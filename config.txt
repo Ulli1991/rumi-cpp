@@ -1,0 +1,33 @@
+# =============================================================================
+# C++ N-Body Configuration
+# =============================================================================
+
+# Test case: outer_planets, plummer
+TEST_CASE = outer_planets
+
+# Integrator: fsi (global timestep) or hhs (adaptive HHS-FSI)
+INTEGRATOR = hhs
+# HHS mode: recursive or stack
+HHS_MODE = stack
+
+# =============================================================================
+# Simulation parameters
+# =============================================================================
+TOTAL_TIME_YEARS = 1000
+DT_MAX_YEARS = 1
+DT_MIN_YEARS = 1e-2
+ETA = 0.02
+SOFTENING_AU = 0.0          # Softening length in AU (206.265 AU = 1e-3 pc)
+
+# =============================================================================
+# Plummer cluster parameters (only used if TEST_CASE = plummer)
+# =============================================================================
+PLUMMER_N = 1000
+PLUMMER_M_TOTAL = 3.79e2        # Total mass in solar masses
+PLUMMER_R_HALF = 3.5            # Half-mass radius in parsecs
+PLUMMER_SEED = 42
+
+# =============================================================================
+# Output
+# =============================================================================
+PRINT_INTERVAL = 1000
