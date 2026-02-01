@@ -5,6 +5,7 @@
 // When true, gradient corrections use N3L (halves work, ~1e-14 momentum).
 // When false, uses full N² per-particle sums (original pattern, ~1e-15 momentum).
 extern bool grad_n3l;
+extern bool use_kahan;
 
 // ---- Full N-body (used for initial setup, global FSI, diagnostics) ----
 

@@ -15,9 +15,11 @@ HHS_MODE = stack
 # =============================================================================
 TOTAL_TIME_YEARS = 1000
 DT_MAX_YEARS = 1
-DT_MIN_YEARS = 1e-2
+DT_MIN_YEARS = 1e-7
 ETA = 0.02
 SOFTENING_AU = 0.0          # Softening length in AU (206.265 AU = 1e-3 pc)
+GRAD_N3L = false            # N3L gradient correction (halves work, slightly less momentum conservation)
+USE_KAHAN = false           # Kahan summation in N3L gradient loops (only used when GRAD_N3L = true)
 
 # =============================================================================
 # Plummer cluster parameters (only used if TEST_CASE = plummer)

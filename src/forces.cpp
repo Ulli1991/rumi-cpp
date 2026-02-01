@@ -5,6 +5,7 @@
 #include <cstring>
 
 bool grad_n3l = false;  // default: full N² gradient (better momentum conservation)
+bool use_kahan = false; // default: plain summation in N3L gradient loops
 
 // ==========================================================================
 // Kahan summation helper macros
@@ -175,36 +176,62 @@ void self_gradient_correction(Particles& p, int start, int count,
         double *cx_acc = p.scratch4, *cy_acc = p.scratch5, *cz_acc = p.scratch6;
         for (int i = 0; i < count; i++) { cx_acc[i] = 0; cy_acc[i] = 0; cz_acc[i] = 0; }
 
-        for (int ii = 0; ii < count; ii++) {
-            int i = start + ii;
-            double axi0 = ax0[ii], ayi0 = ay0[ii], azi0 = az0[ii];
-            for (int jj = ii + 1; jj < count; jj++) {
-                int j = start + jj;
-                double dx = px[j] - px[i];
-                double dy = py[j] - py[i];
-                double dz = pz[j] - pz[i];
-                double dax = ax0[jj] - axi0;
-                double day = ay0[jj] - ayi0;
-                double daz = az0[jj] - azi0;
+        if (use_kahan) {
+            double comp_x[count], comp_y[count], comp_z[count];
+            for (int i = 0; i < count; i++) { comp_x[i] = 0; comp_y[i] = 0; comp_z[i] = 0; }
+            for (int ii = 0; ii < count; ii++) {
+                int i = start + ii;
+                double axi0 = ax0[ii], ayi0 = ay0[ii], azi0 = az0[ii];
+                for (int jj = ii + 1; jj < count; jj++) {
+                    int j = start + jj;
+                    double dx = px[j] - px[i], dy = py[j] - py[i], dz = pz[j] - pz[i];
+                    double dax = ax0[jj] - axi0, day = ay0[jj] - ayi0, daz = az0[jj] - azi0;
+                    double r2 = dx*dx + dy*dy + dz*dz + soft2;
+                    double inv_r2 = 1.0 / r2;
+                    double inv_r = std::sqrt(inv_r2);
+                    double inv_r5 = inv_r2 * inv_r2 * inv_r;
+                    double r_dot_a = dx*dax + dy*day + dz*daz;
+                    double term_x = r2 * dax - 3.0 * r_dot_a * dx;
+                    double term_y = r2 * day - 3.0 * r_dot_a * dy;
+                    double term_z = r2 * daz - 3.0 * r_dot_a * dz;
 
-                double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                double inv_r2 = 1.0 / r2;
-                double inv_r = std::sqrt(inv_r2);
-                double inv_r5 = inv_r2 * inv_r2 * inv_r;
-                double r_dot_a = dx*dax + dy*day + dz*daz;
+                    double fj = coeff * m[j] * inv_r5;
+                    KAHAN_ADD(cx_acc[ii], comp_x[ii], fj * term_x);
+                    KAHAN_ADD(cy_acc[ii], comp_y[ii], fj * term_y);
+                    KAHAN_ADD(cz_acc[ii], comp_z[ii], fj * term_z);
 
-                double fj = coeff * m[j] * inv_r5;
-                double term_x = r2 * dax - 3.0 * r_dot_a * dx;
-                double term_y = r2 * day - 3.0 * r_dot_a * dy;
-                double term_z = r2 * daz - 3.0 * r_dot_a * dz;
-                cx_acc[ii] += fj * term_x;
-                cy_acc[ii] += fj * term_y;
-                cz_acc[ii] += fj * term_z;
+                    double fi = coeff * m[i] * inv_r5;
+                    KAHAN_ADD(cx_acc[jj], comp_x[jj], -fi * term_x);
+                    KAHAN_ADD(cy_acc[jj], comp_y[jj], -fi * term_y);
+                    KAHAN_ADD(cz_acc[jj], comp_z[jj], -fi * term_z);
+                }
+            }
+        } else {
+            for (int ii = 0; ii < count; ii++) {
+                int i = start + ii;
+                double axi0 = ax0[ii], ayi0 = ay0[ii], azi0 = az0[ii];
+                for (int jj = ii + 1; jj < count; jj++) {
+                    int j = start + jj;
+                    double dx = px[j] - px[i], dy = py[j] - py[i], dz = pz[j] - pz[i];
+                    double dax = ax0[jj] - axi0, day = ay0[jj] - ayi0, daz = az0[jj] - azi0;
+                    double r2 = dx*dx + dy*dy + dz*dz + soft2;
+                    double inv_r2 = 1.0 / r2;
+                    double inv_r = std::sqrt(inv_r2);
+                    double inv_r5 = inv_r2 * inv_r2 * inv_r;
+                    double r_dot_a = dx*dax + dy*day + dz*daz;
+                    double fj = coeff * m[j] * inv_r5;
+                    double term_x = r2 * dax - 3.0 * r_dot_a * dx;
+                    double term_y = r2 * day - 3.0 * r_dot_a * dy;
+                    double term_z = r2 * daz - 3.0 * r_dot_a * dz;
+                    cx_acc[ii] += fj * term_x;
+                    cy_acc[ii] += fj * term_y;
+                    cz_acc[ii] += fj * term_z;
 
-                double fi = coeff * m[i] * inv_r5;
-                cx_acc[jj] -= fi * term_x;
-                cy_acc[jj] -= fi * term_y;
-                cz_acc[jj] -= fi * term_z;
+                    double fi = coeff * m[i] * inv_r5;
+                    cx_acc[jj] -= fi * term_x;
+                    cy_acc[jj] -= fi * term_y;
+                    cz_acc[jj] -= fi * term_z;
+                }
             }
         }
         for (int i = 0; i < count; i++) {
@@ -291,31 +318,57 @@ void self_acceleration_and_gradient(Particles& p, int start, int count,
         double *cx_acc = p.scratch4, *cy_acc = p.scratch5, *cz_acc = p.scratch6;
         for (int i = 0; i < count; i++) { cx_acc[i] = 0; cy_acc[i] = 0; cz_acc[i] = 0; }
 
-        for (int ii = 0; ii < count; ii++) {
-            int i = start + ii;
-            double axi0 = ax0[ii], ayi0 = ay0[ii], azi0 = az0[ii];
-            for (int jj = ii + 1; jj < count; jj++) {
-                int j = start + jj;
-                double dx = px[j] - px[i];
-                double dy = py[j] - py[i];
-                double dz = pz[j] - pz[i];
-                double dax = ax0[jj] - axi0;
-                double day = ay0[jj] - ayi0;
-                double daz = az0[jj] - azi0;
+        if (use_kahan) {
+            double comp_x[count], comp_y[count], comp_z[count];
+            for (int i = 0; i < count; i++) { comp_x[i] = 0; comp_y[i] = 0; comp_z[i] = 0; }
+            for (int ii = 0; ii < count; ii++) {
+                int i = start + ii;
+                double axi0 = ax0[ii], ayi0 = ay0[ii], azi0 = az0[ii];
+                for (int jj = ii + 1; jj < count; jj++) {
+                    int j = start + jj;
+                    double dx = px[j] - px[i], dy = py[j] - py[i], dz = pz[j] - pz[i];
+                    double dax = ax0[jj] - axi0, day = ay0[jj] - ayi0, daz = az0[jj] - azi0;
+                    double r2 = dx*dx + dy*dy + dz*dz + soft2;
+                    double inv_r2 = 1.0 / r2;
+                    double inv_r = std::sqrt(inv_r2);
+                    double inv_r5 = inv_r2 * inv_r2 * inv_r;
+                    double r_dot_a = dx*dax + dy*day + dz*daz;
+                    double term_x = r2 * dax - 3.0 * r_dot_a * dx;
+                    double term_y = r2 * day - 3.0 * r_dot_a * dy;
+                    double term_z = r2 * daz - 3.0 * r_dot_a * dz;
 
-                double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                double inv_r2 = 1.0 / r2;
-                double inv_r = std::sqrt(inv_r2);
-                double inv_r5 = inv_r2 * inv_r2 * inv_r;
-                double r_dot_a = dx*dax + dy*day + dz*daz;
-                double term_x = r2 * dax - 3.0 * r_dot_a * dx;
-                double term_y = r2 * day - 3.0 * r_dot_a * dy;
-                double term_z = r2 * daz - 3.0 * r_dot_a * dz;
+                    double fj = coeff * m[j] * inv_r5;
+                    KAHAN_ADD(cx_acc[ii], comp_x[ii], fj * term_x);
+                    KAHAN_ADD(cy_acc[ii], comp_y[ii], fj * term_y);
+                    KAHAN_ADD(cz_acc[ii], comp_z[ii], fj * term_z);
+                    double fi = coeff * m[i] * inv_r5;
+                    KAHAN_ADD(cx_acc[jj], comp_x[jj], -fi * term_x);
+                    KAHAN_ADD(cy_acc[jj], comp_y[jj], -fi * term_y);
+                    KAHAN_ADD(cz_acc[jj], comp_z[jj], -fi * term_z);
+                }
+            }
+        } else {
+            for (int ii = 0; ii < count; ii++) {
+                int i = start + ii;
+                double axi0 = ax0[ii], ayi0 = ay0[ii], azi0 = az0[ii];
+                for (int jj = ii + 1; jj < count; jj++) {
+                    int j = start + jj;
+                    double dx = px[j] - px[i], dy = py[j] - py[i], dz = pz[j] - pz[i];
+                    double dax = ax0[jj] - axi0, day = ay0[jj] - ayi0, daz = az0[jj] - azi0;
+                    double r2 = dx*dx + dy*dy + dz*dz + soft2;
+                    double inv_r2 = 1.0 / r2;
+                    double inv_r = std::sqrt(inv_r2);
+                    double inv_r5 = inv_r2 * inv_r2 * inv_r;
+                    double r_dot_a = dx*dax + dy*day + dz*daz;
+                    double term_x = r2 * dax - 3.0 * r_dot_a * dx;
+                    double term_y = r2 * day - 3.0 * r_dot_a * dy;
+                    double term_z = r2 * daz - 3.0 * r_dot_a * dz;
 
-                double fj = coeff * m[j] * inv_r5;
-                cx_acc[ii] += fj * term_x; cy_acc[ii] += fj * term_y; cz_acc[ii] += fj * term_z;
-                double fi = coeff * m[i] * inv_r5;
-                cx_acc[jj] -= fi * term_x; cy_acc[jj] -= fi * term_y; cz_acc[jj] -= fi * term_z;
+                    double fj = coeff * m[j] * inv_r5;
+                    cx_acc[ii] += fj * term_x; cy_acc[ii] += fj * term_y; cz_acc[ii] += fj * term_z;
+                    double fi = coeff * m[i] * inv_r5;
+                    cx_acc[jj] -= fi * term_x; cy_acc[jj] -= fi * term_y; cz_acc[jj] -= fi * term_z;
+                }
             }
         }
         for (int i = 0; i < count; i++) {
@@ -417,34 +470,59 @@ void cross_gradient_correction(Particles& p,
 
     if (grad_n3l) {
         // N3L: single pass, antisymmetric
-        for (int ii = 0; ii < a_count; ii++) {
-            int i = a_start + ii;
-            double cxi = 0, cyi = 0, czi = 0;
-            double axi0 = ax0_a[ii], ayi0 = ay0_a[ii], azi0 = az0_a[ii];
-            for (int jj = 0; jj < b_count; jj++) {
-                int j = b_start + jj;
-                double dx = px[j] - px[i];
-                double dy = py[j] - py[i];
-                double dz = pz[j] - pz[i];
-                double dax = ax0_b[jj] - axi0;
-                double day = ay0_b[jj] - ayi0;
-                double daz = az0_b[jj] - azi0;
+        if (use_kahan) {
+            for (int ii = 0; ii < a_count; ii++) {
+                int i = a_start + ii;
+                double cxi = 0, cyi = 0, czi = 0;
+                double kx = 0, ky = 0, kz = 0;
+                double axi0 = ax0_a[ii], ayi0 = ay0_a[ii], azi0 = az0_a[ii];
+                for (int jj = 0; jj < b_count; jj++) {
+                    int j = b_start + jj;
+                    double dx = px[j] - px[i], dy = py[j] - py[i], dz = pz[j] - pz[i];
+                    double dax = ax0_b[jj] - axi0, day = ay0_b[jj] - ayi0, daz = az0_b[jj] - azi0;
+                    double r2 = dx*dx + dy*dy + dz*dz + soft2;
+                    double inv_r2 = 1.0 / r2;
+                    double inv_r = std::sqrt(inv_r2);
+                    double inv_r5 = inv_r2 * inv_r2 * inv_r;
+                    double r_dot_a = dx*dax + dy*day + dz*daz;
+                    double term_x = r2 * dax - 3.0 * r_dot_a * dx;
+                    double term_y = r2 * day - 3.0 * r_dot_a * dy;
+                    double term_z = r2 * daz - 3.0 * r_dot_a * dz;
 
-                double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                double inv_r2 = 1.0 / r2;
-                double inv_r = std::sqrt(inv_r2);
-                double inv_r5 = inv_r2 * inv_r2 * inv_r;
-                double r_dot_a = dx*dax + dy*day + dz*daz;
-                double term_x = r2 * dax - 3.0 * r_dot_a * dx;
-                double term_y = r2 * day - 3.0 * r_dot_a * dy;
-                double term_z = r2 * daz - 3.0 * r_dot_a * dz;
-
-                double fj = coeff * m[j] * inv_r5;
-                cxi += fj * term_x; cyi += fj * term_y; czi += fj * term_z;
-                double fi = coeff * m[i] * inv_r5;
-                ax[j] -= fi * term_x; ay[j] -= fi * term_y; az[j] -= fi * term_z;
+                    double fj = coeff * m[j] * inv_r5;
+                    KAHAN_ADD(cxi, kx, fj * term_x);
+                    KAHAN_ADD(cyi, ky, fj * term_y);
+                    KAHAN_ADD(czi, kz, fj * term_z);
+                    double fi = coeff * m[i] * inv_r5;
+                    ax[j] -= fi * term_x; ay[j] -= fi * term_y; az[j] -= fi * term_z;
+                }
+                ax[i] += cxi; ay[i] += cyi; az[i] += czi;
             }
-            ax[i] += cxi; ay[i] += cyi; az[i] += czi;
+        } else {
+            for (int ii = 0; ii < a_count; ii++) {
+                int i = a_start + ii;
+                double cxi = 0, cyi = 0, czi = 0;
+                double axi0 = ax0_a[ii], ayi0 = ay0_a[ii], azi0 = az0_a[ii];
+                for (int jj = 0; jj < b_count; jj++) {
+                    int j = b_start + jj;
+                    double dx = px[j] - px[i], dy = py[j] - py[i], dz = pz[j] - pz[i];
+                    double dax = ax0_b[jj] - axi0, day = ay0_b[jj] - ayi0, daz = az0_b[jj] - azi0;
+                    double r2 = dx*dx + dy*dy + dz*dz + soft2;
+                    double inv_r2 = 1.0 / r2;
+                    double inv_r = std::sqrt(inv_r2);
+                    double inv_r5 = inv_r2 * inv_r2 * inv_r;
+                    double r_dot_a = dx*dax + dy*day + dz*daz;
+                    double term_x = r2 * dax - 3.0 * r_dot_a * dx;
+                    double term_y = r2 * day - 3.0 * r_dot_a * dy;
+                    double term_z = r2 * daz - 3.0 * r_dot_a * dz;
+
+                    double fj = coeff * m[j] * inv_r5;
+                    cxi += fj * term_x; cyi += fj * term_y; czi += fj * term_z;
+                    double fi = coeff * m[i] * inv_r5;
+                    ax[j] -= fi * term_x; ay[j] -= fi * term_y; az[j] -= fi * term_z;
+                }
+                ax[i] += cxi; ay[i] += cyi; az[i] += czi;
+            }
         }
     } else {
         // Full N²: A from B
@@ -554,34 +632,59 @@ void cross_acceleration_and_gradient(Particles& p,
 
     // --- Pass 2: Gradient correction ---
     if (grad_n3l) {
-        for (int ii = 0; ii < a_count; ii++) {
-            int i = a_start + ii;
-            double gxi = 0, gyi = 0, gzi = 0;
-            double axi0 = ax0_a[ii], ayi0 = ay0_a[ii], azi0 = az0_a[ii];
-            for (int jj = 0; jj < b_count; jj++) {
-                int j = b_start + jj;
-                double dx = px[j] - px[i];
-                double dy = py[j] - py[i];
-                double dz = pz[j] - pz[i];
-                double dax = ax0_b[jj] - axi0;
-                double day = ay0_b[jj] - ayi0;
-                double daz = az0_b[jj] - azi0;
+        if (use_kahan) {
+            for (int ii = 0; ii < a_count; ii++) {
+                int i = a_start + ii;
+                double gxi = 0, gyi = 0, gzi = 0;
+                double kx = 0, ky = 0, kz = 0;
+                double axi0 = ax0_a[ii], ayi0 = ay0_a[ii], azi0 = az0_a[ii];
+                for (int jj = 0; jj < b_count; jj++) {
+                    int j = b_start + jj;
+                    double dx = px[j] - px[i], dy = py[j] - py[i], dz = pz[j] - pz[i];
+                    double dax = ax0_b[jj] - axi0, day = ay0_b[jj] - ayi0, daz = az0_b[jj] - azi0;
+                    double r2 = dx*dx + dy*dy + dz*dz + soft2;
+                    double inv_r2 = 1.0 / r2;
+                    double inv_r = std::sqrt(inv_r2);
+                    double inv_r5 = inv_r2 * inv_r2 * inv_r;
+                    double r_dot_a = dx*dax + dy*day + dz*daz;
+                    double term_x = r2 * dax - 3.0 * r_dot_a * dx;
+                    double term_y = r2 * day - 3.0 * r_dot_a * dy;
+                    double term_z = r2 * daz - 3.0 * r_dot_a * dz;
 
-                double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                double inv_r2 = 1.0 / r2;
-                double inv_r = std::sqrt(inv_r2);
-                double inv_r5 = inv_r2 * inv_r2 * inv_r;
-                double r_dot_a = dx*dax + dy*day + dz*daz;
-                double term_x = r2 * dax - 3.0 * r_dot_a * dx;
-                double term_y = r2 * day - 3.0 * r_dot_a * dy;
-                double term_z = r2 * daz - 3.0 * r_dot_a * dz;
-
-                double fj = coeff * m[j] * inv_r5;
-                gxi += fj * term_x; gyi += fj * term_y; gzi += fj * term_z;
-                double fi = coeff * m[i] * inv_r5;
-                ax[j] -= fi * term_x; ay[j] -= fi * term_y; az[j] -= fi * term_z;
+                    double fj = coeff * m[j] * inv_r5;
+                    KAHAN_ADD(gxi, kx, fj * term_x);
+                    KAHAN_ADD(gyi, ky, fj * term_y);
+                    KAHAN_ADD(gzi, kz, fj * term_z);
+                    double fi = coeff * m[i] * inv_r5;
+                    ax[j] -= fi * term_x; ay[j] -= fi * term_y; az[j] -= fi * term_z;
+                }
+                ax[i] += gxi; ay[i] += gyi; az[i] += gzi;
             }
-            ax[i] += gxi; ay[i] += gyi; az[i] += gzi;
+        } else {
+            for (int ii = 0; ii < a_count; ii++) {
+                int i = a_start + ii;
+                double gxi = 0, gyi = 0, gzi = 0;
+                double axi0 = ax0_a[ii], ayi0 = ay0_a[ii], azi0 = az0_a[ii];
+                for (int jj = 0; jj < b_count; jj++) {
+                    int j = b_start + jj;
+                    double dx = px[j] - px[i], dy = py[j] - py[i], dz = pz[j] - pz[i];
+                    double dax = ax0_b[jj] - axi0, day = ay0_b[jj] - ayi0, daz = az0_b[jj] - azi0;
+                    double r2 = dx*dx + dy*dy + dz*dz + soft2;
+                    double inv_r2 = 1.0 / r2;
+                    double inv_r = std::sqrt(inv_r2);
+                    double inv_r5 = inv_r2 * inv_r2 * inv_r;
+                    double r_dot_a = dx*dax + dy*day + dz*daz;
+                    double term_x = r2 * dax - 3.0 * r_dot_a * dx;
+                    double term_y = r2 * day - 3.0 * r_dot_a * dy;
+                    double term_z = r2 * daz - 3.0 * r_dot_a * dz;
+
+                    double fj = coeff * m[j] * inv_r5;
+                    gxi += fj * term_x; gyi += fj * term_y; gzi += fj * term_z;
+                    double fi = coeff * m[i] * inv_r5;
+                    ax[j] -= fi * term_x; ay[j] -= fi * term_y; az[j] -= fi * term_z;
+                }
+                ax[i] += gxi; ay[i] += gyi; az[i] += gzi;
+            }
         }
     } else {
         // Full N²: A from B

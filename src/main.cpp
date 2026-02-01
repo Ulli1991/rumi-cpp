@@ -105,6 +105,7 @@ int main(int argc, char** argv) {
     int seed            = cfg.get_int("PLUMMER_SEED", 42);
 
     grad_n3l = (cfg.get_str("GRAD_N3L", "false") == "true");
+    use_kahan = (cfg.get_str("USE_KAHAN", "false") == "true");
 
     double G = G_CGS;
     double soft_cm = soft_au * LENGTH_UNIT;

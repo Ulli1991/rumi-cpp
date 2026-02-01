@@ -56,9 +56,15 @@ void Particles::partition_by_level() {
         level_start[l] = level_start[l-1] + level_count[l-1];
     }
 
-    // Build permutation via counting sort (using scratch buffers — zero heap alloc)
+    // Build permutation via counting sort
     int* perm = scratch_i;
-    int* cursor = scratch_i2;  // n_levels <= N always
+    // cursor needs n_levels entries which may exceed N, so use level_start copy
+    int* cursor;
+    bool cursor_heap = (n_levels > N);
+    if (cursor_heap)
+        cursor = static_cast<int*>(std::malloc(n_levels * sizeof(int)));
+    else
+        cursor = scratch_i2;
     for (int l = 0; l < n_levels; l++) cursor[l] = level_start[l];
     for (int i = 0; i < N; i++) {
         int l = level[i];
@@ -89,4 +95,6 @@ void Particles::partition_by_level() {
     // Actually perm is read-only here, so order doesn't matter
     apply_perm_int(level);
     apply_perm_int(orig_index);
+
+    if (cursor_heap) std::free(cursor);
 }
