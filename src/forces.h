@@ -1,6 +1,18 @@
 #pragma once
 
 #include "particles.h"
+#include <immintrin.h>
+
+static inline double fast_inv_sqrt(double x) {
+    float xf = (float)x;
+    __m128 v = _mm_set_ss(xf);
+    v = _mm_rsqrt_ss(v);
+    double y = (double)_mm_cvtss_f32(v);
+    // Two Newton-Raphson steps for double precision
+    y = y * (1.5 - 0.5 * x * y * y);
+    y = y * (1.5 - 0.5 * x * y * y);
+    return y;
+}
 
 // When true, gradient corrections use N3L (halves work, ~1e-14 momentum).
 // When false, uses full N² per-particle sums (original pattern, ~1e-15 momentum).

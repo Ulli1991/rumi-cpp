@@ -107,30 +107,16 @@ void hhs_fsi_step(Particles& p, int level, double dt,
 // Stack-based HHS-FSI: explicit stack, no recursion
 // ==========================================================================
 
-enum StackOp {
-    OP_CROSS_NEWTON  = 0,
-    OP_FSI_HALF      = 1,
-    OP_RECURSE       = 2,
-    OP_CROSS_GRADIENT= 3,
-    OP_FSI_BASE      = 4,
-};
-
-struct StackEntry {
-    int op;
-    int level;
-    double dt;
-};
-
 void hhs_fsi_step_stack(Particles& p, int start_level, double dt_outer,
-                        double G, double soft2) {
+                        double G, double soft2,
+                        std::vector<StackEntry>& stack) {
     int finest = p.n_levels - 1;
 
-    // Stack: max 7 entries per level depth
-    std::vector<StackEntry> stack;
-    stack.reserve(7 * p.n_levels + 1);
+    // Reuse pre-allocated stack
+    stack.clear();
 
     // Seed with initial RECURSE
-    stack.push_back({OP_RECURSE, start_level, dt_outer});
+    stack.push_back({(int)StackOp::RECURSE, start_level, dt_outer});
 
     while (!stack.empty()) {
         StackEntry e = stack.back();
@@ -144,36 +130,36 @@ void hhs_fsi_step_stack(Particles& p, int start_level, double dt_outer,
 
         switch (e.op) {
 
-        case OP_RECURSE: {
+        case (int)StackOp::RECURSE: {
             bool is_base = (level >= finest) || (fast_count == 0);
             if (is_base) {
                 // Push single FSI base step
-                stack.push_back({OP_FSI_BASE, level, dt});
+                stack.push_back({(int)StackOp::FSI_BASE, level, dt});
             } else {
                 // Push 7 ops in REVERSE order (LIFO)
-                stack.push_back({OP_CROSS_NEWTON,   level,     dt / 6.0});  // 7
-                stack.push_back({OP_FSI_HALF,       level,     dt});         // 6
-                stack.push_back({OP_RECURSE,        level + 1, dt / 2.0});  // 5
-                stack.push_back({OP_CROSS_GRADIENT, level,     dt});         // 4
-                stack.push_back({OP_RECURSE,        level + 1, dt / 2.0});  // 3
-                stack.push_back({OP_FSI_HALF,       level,     dt});         // 2
-                stack.push_back({OP_CROSS_NEWTON,   level,     dt / 6.0});  // 1
+                stack.push_back({(int)StackOp::CROSS_NEWTON,   level,     dt / 6.0});  // 7
+                stack.push_back({(int)StackOp::FSI_HALF,       level,     dt});         // 6
+                stack.push_back({(int)StackOp::RECURSE,        level + 1, dt / 2.0});  // 5
+                stack.push_back({(int)StackOp::CROSS_GRADIENT, level,     dt});         // 4
+                stack.push_back({(int)StackOp::RECURSE,        level + 1, dt / 2.0});  // 3
+                stack.push_back({(int)StackOp::FSI_HALF,       level,     dt});         // 2
+                stack.push_back({(int)StackOp::CROSS_NEWTON,   level,     dt / 6.0});  // 1
             }
             break;
         }
 
-        case OP_FSI_BASE: {
+        case (int)StackOp::FSI_BASE: {
             fsi_step(p, slow_start, slow_count, G, soft2, dt);
             break;
         }
 
-        case OP_FSI_HALF: {
+        case (int)StackOp::FSI_HALF: {
             double dt_half = dt * 0.5;
             fsi_step(p, slow_start, slow_count, G, soft2, dt_half);
             break;
         }
 
-        case OP_CROSS_NEWTON: {
+        case (int)StackOp::CROSS_NEWTON: {
             if (fast_count > 0 && slow_count > 0) {
                 cross_acceleration(p, slow_start, slow_count,
                                    fast_start, fast_count, G, soft2);
@@ -183,7 +169,7 @@ void hhs_fsi_step_stack(Particles& p, int start_level, double dt_outer,
             break;
         }
 
-        case OP_CROSS_GRADIENT: {
+        case (int)StackOp::CROSS_GRADIENT: {
             if (fast_count > 0 && slow_count > 0) {
                 cross_acceleration_and_gradient(p, slow_start, slow_count,
                                                 fast_start, fast_count, G, soft2, dt);

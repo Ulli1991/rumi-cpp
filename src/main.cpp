@@ -156,6 +156,10 @@ int main(int argc, char** argv) {
 
     std::printf("Running...\n");
 
+    // Pre-allocate HHS stack
+    std::vector<StackEntry> hhs_stack;
+    hhs_stack.reserve(7 * p.n_levels + 1);
+
     auto wall_start = std::chrono::high_resolution_clock::now();
 
     double t = 0;
@@ -187,7 +191,7 @@ int main(int argc, char** argv) {
             double dt_outer = levels[coarsest];
 
             if (hhs_mode == HHSMode::Stack)
-                hhs_fsi_step_stack(p, coarsest, dt_outer, G, soft2);
+                hhs_fsi_step_stack(p, coarsest, dt_outer, G, soft2, hhs_stack);
             else
                 hhs_fsi_step(p, coarsest, dt_outer, G, soft2, levels);
 

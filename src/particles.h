@@ -26,9 +26,12 @@ struct Particles {
     // Scratch buffers — allocated once, reused in hot path (zero malloc)
     double *scratch1 = nullptr, *scratch2 = nullptr, *scratch3 = nullptr;  // 3×N for acc snapshots
     double *scratch4 = nullptr, *scratch5 = nullptr, *scratch6 = nullptr;  // 3×N for second group snapshots
+    double *scratch7 = nullptr, *scratch8 = nullptr, *scratch9 = nullptr;  // 3×N for Kahan compensation
     double *scratch_d = nullptr;   // N doubles for permutation tmp
     int *scratch_i = nullptr;      // N ints for permutation tmp
     int *scratch_i2 = nullptr;     // N ints for cursor tmp
+    int *level_cursor = nullptr;   // pre-allocated cursor for partition_by_level
+    int level_cursor_cap = 0;      // capacity of level_cursor
 
     void allocate(int n);
     void deallocate();

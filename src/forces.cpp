@@ -7,6 +7,8 @@
 bool grad_n3l = false;  // default: full N² gradient (better momentum conservation)
 bool use_kahan = false; // default: plain summation in N3L gradient loops
 
+static constexpr int PF = 8;  // prefetch distance
+
 // ==========================================================================
 // Kahan summation helper macros
 // ==========================================================================
@@ -30,8 +32,12 @@ void compute_acceleration(Particles& p, double G, double soft2) {
 
     for (int i = 0; i < N; i++) {
         double axi = 0, ayi = 0, azi = 0;
-        #pragma omp simd
         for (int j = i + 1; j < N; j++) {
+            if (j + PF < N) {
+                __builtin_prefetch(&px[j+PF], 0, 1);
+                __builtin_prefetch(&py[j+PF], 0, 1);
+                __builtin_prefetch(&pz[j+PF], 0, 1);
+            }
             double dx = px[j] - px[i];
             double dy = py[j] - py[i];
             double dz = pz[j] - pz[i];
@@ -67,6 +73,11 @@ void compute_acceleration_and_frost(Particles& p, double G, double soft2, double
         double t_min_i = dt_f[i];
 
         for (int j = i + 1; j < N; j++) {
+            if (j + PF < N) {
+                __builtin_prefetch(&px[j+PF], 0, 1);
+                __builtin_prefetch(&py[j+PF], 0, 1);
+                __builtin_prefetch(&pz[j+PF], 0, 1);
+            }
             double dx = px[j] - px[i];
             double dy = py[j] - py[i];
             double dz = pz[j] - pz[i];
@@ -133,8 +144,12 @@ void self_acceleration(Particles& p, int start, int count,
 
     for (int i = start; i < end; i++) {
         double axi = 0, ayi = 0, azi = 0;
-        #pragma omp simd
         for (int j = i + 1; j < end; j++) {
+            if (j + PF < end) {
+                __builtin_prefetch(&px[j+PF], 0, 1);
+                __builtin_prefetch(&py[j+PF], 0, 1);
+                __builtin_prefetch(&pz[j+PF], 0, 1);
+            }
             double dx = px[j] - px[i];
             double dy = py[j] - py[i];
             double dz = pz[j] - pz[i];
@@ -177,7 +192,8 @@ void self_gradient_correction(Particles& p, int start, int count,
         for (int i = 0; i < count; i++) { cx_acc[i] = 0; cy_acc[i] = 0; cz_acc[i] = 0; }
 
         if (use_kahan) {
-            double comp_x[count], comp_y[count], comp_z[count];
+            // Use scratch buffers instead of VLAs
+            double *comp_x = p.scratch7, *comp_y = p.scratch8, *comp_z = p.scratch9;
             for (int i = 0; i < count; i++) { comp_x[i] = 0; comp_y[i] = 0; comp_z[i] = 0; }
             for (int ii = 0; ii < count; ii++) {
                 int i = start + ii;
@@ -188,7 +204,7 @@ void self_gradient_correction(Particles& p, int start, int count,
                     double dax = ax0[jj] - axi0, day = ay0[jj] - ayi0, daz = az0[jj] - azi0;
                     double r2 = dx*dx + dy*dy + dz*dz + soft2;
                     double inv_r2 = 1.0 / r2;
-                    double inv_r = std::sqrt(inv_r2);
+                    double inv_r = 1.0 / std::sqrt(r2);
                     double inv_r5 = inv_r2 * inv_r2 * inv_r;
                     double r_dot_a = dx*dax + dy*day + dz*daz;
                     double term_x = r2 * dax - 3.0 * r_dot_a * dx;
@@ -216,7 +232,7 @@ void self_gradient_correction(Particles& p, int start, int count,
                     double dax = ax0[jj] - axi0, day = ay0[jj] - ayi0, daz = az0[jj] - azi0;
                     double r2 = dx*dx + dy*dy + dz*dz + soft2;
                     double inv_r2 = 1.0 / r2;
-                    double inv_r = std::sqrt(inv_r2);
+                    double inv_r = 1.0 / std::sqrt(r2);
                     double inv_r5 = inv_r2 * inv_r2 * inv_r;
                     double r_dot_a = dx*dax + dy*day + dz*daz;
                     double fj = coeff * m[j] * inv_r5;
@@ -257,7 +273,7 @@ void self_gradient_correction(Particles& p, int start, int count,
 
                 double r2 = dx*dx + dy*dy + dz*dz + soft2;
                 double inv_r2 = 1.0 / r2;
-                double inv_r = std::sqrt(inv_r2);
+                double inv_r = 1.0 / std::sqrt(r2);
                 double inv_r5 = inv_r2 * inv_r2 * inv_r;
                 double r_dot_a = dx*dax + dy*day + dz*daz;
                 double f = coeff * m[j] * inv_r5;
@@ -287,8 +303,12 @@ void self_acceleration_and_gradient(Particles& p, int start, int count,
 
     for (int i = start; i < end; i++) {
         double axi = 0, ayi = 0, azi = 0;
-        #pragma omp simd
         for (int j = i + 1; j < end; j++) {
+            if (j + PF < end) {
+                __builtin_prefetch(&px[j+PF], 0, 1);
+                __builtin_prefetch(&py[j+PF], 0, 1);
+                __builtin_prefetch(&pz[j+PF], 0, 1);
+            }
             double dx = px[j] - px[i];
             double dy = py[j] - py[i];
             double dz = pz[j] - pz[i];
@@ -319,7 +339,8 @@ void self_acceleration_and_gradient(Particles& p, int start, int count,
         for (int i = 0; i < count; i++) { cx_acc[i] = 0; cy_acc[i] = 0; cz_acc[i] = 0; }
 
         if (use_kahan) {
-            double comp_x[count], comp_y[count], comp_z[count];
+            // Use scratch buffers instead of VLAs
+            double *comp_x = p.scratch7, *comp_y = p.scratch8, *comp_z = p.scratch9;
             for (int i = 0; i < count; i++) { comp_x[i] = 0; comp_y[i] = 0; comp_z[i] = 0; }
             for (int ii = 0; ii < count; ii++) {
                 int i = start + ii;
@@ -330,7 +351,7 @@ void self_acceleration_and_gradient(Particles& p, int start, int count,
                     double dax = ax0[jj] - axi0, day = ay0[jj] - ayi0, daz = az0[jj] - azi0;
                     double r2 = dx*dx + dy*dy + dz*dz + soft2;
                     double inv_r2 = 1.0 / r2;
-                    double inv_r = std::sqrt(inv_r2);
+                    double inv_r = 1.0 / std::sqrt(r2);
                     double inv_r5 = inv_r2 * inv_r2 * inv_r;
                     double r_dot_a = dx*dax + dy*day + dz*daz;
                     double term_x = r2 * dax - 3.0 * r_dot_a * dx;
@@ -357,7 +378,7 @@ void self_acceleration_and_gradient(Particles& p, int start, int count,
                     double dax = ax0[jj] - axi0, day = ay0[jj] - ayi0, daz = az0[jj] - azi0;
                     double r2 = dx*dx + dy*dy + dz*dz + soft2;
                     double inv_r2 = 1.0 / r2;
-                    double inv_r = std::sqrt(inv_r2);
+                    double inv_r = 1.0 / std::sqrt(r2);
                     double inv_r5 = inv_r2 * inv_r2 * inv_r;
                     double r_dot_a = dx*dax + dy*day + dz*daz;
                     double term_x = r2 * dax - 3.0 * r_dot_a * dx;
@@ -391,7 +412,7 @@ void self_acceleration_and_gradient(Particles& p, int start, int count,
 
                 double r2 = dx*dx + dy*dy + dz*dz + soft2;
                 double inv_r2 = 1.0 / r2;
-                double inv_r = std::sqrt(inv_r2);
+                double inv_r = 1.0 / std::sqrt(r2);
                 double inv_r5 = inv_r2 * inv_r2 * inv_r;
                 double r_dot_a = dx*dax + dy*day + dz*daz;
                 double f = coeff * m[j] * inv_r5;
@@ -405,7 +426,8 @@ void self_acceleration_and_gradient(Particles& p, int start, int count,
 }
 
 // ==========================================================================
-// Cross-interaction: group A × group B, both directions in one pass + Kahan
+// Cross-interaction: group A × group B, both directions in one pass
+// B-side buffered for SIMD vectorization
 // ==========================================================================
 void cross_acceleration(Particles& p,
                         int a_start, int a_count,
@@ -419,6 +441,10 @@ void cross_acceleration(Particles& p,
 
     for (int i = a_start; i < a_end; i++) { ax[i] = 0; ay[i] = 0; az[i] = 0; }
     for (int i = b_start; i < b_end; i++) { ax[i] = 0; ay[i] = 0; az[i] = 0; }
+
+    // B-side accumulation buffers (scratch4-6 are free here)
+    double *bax = p.scratch4, *bay = p.scratch5, *baz = p.scratch6;
+    for (int j = 0; j < b_count; j++) { bax[j] = 0; bay[j] = 0; baz[j] = 0; }
 
     for (int i = a_start; i < a_end; i++) {
         double axi = 0, ayi = 0, azi = 0;
@@ -435,9 +461,17 @@ void cross_acceleration(Particles& p,
             double fi = G * m[i] * inv_r3;
 
             axi += fj * dx; ayi += fj * dy; azi += fj * dz;
-            ax[j] -= fi * dx; ay[j] -= fi * dy; az[j] -= fi * dz;
+            int jj = j - b_start;
+            bax[jj] -= fi * dx; bay[jj] -= fi * dy; baz[jj] -= fi * dz;
         }
         ax[i] += axi; ay[i] += ayi; az[i] += azi;
+    }
+
+    // Apply B-side buffer
+    for (int j = 0; j < b_count; j++) {
+        ax[b_start + j] += bax[j];
+        ay[b_start + j] += bay[j];
+        az[b_start + j] += baz[j];
     }
 }
 
@@ -482,7 +516,7 @@ void cross_gradient_correction(Particles& p,
                     double dax = ax0_b[jj] - axi0, day = ay0_b[jj] - ayi0, daz = az0_b[jj] - azi0;
                     double r2 = dx*dx + dy*dy + dz*dz + soft2;
                     double inv_r2 = 1.0 / r2;
-                    double inv_r = std::sqrt(inv_r2);
+                    double inv_r = 1.0 / std::sqrt(r2);
                     double inv_r5 = inv_r2 * inv_r2 * inv_r;
                     double r_dot_a = dx*dax + dy*day + dz*daz;
                     double term_x = r2 * dax - 3.0 * r_dot_a * dx;
@@ -509,7 +543,7 @@ void cross_gradient_correction(Particles& p,
                     double dax = ax0_b[jj] - axi0, day = ay0_b[jj] - ayi0, daz = az0_b[jj] - azi0;
                     double r2 = dx*dx + dy*dy + dz*dz + soft2;
                     double inv_r2 = 1.0 / r2;
-                    double inv_r = std::sqrt(inv_r2);
+                    double inv_r = 1.0 / std::sqrt(r2);
                     double inv_r5 = inv_r2 * inv_r2 * inv_r;
                     double r_dot_a = dx*dax + dy*day + dz*daz;
                     double term_x = r2 * dax - 3.0 * r_dot_a * dx;
@@ -540,7 +574,7 @@ void cross_gradient_correction(Particles& p,
                 double daz = az0_b[jj] - azi0;
                 double r2 = dx*dx + dy*dy + dz*dz + soft2;
                 double inv_r2 = 1.0 / r2;
-                double inv_r = std::sqrt(inv_r2);
+                double inv_r = 1.0 / std::sqrt(r2);
                 double inv_r5 = inv_r2 * inv_r2 * inv_r;
                 double r_dot_a = dx*dax + dy*day + dz*daz;
                 double f = coeff * m[j] * inv_r5;
@@ -565,7 +599,7 @@ void cross_gradient_correction(Particles& p,
                 double daz = az0_a[ii] - azj0;
                 double r2 = dx*dx + dy*dy + dz*dz + soft2;
                 double inv_r2 = 1.0 / r2;
-                double inv_r = std::sqrt(inv_r2);
+                double inv_r = 1.0 / std::sqrt(r2);
                 double inv_r5 = inv_r2 * inv_r2 * inv_r;
                 double r_dot_a = dx*dax + dy*day + dz*daz;
                 double f = coeff * m[i] * inv_r5;
@@ -592,9 +626,13 @@ void cross_acceleration_and_gradient(Particles& p,
     const int b_end = b_start + b_count;
     const double coeff = G * dt * dt * GRAD_COEFF;
 
-    // --- Pass 1: Cross acceleration (N3L) ---
+    // --- Pass 1: Cross acceleration with B-side buffering ---
     for (int i = a_start; i < a_end; i++) { ax[i] = 0; ay[i] = 0; az[i] = 0; }
     for (int i = b_start; i < b_end; i++) { ax[i] = 0; ay[i] = 0; az[i] = 0; }
+
+    // Use scratch7-9 for B-side accumulation in pass 1
+    double *bax = p.scratch7, *bay = p.scratch8, *baz = p.scratch9;
+    for (int j = 0; j < b_count; j++) { bax[j] = 0; bay[j] = 0; baz[j] = 0; }
 
     for (int i = a_start; i < a_end; i++) {
         double axi = 0, ayi = 0, azi = 0;
@@ -611,9 +649,17 @@ void cross_acceleration_and_gradient(Particles& p,
             double fi = G * m[i] * inv_r3;
 
             axi += fj * dx; ayi += fj * dy; azi += fj * dz;
-            ax[j] -= fi * dx; ay[j] -= fi * dy; az[j] -= fi * dz;
+            int jj = j - b_start;
+            bax[jj] -= fi * dx; bay[jj] -= fi * dy; baz[jj] -= fi * dz;
         }
         ax[i] += axi; ay[i] += ayi; az[i] += azi;
+    }
+
+    // Apply B-side buffer
+    for (int j = 0; j < b_count; j++) {
+        ax[b_start + j] += bax[j];
+        ay[b_start + j] += bay[j];
+        az[b_start + j] += baz[j];
     }
 
     // --- Snapshot accelerations ---
@@ -644,7 +690,7 @@ void cross_acceleration_and_gradient(Particles& p,
                     double dax = ax0_b[jj] - axi0, day = ay0_b[jj] - ayi0, daz = az0_b[jj] - azi0;
                     double r2 = dx*dx + dy*dy + dz*dz + soft2;
                     double inv_r2 = 1.0 / r2;
-                    double inv_r = std::sqrt(inv_r2);
+                    double inv_r = 1.0 / std::sqrt(r2);
                     double inv_r5 = inv_r2 * inv_r2 * inv_r;
                     double r_dot_a = dx*dax + dy*day + dz*daz;
                     double term_x = r2 * dax - 3.0 * r_dot_a * dx;
@@ -671,7 +717,7 @@ void cross_acceleration_and_gradient(Particles& p,
                     double dax = ax0_b[jj] - axi0, day = ay0_b[jj] - ayi0, daz = az0_b[jj] - azi0;
                     double r2 = dx*dx + dy*dy + dz*dz + soft2;
                     double inv_r2 = 1.0 / r2;
-                    double inv_r = std::sqrt(inv_r2);
+                    double inv_r = 1.0 / std::sqrt(r2);
                     double inv_r5 = inv_r2 * inv_r2 * inv_r;
                     double r_dot_a = dx*dax + dy*day + dz*daz;
                     double term_x = r2 * dax - 3.0 * r_dot_a * dx;
@@ -702,7 +748,7 @@ void cross_acceleration_and_gradient(Particles& p,
                 double daz = az0_b[jj] - azi0;
                 double r2 = dx*dx + dy*dy + dz*dz + soft2;
                 double inv_r2 = 1.0 / r2;
-                double inv_r = std::sqrt(inv_r2);
+                double inv_r = 1.0 / std::sqrt(r2);
                 double inv_r5 = inv_r2 * inv_r2 * inv_r;
                 double r_dot_a = dx*dax + dy*day + dz*daz;
                 double f = coeff * m[j] * inv_r5;
@@ -727,7 +773,7 @@ void cross_acceleration_and_gradient(Particles& p,
                 double daz = az0_a[ii] - azj0;
                 double r2 = dx*dx + dy*dy + dz*dz + soft2;
                 double inv_r2 = 1.0 / r2;
-                double inv_r = std::sqrt(inv_r2);
+                double inv_r = 1.0 / std::sqrt(r2);
                 double inv_r5 = inv_r2 * inv_r2 * inv_r;
                 double r_dot_a = dx*dax + dy*day + dz*daz;
                 double f = coeff * m[i] * inv_r5;

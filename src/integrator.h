@@ -14,9 +14,24 @@ void hhs_fsi_step(Particles& p, int level, double dt,
                   double G, double soft2,
                   const std::vector<double>& level_dts);
 
+enum class StackOp {
+    CROSS_NEWTON  = 0,
+    FSI_HALF      = 1,
+    RECURSE       = 2,
+    CROSS_GRADIENT= 3,
+    FSI_BASE      = 4,
+};
+
+struct StackEntry {
+    int op;
+    int level;
+    double dt;
+};
+
 // HHS-FSI stack-based step (flat while loop, no recursion)
 void hhs_fsi_step_stack(Particles& p, int start_level, double dt,
-                        double G, double soft2);
+                        double G, double soft2,
+                        std::vector<StackEntry>& stack);
 
 enum class HHSMode { Recursive, Stack };
 

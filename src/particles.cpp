@@ -17,9 +17,12 @@ void Particles::allocate(int n) {
     // Scratch buffers
     scratch1 = alloc_double(n); scratch2 = alloc_double(n); scratch3 = alloc_double(n);
     scratch4 = alloc_double(n); scratch5 = alloc_double(n); scratch6 = alloc_double(n);
+    scratch7 = alloc_double(n); scratch8 = alloc_double(n); scratch9 = alloc_double(n);
     scratch_d = alloc_double(n);
     scratch_i = static_cast<int*>(std::malloc(n * sizeof(int)));
     scratch_i2 = static_cast<int*>(std::malloc(n * sizeof(int)));
+    level_cursor_cap = 64;
+    level_cursor = static_cast<int*>(std::malloc(level_cursor_cap * sizeof(int)));
 }
 
 void Particles::deallocate() {
@@ -31,12 +34,16 @@ void Particles::deallocate() {
     std::free(level_start); std::free(level_count);
     std::free(scratch1); std::free(scratch2); std::free(scratch3);
     std::free(scratch4); std::free(scratch5); std::free(scratch6);
+    std::free(scratch7); std::free(scratch8); std::free(scratch9);
     std::free(scratch_d); std::free(scratch_i); std::free(scratch_i2);
+    std::free(level_cursor);
     N = 0; n_levels = 0;
     x = y = z = vx = vy = vz = ax = ay = az = mass = dt_frost = nullptr;
     level = orig_index = level_start = level_count = nullptr;
-    scratch1 = scratch2 = scratch3 = scratch4 = scratch5 = scratch6 = scratch_d = nullptr;
+    scratch1 = scratch2 = scratch3 = scratch4 = scratch5 = scratch6 = nullptr;
+    scratch7 = scratch8 = scratch9 = scratch_d = nullptr;
     scratch_i = scratch_i2 = nullptr;
+    level_cursor = nullptr; level_cursor_cap = 0;
 }
 
 void Particles::partition_by_level() {
@@ -58,13 +65,13 @@ void Particles::partition_by_level() {
 
     // Build permutation via counting sort
     int* perm = scratch_i;
-    // cursor needs n_levels entries which may exceed N, so use level_start copy
-    int* cursor;
-    bool cursor_heap = (n_levels > N);
-    if (cursor_heap)
-        cursor = static_cast<int*>(std::malloc(n_levels * sizeof(int)));
-    else
-        cursor = scratch_i2;
+    // Use pre-allocated level_cursor, grow if needed
+    if (n_levels > level_cursor_cap) {
+        std::free(level_cursor);
+        level_cursor_cap = n_levels;
+        level_cursor = static_cast<int*>(std::malloc(level_cursor_cap * sizeof(int)));
+    }
+    int* cursor = level_cursor;
     for (int l = 0; l < n_levels; l++) cursor[l] = level_start[l];
     for (int i = 0; i < N; i++) {
         int l = level[i];
@@ -96,5 +103,5 @@ void Particles::partition_by_level() {
     apply_perm_int(level);
     apply_perm_int(orig_index);
 
-    if (cursor_heap) std::free(cursor);
+    // cursor is pre-allocated, no free needed
 }
