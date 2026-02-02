@@ -1,0 +1,34 @@
+#pragma once
+
+#include <Kokkos_Core.hpp>
+#include <vector>
+
+struct Particles {
+    int N = 0;
+
+    // SoA using Kokkos Views (default memory space)
+    Kokkos::View<double*> x, y, z;
+    Kokkos::View<double*> vx, vy, vz;
+    Kokkos::View<double*> ax, ay, az;
+    Kokkos::View<double*> mass;
+    Kokkos::View<double*> dt_frost;
+    Kokkos::View<int*> level;
+    Kokkos::View<int*> orig_index;
+
+    // Level partitioning (host-side)
+    int* level_start = nullptr;
+    int* level_count = nullptr;
+    int n_levels = 0;
+
+    // Scratch buffers
+    Kokkos::View<double*> scratch1, scratch2, scratch3;
+    Kokkos::View<double*> scratch4, scratch5, scratch6;
+    Kokkos::View<double*> scratch7, scratch8, scratch9;
+    Kokkos::View<double*> scratch_d;
+    Kokkos::View<int*> scratch_i;
+    Kokkos::View<int*> scratch_i2;
+
+    void allocate(int n);
+    void deallocate();
+    void partition_by_level();
+};

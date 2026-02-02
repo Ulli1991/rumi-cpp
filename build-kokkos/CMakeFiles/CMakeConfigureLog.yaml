@@ -1,0 +1,510 @@
+
+---
+events:
+  -
+    kind: "message-v1"
+    backtrace:
+      - "/usr/share/cmake/Modules/CMakeDetermineSystem.cmake:233 (message)"
+      - "CMakeLists.txt:2 (project)"
+    message: |
+      The system is: Linux - 6.4.0-150600.23.78-default - x86_64
+  -
+    kind: "message-v1"
+    backtrace:
+      - "/usr/share/cmake/Modules/CMakeDetermineCompilerId.cmake:17 (message)"
+      - "/usr/share/cmake/Modules/CMakeDetermineCompilerId.cmake:64 (__determine_compiler_id_test)"
+      - "/usr/share/cmake/Modules/CMakeDetermineCXXCompiler.cmake:126 (CMAKE_DETERMINE_COMPILER_ID)"
+      - "CMakeLists.txt:2 (project)"
+    message: |
+      Compiling the CXX compiler identification source file "CMakeCXXCompilerId.cpp" succeeded.
+      Compiler: /mpcdf/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/g++ 
+      Build flags: 
+      Id flags:  
+      
+      The output was:
+      0
+      
+      
+      Compilation of the CXX compiler identification source "CMakeCXXCompilerId.cpp" produced "a.out"
+      
+      The CXX compiler identification is GNU, found in:
+        /raven/u/uli/cpp-nbody/build-kokkos/CMakeFiles/3.28.3/CompilerIdCXX/a.out
+      
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "/usr/share/cmake/Modules/CMakeDetermineCompilerABI.cmake:57 (try_compile)"
+      - "/usr/share/cmake/Modules/CMakeTestCXXCompiler.cmake:26 (CMAKE_DETERMINE_COMPILER_ABI)"
+      - "CMakeLists.txt:2 (project)"
+    checks:
+      - "Detecting CXX compiler ABI info"
+    directories:
+      source: "/raven/u/uli/cpp-nbody/build-kokkos/CMakeFiles/CMakeScratch/TryCompile-a8CvSn"
+      binary: "/raven/u/uli/cpp-nbody/build-kokkos/CMakeFiles/CMakeScratch/TryCompile-a8CvSn"
+    cmakeVariables:
+      CMAKE_CXX_FLAGS: ""
+      CMAKE_CXX_FLAGS_DEBUG: "-g"
+      CMAKE_EXE_LINKER_FLAGS: ""
+    buildResult:
+      variable: "CMAKE_CXX_ABI_COMPILED"
+      cached: true
+      stdout: |
+        Change Dir: '/raven/u/uli/cpp-nbody/build-kokkos/CMakeFiles/CMakeScratch/TryCompile-a8CvSn'
+        
+        Run Build Command(s): /usr/bin/cmake -E env VERBOSE=1 /usr/bin/gmake -f Makefile cmTC_b4909/fast
+        /usr/bin/gmake  -f CMakeFiles/cmTC_b4909.dir/build.make CMakeFiles/cmTC_b4909.dir/build
+        gmake[1]: Entering directory '/raven/u/uli/cpp-nbody/build-kokkos/CMakeFiles/CMakeScratch/TryCompile-a8CvSn'
+        Building CXX object CMakeFiles/cmTC_b4909.dir/CMakeCXXCompilerABI.cpp.o
+        /mpcdf/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/g++   -v -o CMakeFiles/cmTC_b4909.dir/CMakeCXXCompilerABI.cpp.o -c /usr/share/cmake/Modules/CMakeCXXCompilerABI.cpp
+        Reading specs from /raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/specs
+        COLLECT_GCC=/mpcdf/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/g++
+        Target: x86_64-pc-linux-gnu
+        Configured with: ../gcc-13.1.0/configure LDFLAGS='-fmessage-length=0 -grecord-gcc-switches -O2 -D_FORTIFY_SOURCE=2 -funwind-tables -fasynchronous-unwind-tables -fstack-clash-protection -U_FORTIFY_SOURCE -fPIC -Wno-error=format-security -Wl,-rpath=/mpcdf/soft/SLE_15/packages/x86_64/gcc/13.1.0/lib64 -L/mpcdf/soft/SLE_15/packages/x86_64/isl/0.16.1/lib -Wl,-rpath=/mpcdf/soft/SLE_15/packages/x86_64/isl/0.16.1/lib' CFLAGS='-fmessage-length=0 -grecord-gcc-switches -O2 -D_FORTIFY_SOURCE=2 -funwind-tables -fasynchronous-unwind-tables -fstack-clash-protection -U_FORTIFY_SOURCE -fPIC -Wno-error=format-security' CXXFLAGS='-fmessage-length=0 -grecord-gcc-switches -O2 -D_FORTIFY_SOURCE=2 -funwind-tables -fasynchronous-unwind-tables -fstack-clash-protection -U_FORTIFY_SOURCE -fPIC -Wno-error=format-security' XCFLAGS='-fmessage-length=0 -grecord-gcc-switches -O2 -D_FORTIFY_SOURCE=2 -funwind-tables -fasynchronous-unwind-tables -fstack-clash-protection -U_FORTIFY_SOURCE -fPIC -Wno-error=format-security' TCFLAGS='-fmessage-length=0 -grecord-gcc-switches -O2 -D_FORTIFY_SOURCE=2 -funwind-tables -fasynchronous-unwind-tables -fstack-clash-protection -U_FORTIFY_SOURCE -fPIC -Wno-error=format-security' GCJFLAGS='-fmessage-length=0 -grecord-gcc-switches -O2 -D_FORTIFY_SOURCE=2 -funwind-tables -fasynchronous-unwind-tables -fstack-clash-protection -U_FORTIFY_SOURCE -fPIC -Wno-error=format-security ' --with-stage1-ldflags='-fmessage-length=0 -grecord-gcc-switches -O2 -D_FORTIFY_SOURCE=2 -funwind-tables -fasynchronous-unwind-tables -fstack-clash-protection -U_FORTIFY_SOURCE -fPIC -Wno-error=format-security -Wl,-rpath=/mpcdf/soft/SLE_15/packages/x86_64/gcc/13.1.0/lib64 -L/mpcdf/soft/SLE_15/packages/x86_64/isl/0.16.1/lib -Wl,-rpath=/mpcdf/soft/SLE_15/packages/x86_64/isl/0.16.1/lib' --prefix=/mpcdf/soft/SLE_15/packages/x86_64/gcc/13.1.0 --disable-multilib --with-isl=/mpcdf/soft/SLE_15/packages/x86_64/isl/0.16.1 --enable-linker-build-id --enable-languages=c,c++,fortran
+        Thread model: posix
+        Supported LTO compression algorithms: zlib
+        gcc version 13.1.0 (GCC) 
+        COLLECT_GCC_OPTIONS='-v' '-o' 'CMakeFiles/cmTC_b4909.dir/CMakeCXXCompilerABI.cpp.o' '-c' '-shared-libgcc' '-mtune=generic' '-march=x86-64' '-dumpdir' 'CMakeFiles/cmTC_b4909.dir/'
+         /raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../libexec/gcc/x86_64-pc-linux-gnu/13.1.0/cc1plus -quiet -v -iprefix /raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/ -D_GNU_SOURCE /usr/share/cmake/Modules/CMakeCXXCompilerABI.cpp -quiet -dumpdir CMakeFiles/cmTC_b4909.dir/ -dumpbase CMakeCXXCompilerABI.cpp.cpp -dumpbase-ext .cpp -mtune=generic -march=x86-64 -version -o /tmp/cc5hVb8l.s
+        GNU C++17 (GCC) version 13.1.0 (x86_64-pc-linux-gnu)
+        	compiled by GNU C version 13.1.0, GMP version 6.1.2, MPFR version 4.0.2-p6, MPC version 1.1.0, isl version isl-0.16.1-GMP
+        
+        GGC heuristics: --param ggc-min-expand=100 --param ggc-min-heapsize=131072
+        ignoring nonexistent directory "/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/../../../../x86_64-pc-linux-gnu/include"
+        ignoring duplicate directory "/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/../../lib/gcc/x86_64-pc-linux-gnu/13.1.0/../../../../include/c++/13.1.0"
+        ignoring duplicate directory "/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/../../lib/gcc/x86_64-pc-linux-gnu/13.1.0/../../../../include/c++/13.1.0/x86_64-pc-linux-gnu"
+        ignoring duplicate directory "/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/../../lib/gcc/x86_64-pc-linux-gnu/13.1.0/../../../../include/c++/13.1.0/backward"
+        ignoring duplicate directory "/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/../../lib/gcc/x86_64-pc-linux-gnu/13.1.0/include"
+        ignoring duplicate directory "/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/../../lib/gcc/x86_64-pc-linux-gnu/13.1.0/include-fixed"
+        ignoring nonexistent directory "/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/../../lib/gcc/x86_64-pc-linux-gnu/13.1.0/../../../../x86_64-pc-linux-gnu/include"
+        #include "..." search starts here:
+        #include <...> search starts here:
+         /raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/../../../../include/c++/13.1.0
+         /raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/../../../../include/c++/13.1.0/x86_64-pc-linux-gnu
+         /raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/../../../../include/c++/13.1.0/backward
+         /raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/include
+         /raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/include-fixed
+         /usr/local/include
+         /raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/../../include
+         /usr/include
+        End of search list.
+        Compiler executable checksum: 4eae5fff8d67c640e99a627e55f689f2
+        COLLECT_GCC_OPTIONS='-v' '-o' 'CMakeFiles/cmTC_b4909.dir/CMakeCXXCompilerABI.cpp.o' '-c' '-shared-libgcc' '-mtune=generic' '-march=x86-64' '-dumpdir' 'CMakeFiles/cmTC_b4909.dir/'
+         as -v --64 -o CMakeFiles/cmTC_b4909.dir/CMakeCXXCompilerABI.cpp.o /tmp/cc5hVb8l.s
+        GNU assembler version 2.43.1 (x86_64-suse-linux) using BFD version (GNU Binutils; SUSE Linux Enterprise 15) 2.43.1.20241209-150100.7.52
+        COMPILER_PATH=/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../libexec/gcc/x86_64-pc-linux-gnu/13.1.0/:/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../libexec/gcc/
+        LIBRARY_PATH=/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/:/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/:/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/../../../../lib64/:/lib/../lib64/:/usr/lib/../lib64/:/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/../../../:/lib/:/usr/lib/
+        COLLECT_GCC_OPTIONS='-v' '-o' 'CMakeFiles/cmTC_b4909.dir/CMakeCXXCompilerABI.cpp.o' '-c' '-shared-libgcc' '-mtune=generic' '-march=x86-64' '-dumpdir' 'CMakeFiles/cmTC_b4909.dir/CMakeCXXCompilerABI.cpp.'
+        Linking CXX executable cmTC_b4909
+        /usr/bin/cmake -E cmake_link_script CMakeFiles/cmTC_b4909.dir/link.txt --verbose=1
+        /mpcdf/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/g++  -v CMakeFiles/cmTC_b4909.dir/CMakeCXXCompilerABI.cpp.o -o cmTC_b4909 
+        Reading specs from /raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/specs
+        COLLECT_GCC=/mpcdf/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/g++
+        COLLECT_LTO_WRAPPER=/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../libexec/gcc/x86_64-pc-linux-gnu/13.1.0/lto-wrapper
+        Target: x86_64-pc-linux-gnu
+        Configured with: ../gcc-13.1.0/configure LDFLAGS='-fmessage-length=0 -grecord-gcc-switches -O2 -D_FORTIFY_SOURCE=2 -funwind-tables -fasynchronous-unwind-tables -fstack-clash-protection -U_FORTIFY_SOURCE -fPIC -Wno-error=format-security -Wl,-rpath=/mpcdf/soft/SLE_15/packages/x86_64/gcc/13.1.0/lib64 -L/mpcdf/soft/SLE_15/packages/x86_64/isl/0.16.1/lib -Wl,-rpath=/mpcdf/soft/SLE_15/packages/x86_64/isl/0.16.1/lib' CFLAGS='-fmessage-length=0 -grecord-gcc-switches -O2 -D_FORTIFY_SOURCE=2 -funwind-tables -fasynchronous-unwind-tables -fstack-clash-protection -U_FORTIFY_SOURCE -fPIC -Wno-error=format-security' CXXFLAGS='-fmessage-length=0 -grecord-gcc-switches -O2 -D_FORTIFY_SOURCE=2 -funwind-tables -fasynchronous-unwind-tables -fstack-clash-protection -U_FORTIFY_SOURCE -fPIC -Wno-error=format-security' XCFLAGS='-fmessage-length=0 -grecord-gcc-switches -O2 -D_FORTIFY_SOURCE=2 -funwind-tables -fasynchronous-unwind-tables -fstack-clash-protection -U_FORTIFY_SOURCE -fPIC -Wno-error=format-security' TCFLAGS='-fmessage-length=0 -grecord-gcc-switches -O2 -D_FORTIFY_SOURCE=2 -funwind-tables -fasynchronous-unwind-tables -fstack-clash-protection -U_FORTIFY_SOURCE -fPIC -Wno-error=format-security' GCJFLAGS='-fmessage-length=0 -grecord-gcc-switches -O2 -D_FORTIFY_SOURCE=2 -funwind-tables -fasynchronous-unwind-tables -fstack-clash-protection -U_FORTIFY_SOURCE -fPIC -Wno-error=format-security ' --with-stage1-ldflags='-fmessage-length=0 -grecord-gcc-switches -O2 -D_FORTIFY_SOURCE=2 -funwind-tables -fasynchronous-unwind-tables -fstack-clash-protection -U_FORTIFY_SOURCE -fPIC -Wno-error=format-security -Wl,-rpath=/mpcdf/soft/SLE_15/packages/x86_64/gcc/13.1.0/lib64 -L/mpcdf/soft/SLE_15/packages/x86_64/isl/0.16.1/lib -Wl,-rpath=/mpcdf/soft/SLE_15/packages/x86_64/isl/0.16.1/lib' --prefix=/mpcdf/soft/SLE_15/packages/x86_64/gcc/13.1.0 --disable-multilib --with-isl=/mpcdf/soft/SLE_15/packages/x86_64/isl/0.16.1 --enable-linker-build-id --enable-languages=c,c++,fortran
+        Thread model: posix
+        Supported LTO compression algorithms: zlib
+        gcc version 13.1.0 (GCC) 
+        COMPILER_PATH=/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../libexec/gcc/x86_64-pc-linux-gnu/13.1.0/:/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../libexec/gcc/
+        LIBRARY_PATH=/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/:/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/:/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/../../../../lib64/:/lib/../lib64/:/usr/lib/../lib64/:/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/../../../:/lib/:/usr/lib/
+        COLLECT_GCC_OPTIONS='-v' '-o' 'cmTC_b4909' '-shared-libgcc' '-mtune=generic' '-march=x86-64' '-dumpdir' 'cmTC_b4909.'
+         /raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../libexec/gcc/x86_64-pc-linux-gnu/13.1.0/collect2 -plugin /raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../libexec/gcc/x86_64-pc-linux-gnu/13.1.0/liblto_plugin.so -plugin-opt=/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../libexec/gcc/x86_64-pc-linux-gnu/13.1.0/lto-wrapper -plugin-opt=-fresolution=/tmp/ccKhUPHT.res -plugin-opt=-pass-through=-lgcc_s -plugin-opt=-pass-through=-lgcc -plugin-opt=-pass-through=-lc -plugin-opt=-pass-through=-lgcc_s -plugin-opt=-pass-through=-lgcc --build-id --eh-frame-hdr -m elf_x86_64 -dynamic-linker /lib64/ld-linux-x86-64.so.2 -o cmTC_b4909 /usr/lib/../lib64/crt1.o /usr/lib/../lib64/crti.o /raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/crtbegin.o -L/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0 -L/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc -L/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/../../../../lib64 -L/lib/../lib64 -L/usr/lib/../lib64 -L/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/../../.. CMakeFiles/cmTC_b4909.dir/CMakeCXXCompilerABI.cpp.o -lstdc++ -lm -lgcc_s -lgcc -lc -rpath=/mpcdf/soft/SLE_15/packages/x86_64/gcc/13.1.0/lib64 -lgcc_s -lgcc /raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/crtend.o /usr/lib/../lib64/crtn.o
+        COLLECT_GCC_OPTIONS='-v' '-o' 'cmTC_b4909' '-shared-libgcc' '-mtune=generic' '-march=x86-64' '-dumpdir' 'cmTC_b4909.'
+        gmake[1]: Leaving directory '/raven/u/uli/cpp-nbody/build-kokkos/CMakeFiles/CMakeScratch/TryCompile-a8CvSn'
+        
+      exitCode: 0
+  -
+    kind: "message-v1"
+    backtrace:
+      - "/usr/share/cmake/Modules/CMakeDetermineCompilerABI.cmake:127 (message)"
+      - "/usr/share/cmake/Modules/CMakeTestCXXCompiler.cmake:26 (CMAKE_DETERMINE_COMPILER_ABI)"
+      - "CMakeLists.txt:2 (project)"
+    message: |
+      Parsed CXX implicit include dir info: rv=done
+        found start of include info
+        found start of implicit include info
+          add: [/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/../../../../include/c++/13.1.0]
+          add: [/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/../../../../include/c++/13.1.0/x86_64-pc-linux-gnu]
+          add: [/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/../../../../include/c++/13.1.0/backward]
+          add: [/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/include]
+          add: [/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/include-fixed]
+          add: [/usr/local/include]
+          add: [/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/../../include]
+          add: [/usr/include]
+        end of search list found
+        collapse include dir [/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/../../../../include/c++/13.1.0] ==> [/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/include/c++/13.1.0]
+        collapse include dir [/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/../../../../include/c++/13.1.0/x86_64-pc-linux-gnu] ==> [/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/include/c++/13.1.0/x86_64-pc-linux-gnu]
+        collapse include dir [/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/../../../../include/c++/13.1.0/backward] ==> [/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/include/c++/13.1.0/backward]
+        collapse include dir [/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/include] ==> [/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/lib/gcc/x86_64-pc-linux-gnu/13.1.0/include]
+        collapse include dir [/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/include-fixed] ==> [/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/lib/gcc/x86_64-pc-linux-gnu/13.1.0/include-fixed]
+        collapse include dir [/usr/local/include] ==> [/usr/local/include]
+        collapse include dir [/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/../../include] ==> [/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/include]
+        collapse include dir [/usr/include] ==> [/usr/include]
+        implicit include dirs: [/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/include/c++/13.1.0;/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/include/c++/13.1.0/x86_64-pc-linux-gnu;/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/include/c++/13.1.0/backward;/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/lib/gcc/x86_64-pc-linux-gnu/13.1.0/include;/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/lib/gcc/x86_64-pc-linux-gnu/13.1.0/include-fixed;/usr/local/include;/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/include;/usr/include]
+      
+      
+  -
+    kind: "message-v1"
+    backtrace:
+      - "/usr/share/cmake/Modules/CMakeDetermineCompilerABI.cmake:159 (message)"
+      - "/usr/share/cmake/Modules/CMakeTestCXXCompiler.cmake:26 (CMAKE_DETERMINE_COMPILER_ABI)"
+      - "CMakeLists.txt:2 (project)"
+    message: |
+      Parsed CXX implicit link information:
+        link line regex: [^( *|.*[/\\])(ld|CMAKE_LINK_STARTFILE-NOTFOUND|([^/\\]+-)?ld|collect2)[^/\\]*( |$)]
+        ignore line: [Change Dir: '/raven/u/uli/cpp-nbody/build-kokkos/CMakeFiles/CMakeScratch/TryCompile-a8CvSn']
+        ignore line: []
+        ignore line: [Run Build Command(s): /usr/bin/cmake -E env VERBOSE=1 /usr/bin/gmake -f Makefile cmTC_b4909/fast]
+        ignore line: [/usr/bin/gmake  -f CMakeFiles/cmTC_b4909.dir/build.make CMakeFiles/cmTC_b4909.dir/build]
+        ignore line: [gmake[1]: Entering directory '/raven/u/uli/cpp-nbody/build-kokkos/CMakeFiles/CMakeScratch/TryCompile-a8CvSn']
+        ignore line: [Building CXX object CMakeFiles/cmTC_b4909.dir/CMakeCXXCompilerABI.cpp.o]
+        ignore line: [/mpcdf/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/g++   -v -o CMakeFiles/cmTC_b4909.dir/CMakeCXXCompilerABI.cpp.o -c /usr/share/cmake/Modules/CMakeCXXCompilerABI.cpp]
+        ignore line: [Reading specs from /raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/specs]
+        ignore line: [COLLECT_GCC=/mpcdf/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/g++]
+        ignore line: [Target: x86_64-pc-linux-gnu]
+        ignore line: [Configured with: ../gcc-13.1.0/configure LDFLAGS='-fmessage-length=0 -grecord-gcc-switches -O2 -D_FORTIFY_SOURCE=2 -funwind-tables -fasynchronous-unwind-tables -fstack-clash-protection -U_FORTIFY_SOURCE -fPIC -Wno-error=format-security -Wl,-rpath=/mpcdf/soft/SLE_15/packages/x86_64/gcc/13.1.0/lib64 -L/mpcdf/soft/SLE_15/packages/x86_64/isl/0.16.1/lib -Wl,-rpath=/mpcdf/soft/SLE_15/packages/x86_64/isl/0.16.1/lib' CFLAGS='-fmessage-length=0 -grecord-gcc-switches -O2 -D_FORTIFY_SOURCE=2 -funwind-tables -fasynchronous-unwind-tables -fstack-clash-protection -U_FORTIFY_SOURCE -fPIC -Wno-error=format-security' CXXFLAGS='-fmessage-length=0 -grecord-gcc-switches -O2 -D_FORTIFY_SOURCE=2 -funwind-tables -fasynchronous-unwind-tables -fstack-clash-protection -U_FORTIFY_SOURCE -fPIC -Wno-error=format-security' XCFLAGS='-fmessage-length=0 -grecord-gcc-switches -O2 -D_FORTIFY_SOURCE=2 -funwind-tables -fasynchronous-unwind-tables -fstack-clash-protection -U_FORTIFY_SOURCE -fPIC -Wno-error=format-security' TCFLAGS='-fmessage-length=0 -grecord-gcc-switches -O2 -D_FORTIFY_SOURCE=2 -funwind-tables -fasynchronous-unwind-tables -fstack-clash-protection -U_FORTIFY_SOURCE -fPIC -Wno-error=format-security' GCJFLAGS='-fmessage-length=0 -grecord-gcc-switches -O2 -D_FORTIFY_SOURCE=2 -funwind-tables -fasynchronous-unwind-tables -fstack-clash-protection -U_FORTIFY_SOURCE -fPIC -Wno-error=format-security ' --with-stage1-ldflags='-fmessage-length=0 -grecord-gcc-switches -O2 -D_FORTIFY_SOURCE=2 -funwind-tables -fasynchronous-unwind-tables -fstack-clash-protection -U_FORTIFY_SOURCE -fPIC -Wno-error=format-security -Wl,-rpath=/mpcdf/soft/SLE_15/packages/x86_64/gcc/13.1.0/lib64 -L/mpcdf/soft/SLE_15/packages/x86_64/isl/0.16.1/lib -Wl,-rpath=/mpcdf/soft/SLE_15/packages/x86_64/isl/0.16.1/lib' --prefix=/mpcdf/soft/SLE_15/packages/x86_64/gcc/13.1.0 --disable-multilib --with-isl=/mpcdf/soft/SLE_15/packages/x86_64/isl/0.16.1 --enable-linker-build-id --enable-languages=c,c++,fortran]
+        ignore line: [Thread model: posix]
+        ignore line: [Supported LTO compression algorithms: zlib]
+        ignore line: [gcc version 13.1.0 (GCC) ]
+        ignore line: [COLLECT_GCC_OPTIONS='-v' '-o' 'CMakeFiles/cmTC_b4909.dir/CMakeCXXCompilerABI.cpp.o' '-c' '-shared-libgcc' '-mtune=generic' '-march=x86-64' '-dumpdir' 'CMakeFiles/cmTC_b4909.dir/']
+        ignore line: [ /raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../libexec/gcc/x86_64-pc-linux-gnu/13.1.0/cc1plus -quiet -v -iprefix /raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/ -D_GNU_SOURCE /usr/share/cmake/Modules/CMakeCXXCompilerABI.cpp -quiet -dumpdir CMakeFiles/cmTC_b4909.dir/ -dumpbase CMakeCXXCompilerABI.cpp.cpp -dumpbase-ext .cpp -mtune=generic -march=x86-64 -version -o /tmp/cc5hVb8l.s]
+        ignore line: [GNU C++17 (GCC) version 13.1.0 (x86_64-pc-linux-gnu)]
+        ignore line: [	compiled by GNU C version 13.1.0  GMP version 6.1.2  MPFR version 4.0.2-p6  MPC version 1.1.0  isl version isl-0.16.1-GMP]
+        ignore line: []
+        ignore line: [GGC heuristics: --param ggc-min-expand=100 --param ggc-min-heapsize=131072]
+        ignore line: [ignoring nonexistent directory "/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/../../../../x86_64-pc-linux-gnu/include"]
+        ignore line: [ignoring duplicate directory "/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/../../lib/gcc/x86_64-pc-linux-gnu/13.1.0/../../../../include/c++/13.1.0"]
+        ignore line: [ignoring duplicate directory "/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/../../lib/gcc/x86_64-pc-linux-gnu/13.1.0/../../../../include/c++/13.1.0/x86_64-pc-linux-gnu"]
+        ignore line: [ignoring duplicate directory "/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/../../lib/gcc/x86_64-pc-linux-gnu/13.1.0/../../../../include/c++/13.1.0/backward"]
+        ignore line: [ignoring duplicate directory "/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/../../lib/gcc/x86_64-pc-linux-gnu/13.1.0/include"]
+        ignore line: [ignoring duplicate directory "/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/../../lib/gcc/x86_64-pc-linux-gnu/13.1.0/include-fixed"]
+        ignore line: [ignoring nonexistent directory "/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/../../lib/gcc/x86_64-pc-linux-gnu/13.1.0/../../../../x86_64-pc-linux-gnu/include"]
+        ignore line: [#include "..." search starts here:]
+        ignore line: [#include <...> search starts here:]
+        ignore line: [ /raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/../../../../include/c++/13.1.0]
+        ignore line: [ /raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/../../../../include/c++/13.1.0/x86_64-pc-linux-gnu]
+        ignore line: [ /raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/../../../../include/c++/13.1.0/backward]
+        ignore line: [ /raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/include]
+        ignore line: [ /raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/include-fixed]
+        ignore line: [ /usr/local/include]
+        ignore line: [ /raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/../../include]
+        ignore line: [ /usr/include]
+        ignore line: [End of search list.]
+        ignore line: [Compiler executable checksum: 4eae5fff8d67c640e99a627e55f689f2]
+        ignore line: [COLLECT_GCC_OPTIONS='-v' '-o' 'CMakeFiles/cmTC_b4909.dir/CMakeCXXCompilerABI.cpp.o' '-c' '-shared-libgcc' '-mtune=generic' '-march=x86-64' '-dumpdir' 'CMakeFiles/cmTC_b4909.dir/']
+        ignore line: [ as -v --64 -o CMakeFiles/cmTC_b4909.dir/CMakeCXXCompilerABI.cpp.o /tmp/cc5hVb8l.s]
+        ignore line: [GNU assembler version 2.43.1 (x86_64-suse-linux) using BFD version (GNU Binutils]
+        ignore line: [ SUSE Linux Enterprise 15) 2.43.1.20241209-150100.7.52]
+        ignore line: [COMPILER_PATH=/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../libexec/gcc/x86_64-pc-linux-gnu/13.1.0/:/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../libexec/gcc/]
+        ignore line: [LIBRARY_PATH=/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/:/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/:/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/../../../../lib64/:/lib/../lib64/:/usr/lib/../lib64/:/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/../../../:/lib/:/usr/lib/]
+        ignore line: [COLLECT_GCC_OPTIONS='-v' '-o' 'CMakeFiles/cmTC_b4909.dir/CMakeCXXCompilerABI.cpp.o' '-c' '-shared-libgcc' '-mtune=generic' '-march=x86-64' '-dumpdir' 'CMakeFiles/cmTC_b4909.dir/CMakeCXXCompilerABI.cpp.']
+        ignore line: [Linking CXX executable cmTC_b4909]
+        ignore line: [/usr/bin/cmake -E cmake_link_script CMakeFiles/cmTC_b4909.dir/link.txt --verbose=1]
+        ignore line: [/mpcdf/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/g++  -v CMakeFiles/cmTC_b4909.dir/CMakeCXXCompilerABI.cpp.o -o cmTC_b4909 ]
+        ignore line: [Reading specs from /raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/specs]
+        ignore line: [COLLECT_GCC=/mpcdf/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/g++]
+        ignore line: [COLLECT_LTO_WRAPPER=/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../libexec/gcc/x86_64-pc-linux-gnu/13.1.0/lto-wrapper]
+        ignore line: [Target: x86_64-pc-linux-gnu]
+        ignore line: [Configured with: ../gcc-13.1.0/configure LDFLAGS='-fmessage-length=0 -grecord-gcc-switches -O2 -D_FORTIFY_SOURCE=2 -funwind-tables -fasynchronous-unwind-tables -fstack-clash-protection -U_FORTIFY_SOURCE -fPIC -Wno-error=format-security -Wl,-rpath=/mpcdf/soft/SLE_15/packages/x86_64/gcc/13.1.0/lib64 -L/mpcdf/soft/SLE_15/packages/x86_64/isl/0.16.1/lib -Wl,-rpath=/mpcdf/soft/SLE_15/packages/x86_64/isl/0.16.1/lib' CFLAGS='-fmessage-length=0 -grecord-gcc-switches -O2 -D_FORTIFY_SOURCE=2 -funwind-tables -fasynchronous-unwind-tables -fstack-clash-protection -U_FORTIFY_SOURCE -fPIC -Wno-error=format-security' CXXFLAGS='-fmessage-length=0 -grecord-gcc-switches -O2 -D_FORTIFY_SOURCE=2 -funwind-tables -fasynchronous-unwind-tables -fstack-clash-protection -U_FORTIFY_SOURCE -fPIC -Wno-error=format-security' XCFLAGS='-fmessage-length=0 -grecord-gcc-switches -O2 -D_FORTIFY_SOURCE=2 -funwind-tables -fasynchronous-unwind-tables -fstack-clash-protection -U_FORTIFY_SOURCE -fPIC -Wno-error=format-security' TCFLAGS='-fmessage-length=0 -grecord-gcc-switches -O2 -D_FORTIFY_SOURCE=2 -funwind-tables -fasynchronous-unwind-tables -fstack-clash-protection -U_FORTIFY_SOURCE -fPIC -Wno-error=format-security' GCJFLAGS='-fmessage-length=0 -grecord-gcc-switches -O2 -D_FORTIFY_SOURCE=2 -funwind-tables -fasynchronous-unwind-tables -fstack-clash-protection -U_FORTIFY_SOURCE -fPIC -Wno-error=format-security ' --with-stage1-ldflags='-fmessage-length=0 -grecord-gcc-switches -O2 -D_FORTIFY_SOURCE=2 -funwind-tables -fasynchronous-unwind-tables -fstack-clash-protection -U_FORTIFY_SOURCE -fPIC -Wno-error=format-security -Wl,-rpath=/mpcdf/soft/SLE_15/packages/x86_64/gcc/13.1.0/lib64 -L/mpcdf/soft/SLE_15/packages/x86_64/isl/0.16.1/lib -Wl,-rpath=/mpcdf/soft/SLE_15/packages/x86_64/isl/0.16.1/lib' --prefix=/mpcdf/soft/SLE_15/packages/x86_64/gcc/13.1.0 --disable-multilib --with-isl=/mpcdf/soft/SLE_15/packages/x86_64/isl/0.16.1 --enable-linker-build-id --enable-languages=c,c++,fortran]
+        ignore line: [Thread model: posix]
+        ignore line: [Supported LTO compression algorithms: zlib]
+        ignore line: [gcc version 13.1.0 (GCC) ]
+        ignore line: [COMPILER_PATH=/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../libexec/gcc/x86_64-pc-linux-gnu/13.1.0/:/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../libexec/gcc/]
+        ignore line: [LIBRARY_PATH=/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/:/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/:/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/../../../../lib64/:/lib/../lib64/:/usr/lib/../lib64/:/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/../../../:/lib/:/usr/lib/]
+        ignore line: [COLLECT_GCC_OPTIONS='-v' '-o' 'cmTC_b4909' '-shared-libgcc' '-mtune=generic' '-march=x86-64' '-dumpdir' 'cmTC_b4909.']
+        link line: [ /raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../libexec/gcc/x86_64-pc-linux-gnu/13.1.0/collect2 -plugin /raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../libexec/gcc/x86_64-pc-linux-gnu/13.1.0/liblto_plugin.so -plugin-opt=/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../libexec/gcc/x86_64-pc-linux-gnu/13.1.0/lto-wrapper -plugin-opt=-fresolution=/tmp/ccKhUPHT.res -plugin-opt=-pass-through=-lgcc_s -plugin-opt=-pass-through=-lgcc -plugin-opt=-pass-through=-lc -plugin-opt=-pass-through=-lgcc_s -plugin-opt=-pass-through=-lgcc --build-id --eh-frame-hdr -m elf_x86_64 -dynamic-linker /lib64/ld-linux-x86-64.so.2 -o cmTC_b4909 /usr/lib/../lib64/crt1.o /usr/lib/../lib64/crti.o /raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/crtbegin.o -L/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0 -L/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc -L/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/../../../../lib64 -L/lib/../lib64 -L/usr/lib/../lib64 -L/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/../../.. CMakeFiles/cmTC_b4909.dir/CMakeCXXCompilerABI.cpp.o -lstdc++ -lm -lgcc_s -lgcc -lc -rpath=/mpcdf/soft/SLE_15/packages/x86_64/gcc/13.1.0/lib64 -lgcc_s -lgcc /raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/crtend.o /usr/lib/../lib64/crtn.o]
+          arg [/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../libexec/gcc/x86_64-pc-linux-gnu/13.1.0/collect2] ==> ignore
+          arg [-plugin] ==> ignore
+          arg [/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../libexec/gcc/x86_64-pc-linux-gnu/13.1.0/liblto_plugin.so] ==> ignore
+          arg [-plugin-opt=/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../libexec/gcc/x86_64-pc-linux-gnu/13.1.0/lto-wrapper] ==> ignore
+          arg [-plugin-opt=-fresolution=/tmp/ccKhUPHT.res] ==> ignore
+          arg [-plugin-opt=-pass-through=-lgcc_s] ==> ignore
+          arg [-plugin-opt=-pass-through=-lgcc] ==> ignore
+          arg [-plugin-opt=-pass-through=-lc] ==> ignore
+          arg [-plugin-opt=-pass-through=-lgcc_s] ==> ignore
+          arg [-plugin-opt=-pass-through=-lgcc] ==> ignore
+          arg [--build-id] ==> ignore
+          arg [--eh-frame-hdr] ==> ignore
+          arg [-m] ==> ignore
+          arg [elf_x86_64] ==> ignore
+          arg [-dynamic-linker] ==> ignore
+          arg [/lib64/ld-linux-x86-64.so.2] ==> ignore
+          arg [-o] ==> ignore
+          arg [cmTC_b4909] ==> ignore
+          arg [/usr/lib/../lib64/crt1.o] ==> obj [/usr/lib/../lib64/crt1.o]
+          arg [/usr/lib/../lib64/crti.o] ==> obj [/usr/lib/../lib64/crti.o]
+          arg [/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/crtbegin.o] ==> obj [/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/crtbegin.o]
+          arg [-L/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0] ==> dir [/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0]
+          arg [-L/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc] ==> dir [/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc]
+          arg [-L/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/../../../../lib64] ==> dir [/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/../../../../lib64]
+          arg [-L/lib/../lib64] ==> dir [/lib/../lib64]
+          arg [-L/usr/lib/../lib64] ==> dir [/usr/lib/../lib64]
+          arg [-L/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/../../..] ==> dir [/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/../../..]
+          arg [CMakeFiles/cmTC_b4909.dir/CMakeCXXCompilerABI.cpp.o] ==> ignore
+          arg [-lstdc++] ==> lib [stdc++]
+          arg [-lm] ==> lib [m]
+          arg [-lgcc_s] ==> lib [gcc_s]
+          arg [-lgcc] ==> lib [gcc]
+          arg [-lc] ==> lib [c]
+          arg [-rpath=/mpcdf/soft/SLE_15/packages/x86_64/gcc/13.1.0/lib64] ==> ignore
+          arg [-lgcc_s] ==> lib [gcc_s]
+          arg [-lgcc] ==> lib [gcc]
+          arg [/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/crtend.o] ==> obj [/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/crtend.o]
+          arg [/usr/lib/../lib64/crtn.o] ==> obj [/usr/lib/../lib64/crtn.o]
+        collapse obj [/usr/lib/../lib64/crt1.o] ==> [/usr/lib64/crt1.o]
+        collapse obj [/usr/lib/../lib64/crti.o] ==> [/usr/lib64/crti.o]
+        collapse obj [/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/crtbegin.o] ==> [/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/lib/gcc/x86_64-pc-linux-gnu/13.1.0/crtbegin.o]
+        collapse obj [/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/crtend.o] ==> [/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/lib/gcc/x86_64-pc-linux-gnu/13.1.0/crtend.o]
+        collapse obj [/usr/lib/../lib64/crtn.o] ==> [/usr/lib64/crtn.o]
+        collapse library dir [/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0] ==> [/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/lib/gcc/x86_64-pc-linux-gnu/13.1.0]
+        collapse library dir [/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc] ==> [/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/lib/gcc]
+        collapse library dir [/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/../../../../lib64] ==> [/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/lib64]
+        collapse library dir [/lib/../lib64] ==> [/lib64]
+        collapse library dir [/usr/lib/../lib64] ==> [/usr/lib64]
+        collapse library dir [/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/../../..] ==> [/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/lib]
+        implicit libs: [stdc++;m;gcc_s;gcc;c;gcc_s;gcc]
+        implicit objs: [/usr/lib64/crt1.o;/usr/lib64/crti.o;/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/lib/gcc/x86_64-pc-linux-gnu/13.1.0/crtbegin.o;/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/lib/gcc/x86_64-pc-linux-gnu/13.1.0/crtend.o;/usr/lib64/crtn.o]
+        implicit dirs: [/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/lib/gcc/x86_64-pc-linux-gnu/13.1.0;/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/lib/gcc;/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/lib64;/lib64;/usr/lib64;/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/lib]
+        implicit fwks: []
+      
+      
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "/usr/share/cmake/Modules/FindOpenMP.cmake:219 (try_compile)"
+      - "/usr/share/cmake/Modules/FindOpenMP.cmake:486 (_OPENMP_GET_FLAGS)"
+      - "/usr/share/cmake/Modules/CMakeFindDependencyMacro.cmake:76 (find_package)"
+      - "/u/uli/kokkos/lib64/cmake/Kokkos/KokkosConfig.cmake:39 (FIND_DEPENDENCY)"
+      - "CMakeLists.txt:5 (find_package)"
+    description: "Detecting CXX OpenMP compiler info"
+    directories:
+      source: "/raven/u/uli/cpp-nbody/build-kokkos/CMakeFiles/CMakeScratch/TryCompile-DMMod4"
+      binary: "/raven/u/uli/cpp-nbody/build-kokkos/CMakeFiles/CMakeScratch/TryCompile-DMMod4"
+    cmakeVariables:
+      CMAKE_CXX_FLAGS: ""
+      CMAKE_CXX_FLAGS_DEBUG: "-g"
+      CMAKE_EXE_LINKER_FLAGS: ""
+    buildResult:
+      variable: "OpenMP_COMPILE_RESULT_CXX_fopenmp"
+      cached: true
+      stdout: |
+        Change Dir: '/raven/u/uli/cpp-nbody/build-kokkos/CMakeFiles/CMakeScratch/TryCompile-DMMod4'
+        
+        Run Build Command(s): /usr/bin/cmake -E env VERBOSE=1 /usr/bin/gmake -f Makefile cmTC_c4cd0/fast
+        /usr/bin/gmake  -f CMakeFiles/cmTC_c4cd0.dir/build.make CMakeFiles/cmTC_c4cd0.dir/build
+        gmake[1]: Entering directory '/raven/u/uli/cpp-nbody/build-kokkos/CMakeFiles/CMakeScratch/TryCompile-DMMod4'
+        Building CXX object CMakeFiles/cmTC_c4cd0.dir/OpenMPTryFlag.cpp.o
+        /mpcdf/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/g++   -fopenmp -v -o CMakeFiles/cmTC_c4cd0.dir/OpenMPTryFlag.cpp.o -c /raven/u/uli/cpp-nbody/build-kokkos/CMakeFiles/CMakeScratch/TryCompile-DMMod4/OpenMPTryFlag.cpp
+        Reading specs from /raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/specs
+        COLLECT_GCC=/mpcdf/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/g++
+        Target: x86_64-pc-linux-gnu
+        Configured with: ../gcc-13.1.0/configure LDFLAGS='-fmessage-length=0 -grecord-gcc-switches -O2 -D_FORTIFY_SOURCE=2 -funwind-tables -fasynchronous-unwind-tables -fstack-clash-protection -U_FORTIFY_SOURCE -fPIC -Wno-error=format-security -Wl,-rpath=/mpcdf/soft/SLE_15/packages/x86_64/gcc/13.1.0/lib64 -L/mpcdf/soft/SLE_15/packages/x86_64/isl/0.16.1/lib -Wl,-rpath=/mpcdf/soft/SLE_15/packages/x86_64/isl/0.16.1/lib' CFLAGS='-fmessage-length=0 -grecord-gcc-switches -O2 -D_FORTIFY_SOURCE=2 -funwind-tables -fasynchronous-unwind-tables -fstack-clash-protection -U_FORTIFY_SOURCE -fPIC -Wno-error=format-security' CXXFLAGS='-fmessage-length=0 -grecord-gcc-switches -O2 -D_FORTIFY_SOURCE=2 -funwind-tables -fasynchronous-unwind-tables -fstack-clash-protection -U_FORTIFY_SOURCE -fPIC -Wno-error=format-security' XCFLAGS='-fmessage-length=0 -grecord-gcc-switches -O2 -D_FORTIFY_SOURCE=2 -funwind-tables -fasynchronous-unwind-tables -fstack-clash-protection -U_FORTIFY_SOURCE -fPIC -Wno-error=format-security' TCFLAGS='-fmessage-length=0 -grecord-gcc-switches -O2 -D_FORTIFY_SOURCE=2 -funwind-tables -fasynchronous-unwind-tables -fstack-clash-protection -U_FORTIFY_SOURCE -fPIC -Wno-error=format-security' GCJFLAGS='-fmessage-length=0 -grecord-gcc-switches -O2 -D_FORTIFY_SOURCE=2 -funwind-tables -fasynchronous-unwind-tables -fstack-clash-protection -U_FORTIFY_SOURCE -fPIC -Wno-error=format-security ' --with-stage1-ldflags='-fmessage-length=0 -grecord-gcc-switches -O2 -D_FORTIFY_SOURCE=2 -funwind-tables -fasynchronous-unwind-tables -fstack-clash-protection -U_FORTIFY_SOURCE -fPIC -Wno-error=format-security -Wl,-rpath=/mpcdf/soft/SLE_15/packages/x86_64/gcc/13.1.0/lib64 -L/mpcdf/soft/SLE_15/packages/x86_64/isl/0.16.1/lib -Wl,-rpath=/mpcdf/soft/SLE_15/packages/x86_64/isl/0.16.1/lib' --prefix=/mpcdf/soft/SLE_15/packages/x86_64/gcc/13.1.0 --disable-multilib --with-isl=/mpcdf/soft/SLE_15/packages/x86_64/isl/0.16.1 --enable-linker-build-id --enable-languages=c,c++,fortran
+        Thread model: posix
+        Supported LTO compression algorithms: zlib
+        gcc version 13.1.0 (GCC) 
+        COLLECT_GCC_OPTIONS='-fopenmp' '-v' '-o' 'CMakeFiles/cmTC_c4cd0.dir/OpenMPTryFlag.cpp.o' '-c' '-shared-libgcc' '-mtune=generic' '-march=x86-64' '-pthread' '-dumpdir' 'CMakeFiles/cmTC_c4cd0.dir/'
+         /raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../libexec/gcc/x86_64-pc-linux-gnu/13.1.0/cc1plus -quiet -v -iprefix /raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/ -D_GNU_SOURCE -D_REENTRANT /raven/u/uli/cpp-nbody/build-kokkos/CMakeFiles/CMakeScratch/TryCompile-DMMod4/OpenMPTryFlag.cpp -quiet -dumpdir CMakeFiles/cmTC_c4cd0.dir/ -dumpbase OpenMPTryFlag.cpp.cpp -dumpbase-ext .cpp -mtune=generic -march=x86-64 -version -fopenmp -o /tmp/ccVYyKew.s
+        GNU C++17 (GCC) version 13.1.0 (x86_64-pc-linux-gnu)
+        	compiled by GNU C version 13.1.0, GMP version 6.1.2, MPFR version 4.0.2-p6, MPC version 1.1.0, isl version isl-0.16.1-GMP
+        
+        GGC heuristics: --param ggc-min-expand=100 --param ggc-min-heapsize=131072
+        ignoring nonexistent directory "/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/../../../../x86_64-pc-linux-gnu/include"
+        ignoring duplicate directory "/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/../../lib/gcc/x86_64-pc-linux-gnu/13.1.0/../../../../include/c++/13.1.0"
+        ignoring duplicate directory "/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/../../lib/gcc/x86_64-pc-linux-gnu/13.1.0/../../../../include/c++/13.1.0/x86_64-pc-linux-gnu"
+        ignoring duplicate directory "/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/../../lib/gcc/x86_64-pc-linux-gnu/13.1.0/../../../../include/c++/13.1.0/backward"
+        ignoring duplicate directory "/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/../../lib/gcc/x86_64-pc-linux-gnu/13.1.0/include"
+        ignoring duplicate directory "/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/../../lib/gcc/x86_64-pc-linux-gnu/13.1.0/include-fixed"
+        ignoring nonexistent directory "/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/../../lib/gcc/x86_64-pc-linux-gnu/13.1.0/../../../../x86_64-pc-linux-gnu/include"
+        #include "..." search starts here:
+        #include <...> search starts here:
+         /raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/../../../../include/c++/13.1.0
+         /raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/../../../../include/c++/13.1.0/x86_64-pc-linux-gnu
+         /raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/../../../../include/c++/13.1.0/backward
+         /raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/include
+         /raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/include-fixed
+         /usr/local/include
+         /raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/../../include
+         /usr/include
+        End of search list.
+        Compiler executable checksum: 4eae5fff8d67c640e99a627e55f689f2
+        COLLECT_GCC_OPTIONS='-fopenmp' '-v' '-o' 'CMakeFiles/cmTC_c4cd0.dir/OpenMPTryFlag.cpp.o' '-c' '-shared-libgcc' '-mtune=generic' '-march=x86-64' '-pthread' '-dumpdir' 'CMakeFiles/cmTC_c4cd0.dir/'
+         as -v --64 -o CMakeFiles/cmTC_c4cd0.dir/OpenMPTryFlag.cpp.o /tmp/ccVYyKew.s
+        GNU assembler version 2.43.1 (x86_64-suse-linux) using BFD version (GNU Binutils; SUSE Linux Enterprise 15) 2.43.1.20241209-150100.7.52
+        COMPILER_PATH=/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../libexec/gcc/x86_64-pc-linux-gnu/13.1.0/:/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../libexec/gcc/
+        LIBRARY_PATH=/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/:/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/:/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/../../../../lib64/:/lib/../lib64/:/usr/lib/../lib64/:/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/../../../:/lib/:/usr/lib/
+        COLLECT_GCC_OPTIONS='-fopenmp' '-v' '-o' 'CMakeFiles/cmTC_c4cd0.dir/OpenMPTryFlag.cpp.o' '-c' '-shared-libgcc' '-mtune=generic' '-march=x86-64' '-pthread' '-dumpdir' 'CMakeFiles/cmTC_c4cd0.dir/OpenMPTryFlag.cpp.'
+        Linking CXX executable cmTC_c4cd0
+        /usr/bin/cmake -E cmake_link_script CMakeFiles/cmTC_c4cd0.dir/link.txt --verbose=1
+        /mpcdf/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/g++  -fopenmp -v CMakeFiles/cmTC_c4cd0.dir/OpenMPTryFlag.cpp.o -o cmTC_c4cd0  -v 
+        Reading specs from /raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/specs
+        COLLECT_GCC=/mpcdf/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/g++
+        COLLECT_LTO_WRAPPER=/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../libexec/gcc/x86_64-pc-linux-gnu/13.1.0/lto-wrapper
+        Target: x86_64-pc-linux-gnu
+        Configured with: ../gcc-13.1.0/configure LDFLAGS='-fmessage-length=0 -grecord-gcc-switches -O2 -D_FORTIFY_SOURCE=2 -funwind-tables -fasynchronous-unwind-tables -fstack-clash-protection -U_FORTIFY_SOURCE -fPIC -Wno-error=format-security -Wl,-rpath=/mpcdf/soft/SLE_15/packages/x86_64/gcc/13.1.0/lib64 -L/mpcdf/soft/SLE_15/packages/x86_64/isl/0.16.1/lib -Wl,-rpath=/mpcdf/soft/SLE_15/packages/x86_64/isl/0.16.1/lib' CFLAGS='-fmessage-length=0 -grecord-gcc-switches -O2 -D_FORTIFY_SOURCE=2 -funwind-tables -fasynchronous-unwind-tables -fstack-clash-protection -U_FORTIFY_SOURCE -fPIC -Wno-error=format-security' CXXFLAGS='-fmessage-length=0 -grecord-gcc-switches -O2 -D_FORTIFY_SOURCE=2 -funwind-tables -fasynchronous-unwind-tables -fstack-clash-protection -U_FORTIFY_SOURCE -fPIC -Wno-error=format-security' XCFLAGS='-fmessage-length=0 -grecord-gcc-switches -O2 -D_FORTIFY_SOURCE=2 -funwind-tables -fasynchronous-unwind-tables -fstack-clash-protection -U_FORTIFY_SOURCE -fPIC -Wno-error=format-security' TCFLAGS='-fmessage-length=0 -grecord-gcc-switches -O2 -D_FORTIFY_SOURCE=2 -funwind-tables -fasynchronous-unwind-tables -fstack-clash-protection -U_FORTIFY_SOURCE -fPIC -Wno-error=format-security' GCJFLAGS='-fmessage-length=0 -grecord-gcc-switches -O2 -D_FORTIFY_SOURCE=2 -funwind-tables -fasynchronous-unwind-tables -fstack-clash-protection -U_FORTIFY_SOURCE -fPIC -Wno-error=format-security ' --with-stage1-ldflags='-fmessage-length=0 -grecord-gcc-switches -O2 -D_FORTIFY_SOURCE=2 -funwind-tables -fasynchronous-unwind-tables -fstack-clash-protection -U_FORTIFY_SOURCE -fPIC -Wno-error=format-security -Wl,-rpath=/mpcdf/soft/SLE_15/packages/x86_64/gcc/13.1.0/lib64 -L/mpcdf/soft/SLE_15/packages/x86_64/isl/0.16.1/lib -Wl,-rpath=/mpcdf/soft/SLE_15/packages/x86_64/isl/0.16.1/lib' --prefix=/mpcdf/soft/SLE_15/packages/x86_64/gcc/13.1.0 --disable-multilib --with-isl=/mpcdf/soft/SLE_15/packages/x86_64/isl/0.16.1 --enable-linker-build-id --enable-languages=c,c++,fortran
+        Thread model: posix
+        Supported LTO compression algorithms: zlib
+        gcc version 13.1.0 (GCC) 
+        COMPILER_PATH=/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../libexec/gcc/x86_64-pc-linux-gnu/13.1.0/:/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../libexec/gcc/
+        LIBRARY_PATH=/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/:/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/:/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/../../../../lib64/:/lib/../lib64/:/usr/lib/../lib64/:/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/../../../:/lib/:/usr/lib/
+        Reading specs from /raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/../../../../lib64/libgomp.spec
+        COLLECT_GCC_OPTIONS='-fopenmp' '-v' '-o' 'cmTC_c4cd0' '-v' '-shared-libgcc' '-mtune=generic' '-march=x86-64' '-pthread' '-dumpdir' 'cmTC_c4cd0.'
+         /raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../libexec/gcc/x86_64-pc-linux-gnu/13.1.0/collect2 -plugin /raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../libexec/gcc/x86_64-pc-linux-gnu/13.1.0/liblto_plugin.so -plugin-opt=/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../libexec/gcc/x86_64-pc-linux-gnu/13.1.0/lto-wrapper -plugin-opt=-fresolution=/tmp/cc0SODHq.res -plugin-opt=-pass-through=-lgcc_s -plugin-opt=-pass-through=-lgcc -plugin-opt=-pass-through=-lpthread -plugin-opt=-pass-through=-lc -plugin-opt=-pass-through=-lgcc_s -plugin-opt=-pass-through=-lgcc --build-id --eh-frame-hdr -m elf_x86_64 -dynamic-linker /lib64/ld-linux-x86-64.so.2 -o cmTC_c4cd0 /usr/lib/../lib64/crt1.o /usr/lib/../lib64/crti.o /raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/crtbegin.o -L/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0 -L/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc -L/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/../../../../lib64 -L/lib/../lib64 -L/usr/lib/../lib64 -L/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/../../.. CMakeFiles/cmTC_c4cd0.dir/OpenMPTryFlag.cpp.o -lstdc++ -lm -lgomp -lgcc_s -lgcc -lpthread -lc -rpath=/mpcdf/soft/SLE_15/packages/x86_64/gcc/13.1.0/lib64 -lgcc_s -lgcc /raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/crtend.o /usr/lib/../lib64/crtn.o
+        COLLECT_GCC_OPTIONS='-fopenmp' '-v' '-o' 'cmTC_c4cd0' '-v' '-shared-libgcc' '-mtune=generic' '-march=x86-64' '-pthread' '-dumpdir' 'cmTC_c4cd0.'
+        gmake[1]: Leaving directory '/raven/u/uli/cpp-nbody/build-kokkos/CMakeFiles/CMakeScratch/TryCompile-DMMod4'
+        
+      exitCode: 0
+  -
+    kind: "message-v1"
+    backtrace:
+      - "/usr/share/cmake/Modules/FindOpenMP.cmake:262 (message)"
+      - "/usr/share/cmake/Modules/FindOpenMP.cmake:486 (_OPENMP_GET_FLAGS)"
+      - "/usr/share/cmake/Modules/CMakeFindDependencyMacro.cmake:76 (find_package)"
+      - "/u/uli/kokkos/lib64/cmake/Kokkos/KokkosConfig.cmake:39 (FIND_DEPENDENCY)"
+      - "CMakeLists.txt:5 (find_package)"
+    message: |
+      Parsed CXX OpenMP implicit link information from above output:
+        link line regex: [^( *|.*[/\\])(ld|CMAKE_LINK_STARTFILE-NOTFOUND|([^/\\]+-)?ld|collect2)[^/\\]*( |$)]
+        ignore line: [Change Dir: '/raven/u/uli/cpp-nbody/build-kokkos/CMakeFiles/CMakeScratch/TryCompile-DMMod4']
+        ignore line: []
+        ignore line: [Run Build Command(s): /usr/bin/cmake -E env VERBOSE=1 /usr/bin/gmake -f Makefile cmTC_c4cd0/fast]
+        ignore line: [/usr/bin/gmake  -f CMakeFiles/cmTC_c4cd0.dir/build.make CMakeFiles/cmTC_c4cd0.dir/build]
+        ignore line: [gmake[1]: Entering directory '/raven/u/uli/cpp-nbody/build-kokkos/CMakeFiles/CMakeScratch/TryCompile-DMMod4']
+        ignore line: [Building CXX object CMakeFiles/cmTC_c4cd0.dir/OpenMPTryFlag.cpp.o]
+        ignore line: [/mpcdf/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/g++   -fopenmp -v -o CMakeFiles/cmTC_c4cd0.dir/OpenMPTryFlag.cpp.o -c /raven/u/uli/cpp-nbody/build-kokkos/CMakeFiles/CMakeScratch/TryCompile-DMMod4/OpenMPTryFlag.cpp]
+        ignore line: [Reading specs from /raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/specs]
+        ignore line: [COLLECT_GCC=/mpcdf/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/g++]
+        ignore line: [Target: x86_64-pc-linux-gnu]
+        ignore line: [Configured with: ../gcc-13.1.0/configure LDFLAGS='-fmessage-length=0 -grecord-gcc-switches -O2 -D_FORTIFY_SOURCE=2 -funwind-tables -fasynchronous-unwind-tables -fstack-clash-protection -U_FORTIFY_SOURCE -fPIC -Wno-error=format-security -Wl,-rpath=/mpcdf/soft/SLE_15/packages/x86_64/gcc/13.1.0/lib64 -L/mpcdf/soft/SLE_15/packages/x86_64/isl/0.16.1/lib -Wl,-rpath=/mpcdf/soft/SLE_15/packages/x86_64/isl/0.16.1/lib' CFLAGS='-fmessage-length=0 -grecord-gcc-switches -O2 -D_FORTIFY_SOURCE=2 -funwind-tables -fasynchronous-unwind-tables -fstack-clash-protection -U_FORTIFY_SOURCE -fPIC -Wno-error=format-security' CXXFLAGS='-fmessage-length=0 -grecord-gcc-switches -O2 -D_FORTIFY_SOURCE=2 -funwind-tables -fasynchronous-unwind-tables -fstack-clash-protection -U_FORTIFY_SOURCE -fPIC -Wno-error=format-security' XCFLAGS='-fmessage-length=0 -grecord-gcc-switches -O2 -D_FORTIFY_SOURCE=2 -funwind-tables -fasynchronous-unwind-tables -fstack-clash-protection -U_FORTIFY_SOURCE -fPIC -Wno-error=format-security' TCFLAGS='-fmessage-length=0 -grecord-gcc-switches -O2 -D_FORTIFY_SOURCE=2 -funwind-tables -fasynchronous-unwind-tables -fstack-clash-protection -U_FORTIFY_SOURCE -fPIC -Wno-error=format-security' GCJFLAGS='-fmessage-length=0 -grecord-gcc-switches -O2 -D_FORTIFY_SOURCE=2 -funwind-tables -fasynchronous-unwind-tables -fstack-clash-protection -U_FORTIFY_SOURCE -fPIC -Wno-error=format-security ' --with-stage1-ldflags='-fmessage-length=0 -grecord-gcc-switches -O2 -D_FORTIFY_SOURCE=2 -funwind-tables -fasynchronous-unwind-tables -fstack-clash-protection -U_FORTIFY_SOURCE -fPIC -Wno-error=format-security -Wl,-rpath=/mpcdf/soft/SLE_15/packages/x86_64/gcc/13.1.0/lib64 -L/mpcdf/soft/SLE_15/packages/x86_64/isl/0.16.1/lib -Wl,-rpath=/mpcdf/soft/SLE_15/packages/x86_64/isl/0.16.1/lib' --prefix=/mpcdf/soft/SLE_15/packages/x86_64/gcc/13.1.0 --disable-multilib --with-isl=/mpcdf/soft/SLE_15/packages/x86_64/isl/0.16.1 --enable-linker-build-id --enable-languages=c,c++,fortran]
+        ignore line: [Thread model: posix]
+        ignore line: [Supported LTO compression algorithms: zlib]
+        ignore line: [gcc version 13.1.0 (GCC) ]
+        ignore line: [COLLECT_GCC_OPTIONS='-fopenmp' '-v' '-o' 'CMakeFiles/cmTC_c4cd0.dir/OpenMPTryFlag.cpp.o' '-c' '-shared-libgcc' '-mtune=generic' '-march=x86-64' '-pthread' '-dumpdir' 'CMakeFiles/cmTC_c4cd0.dir/']
+        ignore line: [ /raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../libexec/gcc/x86_64-pc-linux-gnu/13.1.0/cc1plus -quiet -v -iprefix /raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/ -D_GNU_SOURCE -D_REENTRANT /raven/u/uli/cpp-nbody/build-kokkos/CMakeFiles/CMakeScratch/TryCompile-DMMod4/OpenMPTryFlag.cpp -quiet -dumpdir CMakeFiles/cmTC_c4cd0.dir/ -dumpbase OpenMPTryFlag.cpp.cpp -dumpbase-ext .cpp -mtune=generic -march=x86-64 -version -fopenmp -o /tmp/ccVYyKew.s]
+        ignore line: [GNU C++17 (GCC) version 13.1.0 (x86_64-pc-linux-gnu)]
+        ignore line: [	compiled by GNU C version 13.1.0  GMP version 6.1.2  MPFR version 4.0.2-p6  MPC version 1.1.0  isl version isl-0.16.1-GMP]
+        ignore line: []
+        ignore line: [GGC heuristics: --param ggc-min-expand=100 --param ggc-min-heapsize=131072]
+        ignore line: [ignoring nonexistent directory "/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/../../../../x86_64-pc-linux-gnu/include"]
+        ignore line: [ignoring duplicate directory "/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/../../lib/gcc/x86_64-pc-linux-gnu/13.1.0/../../../../include/c++/13.1.0"]
+        ignore line: [ignoring duplicate directory "/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/../../lib/gcc/x86_64-pc-linux-gnu/13.1.0/../../../../include/c++/13.1.0/x86_64-pc-linux-gnu"]
+        ignore line: [ignoring duplicate directory "/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/../../lib/gcc/x86_64-pc-linux-gnu/13.1.0/../../../../include/c++/13.1.0/backward"]
+        ignore line: [ignoring duplicate directory "/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/../../lib/gcc/x86_64-pc-linux-gnu/13.1.0/include"]
+        ignore line: [ignoring duplicate directory "/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/../../lib/gcc/x86_64-pc-linux-gnu/13.1.0/include-fixed"]
+        ignore line: [ignoring nonexistent directory "/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/../../lib/gcc/x86_64-pc-linux-gnu/13.1.0/../../../../x86_64-pc-linux-gnu/include"]
+        ignore line: [#include "..." search starts here:]
+        ignore line: [#include <...> search starts here:]
+        ignore line: [ /raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/../../../../include/c++/13.1.0]
+        ignore line: [ /raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/../../../../include/c++/13.1.0/x86_64-pc-linux-gnu]
+        ignore line: [ /raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/../../../../include/c++/13.1.0/backward]
+        ignore line: [ /raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/include]
+        ignore line: [ /raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/include-fixed]
+        ignore line: [ /usr/local/include]
+        ignore line: [ /raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/../../include]
+        ignore line: [ /usr/include]
+        ignore line: [End of search list.]
+        ignore line: [Compiler executable checksum: 4eae5fff8d67c640e99a627e55f689f2]
+        ignore line: [COLLECT_GCC_OPTIONS='-fopenmp' '-v' '-o' 'CMakeFiles/cmTC_c4cd0.dir/OpenMPTryFlag.cpp.o' '-c' '-shared-libgcc' '-mtune=generic' '-march=x86-64' '-pthread' '-dumpdir' 'CMakeFiles/cmTC_c4cd0.dir/']
+        ignore line: [ as -v --64 -o CMakeFiles/cmTC_c4cd0.dir/OpenMPTryFlag.cpp.o /tmp/ccVYyKew.s]
+        ignore line: [GNU assembler version 2.43.1 (x86_64-suse-linux) using BFD version (GNU Binutils]
+        ignore line: [ SUSE Linux Enterprise 15) 2.43.1.20241209-150100.7.52]
+        ignore line: [COMPILER_PATH=/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../libexec/gcc/x86_64-pc-linux-gnu/13.1.0/:/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../libexec/gcc/]
+        ignore line: [LIBRARY_PATH=/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/:/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/:/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/../../../../lib64/:/lib/../lib64/:/usr/lib/../lib64/:/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/../../../:/lib/:/usr/lib/]
+        ignore line: [COLLECT_GCC_OPTIONS='-fopenmp' '-v' '-o' 'CMakeFiles/cmTC_c4cd0.dir/OpenMPTryFlag.cpp.o' '-c' '-shared-libgcc' '-mtune=generic' '-march=x86-64' '-pthread' '-dumpdir' 'CMakeFiles/cmTC_c4cd0.dir/OpenMPTryFlag.cpp.']
+        ignore line: [Linking CXX executable cmTC_c4cd0]
+        ignore line: [/usr/bin/cmake -E cmake_link_script CMakeFiles/cmTC_c4cd0.dir/link.txt --verbose=1]
+        ignore line: [/mpcdf/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/g++  -fopenmp -v CMakeFiles/cmTC_c4cd0.dir/OpenMPTryFlag.cpp.o -o cmTC_c4cd0  -v ]
+        ignore line: [Reading specs from /raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/specs]
+        ignore line: [COLLECT_GCC=/mpcdf/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/g++]
+        ignore line: [COLLECT_LTO_WRAPPER=/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../libexec/gcc/x86_64-pc-linux-gnu/13.1.0/lto-wrapper]
+        ignore line: [Target: x86_64-pc-linux-gnu]
+        ignore line: [Configured with: ../gcc-13.1.0/configure LDFLAGS='-fmessage-length=0 -grecord-gcc-switches -O2 -D_FORTIFY_SOURCE=2 -funwind-tables -fasynchronous-unwind-tables -fstack-clash-protection -U_FORTIFY_SOURCE -fPIC -Wno-error=format-security -Wl,-rpath=/mpcdf/soft/SLE_15/packages/x86_64/gcc/13.1.0/lib64 -L/mpcdf/soft/SLE_15/packages/x86_64/isl/0.16.1/lib -Wl,-rpath=/mpcdf/soft/SLE_15/packages/x86_64/isl/0.16.1/lib' CFLAGS='-fmessage-length=0 -grecord-gcc-switches -O2 -D_FORTIFY_SOURCE=2 -funwind-tables -fasynchronous-unwind-tables -fstack-clash-protection -U_FORTIFY_SOURCE -fPIC -Wno-error=format-security' CXXFLAGS='-fmessage-length=0 -grecord-gcc-switches -O2 -D_FORTIFY_SOURCE=2 -funwind-tables -fasynchronous-unwind-tables -fstack-clash-protection -U_FORTIFY_SOURCE -fPIC -Wno-error=format-security' XCFLAGS='-fmessage-length=0 -grecord-gcc-switches -O2 -D_FORTIFY_SOURCE=2 -funwind-tables -fasynchronous-unwind-tables -fstack-clash-protection -U_FORTIFY_SOURCE -fPIC -Wno-error=format-security' TCFLAGS='-fmessage-length=0 -grecord-gcc-switches -O2 -D_FORTIFY_SOURCE=2 -funwind-tables -fasynchronous-unwind-tables -fstack-clash-protection -U_FORTIFY_SOURCE -fPIC -Wno-error=format-security' GCJFLAGS='-fmessage-length=0 -grecord-gcc-switches -O2 -D_FORTIFY_SOURCE=2 -funwind-tables -fasynchronous-unwind-tables -fstack-clash-protection -U_FORTIFY_SOURCE -fPIC -Wno-error=format-security ' --with-stage1-ldflags='-fmessage-length=0 -grecord-gcc-switches -O2 -D_FORTIFY_SOURCE=2 -funwind-tables -fasynchronous-unwind-tables -fstack-clash-protection -U_FORTIFY_SOURCE -fPIC -Wno-error=format-security -Wl,-rpath=/mpcdf/soft/SLE_15/packages/x86_64/gcc/13.1.0/lib64 -L/mpcdf/soft/SLE_15/packages/x86_64/isl/0.16.1/lib -Wl,-rpath=/mpcdf/soft/SLE_15/packages/x86_64/isl/0.16.1/lib' --prefix=/mpcdf/soft/SLE_15/packages/x86_64/gcc/13.1.0 --disable-multilib --with-isl=/mpcdf/soft/SLE_15/packages/x86_64/isl/0.16.1 --enable-linker-build-id --enable-languages=c,c++,fortran]
+        ignore line: [Thread model: posix]
+        ignore line: [Supported LTO compression algorithms: zlib]
+        ignore line: [gcc version 13.1.0 (GCC) ]
+        ignore line: [COMPILER_PATH=/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../libexec/gcc/x86_64-pc-linux-gnu/13.1.0/:/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../libexec/gcc/]
+        ignore line: [LIBRARY_PATH=/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/:/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/:/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/../../../../lib64/:/lib/../lib64/:/usr/lib/../lib64/:/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/../../../:/lib/:/usr/lib/]
+        ignore line: [Reading specs from /raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/../../../../lib64/libgomp.spec]
+        ignore line: [COLLECT_GCC_OPTIONS='-fopenmp' '-v' '-o' 'cmTC_c4cd0' '-v' '-shared-libgcc' '-mtune=generic' '-march=x86-64' '-pthread' '-dumpdir' 'cmTC_c4cd0.']
+        link line: [ /raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../libexec/gcc/x86_64-pc-linux-gnu/13.1.0/collect2 -plugin /raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../libexec/gcc/x86_64-pc-linux-gnu/13.1.0/liblto_plugin.so -plugin-opt=/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../libexec/gcc/x86_64-pc-linux-gnu/13.1.0/lto-wrapper -plugin-opt=-fresolution=/tmp/cc0SODHq.res -plugin-opt=-pass-through=-lgcc_s -plugin-opt=-pass-through=-lgcc -plugin-opt=-pass-through=-lpthread -plugin-opt=-pass-through=-lc -plugin-opt=-pass-through=-lgcc_s -plugin-opt=-pass-through=-lgcc --build-id --eh-frame-hdr -m elf_x86_64 -dynamic-linker /lib64/ld-linux-x86-64.so.2 -o cmTC_c4cd0 /usr/lib/../lib64/crt1.o /usr/lib/../lib64/crti.o /raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/crtbegin.o -L/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0 -L/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc -L/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/../../../../lib64 -L/lib/../lib64 -L/usr/lib/../lib64 -L/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/../../.. CMakeFiles/cmTC_c4cd0.dir/OpenMPTryFlag.cpp.o -lstdc++ -lm -lgomp -lgcc_s -lgcc -lpthread -lc -rpath=/mpcdf/soft/SLE_15/packages/x86_64/gcc/13.1.0/lib64 -lgcc_s -lgcc /raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/crtend.o /usr/lib/../lib64/crtn.o]
+          arg [/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../libexec/gcc/x86_64-pc-linux-gnu/13.1.0/collect2] ==> ignore
+          arg [-plugin] ==> ignore
+          arg [/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../libexec/gcc/x86_64-pc-linux-gnu/13.1.0/liblto_plugin.so] ==> ignore
+          arg [-plugin-opt=/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../libexec/gcc/x86_64-pc-linux-gnu/13.1.0/lto-wrapper] ==> ignore
+          arg [-plugin-opt=-fresolution=/tmp/cc0SODHq.res] ==> ignore
+          arg [-plugin-opt=-pass-through=-lgcc_s] ==> ignore
+          arg [-plugin-opt=-pass-through=-lgcc] ==> ignore
+          arg [-plugin-opt=-pass-through=-lpthread] ==> ignore
+          arg [-plugin-opt=-pass-through=-lc] ==> ignore
+          arg [-plugin-opt=-pass-through=-lgcc_s] ==> ignore
+          arg [-plugin-opt=-pass-through=-lgcc] ==> ignore
+          arg [--build-id] ==> ignore
+          arg [--eh-frame-hdr] ==> ignore
+          arg [-m] ==> ignore
+          arg [elf_x86_64] ==> ignore
+          arg [-dynamic-linker] ==> ignore
+          arg [/lib64/ld-linux-x86-64.so.2] ==> ignore
+          arg [-o] ==> ignore
+          arg [cmTC_c4cd0] ==> ignore
+          arg [-L/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0] ==> dir [/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0]
+          arg [-L/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc] ==> dir [/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc]
+          arg [-L/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/../../../../lib64] ==> dir [/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/../../../../lib64]
+          arg [-L/lib/../lib64] ==> dir [/lib/../lib64]
+          arg [-L/usr/lib/../lib64] ==> dir [/usr/lib/../lib64]
+          arg [-L/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/../../..] ==> dir [/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/../../..]
+          arg [CMakeFiles/cmTC_c4cd0.dir/OpenMPTryFlag.cpp.o] ==> ignore
+          arg [-lstdc++] ==> lib [stdc++]
+          arg [-lm] ==> lib [m]
+          arg [-lgomp] ==> lib [gomp]
+          arg [-lgcc_s] ==> lib [gcc_s]
+          arg [-lgcc] ==> lib [gcc]
+          arg [-lpthread] ==> lib [pthread]
+          arg [-lc] ==> lib [c]
+          arg [-rpath=/mpcdf/soft/SLE_15/packages/x86_64/gcc/13.1.0/lib64] ==> ignore
+          arg [-lgcc_s] ==> lib [gcc_s]
+          arg [-lgcc] ==> lib [gcc]
+        collapse library dir [/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0] ==> [/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/lib/gcc/x86_64-pc-linux-gnu/13.1.0]
+        collapse library dir [/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc] ==> [/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/lib/gcc]
+        collapse library dir [/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/../../../../lib64] ==> [/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/lib64]
+        collapse library dir [/lib/../lib64] ==> [/lib64]
+        collapse library dir [/usr/lib/../lib64] ==> [/usr/lib64]
+        collapse library dir [/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/../lib/gcc/x86_64-pc-linux-gnu/13.1.0/../../..] ==> [/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/lib]
+        implicit libs: [stdc++;m;gomp;gcc_s;gcc;pthread;c;gcc_s;gcc]
+        implicit objs: []
+        implicit dirs: [/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/lib/gcc/x86_64-pc-linux-gnu/13.1.0;/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/lib/gcc;/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/lib64;/lib64;/usr/lib64;/raven/u/system/soft/SLE_15/packages/x86_64/gcc/13.1.0/lib]
+        implicit fwks: []
+      
+      
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "/usr/share/cmake/Modules/FindOpenMP.cmake:420 (try_compile)"
+      - "/usr/share/cmake/Modules/FindOpenMP.cmake:560 (_OPENMP_GET_SPEC_DATE)"
+      - "/usr/share/cmake/Modules/CMakeFindDependencyMacro.cmake:76 (find_package)"
+      - "/u/uli/kokkos/lib64/cmake/Kokkos/KokkosConfig.cmake:39 (FIND_DEPENDENCY)"
+      - "CMakeLists.txt:5 (find_package)"
+    description: "Detecting CXX OpenMP version"
+    directories:
+      source: "/raven/u/uli/cpp-nbody/build-kokkos/CMakeFiles/CMakeScratch/TryCompile-1lZGHQ"
+      binary: "/raven/u/uli/cpp-nbody/build-kokkos/CMakeFiles/CMakeScratch/TryCompile-1lZGHQ"
+    cmakeVariables:
+      CMAKE_CXX_FLAGS: ""
+      CMAKE_CXX_FLAGS_DEBUG: "-g"
+      CMAKE_EXE_LINKER_FLAGS: ""
+    buildResult:
+      variable: "OpenMP_SPECTEST_CXX_"
+      cached: true
+      stdout: |
+        Change Dir: '/raven/u/uli/cpp-nbody/build-kokkos/CMakeFiles/CMakeScratch/TryCompile-1lZGHQ'
+        
+        Run Build Command(s): /usr/bin/cmake -E env VERBOSE=1 /usr/bin/gmake -f Makefile cmTC_771be/fast
+        /usr/bin/gmake  -f CMakeFiles/cmTC_771be.dir/build.make CMakeFiles/cmTC_771be.dir/build
+        gmake[1]: Entering directory '/raven/u/uli/cpp-nbody/build-kokkos/CMakeFiles/CMakeScratch/TryCompile-1lZGHQ'
+        Building CXX object CMakeFiles/cmTC_771be.dir/OpenMPCheckVersion.cpp.o
+        /mpcdf/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/g++   -fopenmp -o CMakeFiles/cmTC_771be.dir/OpenMPCheckVersion.cpp.o -c /raven/u/uli/cpp-nbody/build-kokkos/CMakeFiles/CMakeScratch/TryCompile-1lZGHQ/OpenMPCheckVersion.cpp
+        Linking CXX executable cmTC_771be
+        /usr/bin/cmake -E cmake_link_script CMakeFiles/cmTC_771be.dir/link.txt --verbose=1
+        /mpcdf/soft/SLE_15/packages/x86_64/gcc/13.1.0/bin/g++  -fopenmp CMakeFiles/cmTC_771be.dir/OpenMPCheckVersion.cpp.o -o cmTC_771be 
+        gmake[1]: Leaving directory '/raven/u/uli/cpp-nbody/build-kokkos/CMakeFiles/CMakeScratch/TryCompile-1lZGHQ'
+        
+      exitCode: 0
+...

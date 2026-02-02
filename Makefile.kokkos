@@ -1,0 +1,64 @@
+# Makefile.kokkos — Kokkos-based N-body build
+#
+# Usage:
+#   make -f Makefile.kokkos KOKKOS_PATH=/path/to/kokkos [KOKKOS_DEVICES=OpenMP|Cuda|HIP|SYCL]
+#
+# Examples:
+#   make -f Makefile.kokkos KOKKOS_DEVICES=OpenMP
+#   make -f Makefile.kokkos KOKKOS_DEVICES=Cuda KOKKOS_ARCH=Ampere80
+#   make -f Makefile.kokkos KOKKOS_DEVICES=HIP  KOKKOS_ARCH=AMD_GFX90A
+
+# Kokkos settings (override on command line or via environment)
+KOKKOS_PATH ?= $(HOME)/kokkos
+KOKKOS_DEVICES ?= OpenMP
+KOKKOS_ARCH ?=
+
+# Project settings
+SRC_DIR = src-kokkos
+TARGET = nbody-kokkos
+
+SRC = $(SRC_DIR)/main.cpp \
+      $(SRC_DIR)/particles.cpp \
+      $(SRC_DIR)/forces.cpp \
+      $(SRC_DIR)/integrator.cpp \
+      $(SRC_DIR)/timestep.cpp \
+      $(SRC_DIR)/initial_conditions.cpp \
+      $(SRC_DIR)/diagnostics.cpp
+
+# Default compiler depends on backend
+ifneq (,$(findstring Cuda,$(KOKKOS_DEVICES)))
+  CXX = $(KOKKOS_PATH)/bin/nvcc_wrapper
+  KOKKOS_CUDA_OPTIONS = enable_lambda
+else ifneq (,$(findstring HIP,$(KOKKOS_DEVICES)))
+  CXX ?= hipcc
+else ifneq (,$(findstring SYCL,$(KOKKOS_DEVICES)))
+  CXX ?= icpx
+else
+  CXX ?= g++
+endif
+
+CXXFLAGS = -O3 -std=c++17
+LDFLAGS =
+
+# Include Kokkos Makefile
+include $(KOKKOS_PATH)/Makefile.kokkos
+
+# Object files (in src-kokkos/)
+OBJ = $(SRC:.cpp=.o)
+
+.PHONY: all clean
+
+all: $(TARGET)
+
+$(TARGET): $(OBJ) $(KOKKOS_LINK_DEPENDS)
+	$(CXX) $(KOKKOS_LDFLAGS) $(CXXFLAGS) -o $@ $(OBJ) $(KOKKOS_LIBS) $(LDFLAGS)
+
+$(SRC_DIR)/%.o: $(SRC_DIR)/%.cpp $(KOKKOS_CPP_DEPENDS)
+	$(CXX) $(KOKKOS_CPPFLAGS) $(KOKKOS_CXXFLAGS) $(CXXFLAGS) -I$(SRC_DIR) -c -o $@ $<
+
+clean:
+	rm -f $(TARGET) $(SRC_DIR)/*.o
+
+# Debug build
+debug: CXXFLAGS = -O0 -g -std=c++17
+debug: clean all
