@@ -1,0 +1,47 @@
+# Build artifacts
+build*/
+nbody
+nbody-kokkos
+src/*.o
+src-kokkos/*.o
+*.o
+*.a
+*.so
+*.dylib
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile.cmake
+
+# Job scheduler scripts and output
+*.sh.o*
+*.sh.e*
+*.out
+*.err
+slurm-*.out
+job_*.sh
+*.pbs
+*.sge
+
+# Editor / IDE
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+*.kate-swp
+.project
+.cproject
+.settings/
+compile_commands.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Kokkos build/install (if built in-tree)
+kokkos-src/
+kokkos-build/
+kokkos/
