@@ -1,3 +1,0 @@
-/raven/u/uli/cpp-nbody/build-kokkos/CMakeFiles/nbody-kokkos.dir
-/raven/u/uli/cpp-nbody/build-kokkos/CMakeFiles/edit_cache.dir
-/raven/u/uli/cpp-nbody/build-kokkos/CMakeFiles/rebuild_cache.dir

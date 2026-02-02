@@ -62,6 +62,13 @@ cmake --build build-kokkos -j$(nproc)
 
 Produces `build-kokkos/nbody-kokkos`.
 
+To clean:
+
+```bash
+cmake --build build-kokkos --target clean   # remove object files
+rm -rf build-kokkos                         # full reset
+```
+
 ## Running
 
 Both executables read `config.txt` from the working directory:
