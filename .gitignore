@@ -24,6 +24,7 @@ slurm-*.out
 job_*.sh
 *.pbs
 *.sge
+job.*
 
 # Editor / IDE
 *.swp
