@@ -23,7 +23,7 @@ SOFTENING_AU = 206.265          # Softening length in AU (206.265 AU = 1e-3 pc)
 GRAD_N3L = false                # N3L gradient correction (halves work, slightly less momentum conservation)
 USE_KAHAN = false               # Kahan summation in N3L gradient loops (only used when GRAD_N3L = true)
 USE_N3L = false                 # Newton's 3rd law optimization (default: true on CPU, false on GPU)
-MEMORY_TILING = false           # Shared memory tiling for force computation (GPU optimization)
+MEMORY_TILING = true           # Shared memory tiling for force computation (GPU optimization)
 REASSIGN_TIMESTEPS = true       # Reassign timesteps during HHS recursion (legacy mode only)
 
 # =============================================================================

@@ -147,19 +147,20 @@ void compute_acceleration_and_frost(Particles& p, double G, double soft2, double
         });
     } else if (use_memory_tiling) {
         // Tiled version using shared memory
-        // Tile holds: x, y, z, vx, vy, vz, mass (7 doubles per particle)
+        // Each team of TILE_SIZE threads handles TILE_SIZE particles (i)
+        // All threads collaborate to load tiles of j particles
         using team_policy = Kokkos::TeamPolicy<>;
         using member_type = team_policy::member_type;
         using scratch_space = Kokkos::DefaultExecutionSpace::scratch_memory_space;
 
         size_t scratch_size = TILE_SIZE * 7 * sizeof(double);
-        int league_size = N;  // One team per particle
+        int num_teams = (N + TILE_SIZE - 1) / TILE_SIZE;
 
         Kokkos::parallel_for("acc_frost_tiled",
-            team_policy(league_size, TILE_SIZE).set_scratch_size(0, Kokkos::PerTeam(scratch_size)),
+            team_policy(num_teams, TILE_SIZE).set_scratch_size(0, Kokkos::PerTeam(scratch_size)),
             KOKKOS_LAMBDA(const member_type& team) {
-                int i = team.league_rank();
-                if (i >= N) return;
+                // Each thread handles one particle i
+                int i = team.league_rank() * TILE_SIZE + team.team_rank();
 
                 // Scratch memory views for tile data
                 Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
@@ -177,15 +178,20 @@ void compute_acceleration_and_frost(Particles& p, double G, double soft2, double
                 Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
                     tile_m(reinterpret_cast<double*>(tile_vz.data() + TILE_SIZE), TILE_SIZE);
 
-                // Load particle i's data
-                double xi = px(i), yi = py(i), zi = pz(i);
-                double vxi = pvx(i), vyi = pvy(i), vzi = pvz(i);
-                double mi = m(i);
+                // Load particle i's data (handle out-of-bounds)
+                double xi = 0, yi = 0, zi = 0;
+                double vxi = 0, vyi = 0, vzi = 0;
+                double mi = 0;
+                if (i < N) {
+                    xi = px(i); yi = py(i); zi = pz(i);
+                    vxi = pvx(i); vyi = pvy(i); vzi = pvz(i);
+                    mi = m(i);
+                }
 
                 double axi = 0, ayi = 0, azi = 0;
                 double t_min_i = DBL_MAX;
 
-                // Loop over tiles
+                // Loop over tiles of j particles
                 for (int tile_start = 0; tile_start < N; tile_start += TILE_SIZE) {
                     int tile_end = (tile_start + TILE_SIZE < N) ? tile_start + TILE_SIZE : N;
                     int tile_count = tile_end - tile_start;
@@ -205,55 +211,59 @@ void compute_acceleration_and_frost(Particles& p, double G, double soft2, double
                     team.team_barrier();
 
                     // Accumulate forces and FROST from this tile
-                    for (int jt = 0; jt < tile_count; jt++) {
-                        int j = tile_start + jt;
-                        if (j == i) continue;
+                    if (i < N) {
+                        for (int jt = 0; jt < tile_count; jt++) {
+                            int j = tile_start + jt;
+                            if (j == i) continue;
 
-                        double dx = tile_x(jt) - xi;
-                        double dy = tile_y(jt) - yi;
-                        double dz = tile_z(jt) - zi;
-                        double r2 = dx*dx + dy*dy + dz*dz;
-                        double r2s = r2 + soft2;
-                        double inv_r = 1.0 / Kokkos::sqrt(r2s);
-                        double inv_r3 = inv_r * inv_r * inv_r;
+                            double dx = tile_x(jt) - xi;
+                            double dy = tile_y(jt) - yi;
+                            double dz = tile_z(jt) - zi;
+                            double r2 = dx*dx + dy*dy + dz*dz;
+                            double r2s = r2 + soft2;
+                            double inv_r = 1.0 / Kokkos::sqrt(r2s);
+                            double inv_r3 = inv_r * inv_r * inv_r;
 
-                        double fj = G * tile_m(jt) * inv_r3;
-                        axi += fj * dx; ayi += fj * dy; azi += fj * dz;
+                            double fj = G * tile_m(jt) * inv_r3;
+                            axi += fj * dx; ayi += fj * dy; azi += fj * dz;
 
-                        // FROST
-                        double dvx = tile_vx(jt) - vxi;
-                        double dvy = tile_vy(jt) - vyi;
-                        double dvz = tile_vz(jt) - vzi;
-                        double v_sq = dvx*dvx + dvy*dvy + dvz*dvz;
-                        double r_norm = Kokkos::sqrt(r2 + EPS);
-                        double v_norm = Kokkos::sqrt(v_sq + EPS);
-                        double mass_sum = mi + tile_m(jt);
+                            // FROST
+                            double dvx = tile_vx(jt) - vxi;
+                            double dvy = tile_vy(jt) - vyi;
+                            double dvz = tile_vz(jt) - vzi;
+                            double v_sq = dvx*dvx + dvy*dvy + dvz*dvz;
+                            double r_norm = Kokkos::sqrt(r2 + EPS);
+                            double v_norm = Kokkos::sqrt(v_sq + EPS);
+                            double mass_sum = mi + tile_m(jt);
 
-                        double t_ff = Kokkos::sqrt(r_norm * r_norm * r_norm / (G * mass_sum + EPS));
-                        double t_fb = r_norm / (v_norm + EPS);
+                            double t_ff = Kokkos::sqrt(r_norm * r_norm * r_norm / (G * mass_sum + EPS));
+                            double t_fb = r_norm / (v_norm + EPS);
 
-                        double r_dot_v = dx*dvx + dy*dvy + dz*dvz;
-                        double r2_safe = r2 + EPS;
+                            double r_dot_v = dx*dvx + dy*dvy + dz*dvz;
+                            double r2_safe = r2 + EPS;
 
-                        double dt_ff_dt = 1.5 * (r_dot_v / r2_safe) * t_ff;
-                        double factor = 1.0 + G * mass_sum / (v_sq * r_norm + EPS);
-                        double dt_fb_dt = (r_dot_v / r2_safe) * factor * t_fb;
+                            double dt_ff_dt = 1.5 * (r_dot_v / r2_safe) * t_ff;
+                            double factor = 1.0 + G * mass_sum / (v_sq * r_norm + EPS);
+                            double dt_fb_dt = (r_dot_v / r2_safe) * factor * t_fb;
 
-                        auto symmetrize = [](double t, double ddt) -> double {
-                            double ddt_safe = (Kokkos::fabs(ddt) > EPS) ? ddt : EPS;
-                            return t * (ddt + Kokkos::sqrt(1.0 + ddt * ddt) - 1.0) / ddt_safe;
-                        };
+                            auto symmetrize = [](double t, double ddt) -> double {
+                                double ddt_safe = (Kokkos::fabs(ddt) > EPS) ? ddt : EPS;
+                                return t * (ddt + Kokkos::sqrt(1.0 + ddt * ddt) - 1.0) / ddt_safe;
+                            };
 
-                        double t_ff_sym = symmetrize(t_ff, dt_ff_dt);
-                        double t_fb_sym = symmetrize(t_fb, dt_fb_dt);
-                        double t_min_pair = Kokkos::fmin(t_ff_sym, t_fb_sym);
-                        t_min_i = Kokkos::fmin(t_min_i, t_min_pair);
+                            double t_ff_sym = symmetrize(t_ff, dt_ff_dt);
+                            double t_fb_sym = symmetrize(t_fb, dt_fb_dt);
+                            double t_min_pair = Kokkos::fmin(t_ff_sym, t_fb_sym);
+                            t_min_i = Kokkos::fmin(t_min_i, t_min_pair);
+                        }
                     }
                     team.team_barrier();
                 }
 
-                pax(i) = axi; pay(i) = ayi; paz(i) = azi;
-                dt_f(i) = t_min_i;
+                if (i < N) {
+                    pax(i) = axi; pay(i) = ayi; paz(i) = azi;
+                    dt_f(i) = t_min_i;
+                }
             });
     } else {
         // Original non-tiled version
