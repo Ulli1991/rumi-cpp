@@ -5,6 +5,7 @@
 // Runtime flags (host-side)
 extern bool grad_n3l;
 extern bool use_kahan;
+extern bool use_memory_tiling;
 
 // N3L control: UseN3L=true uses upper-triangle + atomics, UseN3L=false uses full N^2
 // Full N-body

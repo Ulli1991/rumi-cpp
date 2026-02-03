@@ -121,6 +121,7 @@ int main(int argc, char** argv) {
 
         grad_n3l = (cfg.get_str("GRAD_N3L", "false") == "true");
         use_kahan = (cfg.get_str("USE_KAHAN", "false") == "true");
+        use_memory_tiling = (cfg.get_str("MEMORY_TILING", "true") == "true");
         bool reassign_timesteps = (cfg.get_str("REASSIGN_TIMESTEPS", "true") == "true");
         bool hhs_dynamic = (cfg.get_str("HHS_DYNAMIC", "false") == "true");
 
@@ -167,7 +168,8 @@ int main(int argc, char** argv) {
         std::fflush(stdout);
         std::printf("G=%.4e  soft=%.4e cm  dt_max=%.4e yr  dt_min=%.4e yr  eta=%.4f\n",
                     G, soft_cm, dt_max_yr, dt_min_yr, eta);
-        std::printf("t_final=%.4e yr  print_interval=%d\n\n", t_final_yr, print_interval);
+        std::printf("t_final=%.4e yr  print_interval=%d  memory_tiling=%s\n\n",
+                    t_final_yr, print_interval, use_memory_tiling ? "true" : "false");
         std::fflush(stdout);
 
         auto levels = build_levels(dt_max, dt_min);

@@ -155,6 +155,10 @@ void init_plummer(Particles& p, int N, double M_total_msun, double r_half_pc, in
     double a_pc = r_half_pc / PLUMMER_SCALE_FACTOR;
     double a = a_pc * PC_TO_CM;
 
+    // Crossing time: t_cr = sqrt(R_h^3 / (G * M))
+    double t_cr_myr = std::sqrt(r_half_pc * r_half_pc * r_half_pc / (G_PC_MSUN_MYR * M_total_msun));
+    std::printf("  Crossing time: %.3f Myr\n", t_cr_myr);
+
     std::mt19937_64 rng(seed);
     std::uniform_real_distribution<double> uni(0.0, 1.0);
 
