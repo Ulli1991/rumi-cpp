@@ -134,7 +134,7 @@ static int partition_by_pivot(Particles& p, int start, int count, double pivot) 
     });
     Kokkos::fence();
 
-    // Apply permutation using gather (same as partition_by_level)
+    // Apply permutation using fused gather/copy (reduces kernel launches from 26 to 6)
     auto px = p.x; auto py = p.y; auto pz = p.z;
     auto pvx = p.vx; auto pvy = p.vy; auto pvz = p.vz;
     auto pax = p.ax; auto pay = p.ay; auto paz = p.az;
@@ -142,27 +142,61 @@ static int partition_by_pivot(Particles& p, int start, int count, double pivot) 
     auto porig = p.orig_index;
     auto plevel = p.level;
 
-    // Gather and copy for each array
-    #define GATHER_COPY_D(arr) \
-        Kokkos::parallel_for("gather", count, KOKKOS_LAMBDA(int ii) { tmp_d(ii) = arr(perm(ii)); }); \
-        Kokkos::fence(); \
-        Kokkos::parallel_for("copy", count, KOKKOS_LAMBDA(int ii) { arr(start + ii) = tmp_d(ii); });
+    // Use scratch1-9 for 9 doubles, scratch_d and tmp_i(reused) for remaining 2
+    auto t1 = p.scratch1; auto t2 = p.scratch2; auto t3 = p.scratch3;
+    auto t4 = p.scratch4; auto t5 = p.scratch5; auto t6 = p.scratch6;
+    auto t7 = p.scratch7; auto t8 = p.scratch8; auto t9 = p.scratch9;
 
-    #define GATHER_COPY_I(arr) \
-        Kokkos::parallel_for("gather", count, KOKKOS_LAMBDA(int ii) { tmp_i(ii) = arr(perm(ii)); }); \
-        Kokkos::fence(); \
-        Kokkos::parallel_for("copy", count, KOKKOS_LAMBDA(int ii) { arr(start + ii) = tmp_i(ii); });
-
-    GATHER_COPY_D(px); GATHER_COPY_D(py); GATHER_COPY_D(pz);
-    GATHER_COPY_D(pvx); GATHER_COPY_D(pvy); GATHER_COPY_D(pvz);
-    GATHER_COPY_D(pax); GATHER_COPY_D(pay); GATHER_COPY_D(paz);
-    GATHER_COPY_D(pmass); GATHER_COPY_D(pdt);
-    GATHER_COPY_I(porig); GATHER_COPY_I(plevel);
-
-    #undef GATHER_COPY_D
-    #undef GATHER_COPY_I
-
+    // Pass 1: Fused gather of x,y,z,vx,vy,vz,ax,ay,az (9 doubles)
+    Kokkos::parallel_for("gather_9d", count, KOKKOS_LAMBDA(int ii) {
+        int src = perm(ii);
+        t1(ii) = px(src);  t2(ii) = py(src);  t3(ii) = pz(src);
+        t4(ii) = pvx(src); t5(ii) = pvy(src); t6(ii) = pvz(src);
+        t7(ii) = pax(src); t8(ii) = pay(src); t9(ii) = paz(src);
+    });
     Kokkos::fence();
+
+    // Pass 1: Fused copy back
+    Kokkos::parallel_for("copy_9d", count, KOKKOS_LAMBDA(int ii) {
+        int dst = start + ii;
+        px(dst) = t1(ii);  py(dst) = t2(ii);  pz(dst) = t3(ii);
+        pvx(dst) = t4(ii); pvy(dst) = t5(ii); pvz(dst) = t6(ii);
+        pax(dst) = t7(ii); pay(dst) = t8(ii); paz(dst) = t9(ii);
+    });
+    Kokkos::fence();
+
+    // Pass 2: Fused gather of mass, dt_frost (2 doubles)
+    Kokkos::parallel_for("gather_2d", count, KOKKOS_LAMBDA(int ii) {
+        int src = perm(ii);
+        t1(ii) = pmass(src);
+        t2(ii) = pdt(src);
+    });
+    Kokkos::fence();
+
+    // Pass 2: Fused copy back
+    Kokkos::parallel_for("copy_2d", count, KOKKOS_LAMBDA(int ii) {
+        int dst = start + ii;
+        pmass(dst) = t1(ii);
+        pdt(dst) = t2(ii);
+    });
+    Kokkos::fence();
+
+    // Pass 3: Fused gather of orig_index, level (2 ints) - reuse perm/scratch_i since we're done with it
+    Kokkos::parallel_for("gather_2i", count, KOKKOS_LAMBDA(int ii) {
+        int src = perm(ii);
+        tmp_i(ii) = porig(src);
+        tmp_d(ii) = plevel(src);  // Temporarily store int in double
+    });
+    Kokkos::fence();
+
+    // Pass 3: Fused copy back
+    Kokkos::parallel_for("copy_2i", count, KOKKOS_LAMBDA(int ii) {
+        int dst = start + ii;
+        porig(dst) = tmp_i(ii);
+        plevel(dst) = (int)tmp_d(ii);
+    });
+    Kokkos::fence();
+
     return slow_count;
 }
 
