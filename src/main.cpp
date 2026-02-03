@@ -103,6 +103,9 @@ int main(int argc, char** argv) {
     double M_total_msun = cfg.get_double("PLUMMER_M_TOTAL", 3.79e2);
     double r_half_pc    = cfg.get_double("PLUMMER_R_HALF", 3.5);
     int seed            = cfg.get_int("PLUMMER_SEED", 42);
+    std::string mass_dist = cfg.get_str("PLUMMER_MASS_DIST", "equal");
+    double age_gyr      = cfg.get_double("PLUMMER_AGE_GYR", 1.0);
+    double metallicity  = cfg.get_double("PLUMMER_METALLICITY", 0.02);
 
     grad_n3l = (cfg.get_str("GRAD_N3L", "false") == "true");
     use_kahan = (cfg.get_str("USE_KAHAN", "false") == "true");
@@ -121,7 +124,7 @@ int main(int argc, char** argv) {
         init_outer_planets(p);
         names = outer_planet_names;
     } else if (test == "plummer") {
-        init_plummer(p, N_plummer, M_total_msun, r_half_pc, seed);
+        init_plummer(p, N_plummer, M_total_msun, r_half_pc, seed, mass_dist, age_gyr, metallicity);
     } else {
         std::fprintf(stderr, "Unknown test case: %s\n", test.c_str());
         return 1;

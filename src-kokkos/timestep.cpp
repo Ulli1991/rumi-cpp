@@ -16,17 +16,50 @@ void assign_levels(Particles& p, const std::vector<double>& levels) {
     int nl = (int)levels.size();
     p.n_levels = nl;
 
-    // Copy levels to device
-    Kokkos::View<double*> d_levels("levels", nl);
-    auto h_levels = Kokkos::create_mirror_view(d_levels);
-    for (int k = 0; k < nl; k++) h_levels(k) = levels[k];
-    Kokkos::deep_copy(d_levels, h_levels);
+    // Only allocate and copy levels if size changed or first call
+    if (p.d_level_dts.extent(0) != (size_t)nl) {
+        p.d_level_dts = Kokkos::View<double*>("d_level_dts", nl);
+        auto h_levels = Kokkos::create_mirror_view(p.d_level_dts);
+        for (int k = 0; k < nl; k++) h_levels(k) = levels[k];
+        Kokkos::deep_copy(p.d_level_dts, h_levels);
+    }
 
+    auto d_levels = p.d_level_dts;
     auto p_level = p.level;
     auto p_dt_frost = p.dt_frost;
     int N = p.N;
 
     Kokkos::parallel_for("assign_levels", N, KOKKOS_LAMBDA(int i) {
+        int l = nl - 1;
+        for (int k = 0; k < nl; k++) {
+            if (d_levels(k) <= p_dt_frost(i)) {
+                l = k;
+                break;
+            }
+        }
+        p_level(i) = l;
+    });
+    Kokkos::fence();
+}
+
+void assign_levels_subset(Particles& p, int start, int count, const std::vector<double>& levels) {
+    if (count == 0) return;
+    int nl = (int)levels.size();
+
+    // Ensure d_level_dts is allocated
+    if (p.d_level_dts.extent(0) != (size_t)nl) {
+        p.d_level_dts = Kokkos::View<double*>("d_level_dts", nl);
+        auto h_levels = Kokkos::create_mirror_view(p.d_level_dts);
+        for (int k = 0; k < nl; k++) h_levels(k) = levels[k];
+        Kokkos::deep_copy(p.d_level_dts, h_levels);
+    }
+
+    auto d_levels = p.d_level_dts;
+    auto p_level = p.level;
+    auto p_dt_frost = p.dt_frost;
+
+    Kokkos::parallel_for("assign_levels_subset", count, KOKKOS_LAMBDA(int ii) {
+        int i = start + ii;
         int l = nl - 1;
         for (int k = 0; k < nl; k++) {
             if (d_levels(k) <= p_dt_frost(i)) {

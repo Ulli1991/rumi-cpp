@@ -20,6 +20,9 @@ struct Particles {
     int* level_count = nullptr;
     int n_levels = 0;
 
+    // Cached device View for level timesteps (avoids reallocation every step)
+    Kokkos::View<double*> d_level_dts;
+
     // Scratch buffers
     Kokkos::View<double*> scratch1, scratch2, scratch3;
     Kokkos::View<double*> scratch4, scratch5, scratch6;

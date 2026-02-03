@@ -3,33 +3,40 @@
 # =============================================================================
 
 # Test case: outer_planets, plummer
-TEST_CASE = outer_planets
+TEST_CASE = plummer
 
 # Integrator: fsi (global timestep) or hhs (adaptive HHS-FSI)
 INTEGRATOR = hhs
-# HHS mode: recursive or stack
+# HHS mode: recursive or stack (only used if HHS_DYNAMIC = false)
 HHS_MODE = stack
+# HHS dynamic: use pivot-based partitioning per Algorithm 4 of FROST paper
+HHS_DYNAMIC = true
 
 # =============================================================================
 # Simulation parameters
 # =============================================================================
-TOTAL_TIME_YEARS = 1000
-DT_MAX_YEARS = 1
-DT_MIN_YEARS = 1e-7
-ETA = 0.02
-SOFTENING_AU = 0.0          # Softening length in AU (206.265 AU = 1e-3 pc)
-GRAD_N3L = false            # N3L gradient correction (halves work, slightly less momentum conservation)
-USE_KAHAN = false           # Kahan summation in N3L gradient loops (only used when GRAD_N3L = true)
+TOTAL_TIME_YEARS = 7.47e5       # ~1 crossing time for M=3.79e4, r_half=3.5 pc
+DT_MAX_YEARS = 7.47e3
+DT_MIN_YEARS = 1e-3
+ETA = 0.2
+SOFTENING_AU = 206.265          # Softening length in AU (206.265 AU = 1e-3 pc)
+GRAD_N3L = false                # N3L gradient correction (halves work, slightly less momentum conservation)
+USE_KAHAN = false               # Kahan summation in N3L gradient loops (only used when GRAD_N3L = true)
+USE_N3L = false                 # Newton's 3rd law optimization (default: true on CPU, false on GPU)
+REASSIGN_TIMESTEPS = true       # Reassign timesteps during HHS recursion (legacy mode only)
 
 # =============================================================================
 # Plummer cluster parameters (only used if TEST_CASE = plummer)
 # =============================================================================
-PLUMMER_N = 1000
-PLUMMER_M_TOTAL = 3.79e2        # Total mass in solar masses
-PLUMMER_R_HALF = 3.5            # Half-mass radius in parsecs
+PLUMMER_N = 100000
+PLUMMER_M_TOTAL = 3.79e4            # Total mass in solar masses
+PLUMMER_R_HALF = 3.5                # Half-mass radius in parsecs
 PLUMMER_SEED = 42
+PLUMMER_MASS_DIST = kroupa_evolved  # equal, kroupa, or kroupa_evolved
+PLUMMER_AGE_GYR = 1.0               # Cluster age in Gyr (for kroupa_evolved)
+PLUMMER_METALLICITY = 0.02          # Stellar metallicity Z (solar)
 
 # =============================================================================
 # Output
 # =============================================================================
-PRINT_INTERVAL = 1000
+PRINT_INTERVAL = 1

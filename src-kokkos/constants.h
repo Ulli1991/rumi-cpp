@@ -23,7 +23,7 @@ constexpr double FSI_KICK = 1.0 / 6.0;
 constexpr double FSI_DRIFT = 0.5;
 constexpr double FSI_MOD_KICK = 2.0 / 3.0;
 
-// Gradient correction coefficient: G * dt² / 24
+// Gradient correction coefficient: G * dt² / 24 (from Eq. 29 of Rantala+2020: factor 2 in g_i × 1/48 = 1/24)
 constexpr double GRAD_COEFF = 1.0 / 24.0;
 
 // Plummer sphere

@@ -45,3 +45,9 @@ void cross_acceleration_and_gradient(Particles& p,
                                      int a_start, int a_count,
                                      int b_start, int b_count,
                                      double G, double soft2, double dt);
+
+// Compute FROST timesteps for a subset of particles [start, start+count)
+// Only considers mutual interactions within the subset
+template <bool UseN3L>
+void compute_frost_subset(Particles& p, int start, int count,
+                          double G, double soft2, double eta);

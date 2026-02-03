@@ -212,13 +212,14 @@ void self_acceleration(Particles& p, int start, int count,
     auto m = p.mass;
     const int end = start + count;
 
-    Kokkos::parallel_for("zero_self", count, KOKKOS_LAMBDA(int ii) {
-        int i = start + ii;
-        pax(i) = 0; pay(i) = 0; paz(i) = 0;
-    });
-    Kokkos::fence();
-
     if constexpr (UseN3L) {
+        // N3L needs zeroing first due to atomic adds
+        Kokkos::parallel_for("zero_self", count, KOKKOS_LAMBDA(int ii) {
+            int i = start + ii;
+            pax(i) = 0; pay(i) = 0; paz(i) = 0;
+        });
+        Kokkos::fence();
+
         Kokkos::parallel_for("self_acc_n3l", count, KOKKOS_LAMBDA(int ii) {
             int i = start + ii;
             double axi = 0, ayi = 0, azi = 0;
@@ -240,25 +241,28 @@ void self_acceleration(Particles& p, int start, int count,
             Kokkos::atomic_add(&pay(i), ayi);
             Kokkos::atomic_add(&paz(i), azi);
         });
+        Kokkos::fence();
     } else {
+        // Non-N3L: direct assignment, no zeroing needed, no branch
         Kokkos::parallel_for("self_acc_full", count, KOKKOS_LAMBDA(int ii) {
             int i = start + ii;
             double axi = 0, ayi = 0, azi = 0;
+            double xi = px(i), yi = py(i), zi = pz(i);
             for (int j = start; j < end; j++) {
-                if (j == i) continue;
-                double dx = px(j) - px(i);
-                double dy = py(j) - py(i);
-                double dz = pz(j) - pz(i);
+                double dx = px(j) - xi;
+                double dy = py(j) - yi;
+                double dz = pz(j) - zi;
                 double r2 = dx*dx + dy*dy + dz*dz + soft2;
                 double inv_r = 1.0 / Kokkos::sqrt(r2);
                 double inv_r3 = inv_r * inv_r * inv_r;
                 double fj = G * m(j) * inv_r3;
                 axi += fj * dx; ayi += fj * dy; azi += fj * dz;
             }
+            // Self contribution is 0 since dx=dy=dz=0
             pax(i) = axi; pay(i) = ayi; paz(i) = azi;
         });
+        Kokkos::fence();
     }
-    Kokkos::fence();
 }
 
 // ==========================================================================
@@ -378,18 +382,18 @@ void cross_acceleration(Particles& p,
     auto m = p.mass;
     const int b_end = b_start + b_count;
 
-    // Zero both groups
-    Kokkos::parallel_for("zero_cross_a", a_count, KOKKOS_LAMBDA(int ii) {
-        int i = a_start + ii;
-        pax(i) = 0; pay(i) = 0; paz(i) = 0;
-    });
-    Kokkos::parallel_for("zero_cross_b", b_count, KOKKOS_LAMBDA(int jj) {
-        int j = b_start + jj;
-        pax(j) = 0; pay(j) = 0; paz(j) = 0;
-    });
-    Kokkos::fence();
-
     if constexpr (UseN3L) {
+        // N3L needs zeroing first due to atomic adds on B
+        Kokkos::parallel_for("zero_cross_a", a_count, KOKKOS_LAMBDA(int ii) {
+            int i = a_start + ii;
+            pax(i) = 0; pay(i) = 0; paz(i) = 0;
+        });
+        Kokkos::parallel_for("zero_cross_b", b_count, KOKKOS_LAMBDA(int jj) {
+            int j = b_start + jj;
+            pax(j) = 0; pay(j) = 0; paz(j) = 0;
+        });
+        Kokkos::fence();
+
         // A-side loop, atomics on B
         Kokkos::parallel_for("cross_acc_n3l", a_count, KOKKOS_LAMBDA(int ii) {
             int i = a_start + ii;
@@ -410,15 +414,19 @@ void cross_acceleration(Particles& p,
             }
             pax(i) += axi; pay(i) += ayi; paz(i) += azi;
         });
+        Kokkos::fence();
     } else {
+        // Non-N3L: direct assignment, no zeroing needed
         // Full: A from B
+        const int a_end = a_start + a_count;
         Kokkos::parallel_for("cross_acc_a", a_count, KOKKOS_LAMBDA(int ii) {
             int i = a_start + ii;
             double axi = 0, ayi = 0, azi = 0;
+            double xi = px(i), yi = py(i), zi = pz(i);
             for (int j = b_start; j < b_end; j++) {
-                double dx = px(j) - px(i);
-                double dy = py(j) - py(i);
-                double dz = pz(j) - pz(i);
+                double dx = px(j) - xi;
+                double dy = py(j) - yi;
+                double dz = pz(j) - zi;
                 double r2 = dx*dx + dy*dy + dz*dz + soft2;
                 double inv_r = 1.0 / Kokkos::sqrt(r2);
                 double inv_r3 = inv_r * inv_r * inv_r;
@@ -428,14 +436,14 @@ void cross_acceleration(Particles& p,
             pax(i) = axi; pay(i) = ayi; paz(i) = azi;
         });
         // Full: B from A
-        const int a_end = a_start + a_count;
         Kokkos::parallel_for("cross_acc_b", b_count, KOKKOS_LAMBDA(int jj) {
             int j = b_start + jj;
             double axj = 0, ayj = 0, azj = 0;
+            double xj = px(j), yj = py(j), zj = pz(j);
             for (int i = a_start; i < a_end; i++) {
-                double dx = px(i) - px(j);
-                double dy = py(i) - py(j);
-                double dz = pz(i) - pz(j);
+                double dx = px(i) - xj;
+                double dy = py(i) - yj;
+                double dz = pz(i) - zj;
                 double r2 = dx*dx + dy*dy + dz*dz + soft2;
                 double inv_r = 1.0 / Kokkos::sqrt(r2);
                 double inv_r3 = inv_r * inv_r * inv_r;
@@ -444,8 +452,8 @@ void cross_acceleration(Particles& p,
             }
             pax(j) = axj; pay(j) = ayj; paz(j) = azj;
         });
+        Kokkos::fence();
     }
-    Kokkos::fence();
 }
 
 // ==========================================================================
@@ -565,6 +573,124 @@ void cross_acceleration_and_gradient(Particles& p,
 }
 
 // ==========================================================================
+// Compute FROST timesteps for a subset [start, start+count)
+// Only considers mutual interactions within the subset (for HHS recursion)
+// ==========================================================================
+template <bool UseN3L>
+void compute_frost_subset(Particles& p, int start, int count,
+                          double G, double soft2, double eta) {
+    if (count <= 1) return;  // No pairs to consider
+
+    auto px = p.x; auto py = p.y; auto pz = p.z;
+    auto pvx = p.vx; auto pvy = p.vy; auto pvz = p.vz;
+    auto m = p.mass;
+    auto dt_f = p.dt_frost;
+    const int end = start + count;
+
+    // Initialize dt_frost to large value for subset
+    Kokkos::parallel_for("init_frost_subset", count, KOKKOS_LAMBDA(int ii) {
+        dt_f(start + ii) = DBL_MAX;
+    });
+    Kokkos::fence();
+
+    if constexpr (UseN3L) {
+        // N3L: upper triangle with atomics
+        Kokkos::parallel_for("frost_subset_n3l", count, KOKKOS_LAMBDA(int ii) {
+            int i = start + ii;
+            double t_min_i = DBL_MAX;
+
+            for (int j = i + 1; j < end; j++) {
+                double dx = px(j) - px(i);
+                double dy = py(j) - py(i);
+                double dz = pz(j) - pz(i);
+                double r2 = dx*dx + dy*dy + dz*dz;
+
+                double dvx = pvx(j) - pvx(i);
+                double dvy = pvy(j) - pvy(i);
+                double dvz = pvz(j) - pvz(i);
+                double v_sq = dvx*dvx + dvy*dvy + dvz*dvz;
+                double r_norm = Kokkos::sqrt(r2 + EPS);
+                double v_norm = Kokkos::sqrt(v_sq + EPS);
+                double mass_sum = m(i) + m(j);
+
+                double t_ff = Kokkos::sqrt(r_norm * r_norm * r_norm / (G * mass_sum + EPS));
+                double t_fb = r_norm / (v_norm + EPS);
+
+                double r_dot_v = dx*dvx + dy*dvy + dz*dvz;
+                double r2_safe = r2 + EPS;
+
+                double dt_ff_dt = 1.5 * (r_dot_v / r2_safe) * t_ff;
+                double factor = 1.0 + G * mass_sum / (v_sq * r_norm + EPS);
+                double dt_fb_dt = (r_dot_v / r2_safe) * factor * t_fb;
+
+                auto symmetrize = [](double t, double ddt) -> double {
+                    double ddt_safe = (Kokkos::fabs(ddt) > EPS) ? ddt : EPS;
+                    return t * (ddt + Kokkos::sqrt(1.0 + ddt * ddt) - 1.0) / ddt_safe;
+                };
+
+                double t_ff_sym = symmetrize(t_ff, dt_ff_dt);
+                double t_fb_sym = symmetrize(t_fb, dt_fb_dt);
+                double t_min_pair = Kokkos::fmin(t_ff_sym, t_fb_sym);
+
+                t_min_i = Kokkos::fmin(t_min_i, t_min_pair);
+                Kokkos::atomic_min(&dt_f(j), t_min_pair);
+            }
+            Kokkos::atomic_min(&dt_f(i), t_min_i);
+        });
+    } else {
+        // Full N^2 within subset
+        Kokkos::parallel_for("frost_subset_full", count, KOKKOS_LAMBDA(int ii) {
+            int i = start + ii;
+            double t_min_i = DBL_MAX;
+
+            for (int j = start; j < end; j++) {
+                if (j == i) continue;
+                double dx = px(j) - px(i);
+                double dy = py(j) - py(i);
+                double dz = pz(j) - pz(i);
+                double r2 = dx*dx + dy*dy + dz*dz;
+
+                double dvx = pvx(j) - pvx(i);
+                double dvy = pvy(j) - pvy(i);
+                double dvz = pvz(j) - pvz(i);
+                double v_sq = dvx*dvx + dvy*dvy + dvz*dvz;
+                double r_norm = Kokkos::sqrt(r2 + EPS);
+                double v_norm = Kokkos::sqrt(v_sq + EPS);
+                double mass_sum = m(i) + m(j);
+
+                double t_ff = Kokkos::sqrt(r_norm * r_norm * r_norm / (G * mass_sum + EPS));
+                double t_fb = r_norm / (v_norm + EPS);
+
+                double r_dot_v = dx*dvx + dy*dvy + dz*dvz;
+                double r2_safe = r2 + EPS;
+
+                double dt_ff_dt = 1.5 * (r_dot_v / r2_safe) * t_ff;
+                double factor = 1.0 + G * mass_sum / (v_sq * r_norm + EPS);
+                double dt_fb_dt = (r_dot_v / r2_safe) * factor * t_fb;
+
+                auto symmetrize = [](double t, double ddt) -> double {
+                    double ddt_safe = (Kokkos::fabs(ddt) > EPS) ? ddt : EPS;
+                    return t * (ddt + Kokkos::sqrt(1.0 + ddt * ddt) - 1.0) / ddt_safe;
+                };
+
+                double t_ff_sym = symmetrize(t_ff, dt_ff_dt);
+                double t_fb_sym = symmetrize(t_fb, dt_fb_dt);
+                double t_min_pair = Kokkos::fmin(t_ff_sym, t_fb_sym);
+                t_min_i = Kokkos::fmin(t_min_i, t_min_pair);
+            }
+            dt_f(i) = t_min_i;
+        });
+    }
+    Kokkos::fence();
+
+    // Apply eta
+    Kokkos::parallel_for("apply_eta_subset", count, KOKKOS_LAMBDA(int ii) {
+        dt_f(start + ii) *= eta;
+    });
+    Kokkos::fence();
+}
+
+// ==========================================================================
 // Explicit template instantiations
 // ==========================================================================
 template void compute_acceleration<true>(Particles&, double, double);
@@ -583,3 +709,5 @@ template void cross_gradient_correction<true>(Particles&, int, int, int, int, do
 template void cross_gradient_correction<false>(Particles&, int, int, int, int, double, double, double);
 template void cross_acceleration_and_gradient<true>(Particles&, int, int, int, int, double, double, double);
 template void cross_acceleration_and_gradient<false>(Particles&, int, int, int, int, double, double, double);
+template void compute_frost_subset<true>(Particles&, int, int, double, double, double);
+template void compute_frost_subset<false>(Particles&, int, int, double, double, double);
