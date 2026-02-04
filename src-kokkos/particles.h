@@ -23,13 +23,13 @@ struct Particles {
     // Cached device View for level timesteps (avoids reallocation every step)
     Kokkos::View<double*> d_level_dts;
 
-    // Scratch buffers
+    // Scratch buffers (11 doubles + 3 ints for fused partitioning)
     Kokkos::View<double*> scratch1, scratch2, scratch3;
     Kokkos::View<double*> scratch4, scratch5, scratch6;
     Kokkos::View<double*> scratch7, scratch8, scratch9;
-    Kokkos::View<double*> scratch_d;
-    Kokkos::View<int*> scratch_i;
-    Kokkos::View<int*> scratch_i2;
+    Kokkos::View<double*> scratch10, scratch11;
+    Kokkos::View<int*> scratch_i;   // used for permutation
+    Kokkos::View<int*> scratch_i2, scratch_i3;
 
     void allocate(int n);
     void deallocate();

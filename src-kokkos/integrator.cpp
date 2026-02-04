@@ -84,8 +84,6 @@ static int partition_by_pivot(Particles& p, int start, int count, double pivot) 
 
     auto dt_f = p.dt_frost;
     auto perm = p.scratch_i;
-    auto tmp_d = p.scratch_d;
-    auto tmp_i = p.scratch_i2;
 
     // Count slow particles using scalar reduction
     int slow_count = 0;
@@ -120,7 +118,7 @@ static int partition_by_pivot(Particles& p, int start, int count, double pivot) 
     });
     Kokkos::fence();
 
-    // Apply permutation using fused gather/copy (reduces kernel launches from 26 to 6)
+    // Apply permutation: fused gather of all 13 fields (11 doubles + 2 ints)
     auto px = p.x; auto py = p.y; auto pz = p.z;
     auto pvx = p.vx; auto pvy = p.vy; auto pvz = p.vz;
     auto pax = p.ax; auto pay = p.ay; auto paz = p.az;
@@ -128,58 +126,32 @@ static int partition_by_pivot(Particles& p, int start, int count, double pivot) 
     auto porig = p.orig_index;
     auto plevel = p.level;
 
-    // Use scratch1-9 for 9 doubles, scratch_d and tmp_i(reused) for remaining 2
-    auto t1 = p.scratch1; auto t2 = p.scratch2; auto t3 = p.scratch3;
-    auto t4 = p.scratch4; auto t5 = p.scratch5; auto t6 = p.scratch6;
-    auto t7 = p.scratch7; auto t8 = p.scratch8; auto t9 = p.scratch9;
+    // Scratch: 11 doubles + 2 ints
+    auto t1 = p.scratch1;  auto t2 = p.scratch2;  auto t3 = p.scratch3;
+    auto t4 = p.scratch4;  auto t5 = p.scratch5;  auto t6 = p.scratch6;
+    auto t7 = p.scratch7;  auto t8 = p.scratch8;  auto t9 = p.scratch9;
+    auto t10 = p.scratch10; auto t11 = p.scratch11;
+    auto ti1 = p.scratch_i2; auto ti2 = p.scratch_i3;
 
-    // Pass 1: Fused gather of x,y,z,vx,vy,vz,ax,ay,az (9 doubles)
-    Kokkos::parallel_for("gather_9d", count, KOKKOS_LAMBDA(int ii) {
+    // Single fused gather of all fields
+    Kokkos::parallel_for("gather_all", count, KOKKOS_LAMBDA(int ii) {
         int src = perm(ii);
-        t1(ii) = px(src);  t2(ii) = py(src);  t3(ii) = pz(src);
-        t4(ii) = pvx(src); t5(ii) = pvy(src); t6(ii) = pvz(src);
-        t7(ii) = pax(src); t8(ii) = pay(src); t9(ii) = paz(src);
+        t1(ii) = px(src);   t2(ii) = py(src);   t3(ii) = pz(src);
+        t4(ii) = pvx(src);  t5(ii) = pvy(src);  t6(ii) = pvz(src);
+        t7(ii) = pax(src);  t8(ii) = pay(src);  t9(ii) = paz(src);
+        t10(ii) = pmass(src); t11(ii) = pdt(src);
+        ti1(ii) = porig(src); ti2(ii) = plevel(src);
     });
     Kokkos::fence();
 
-    // Pass 1: Fused copy back
-    Kokkos::parallel_for("copy_9d", count, KOKKOS_LAMBDA(int ii) {
+    // Single fused copy back of all fields
+    Kokkos::parallel_for("copy_all", count, KOKKOS_LAMBDA(int ii) {
         int dst = start + ii;
-        px(dst) = t1(ii);  py(dst) = t2(ii);  pz(dst) = t3(ii);
-        pvx(dst) = t4(ii); pvy(dst) = t5(ii); pvz(dst) = t6(ii);
-        pax(dst) = t7(ii); pay(dst) = t8(ii); paz(dst) = t9(ii);
-    });
-    Kokkos::fence();
-
-    // Pass 2: Fused gather of mass, dt_frost (2 doubles)
-    Kokkos::parallel_for("gather_2d", count, KOKKOS_LAMBDA(int ii) {
-        int src = perm(ii);
-        t1(ii) = pmass(src);
-        t2(ii) = pdt(src);
-    });
-    Kokkos::fence();
-
-    // Pass 2: Fused copy back
-    Kokkos::parallel_for("copy_2d", count, KOKKOS_LAMBDA(int ii) {
-        int dst = start + ii;
-        pmass(dst) = t1(ii);
-        pdt(dst) = t2(ii);
-    });
-    Kokkos::fence();
-
-    // Pass 3: Fused gather of orig_index, level (2 ints) - reuse perm/scratch_i since we're done with it
-    Kokkos::parallel_for("gather_2i", count, KOKKOS_LAMBDA(int ii) {
-        int src = perm(ii);
-        tmp_i(ii) = porig(src);
-        tmp_d(ii) = plevel(src);  // Temporarily store int in double
-    });
-    Kokkos::fence();
-
-    // Pass 3: Fused copy back
-    Kokkos::parallel_for("copy_2i", count, KOKKOS_LAMBDA(int ii) {
-        int dst = start + ii;
-        porig(dst) = tmp_i(ii);
-        plevel(dst) = (int)tmp_d(ii);
+        px(dst) = t1(ii);   py(dst) = t2(ii);   pz(dst) = t3(ii);
+        pvx(dst) = t4(ii);  pvy(dst) = t5(ii);  pvz(dst) = t6(ii);
+        pax(dst) = t7(ii);  pay(dst) = t8(ii);  paz(dst) = t9(ii);
+        pmass(dst) = t10(ii); pdt(dst) = t11(ii);
+        porig(dst) = ti1(ii); plevel(dst) = ti2(ii);
     });
     Kokkos::fence();
 
