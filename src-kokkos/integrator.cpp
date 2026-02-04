@@ -11,17 +11,36 @@ static AccGradFn fn_self_acc_grad = nullptr;
 static CrossAccFn fn_cross_acc = nullptr;
 static CrossAccGradFn fn_cross_acc_grad = nullptr;
 
+// Fused function pointer types (force + kick combined)
+using AccKickFn = void(*)(Particles&, int, int, double, double, double);
+using AccGradKickFn = void(*)(Particles&, int, int, double, double, double, double);
+using CrossAccKickFn = void(*)(Particles&, int, int, int, int, double, double, double);
+using CrossAccGradKickFn = void(*)(Particles&, int, int, int, int, double, double, double, double);
+
+static AccKickFn fn_self_acc_kick = nullptr;
+static AccGradKickFn fn_self_acc_grad_kick = nullptr;
+static CrossAccKickFn fn_cross_acc_kick = nullptr;
+static CrossAccGradKickFn fn_cross_acc_grad_kick = nullptr;
+
 void set_force_dispatch(bool use_n3l) {
     if (use_n3l) {
         fn_self_acc      = &self_acceleration<true>;
         fn_self_acc_grad = &self_acceleration_and_gradient<true>;
         fn_cross_acc     = &cross_acceleration<true>;
         fn_cross_acc_grad = &cross_acceleration_and_gradient<true>;
+        fn_self_acc_kick = &self_acceleration_kick<true>;
+        fn_self_acc_grad_kick = &self_acceleration_and_gradient_kick<true>;
+        fn_cross_acc_kick = &cross_acceleration_kick<true>;
+        fn_cross_acc_grad_kick = &cross_acceleration_and_gradient_kick<true>;
     } else {
         fn_self_acc      = &self_acceleration<false>;
         fn_self_acc_grad = &self_acceleration_and_gradient<false>;
         fn_cross_acc     = &cross_acceleration<false>;
         fn_cross_acc_grad = &cross_acceleration_and_gradient<false>;
+        fn_self_acc_kick = &self_acceleration_kick<false>;
+        fn_self_acc_grad_kick = &self_acceleration_and_gradient_kick<false>;
+        fn_cross_acc_kick = &cross_acceleration_kick<false>;
+        fn_cross_acc_grad_kick = &cross_acceleration_and_gradient_kick<false>;
     }
 }
 
@@ -53,23 +72,20 @@ static void kick(Particles& p, int start, int count, double dt) {
 
 void fsi_step(Particles& p, int start, int count,
               double G, double soft2, double dt) {
-    // U kick (dt/6)
-    fn_self_acc(p, start, count, G, soft2);
-    kick(p, start, count, dt * FSI_KICK);
+    // U kick (dt/6) - fused force + kick
+    fn_self_acc_kick(p, start, count, G, soft2, dt * FSI_KICK);
 
     // T drift (dt/2)
     drift(p, start, count, dt * FSI_DRIFT);
 
-    // U-tilde kick (2dt/3)
-    fn_self_acc_grad(p, start, count, G, soft2, dt);
-    kick(p, start, count, dt * FSI_MOD_KICK);
+    // U-tilde kick (2dt/3) - fused force + gradient + kick
+    fn_self_acc_grad_kick(p, start, count, G, soft2, dt, dt * FSI_MOD_KICK);
 
     // T drift (dt/2)
     drift(p, start, count, dt * FSI_DRIFT);
 
-    // U kick (dt/6)
-    fn_self_acc(p, start, count, G, soft2);
-    kick(p, start, count, dt * FSI_KICK);
+    // U kick (dt/6) - fused force + kick
+    fn_self_acc_kick(p, start, count, G, soft2, dt * FSI_KICK);
 }
 
 // ==========================================================================
@@ -184,10 +200,8 @@ void hhs_fsi_step_dynamic(Particles& p, int start, int count, double pivot_dt,
     }
 
     // HHS-FSI structure (Algorithm 4 / Eq. 40)
-    // 1. Cross-Newton kick (dt/6)
-    fn_cross_acc(p, slow_start, slow_count, fast_start, fast_count, G, soft2);
-    kick(p, slow_start, slow_count, pivot_dt * FSI_KICK);
-    kick(p, fast_start, fast_count, pivot_dt * FSI_KICK);
+    // 1. Cross-Newton kick (dt/6) - fused
+    fn_cross_acc_kick(p, slow_start, slow_count, fast_start, fast_count, G, soft2, pivot_dt * FSI_KICK);
 
     // 2. FSI half-step on slow
     fsi_step(p, slow_start, slow_count, G, soft2, pivot_dt * 0.5);
@@ -195,10 +209,8 @@ void hhs_fsi_step_dynamic(Particles& p, int start, int count, double pivot_dt,
     // 3. Recurse on fast (first half) with pivot/2
     hhs_fsi_step_dynamic(p, fast_start, fast_count, pivot_dt * 0.5, G, soft2, dt_min, eta, use_n3l);
 
-    // 4. Cross-gradient kick (2dt/3)
-    fn_cross_acc_grad(p, slow_start, slow_count, fast_start, fast_count, G, soft2, pivot_dt);
-    kick(p, slow_start, slow_count, pivot_dt * FSI_MOD_KICK);
-    kick(p, fast_start, fast_count, pivot_dt * FSI_MOD_KICK);
+    // 4. Cross-gradient kick (2dt/3) - fused
+    fn_cross_acc_grad_kick(p, slow_start, slow_count, fast_start, fast_count, G, soft2, pivot_dt, pivot_dt * FSI_MOD_KICK);
 
     // 5. Recurse on fast (second half) with pivot/2
     hhs_fsi_step_dynamic(p, fast_start, fast_count, pivot_dt * 0.5, G, soft2, dt_min, eta, use_n3l);
@@ -206,9 +218,7 @@ void hhs_fsi_step_dynamic(Particles& p, int start, int count, double pivot_dt,
     // 6. FSI half-step on slow
     fsi_step(p, slow_start, slow_count, G, soft2, pivot_dt * 0.5);
 
-    // 7. Cross-Newton kick (dt/6)
-    fn_cross_acc(p, slow_start, slow_count, fast_start, fast_count, G, soft2);
-    kick(p, slow_start, slow_count, pivot_dt * FSI_KICK);
-    kick(p, fast_start, fast_count, pivot_dt * FSI_KICK);
+    // 7. Cross-Newton kick (dt/6) - fused
+    fn_cross_acc_kick(p, slow_start, slow_count, fast_start, fast_count, G, soft2, pivot_dt * FSI_KICK);
 }
 

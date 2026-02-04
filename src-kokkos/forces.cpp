@@ -816,6 +816,246 @@ void compute_frost_subset(Particles& p, int start, int count,
 }
 
 // ==========================================================================
+// Fused self_acceleration + kick (reduces kernel launches)
+// ==========================================================================
+template <bool UseN3L>
+void self_acceleration_kick(Particles& p, int start, int count,
+                            double G, double soft2, double kick_dt) {
+    auto px = p.x; auto py = p.y; auto pz = p.z;
+    auto pvx = p.vx; auto pvy = p.vy; auto pvz = p.vz;
+    auto pax = p.ax; auto pay = p.ay; auto paz = p.az;
+    auto m = p.mass;
+    const int end = start + count;
+
+    if constexpr (UseN3L) {
+        // N3L needs zeroing first due to atomic adds
+        Kokkos::parallel_for("zero_self_kick", count, KOKKOS_LAMBDA(int ii) {
+            int i = start + ii;
+            pax(i) = 0; pay(i) = 0; paz(i) = 0;
+        });
+        Kokkos::fence();
+
+        Kokkos::parallel_for("self_acc_kick_n3l", count, KOKKOS_LAMBDA(int ii) {
+            int i = start + ii;
+            double axi = 0, ayi = 0, azi = 0;
+            for (int j = i + 1; j < end; j++) {
+                double dx = px(j) - px(i);
+                double dy = py(j) - py(i);
+                double dz = pz(j) - pz(i);
+                double r2 = dx*dx + dy*dy + dz*dz + soft2;
+                double inv_r = 1.0 / Kokkos::sqrt(r2);
+                double inv_r3 = inv_r * inv_r * inv_r;
+                double fj = G * m(j) * inv_r3;
+                double fi = G * m(i) * inv_r3;
+                axi += fj * dx; ayi += fj * dy; azi += fj * dz;
+                Kokkos::atomic_add(&pax(j), -fi * dx);
+                Kokkos::atomic_add(&pay(j), -fi * dy);
+                Kokkos::atomic_add(&paz(j), -fi * dz);
+            }
+            Kokkos::atomic_add(&pax(i), axi);
+            Kokkos::atomic_add(&pay(i), ayi);
+            Kokkos::atomic_add(&paz(i), azi);
+        });
+        Kokkos::fence();
+
+        // Apply kick
+        Kokkos::parallel_for("kick_n3l", count, KOKKOS_LAMBDA(int ii) {
+            int i = start + ii;
+            pvx(i) += pax(i) * kick_dt;
+            pvy(i) += pay(i) * kick_dt;
+            pvz(i) += paz(i) * kick_dt;
+        });
+        Kokkos::fence();
+    } else {
+        // Non-N3L: fused force + kick in single kernel
+        Kokkos::parallel_for("self_acc_kick_full", count, KOKKOS_LAMBDA(int ii) {
+            int i = start + ii;
+            double axi = 0, ayi = 0, azi = 0;
+            double xi = px(i), yi = py(i), zi = pz(i);
+            for (int j = start; j < end; j++) {
+                if (i == j) continue;
+                double dx = px(j) - xi;
+                double dy = py(j) - yi;
+                double dz = pz(j) - zi;
+                double r2 = dx*dx + dy*dy + dz*dz + soft2;
+                double inv_r = 1.0 / Kokkos::sqrt(r2);
+                double inv_r3 = inv_r * inv_r * inv_r;
+                double fj = G * m(j) * inv_r3;
+                axi += fj * dx; ayi += fj * dy; azi += fj * dz;
+            }
+            pax(i) = axi; pay(i) = ayi; paz(i) = azi;
+            // Fused kick
+            pvx(i) += axi * kick_dt;
+            pvy(i) += ayi * kick_dt;
+            pvz(i) += azi * kick_dt;
+        });
+        Kokkos::fence();
+    }
+}
+
+// ==========================================================================
+// Fused self_acceleration_and_gradient + kick
+// ==========================================================================
+template <bool UseN3L>
+void self_acceleration_and_gradient_kick(Particles& p, int start, int count,
+                                         double G, double soft2, double grad_dt, double kick_dt) {
+    // First compute acceleration (stores in ax, ay, az)
+    self_acceleration<UseN3L>(p, start, count, G, soft2);
+    // Then apply gradient correction (modifies ax, ay, az)
+    self_gradient_correction<UseN3L>(p, start, count, G, soft2, grad_dt);
+
+    // Finally apply kick
+    auto pvx = p.vx; auto pvy = p.vy; auto pvz = p.vz;
+    auto pax = p.ax; auto pay = p.ay; auto paz = p.az;
+    Kokkos::parallel_for("kick_grad", count, KOKKOS_LAMBDA(int ii) {
+        int i = start + ii;
+        pvx(i) += pax(i) * kick_dt;
+        pvy(i) += pay(i) * kick_dt;
+        pvz(i) += paz(i) * kick_dt;
+    });
+    Kokkos::fence();
+}
+
+// ==========================================================================
+// Fused cross_acceleration + kick
+// ==========================================================================
+template <bool UseN3L>
+void cross_acceleration_kick(Particles& p,
+                             int a_start, int a_count,
+                             int b_start, int b_count,
+                             double G, double soft2, double kick_dt) {
+    auto px = p.x; auto py = p.y; auto pz = p.z;
+    auto pvx = p.vx; auto pvy = p.vy; auto pvz = p.vz;
+    auto pax = p.ax; auto pay = p.ay; auto paz = p.az;
+    auto m = p.mass;
+    const int b_end = b_start + b_count;
+
+    if constexpr (UseN3L) {
+        // N3L needs zeroing first
+        Kokkos::parallel_for("zero_cross_a_kick", a_count, KOKKOS_LAMBDA(int ii) {
+            int i = a_start + ii;
+            pax(i) = 0; pay(i) = 0; paz(i) = 0;
+        });
+        Kokkos::parallel_for("zero_cross_b_kick", b_count, KOKKOS_LAMBDA(int jj) {
+            int j = b_start + jj;
+            pax(j) = 0; pay(j) = 0; paz(j) = 0;
+        });
+        Kokkos::fence();
+
+        Kokkos::parallel_for("cross_acc_kick_n3l", a_count, KOKKOS_LAMBDA(int ii) {
+            int i = a_start + ii;
+            double axi = 0, ayi = 0, azi = 0;
+            for (int j = b_start; j < b_end; j++) {
+                double dx = px(j) - px(i);
+                double dy = py(j) - py(i);
+                double dz = pz(j) - pz(i);
+                double r2 = dx*dx + dy*dy + dz*dz + soft2;
+                double inv_r = 1.0 / Kokkos::sqrt(r2);
+                double inv_r3 = inv_r * inv_r * inv_r;
+                double fj = G * m(j) * inv_r3;
+                double fi = G * m(i) * inv_r3;
+                axi += fj * dx; ayi += fj * dy; azi += fj * dz;
+                Kokkos::atomic_add(&pax(j), -fi * dx);
+                Kokkos::atomic_add(&pay(j), -fi * dy);
+                Kokkos::atomic_add(&paz(j), -fi * dz);
+            }
+            Kokkos::atomic_add(&pax(i), axi);
+            Kokkos::atomic_add(&pay(i), ayi);
+            Kokkos::atomic_add(&paz(i), azi);
+        });
+        Kokkos::fence();
+
+        // Apply kick to both groups
+        Kokkos::parallel_for("kick_cross_a", a_count, KOKKOS_LAMBDA(int ii) {
+            int i = a_start + ii;
+            pvx(i) += pax(i) * kick_dt;
+            pvy(i) += pay(i) * kick_dt;
+            pvz(i) += paz(i) * kick_dt;
+        });
+        Kokkos::parallel_for("kick_cross_b", b_count, KOKKOS_LAMBDA(int jj) {
+            int j = b_start + jj;
+            pvx(j) += pax(j) * kick_dt;
+            pvy(j) += pay(j) * kick_dt;
+            pvz(j) += paz(j) * kick_dt;
+        });
+        Kokkos::fence();
+    } else {
+        // Non-N3L: compute forces independently for A and B
+        Kokkos::parallel_for("cross_acc_kick_a", a_count, KOKKOS_LAMBDA(int ii) {
+            int i = a_start + ii;
+            double axi = 0, ayi = 0, azi = 0;
+            for (int j = b_start; j < b_end; j++) {
+                double dx = px(j) - px(i);
+                double dy = py(j) - py(i);
+                double dz = pz(j) - pz(i);
+                double r2 = dx*dx + dy*dy + dz*dz + soft2;
+                double inv_r = 1.0 / Kokkos::sqrt(r2);
+                double inv_r3 = inv_r * inv_r * inv_r;
+                double fj = G * m(j) * inv_r3;
+                axi += fj * dx; ayi += fj * dy; azi += fj * dz;
+            }
+            pax(i) = axi; pay(i) = ayi; paz(i) = azi;
+            pvx(i) += axi * kick_dt;
+            pvy(i) += ayi * kick_dt;
+            pvz(i) += azi * kick_dt;
+        });
+
+        const int a_end = a_start + a_count;
+        Kokkos::parallel_for("cross_acc_kick_b", b_count, KOKKOS_LAMBDA(int jj) {
+            int j = b_start + jj;
+            double axj = 0, ayj = 0, azj = 0;
+            for (int i = a_start; i < a_end; i++) {
+                double dx = px(i) - px(j);
+                double dy = py(i) - py(j);
+                double dz = pz(i) - pz(j);
+                double r2 = dx*dx + dy*dy + dz*dz + soft2;
+                double inv_r = 1.0 / Kokkos::sqrt(r2);
+                double inv_r3 = inv_r * inv_r * inv_r;
+                double fi = G * m(i) * inv_r3;
+                axj += fi * dx; ayj += fi * dy; azj += fi * dz;
+            }
+            pax(j) = axj; pay(j) = ayj; paz(j) = azj;
+            pvx(j) += axj * kick_dt;
+            pvy(j) += ayj * kick_dt;
+            pvz(j) += azj * kick_dt;
+        });
+        Kokkos::fence();
+    }
+}
+
+// ==========================================================================
+// Fused cross_acceleration_and_gradient + kick
+// ==========================================================================
+template <bool UseN3L>
+void cross_acceleration_and_gradient_kick(Particles& p,
+                                          int a_start, int a_count,
+                                          int b_start, int b_count,
+                                          double G, double soft2, double grad_dt, double kick_dt) {
+    // Compute cross acceleration
+    cross_acceleration<UseN3L>(p, a_start, a_count, b_start, b_count, G, soft2);
+    // Apply gradient correction
+    cross_gradient_correction<UseN3L>(p, a_start, a_count, b_start, b_count, G, soft2, grad_dt);
+
+    // Apply kick to both groups
+    auto pvx = p.vx; auto pvy = p.vy; auto pvz = p.vz;
+    auto pax = p.ax; auto pay = p.ay; auto paz = p.az;
+
+    Kokkos::parallel_for("kick_cross_grad_a", a_count, KOKKOS_LAMBDA(int ii) {
+        int i = a_start + ii;
+        pvx(i) += pax(i) * kick_dt;
+        pvy(i) += pay(i) * kick_dt;
+        pvz(i) += paz(i) * kick_dt;
+    });
+    Kokkos::parallel_for("kick_cross_grad_b", b_count, KOKKOS_LAMBDA(int jj) {
+        int j = b_start + jj;
+        pvx(j) += pax(j) * kick_dt;
+        pvy(j) += pay(j) * kick_dt;
+        pvz(j) += paz(j) * kick_dt;
+    });
+    Kokkos::fence();
+}
+
+// ==========================================================================
 // Explicit template instantiations
 // ==========================================================================
 template void compute_acceleration<true>(Particles&, double, double);
@@ -836,3 +1076,11 @@ template void cross_acceleration_and_gradient<true>(Particles&, int, int, int, i
 template void cross_acceleration_and_gradient<false>(Particles&, int, int, int, int, double, double, double);
 template void compute_frost_subset<true>(Particles&, int, int, double, double, double);
 template void compute_frost_subset<false>(Particles&, int, int, double, double, double);
+template void self_acceleration_kick<true>(Particles&, int, int, double, double, double);
+template void self_acceleration_kick<false>(Particles&, int, int, double, double, double);
+template void self_acceleration_and_gradient_kick<true>(Particles&, int, int, double, double, double, double);
+template void self_acceleration_and_gradient_kick<false>(Particles&, int, int, double, double, double, double);
+template void cross_acceleration_kick<true>(Particles&, int, int, int, int, double, double, double);
+template void cross_acceleration_kick<false>(Particles&, int, int, int, int, double, double, double);
+template void cross_acceleration_and_gradient_kick<true>(Particles&, int, int, int, int, double, double, double, double);
+template void cross_acceleration_and_gradient_kick<false>(Particles&, int, int, int, int, double, double, double, double);

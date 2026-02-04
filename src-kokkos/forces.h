@@ -52,3 +52,26 @@ void cross_acceleration_and_gradient(Particles& p,
 template <bool UseN3L>
 void compute_frost_subset(Particles& p, int start, int count,
                           double G, double soft2, double eta);
+
+// ==========================================================================
+// Fused force + kick functions (reduce kernel launches)
+// ==========================================================================
+template <bool UseN3L>
+void self_acceleration_kick(Particles& p, int start, int count,
+                            double G, double soft2, double kick_dt);
+
+template <bool UseN3L>
+void self_acceleration_and_gradient_kick(Particles& p, int start, int count,
+                                         double G, double soft2, double grad_dt, double kick_dt);
+
+template <bool UseN3L>
+void cross_acceleration_kick(Particles& p,
+                             int a_start, int a_count,
+                             int b_start, int b_count,
+                             double G, double soft2, double kick_dt);
+
+template <bool UseN3L>
+void cross_acceleration_and_gradient_kick(Particles& p,
+                                          int a_start, int a_count,
+                                          int b_start, int b_count,
+                                          double G, double soft2, double grad_dt, double kick_dt);
