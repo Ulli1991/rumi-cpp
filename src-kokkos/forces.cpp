@@ -368,12 +368,13 @@ void self_acceleration(Particles& p, int start, int count,
         });
         Kokkos::fence();
     } else {
-        // Non-N3L: direct assignment, no zeroing needed, no branch
+        // Non-N3L: direct assignment, no zeroing needed
         Kokkos::parallel_for("self_acc_full", count, KOKKOS_LAMBDA(int ii) {
             int i = start + ii;
             double axi = 0, ayi = 0, azi = 0;
             double xi = px(i), yi = py(i), zi = pz(i);
             for (int j = start; j < end; j++) {
+                if (i == j) continue;  // Skip self-interaction
                 double dx = px(j) - xi;
                 double dy = py(j) - yi;
                 double dz = pz(j) - zi;
@@ -383,7 +384,6 @@ void self_acceleration(Particles& p, int start, int count,
                 double fj = G * m(j) * inv_r3;
                 axi += fj * dx; ayi += fj * dy; azi += fj * dz;
             }
-            // Self contribution is 0 since dx=dy=dz=0
             pax(i) = axi; pay(i) = ayi; paz(i) = azi;
         });
         Kokkos::fence();
