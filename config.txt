@@ -5,12 +5,8 @@
 # Test case: outer_planets, plummer
 TEST_CASE = plummer
 
-# Integrator: fsi (global timestep) or hhs (adaptive HHS-FSI)
+# Integrator: fsi (global timestep) or hhs (adaptive HHS-FSI per Algorithm 4 of FROST paper)
 INTEGRATOR = hhs
-# HHS mode: recursive or stack (only used if HHS_DYNAMIC = false)
-HHS_MODE = stack
-# HHS dynamic: use pivot-based partitioning per Algorithm 4 of FROST paper
-HHS_DYNAMIC = true
 
 # =============================================================================
 # Simulation parameters
@@ -21,10 +17,9 @@ DT_MIN_YEARS = 1e-3
 ETA = 0.2
 SOFTENING_AU = 206.265          # Softening length in AU (206.265 AU = 1e-3 pc)
 GRAD_N3L = false                # N3L gradient correction (halves work, slightly less momentum conservation)
-USE_KAHAN = false               # Kahan summation in N3L gradient loops (only used when GRAD_N3L = true)
+USE_KAHAN = false               # Kahan summation in N3L gradient loops (CPU only, requires GRAD_N3L = true)
 USE_N3L = false                 # Newton's 3rd law optimization (default: true on CPU, false on GPU)
 MEMORY_TILING = true           # Shared memory tiling for force computation (GPU optimization)
-REASSIGN_TIMESTEPS = true       # Reassign timesteps during HHS recursion (legacy mode only)
 
 # =============================================================================
 # Plummer cluster parameters (only used if TEST_CASE = plummer)

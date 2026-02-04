@@ -104,7 +104,6 @@ int main(int argc, char** argv) {
 
         std::string test = test_override.empty() ? cfg.get_str("TEST_CASE", "outer_planets") : test_override;
         std::string integrator = cfg.get_str("INTEGRATOR", "hhs");
-        HHSMode hhs_mode = parse_hhs_mode(cfg.get_str("HHS_MODE", "recursive"));
         double t_final_yr   = cfg.get_double("TOTAL_TIME_YEARS", 2.5e8);
         double dt_max_yr    = cfg.get_double("DT_MAX_YEARS", 1e4);
         double dt_min_yr    = cfg.get_double("DT_MIN_YEARS", 100.0);
@@ -122,8 +121,6 @@ int main(int argc, char** argv) {
         grad_n3l = (cfg.get_str("GRAD_N3L", "false") == "true");
         use_kahan = (cfg.get_str("USE_KAHAN", "false") == "true");
         use_memory_tiling = (cfg.get_str("MEMORY_TILING", "true") == "true");
-        bool reassign_timesteps = (cfg.get_str("REASSIGN_TIMESTEPS", "true") == "true");
-        bool hhs_dynamic = (cfg.get_str("HHS_DYNAMIC", "false") == "true");
 
         // USE_N3L: default true on CPU-like backends, false on GPU
         bool use_n3l_default = true;
@@ -161,8 +158,7 @@ int main(int argc, char** argv) {
 
         bool is_cluster = (test == "plummer");
 
-        const char* mode_str = (integrator == "hhs")
-            ? (hhs_dynamic ? "hhs-dynamic" : (hhs_mode == HHSMode::Stack ? "hhs-stack" : "hhs-recursive")) : "fsi";
+        const char* mode_str = (integrator == "hhs") ? "hhs" : "fsi";
         std::printf("=== Kokkos N-Body: %s, %s test, N=%d, N3L=%s ===\n",
                     mode_str, test.c_str(), p.N, use_n3l ? "true" : "false");
         std::fflush(stdout);
@@ -174,13 +170,10 @@ int main(int argc, char** argv) {
 
         auto levels = build_levels(dt_max, dt_min);
 
-        // Initial force computation + FROST
+        // Initial force computation + FROST (always use N3L for FROST - single O(N²) computation)
         std::printf("Computing initial forces...\n"); std::fflush(stdout);
         auto t0 = std::chrono::high_resolution_clock::now();
-        if (use_n3l)
-            compute_acceleration_and_frost<true>(p, G, soft2, eta);
-        else
-            compute_acceleration_and_frost<false>(p, G, soft2, eta);
+        compute_acceleration_and_frost<true>(p, G, soft2, eta);
         auto t1 = std::chrono::high_resolution_clock::now();
         std::printf("Initial forces: %.3f s\n", std::chrono::duration<double>(t1-t0).count());
         std::fflush(stdout);
@@ -205,9 +198,6 @@ int main(int argc, char** argv) {
 
         std::printf("Running...\n"); std::fflush(stdout);
 
-        std::vector<StackEntry> hhs_stack;
-        hhs_stack.reserve(7 * p.n_levels + 1);
-
         auto wall_start = std::chrono::high_resolution_clock::now();
 
         double t = 0;
@@ -227,17 +217,14 @@ int main(int argc, char** argv) {
                 t += dt_global;
                 step++;
                 if (step % print_interval == 0) {
-                    if (use_n3l)
-                        compute_acceleration_and_frost<true>(p, G, soft2, eta);
-                    else
-                        compute_acceleration_and_frost<false>(p, G, soft2, eta);
+                    compute_acceleration_and_frost<true>(p, G, soft2, eta);
                     assign_levels(p, levels);
                     p.partition_by_level();
                     print_progress(t, step);
                 }
             }
-        } else if (hhs_dynamic) {
-            // Dynamic pivot-based HHS-FSI (per paper's Algorithm 4)
+        } else {
+            // HHS-FSI (per paper's Algorithm 4)
             while (t < t_final) {
                 auto step_t0 = std::chrono::high_resolution_clock::now();
 
@@ -245,12 +232,9 @@ int main(int argc, char** argv) {
                 hhs_fsi_step_dynamic(p, 0, p.N, dt_max, G, soft2, dt_min, eta, use_n3l);
                 auto hhs_t1 = std::chrono::high_resolution_clock::now();
 
-                // Recompute forces and FROST for diagnostics and next step
+                // Recompute forces and FROST for diagnostics and next step (always N3L)
                 auto frost_t0 = std::chrono::high_resolution_clock::now();
-                if (use_n3l)
-                    compute_acceleration_and_frost<true>(p, G, soft2, eta);
-                else
-                    compute_acceleration_and_frost<false>(p, G, soft2, eta);
+                compute_acceleration_and_frost<true>(p, G, soft2, eta);
                 auto frost_t1 = std::chrono::high_resolution_clock::now();
 
                 // Restore level structure for diagnostics
@@ -270,51 +254,6 @@ int main(int argc, char** argv) {
                         std::chrono::duration<double>(frost_t1-frost_t0).count(),
                         std::chrono::duration<double>(step_t1-step_t0).count(),
                         dt_max/TIME_UNIT);
-                    std::fflush(stdout);
-                }
-
-                if (step % print_interval == 0) {
-                    print_progress(t, step);
-                }
-            }
-        } else {
-            // Legacy HHS-FSI with pre-computed global levels
-            while (t < t_final) {
-                auto step_t0 = std::chrono::high_resolution_clock::now();
-
-                int coarsest = find_coarsest_active(p);
-                double dt_outer = levels[coarsest];
-
-                auto hhs_t0 = std::chrono::high_resolution_clock::now();
-                if (hhs_mode == HHSMode::Stack)
-                    hhs_fsi_step_stack(p, coarsest, dt_outer, G, soft2, hhs_stack);
-                else
-                    hhs_fsi_step(p, coarsest, dt_outer, G, soft2, levels, eta, use_n3l, reassign_timesteps);
-                auto hhs_t1 = std::chrono::high_resolution_clock::now();
-
-                auto frost_t0 = std::chrono::high_resolution_clock::now();
-                if (use_n3l)
-                    compute_acceleration_and_frost<true>(p, G, soft2, eta);
-                else
-                    compute_acceleration_and_frost<false>(p, G, soft2, eta);
-                auto frost_t1 = std::chrono::high_resolution_clock::now();
-
-                assign_levels(p, levels);
-                p.partition_by_level();
-
-                t += dt_outer;
-                step++;
-
-                auto step_t1 = std::chrono::high_resolution_clock::now();
-
-                // Print timing for first few steps
-                if (step <= 5) {
-                    std::printf("Step %d: HHS=%.3fs, FROST=%.3fs, total=%.3fs, dt=%.2e yr\n",
-                        step,
-                        std::chrono::duration<double>(hhs_t1-hhs_t0).count(),
-                        std::chrono::duration<double>(frost_t1-frost_t0).count(),
-                        std::chrono::duration<double>(step_t1-step_t0).count(),
-                        dt_outer/TIME_UNIT);
                     std::fflush(stdout);
                 }
 

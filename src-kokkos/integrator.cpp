@@ -72,20 +72,6 @@ void fsi_step(Particles& p, int start, int count,
     kick(p, start, count, dt * FSI_KICK);
 }
 
-static void get_slow_fast(const Particles& p, int level,
-                          int& slow_start, int& slow_count,
-                          int& fast_start, int& fast_count) {
-    slow_start = p.level_start[level];
-    slow_count = p.level_count[level];
-    fast_start = -1;
-    fast_count = 0;
-    if (level + 1 < p.n_levels) {
-        fast_start = p.level_start[level + 1];
-        for (int l = level + 1; l < p.n_levels; l++)
-            fast_count += p.level_count[l];
-    }
-}
-
 // ==========================================================================
 // Dynamic pivot-based partitioning for HHS (per paper's Algorithm 4)
 // Partitions particles [start, start+count) into:
@@ -208,12 +194,9 @@ void hhs_fsi_step_dynamic(Particles& p, int start, int count, double pivot_dt,
                           double eta, bool use_n3l) {
     if (count == 0) return;
 
-    // Compute FROST timesteps for this subset (considering only internal interactions)
+    // Compute FROST timesteps for this subset (always N3L - single O(N²) computation)
     if (count > 1) {
-        if (use_n3l)
-            compute_frost_subset<true>(p, start, count, G, soft2, eta);
-        else
-            compute_frost_subset<false>(p, start, count, G, soft2, eta);
+        compute_frost_subset<true>(p, start, count, G, soft2, eta);
     }
 
     // Partition into slow (dt >= pivot) and fast (dt < pivot)
@@ -257,113 +240,3 @@ void hhs_fsi_step_dynamic(Particles& p, int start, int count, double pivot_dt,
     kick(p, fast_start, fast_count, pivot_dt * FSI_KICK);
 }
 
-// ==========================================================================
-// Legacy HHS-FSI with pre-computed global levels
-// ==========================================================================
-void hhs_fsi_step(Particles& p, int level, double dt,
-                  double G, double soft2,
-                  const std::vector<double>& level_dts,
-                  double eta, bool use_n3l,
-                  bool reassign_timesteps) {
-    int slow_start, slow_count, fast_start, fast_count;
-    get_slow_fast(p, level, slow_start, slow_count, fast_start, fast_count);
-
-    if (fast_count == 0) {
-        fsi_step(p, slow_start, slow_count, G, soft2, dt);
-        return;
-    }
-
-    // Optionally recompute FROST timesteps for fast particles (per paper's Algorithm 4)
-    // This considers only mutual interactions within the fast set
-    if (reassign_timesteps && fast_count > 1) {
-        if (use_n3l)
-            compute_frost_subset<true>(p, fast_start, fast_count, G, soft2, eta);
-        else
-            compute_frost_subset<false>(p, fast_start, fast_count, G, soft2, eta);
-        assign_levels_subset(p, fast_start, fast_count, level_dts);
-    }
-
-    // 1. Cross-Newton kick (dt/6)
-    fn_cross_acc(p, slow_start, slow_count, fast_start, fast_count, G, soft2);
-    kick(p, slow_start, slow_count, dt * FSI_KICK);
-    kick(p, fast_start, fast_count, dt * FSI_KICK);
-
-    // 2. FSI half-step on slow
-    fsi_step(p, slow_start, slow_count, G, soft2, dt * 0.5);
-
-    // 3. Recurse (first half)
-    hhs_fsi_step(p, level + 1, dt * 0.5, G, soft2, level_dts, eta, use_n3l, reassign_timesteps);
-
-    // 4. Cross-gradient kick (2dt/3)
-    fn_cross_acc_grad(p, slow_start, slow_count, fast_start, fast_count, G, soft2, dt);
-    kick(p, slow_start, slow_count, dt * FSI_MOD_KICK);
-    kick(p, fast_start, fast_count, dt * FSI_MOD_KICK);
-
-    // 5. Recurse (second half)
-    hhs_fsi_step(p, level + 1, dt * 0.5, G, soft2, level_dts, eta, use_n3l, reassign_timesteps);
-
-    // 6. FSI half-step on slow
-    fsi_step(p, slow_start, slow_count, G, soft2, dt * 0.5);
-
-    // 7. Cross-Newton kick (dt/6)
-    fn_cross_acc(p, slow_start, slow_count, fast_start, fast_count, G, soft2);
-    kick(p, slow_start, slow_count, dt * FSI_KICK);
-    kick(p, fast_start, fast_count, dt * FSI_KICK);
-}
-
-void hhs_fsi_step_stack(Particles& p, int start_level, double dt_outer,
-                        double G, double soft2,
-                        std::vector<StackEntry>& stack) {
-    int finest = p.n_levels - 1;
-    stack.clear();
-    stack.push_back({(int)StackOp::RECURSE, start_level, dt_outer});
-
-    while (!stack.empty()) {
-        StackEntry e = stack.back();
-        stack.pop_back();
-
-        int level = e.level;
-        double dt = e.dt;
-
-        int slow_start, slow_count, fast_start, fast_count;
-        get_slow_fast(p, level, slow_start, slow_count, fast_start, fast_count);
-
-        switch (e.op) {
-        case (int)StackOp::RECURSE: {
-            bool is_base = (level >= finest) || (fast_count == 0);
-            if (is_base) {
-                stack.push_back({(int)StackOp::FSI_BASE, level, dt});
-            } else {
-                stack.push_back({(int)StackOp::CROSS_NEWTON,   level,     dt / 6.0});
-                stack.push_back({(int)StackOp::FSI_HALF,       level,     dt});
-                stack.push_back({(int)StackOp::RECURSE,        level + 1, dt / 2.0});
-                stack.push_back({(int)StackOp::CROSS_GRADIENT, level,     dt});
-                stack.push_back({(int)StackOp::RECURSE,        level + 1, dt / 2.0});
-                stack.push_back({(int)StackOp::FSI_HALF,       level,     dt});
-                stack.push_back({(int)StackOp::CROSS_NEWTON,   level,     dt / 6.0});
-            }
-            break;
-        }
-        case (int)StackOp::FSI_BASE:
-            fsi_step(p, slow_start, slow_count, G, soft2, dt);
-            break;
-        case (int)StackOp::FSI_HALF:
-            fsi_step(p, slow_start, slow_count, G, soft2, dt * 0.5);
-            break;
-        case (int)StackOp::CROSS_NEWTON:
-            if (fast_count > 0 && slow_count > 0) {
-                fn_cross_acc(p, slow_start, slow_count, fast_start, fast_count, G, soft2);
-                kick(p, slow_start, slow_count, dt);
-                kick(p, fast_start, fast_count, dt);
-            }
-            break;
-        case (int)StackOp::CROSS_GRADIENT:
-            if (fast_count > 0 && slow_count > 0) {
-                fn_cross_acc_grad(p, slow_start, slow_count, fast_start, fast_count, G, soft2, dt);
-                kick(p, slow_start, slow_count, dt * FSI_MOD_KICK);
-                kick(p, fast_start, fast_count, dt * FSI_MOD_KICK);
-            }
-            break;
-        }
-    }
-}
