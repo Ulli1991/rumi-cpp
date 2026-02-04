@@ -146,15 +146,22 @@ void compute_acceleration_and_frost(Particles& p, double G, double soft2, double
             Kokkos::atomic_min(&dt_f(i), t_min_i);
         });
     } else if (use_memory_tiling) {
-        // Tiled version using shared memory
+        // Tiled version using shared memory with packed vector loads
         // Each team of TILE_SIZE threads handles TILE_SIZE particles (i)
         // All threads collaborate to load tiles of j particles
         using team_policy = Kokkos::TeamPolicy<>;
         using member_type = team_policy::member_type;
         using scratch_space = Kokkos::DefaultExecutionSpace::scratch_memory_space;
 
+        // Pack SoA data into vectorized format for efficient global memory access
+        p.pack();
+
         size_t scratch_size = TILE_SIZE * 7 * sizeof(double);
         int num_teams = (N + TILE_SIZE - 1) / TILE_SIZE;
+
+        // Use packed views for vectorized global memory access
+        auto pos = p.pos_packed;
+        auto vel = p.vel_packed;
 
         Kokkos::parallel_for("acc_frost_tiled",
             team_policy(num_teams, TILE_SIZE).set_scratch_size(0, Kokkos::PerTeam(scratch_size)),
@@ -178,14 +185,13 @@ void compute_acceleration_and_frost(Particles& p, double G, double soft2, double
                 Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
                     tile_m(reinterpret_cast<double*>(tile_vz.data() + TILE_SIZE), TILE_SIZE);
 
-                // Load particle i's data (handle out-of-bounds)
+                // Load particle i's data using packed views (vectorized load)
                 double xi = 0, yi = 0, zi = 0;
                 double vxi = 0, vyi = 0, vzi = 0;
                 double mi = 0;
                 if (i < N) {
-                    xi = px(i); yi = py(i); zi = pz(i);
-                    vxi = pvx(i); vyi = pvy(i); vzi = pvz(i);
-                    mi = m(i);
+                    xi = pos(i, 0); yi = pos(i, 1); zi = pos(i, 2); mi = pos(i, 3);
+                    vxi = vel(i, 0); vyi = vel(i, 1); vzi = vel(i, 2);
                 }
 
                 double axi = 0, ayi = 0, azi = 0;
@@ -196,17 +202,19 @@ void compute_acceleration_and_frost(Particles& p, double G, double soft2, double
                     int tile_end = (tile_start + TILE_SIZE < N) ? tile_start + TILE_SIZE : N;
                     int tile_count = tile_end - tile_start;
 
-                    // Collaborative load: each thread loads one element
+                    // Collaborative load using packed views (2 vector loads instead of 7 scalar)
                     int t = team.team_rank();
                     if (t < tile_count) {
                         int idx = tile_start + t;
-                        tile_x(t) = px(idx);
-                        tile_y(t) = py(idx);
-                        tile_z(t) = pz(idx);
-                        tile_vx(t) = pvx(idx);
-                        tile_vy(t) = pvy(idx);
-                        tile_vz(t) = pvz(idx);
-                        tile_m(t) = m(idx);
+                        // Load position + mass (4 doubles)
+                        tile_x(t) = pos(idx, 0);
+                        tile_y(t) = pos(idx, 1);
+                        tile_z(t) = pos(idx, 2);
+                        tile_m(t) = pos(idx, 3);
+                        // Load velocity (3 doubles)
+                        tile_vx(t) = vel(idx, 0);
+                        tile_vy(t) = vel(idx, 1);
+                        tile_vz(t) = vel(idx, 2);
                     }
                     team.team_barrier();
 
@@ -1056,6 +1064,151 @@ void cross_acceleration_and_gradient_kick(Particles& p,
 }
 
 // ==========================================================================
+// Cached cross-acceleration: compute, cache to scratch, and kick
+// Uses scratch4/5/6 for group A cache, scratch7/8/9 for group B cache
+// ==========================================================================
+template <bool UseN3L>
+void cross_acceleration_kick_and_cache(Particles& p,
+                                       int a_start, int a_count,
+                                       int b_start, int b_count,
+                                       double G, double soft2, double kick_dt) {
+    auto px = p.x; auto py = p.y; auto pz = p.z;
+    auto pvx = p.vx; auto pvy = p.vy; auto pvz = p.vz;
+    auto pax = p.ax; auto pay = p.ay; auto paz = p.az;
+    auto m = p.mass;
+    // Cache arrays (indexed by absolute position)
+    auto cax_a = p.scratch4; auto cay_a = p.scratch5; auto caz_a = p.scratch6;
+    auto cax_b = p.scratch7; auto cay_b = p.scratch8; auto caz_b = p.scratch9;
+    const int b_end = b_start + b_count;
+
+    if constexpr (UseN3L) {
+        // Zero accelerations
+        Kokkos::parallel_for("zero_cross_cache_a", a_count, KOKKOS_LAMBDA(int ii) {
+            int i = a_start + ii;
+            pax(i) = 0; pay(i) = 0; paz(i) = 0;
+        });
+        Kokkos::parallel_for("zero_cross_cache_b", b_count, KOKKOS_LAMBDA(int jj) {
+            int j = b_start + jj;
+            pax(j) = 0; pay(j) = 0; paz(j) = 0;
+        });
+        Kokkos::fence();
+
+        Kokkos::parallel_for("cross_acc_cache_n3l", a_count, KOKKOS_LAMBDA(int ii) {
+            int i = a_start + ii;
+            double axi = 0, ayi = 0, azi = 0;
+            for (int j = b_start; j < b_end; j++) {
+                double dx = px(j) - px(i);
+                double dy = py(j) - py(i);
+                double dz = pz(j) - pz(i);
+                double r2 = dx*dx + dy*dy + dz*dz + soft2;
+                double inv_r = 1.0 / Kokkos::sqrt(r2);
+                double inv_r3 = inv_r * inv_r * inv_r;
+                double fj = G * m(j) * inv_r3;
+                double fi = G * m(i) * inv_r3;
+                axi += fj * dx; ayi += fj * dy; azi += fj * dz;
+                Kokkos::atomic_add(&pax(j), -fi * dx);
+                Kokkos::atomic_add(&pay(j), -fi * dy);
+                Kokkos::atomic_add(&paz(j), -fi * dz);
+            }
+            Kokkos::atomic_add(&pax(i), axi);
+            Kokkos::atomic_add(&pay(i), ayi);
+            Kokkos::atomic_add(&paz(i), azi);
+        });
+        Kokkos::fence();
+
+        // Cache and kick group A
+        Kokkos::parallel_for("cache_kick_a", a_count, KOKKOS_LAMBDA(int ii) {
+            int i = a_start + ii;
+            cax_a(i) = pax(i); cay_a(i) = pay(i); caz_a(i) = paz(i);
+            pvx(i) += pax(i) * kick_dt;
+            pvy(i) += pay(i) * kick_dt;
+            pvz(i) += paz(i) * kick_dt;
+        });
+        // Cache and kick group B
+        Kokkos::parallel_for("cache_kick_b", b_count, KOKKOS_LAMBDA(int jj) {
+            int j = b_start + jj;
+            cax_b(j) = pax(j); cay_b(j) = pay(j); caz_b(j) = paz(j);
+            pvx(j) += pax(j) * kick_dt;
+            pvy(j) += pay(j) * kick_dt;
+            pvz(j) += paz(j) * kick_dt;
+        });
+        Kokkos::fence();
+    } else {
+        // Non-N3L: compute independently for A and B
+        Kokkos::parallel_for("cross_acc_cache_a", a_count, KOKKOS_LAMBDA(int ii) {
+            int i = a_start + ii;
+            double axi = 0, ayi = 0, azi = 0;
+            for (int j = b_start; j < b_end; j++) {
+                double dx = px(j) - px(i);
+                double dy = py(j) - py(i);
+                double dz = pz(j) - pz(i);
+                double r2 = dx*dx + dy*dy + dz*dz + soft2;
+                double inv_r = 1.0 / Kokkos::sqrt(r2);
+                double inv_r3 = inv_r * inv_r * inv_r;
+                double fj = G * m(j) * inv_r3;
+                axi += fj * dx; ayi += fj * dy; azi += fj * dz;
+            }
+            pax(i) = axi; pay(i) = ayi; paz(i) = azi;
+            cax_a(i) = axi; cay_a(i) = ayi; caz_a(i) = azi;
+            pvx(i) += axi * kick_dt;
+            pvy(i) += ayi * kick_dt;
+            pvz(i) += azi * kick_dt;
+        });
+
+        const int a_end = a_start + a_count;
+        Kokkos::parallel_for("cross_acc_cache_b", b_count, KOKKOS_LAMBDA(int jj) {
+            int j = b_start + jj;
+            double axj = 0, ayj = 0, azj = 0;
+            for (int i = a_start; i < a_end; i++) {
+                double dx = px(i) - px(j);
+                double dy = py(i) - py(j);
+                double dz = pz(i) - pz(j);
+                double r2 = dx*dx + dy*dy + dz*dz + soft2;
+                double inv_r = 1.0 / Kokkos::sqrt(r2);
+                double inv_r3 = inv_r * inv_r * inv_r;
+                double fi = G * m(i) * inv_r3;
+                axj += fi * dx; ayj += fi * dy; azj += fi * dz;
+            }
+            pax(j) = axj; pay(j) = ayj; paz(j) = azj;
+            cax_b(j) = axj; cay_b(j) = ayj; caz_b(j) = azj;
+            pvx(j) += axj * kick_dt;
+            pvy(j) += ayj * kick_dt;
+            pvz(j) += azj * kick_dt;
+        });
+        Kokkos::fence();
+    }
+}
+
+// ==========================================================================
+// Kick using cached accelerations (no force recomputation)
+// ==========================================================================
+void kick_from_cache(Particles& p, int a_start, int a_count,
+                     int b_start, int b_count, double kick_dt) {
+    auto pvx = p.vx; auto pvy = p.vy; auto pvz = p.vz;
+    auto pax = p.ax; auto pay = p.ay; auto paz = p.az;
+    auto cax_a = p.scratch4; auto cay_a = p.scratch5; auto caz_a = p.scratch6;
+    auto cax_b = p.scratch7; auto cay_b = p.scratch8; auto caz_b = p.scratch9;
+
+    // Restore cached accelerations and kick group A
+    Kokkos::parallel_for("kick_cache_a", a_count, KOKKOS_LAMBDA(int ii) {
+        int i = a_start + ii;
+        pax(i) = cax_a(i); pay(i) = cay_a(i); paz(i) = caz_a(i);
+        pvx(i) += cax_a(i) * kick_dt;
+        pvy(i) += cay_a(i) * kick_dt;
+        pvz(i) += caz_a(i) * kick_dt;
+    });
+    // Restore cached accelerations and kick group B
+    Kokkos::parallel_for("kick_cache_b", b_count, KOKKOS_LAMBDA(int jj) {
+        int j = b_start + jj;
+        pax(j) = cax_b(j); pay(j) = cay_b(j); paz(j) = caz_b(j);
+        pvx(j) += cax_b(j) * kick_dt;
+        pvy(j) += cay_b(j) * kick_dt;
+        pvz(j) += caz_b(j) * kick_dt;
+    });
+    Kokkos::fence();
+}
+
+// ==========================================================================
 // Explicit template instantiations
 // ==========================================================================
 template void compute_acceleration<true>(Particles&, double, double);
@@ -1084,3 +1237,5 @@ template void cross_acceleration_kick<true>(Particles&, int, int, int, int, doub
 template void cross_acceleration_kick<false>(Particles&, int, int, int, int, double, double, double);
 template void cross_acceleration_and_gradient_kick<true>(Particles&, int, int, int, int, double, double, double, double);
 template void cross_acceleration_and_gradient_kick<false>(Particles&, int, int, int, int, double, double, double, double);
+template void cross_acceleration_kick_and_cache<true>(Particles&, int, int, int, int, double, double, double);
+template void cross_acceleration_kick_and_cache<false>(Particles&, int, int, int, int, double, double, double);

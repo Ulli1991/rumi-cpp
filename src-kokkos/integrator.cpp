@@ -5,42 +5,28 @@
 #include <Kokkos_Core.hpp>
 #include <vector>
 
-// Function pointers for runtime N3L dispatch
-static AccFn fn_self_acc = nullptr;
-static AccGradFn fn_self_acc_grad = nullptr;
-static CrossAccFn fn_cross_acc = nullptr;
-static CrossAccGradFn fn_cross_acc_grad = nullptr;
-
 // Fused function pointer types (force + kick combined)
 using AccKickFn = void(*)(Particles&, int, int, double, double, double);
 using AccGradKickFn = void(*)(Particles&, int, int, double, double, double, double);
-using CrossAccKickFn = void(*)(Particles&, int, int, int, int, double, double, double);
 using CrossAccGradKickFn = void(*)(Particles&, int, int, int, int, double, double, double, double);
+using CrossAccKickCacheFn = void(*)(Particles&, int, int, int, int, double, double, double);
 
 static AccKickFn fn_self_acc_kick = nullptr;
 static AccGradKickFn fn_self_acc_grad_kick = nullptr;
-static CrossAccKickFn fn_cross_acc_kick = nullptr;
 static CrossAccGradKickFn fn_cross_acc_grad_kick = nullptr;
+static CrossAccKickCacheFn fn_cross_acc_kick_cache = nullptr;
 
 void set_force_dispatch(bool use_n3l) {
     if (use_n3l) {
-        fn_self_acc      = &self_acceleration<true>;
-        fn_self_acc_grad = &self_acceleration_and_gradient<true>;
-        fn_cross_acc     = &cross_acceleration<true>;
-        fn_cross_acc_grad = &cross_acceleration_and_gradient<true>;
         fn_self_acc_kick = &self_acceleration_kick<true>;
         fn_self_acc_grad_kick = &self_acceleration_and_gradient_kick<true>;
-        fn_cross_acc_kick = &cross_acceleration_kick<true>;
         fn_cross_acc_grad_kick = &cross_acceleration_and_gradient_kick<true>;
+        fn_cross_acc_kick_cache = &cross_acceleration_kick_and_cache<true>;
     } else {
-        fn_self_acc      = &self_acceleration<false>;
-        fn_self_acc_grad = &self_acceleration_and_gradient<false>;
-        fn_cross_acc     = &cross_acceleration<false>;
-        fn_cross_acc_grad = &cross_acceleration_and_gradient<false>;
         fn_self_acc_kick = &self_acceleration_kick<false>;
         fn_self_acc_grad_kick = &self_acceleration_and_gradient_kick<false>;
-        fn_cross_acc_kick = &cross_acceleration_kick<false>;
         fn_cross_acc_grad_kick = &cross_acceleration_and_gradient_kick<false>;
+        fn_cross_acc_kick_cache = &cross_acceleration_kick_and_cache<false>;
     }
 }
 
@@ -53,19 +39,6 @@ static void drift(Particles& p, int start, int count, double dt) {
         px(i) += pvx(i) * dt;
         py(i) += pvy(i) * dt;
         pz(i) += pvz(i) * dt;
-    });
-    // No fence - next operation will handle dependency
-}
-
-// Helper: kick velocities for [start, start+count)
-static void kick(Particles& p, int start, int count, double dt) {
-    auto pvx = p.vx; auto pvy = p.vy; auto pvz = p.vz;
-    auto pax = p.ax; auto pay = p.ay; auto paz = p.az;
-    Kokkos::parallel_for("kick", count, KOKKOS_LAMBDA(int ii) {
-        int i = start + ii;
-        pvx(i) += pax(i) * dt;
-        pvy(i) += pay(i) * dt;
-        pvz(i) += paz(i) * dt;
     });
     // No fence - next operation will handle dependency
 }
@@ -200,8 +173,8 @@ void hhs_fsi_step_dynamic(Particles& p, int start, int count, double pivot_dt,
     }
 
     // HHS-FSI structure (Algorithm 4 / Eq. 40)
-    // 1. Cross-Newton kick (dt/6) - fused
-    fn_cross_acc_kick(p, slow_start, slow_count, fast_start, fast_count, G, soft2, pivot_dt * FSI_KICK);
+    // 1. Cross-Newton kick (dt/6)
+    fn_cross_acc_kick_cache(p, slow_start, slow_count, fast_start, fast_count, G, soft2, pivot_dt * FSI_KICK);
 
     // 2. FSI half-step on slow
     fsi_step(p, slow_start, slow_count, G, soft2, pivot_dt * 0.5);
@@ -209,7 +182,7 @@ void hhs_fsi_step_dynamic(Particles& p, int start, int count, double pivot_dt,
     // 3. Recurse on fast (first half) with pivot/2
     hhs_fsi_step_dynamic(p, fast_start, fast_count, pivot_dt * 0.5, G, soft2, dt_min, eta, use_n3l);
 
-    // 4. Cross-gradient kick (2dt/3) - fused
+    // 4. Cross-gradient kick (2dt/3)
     fn_cross_acc_grad_kick(p, slow_start, slow_count, fast_start, fast_count, G, soft2, pivot_dt, pivot_dt * FSI_MOD_KICK);
 
     // 5. Recurse on fast (second half) with pivot/2
@@ -218,7 +191,7 @@ void hhs_fsi_step_dynamic(Particles& p, int start, int count, double pivot_dt,
     // 6. FSI half-step on slow
     fsi_step(p, slow_start, slow_count, G, soft2, pivot_dt * 0.5);
 
-    // 7. Cross-Newton kick (dt/6) - fused
-    fn_cross_acc_kick(p, slow_start, slow_count, fast_start, fast_count, G, soft2, pivot_dt * FSI_KICK);
+    // 7. Cross-Newton kick (dt/6)
+    fn_cross_acc_kick_cache(p, slow_start, slow_count, fast_start, fast_count, G, soft2, pivot_dt * FSI_KICK);
 }
 

@@ -43,6 +43,10 @@ void Particles::allocate(int n) {
     scratch_i  = Kokkos::View<int*>("si", n);
     scratch_i2 = Kokkos::View<int*>("si2", n);
     scratch_i3 = Kokkos::View<int*>("si3", n);
+
+    // Packed views for vectorized memory access
+    pos_packed = Kokkos::View<double*[4]>("pos_packed", n);
+    vel_packed = Kokkos::View<double*[4]>("vel_packed", n);
 }
 
 void Particles::deallocate() {
@@ -58,9 +62,53 @@ void Particles::deallocate() {
     scratch10 = scratch11 = Kokkos::View<double*>();
     scratch_i = scratch_i2 = scratch_i3 = Kokkos::View<int*>();
     d_level_dts = Kokkos::View<double*>();
+    pos_packed = Kokkos::View<double*[4]>();
+    vel_packed = Kokkos::View<double*[4]>();
     std::free(level_start); level_start = nullptr;
     std::free(level_count); level_count = nullptr;
     N = 0; n_levels = 0;
+}
+
+void Particles::pack() {
+    // Copy SoA data into packed format for vectorized access
+    auto px = x; auto py = y; auto pz = z;
+    auto pvx = vx; auto pvy = vy; auto pvz = vz;
+    auto pm = mass;
+    auto pos = pos_packed;
+    auto vel = vel_packed;
+    int NN = N;
+
+    Kokkos::parallel_for("pack", NN, KOKKOS_LAMBDA(int i) {
+        pos(i, 0) = px(i);
+        pos(i, 1) = py(i);
+        pos(i, 2) = pz(i);
+        pos(i, 3) = pm(i);
+        vel(i, 0) = pvx(i);
+        vel(i, 1) = pvy(i);
+        vel(i, 2) = pvz(i);
+        vel(i, 3) = 0.0;
+    });
+    Kokkos::fence();
+}
+
+void Particles::unpack() {
+    // Copy packed data back to SoA (mainly for velocities after kicks)
+    auto px = x; auto py = y; auto pz = z;
+    auto pvx = vx; auto pvy = vy; auto pvz = vz;
+    auto pos = pos_packed;
+    auto vel = vel_packed;
+    int NN = N;
+
+    Kokkos::parallel_for("unpack", NN, KOKKOS_LAMBDA(int i) {
+        px(i) = pos(i, 0);
+        py(i) = pos(i, 1);
+        pz(i) = pos(i, 2);
+        // mass doesn't change, no need to unpack
+        pvx(i) = vel(i, 0);
+        pvy(i) = vel(i, 1);
+        pvz(i) = vel(i, 2);
+    });
+    Kokkos::fence();
 }
 
 void Particles::partition_by_level() {

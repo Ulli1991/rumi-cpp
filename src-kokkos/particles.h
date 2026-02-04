@@ -15,6 +15,12 @@ struct Particles {
     Kokkos::View<int*> level;
     Kokkos::View<int*> orig_index;
 
+    // Packed views for vectorized memory access: [N][4] layout
+    // pos_packed[i] = {x, y, z, mass}
+    // vel_packed[i] = {vx, vy, vz, 0}
+    Kokkos::View<double*[4]> pos_packed;
+    Kokkos::View<double*[4]> vel_packed;
+
     // Level partitioning (host-side)
     int* level_start = nullptr;
     int* level_count = nullptr;
@@ -34,4 +40,6 @@ struct Particles {
     void allocate(int n);
     void deallocate();
     void partition_by_level();
+    void pack();    // Copy SoA to packed format
+    void unpack();  // Copy packed back to SoA (for velocities after kick)
 };

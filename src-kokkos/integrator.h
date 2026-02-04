@@ -4,13 +4,7 @@
 #include <vector>
 #include <string>
 
-// Runtime function pointer type for N3L dispatch
-using AccFn = void(*)(Particles&, int, int, double, double);
-using AccGradFn = void(*)(Particles&, int, int, double, double, double);
-using CrossAccFn = void(*)(Particles&, int, int, int, int, double, double);
-using CrossAccGradFn = void(*)(Particles&, int, int, int, int, double, double, double);
-
-// Set the function pointers based on UseN3L flag
+// Set force function pointers based on UseN3L flag
 void set_force_dispatch(bool use_n3l);
 
 // Single-level FSI step on [start, start+count)

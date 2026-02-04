@@ -75,3 +75,17 @@ void cross_acceleration_and_gradient_kick(Particles& p,
                                           int a_start, int a_count,
                                           int b_start, int b_count,
                                           double G, double soft2, double grad_dt, double kick_dt);
+
+// ==========================================================================
+// Cached cross-force functions (for HHS Ahmad-Cohen style optimization)
+// ==========================================================================
+// Compute cross-force and cache accelerations in scratch arrays
+template <bool UseN3L>
+void cross_acceleration_kick_and_cache(Particles& p,
+                                       int a_start, int a_count,
+                                       int b_start, int b_count,
+                                       double G, double soft2, double kick_dt);
+
+// Apply kick using cached accelerations (no force recomputation)
+void kick_from_cache(Particles& p, int a_start, int a_count,
+                     int b_start, int b_count, double kick_dt);
