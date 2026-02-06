@@ -511,35 +511,160 @@ static void self_acceleration_distributed(DistributedParticles& dp, int start, i
     dp.allgather_accelerations_subset(start, count);
 }
 
-// Distributed gradient correction with tiled GPU kernel
-static void self_gradient_correction_distributed(DistributedParticles& dp, int start, int count,
-                                                  double G, double soft2, double dt) {
+// =============================================================================
+// Fused distributed force + kick: computes forces for my slice AND kicks from
+// registers, then allgather forces, then kick non-local particles.
+// Saves one kernel launch + memory round-trip for accelerations on local slice.
+// =============================================================================
+static void self_acceleration_kick_distributed(DistributedParticles& dp, int start, int count,
+                                                double G, double soft2, double kick_dt) {
     if (count <= 0) return;
 
     int slice_start, slice_count;
     dp.get_force_slice(start, count, slice_start, slice_count);
     if (slice_count == 0) {
         dp.allgather_accelerations_subset(start, count);
+        kick_velocities(dp.local, start, count, kick_dt);
         return;
     }
 
     auto px = dp.local.x; auto py = dp.local.y; auto pz = dp.local.z;
+    auto pvx = dp.local.vx; auto pvy = dp.local.vy; auto pvz = dp.local.vz;
     auto pax = dp.local.ax; auto pay = dp.local.ay; auto paz = dp.local.az;
     auto pm = dp.local.mass;
 
-    const double coeff = G * dt * dt * GRAD_COEFF;
     const int j_start = start;
     const int j_end = start + count;
+    const double kdt = kick_dt;
 
     using team_policy = Kokkos::TeamPolicy<>;
     using member_type = team_policy::member_type;
     using scratch_space = Kokkos::DefaultExecutionSpace::scratch_memory_space;
 
-    // Need x,y,z,m,ax,ay,az for gradient correction
+    size_t scratch_size = DIST_TILE_SIZE * 4 * sizeof(double);
+    int num_teams = (slice_count + DIST_TILE_SIZE - 1) / DIST_TILE_SIZE;
+
+    Kokkos::parallel_for("dist_self_acc_kick_tiled",
+        team_policy(num_teams, DIST_TILE_SIZE).set_scratch_size(0, Kokkos::PerTeam(scratch_size)),
+        KOKKOS_LAMBDA(const member_type& team) {
+            int ii = team.league_rank() * DIST_TILE_SIZE + team.team_rank();
+            int i = slice_start + ii;
+
+            Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
+                tile_x(team.team_scratch(0), DIST_TILE_SIZE);
+            Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
+                tile_y(tile_x.data() + DIST_TILE_SIZE, DIST_TILE_SIZE);
+            Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
+                tile_z(tile_y.data() + DIST_TILE_SIZE, DIST_TILE_SIZE);
+            Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
+                tile_m(tile_z.data() + DIST_TILE_SIZE, DIST_TILE_SIZE);
+
+            double xi = 0, yi = 0, zi = 0;
+            if (ii < slice_count) {
+                xi = px(i); yi = py(i); zi = pz(i);
+            }
+
+            double axi = 0, ayi = 0, azi = 0;
+
+            for (int tile_start = j_start; tile_start < j_end; tile_start += DIST_TILE_SIZE) {
+                int tile_end = (tile_start + DIST_TILE_SIZE < j_end) ? tile_start + DIST_TILE_SIZE : j_end;
+                int tile_count = tile_end - tile_start;
+
+                int t = team.team_rank();
+                if (t < tile_count) {
+                    int idx = tile_start + t;
+                    tile_x(t) = px(idx);
+                    tile_y(t) = py(idx);
+                    tile_z(t) = pz(idx);
+                    tile_m(t) = pm(idx);
+                }
+                team.team_barrier();
+
+                if (ii < slice_count) {
+                    for (int jt = 0; jt < tile_count; jt++) {
+                        int j = tile_start + jt;
+                        if (j == i) continue;
+
+                        double dx = tile_x(jt) - xi;
+                        double dy = tile_y(jt) - yi;
+                        double dz = tile_z(jt) - zi;
+
+                        double r2 = dx*dx + dy*dy + dz*dz + soft2;
+                        double inv_r = 1.0 / Kokkos::sqrt(r2);
+                        double inv_r3 = inv_r * inv_r * inv_r;
+                        double mj_inv_r3 = G * tile_m(jt) * inv_r3;
+
+                        axi += mj_inv_r3 * dx;
+                        ayi += mj_inv_r3 * dy;
+                        azi += mj_inv_r3 * dz;
+                    }
+                }
+                team.team_barrier();
+            }
+
+            if (ii < slice_count) {
+                // Store forces (needed for allgather)
+                pax(i) = axi;
+                pay(i) = ayi;
+                paz(i) = azi;
+                // Fused kick directly from registers
+                pvx(i) += axi * kdt;
+                pvy(i) += ayi * kdt;
+                pvz(i) += azi * kdt;
+            }
+        });
+    Kokkos::fence();
+
+    // Allgather forces so all ranks have consistent accelerations
+    dp.allgather_accelerations_subset(start, count);
+
+    // Kick non-local particles using allgathered accelerations
+    int ss = slice_start, sc = slice_count;
+    Kokkos::parallel_for("kick_non_local", count, KOKKOS_LAMBDA(int ii) {
+        int i = start + ii;
+        if (i >= ss && i < ss + sc) return;  // already kicked in fused kernel
+        pvx(i) += pax(i) * kdt;
+        pvy(i) += pay(i) * kdt;
+        pvz(i) += paz(i) * kdt;
+    });
+    Kokkos::fence();
+}
+
+// =============================================================================
+// Fused distributed gradient correction + kick: computes gradient correction
+// for my slice AND kicks from corrected accelerations, then allgather, then
+// kick non-local particles.
+// =============================================================================
+static void self_gradient_correction_kick_distributed(DistributedParticles& dp, int start, int count,
+                                                       double G, double soft2, double grad_dt, double kick_dt) {
+    if (count <= 0) return;
+
+    int slice_start, slice_count;
+    dp.get_force_slice(start, count, slice_start, slice_count);
+    if (slice_count == 0) {
+        dp.allgather_accelerations_subset(start, count);
+        kick_velocities(dp.local, start, count, kick_dt);
+        return;
+    }
+
+    auto px = dp.local.x; auto py = dp.local.y; auto pz = dp.local.z;
+    auto pvx = dp.local.vx; auto pvy = dp.local.vy; auto pvz = dp.local.vz;
+    auto pax = dp.local.ax; auto pay = dp.local.ay; auto paz = dp.local.az;
+    auto pm = dp.local.mass;
+
+    const double coeff = G * grad_dt * grad_dt * GRAD_COEFF;
+    const int j_start = start;
+    const int j_end = start + count;
+    const double kdt = kick_dt;
+
+    using team_policy = Kokkos::TeamPolicy<>;
+    using member_type = team_policy::member_type;
+    using scratch_space = Kokkos::DefaultExecutionSpace::scratch_memory_space;
+
     size_t scratch_size = DIST_TILE_SIZE * 7 * sizeof(double);
     int num_teams = (slice_count + DIST_TILE_SIZE - 1) / DIST_TILE_SIZE;
 
-    Kokkos::parallel_for("dist_grad_corr_tiled",
+    Kokkos::parallel_for("dist_grad_kick_tiled",
         team_policy(num_teams, DIST_TILE_SIZE).set_scratch_size(0, Kokkos::PerTeam(scratch_size)),
         KOKKOS_LAMBDA(const member_type& team) {
             int ii = team.league_rank() * DIST_TILE_SIZE + team.team_rank();
@@ -616,42 +741,60 @@ static void self_gradient_correction_distributed(DistributedParticles& dp, int s
             }
 
             if (ii < slice_count) {
-                pax(i) += cx;
-                pay(i) += cy;
-                paz(i) += cz;
+                // Apply gradient correction
+                double corrected_ax = axi + cx;
+                double corrected_ay = ayi + cy;
+                double corrected_az = azi + cz;
+                pax(i) = corrected_ax;
+                pay(i) = corrected_ay;
+                paz(i) = corrected_az;
+                // Fused kick from corrected accelerations in registers
+                pvx(i) += corrected_ax * kdt;
+                pvy(i) += corrected_ay * kdt;
+                pvz(i) += corrected_az * kdt;
             }
         });
     Kokkos::fence();
 
+    // Allgather corrected accelerations
     dp.allgather_accelerations_subset(start, count);
+
+    // Kick non-local particles using allgathered corrected accelerations
+    int ss = slice_start, sc = slice_count;
+    Kokkos::parallel_for("kick_grad_non_local", count, KOKKOS_LAMBDA(int ii) {
+        int i = start + ii;
+        if (i >= ss && i < ss + sc) return;  // already kicked in fused kernel
+        pvx(i) += pax(i) * kdt;
+        pvy(i) += pay(i) * kdt;
+        pvz(i) += paz(i) * kdt;
+    });
+    Kokkos::fence();
 }
 
 // =============================================================================
 // Distributed FSI step using scatter-compute-gather
 // All ranks execute identical code; only force computation is distributed
+// Uses fused force+kick kernels to reduce kernel launches and memory traffic
 // =============================================================================
 static void fsi_step_distributed(DistributedParticles& dp, int start, int count,
                                  double G, double soft2, double dt) {
     if (count <= 0) return;
 
-    // U kick (dt/6) - distributed force + allgather + kick
-    self_acceleration_distributed(dp, start, count, G, soft2);
-    kick_velocities(dp.local, start, count, dt * FSI_KICK);
+    // U kick (dt/6) - fused distributed force + kick
+    self_acceleration_kick_distributed(dp, start, count, G, soft2, dt * FSI_KICK);
 
     // T drift (dt/2) - all ranks drift identically
     drift(dp.local, start, count, dt * FSI_DRIFT);
 
-    // U-tilde kick (2dt/3) with gradient correction
+    // U-tilde kick (2dt/3) with gradient correction - force then fused gradient + kick
     self_acceleration_distributed(dp, start, count, G, soft2);
-    self_gradient_correction_distributed(dp, start, count, G, soft2, dt);
-    kick_velocities(dp.local, start, count, dt * FSI_MOD_KICK);
+    self_gradient_correction_kick_distributed(dp, start, count, G, soft2, dt, dt * FSI_MOD_KICK);
 
     // T drift (dt/2)
     drift(dp.local, start, count, dt * FSI_DRIFT);
 
-    // U kick (dt/6)
-    self_acceleration_distributed(dp, start, count, G, soft2);
-    kick_velocities(dp.local, start, count, dt * FSI_KICK);
+    // U kick (dt/6) - fused distributed force + kick
+    self_acceleration_kick_distributed(dp, start, count, G, soft2, dt * FSI_KICK);
 }
 
 // =============================================================================
