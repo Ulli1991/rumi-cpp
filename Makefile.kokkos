@@ -7,11 +7,20 @@
 #   make -f Makefile.kokkos KOKKOS_DEVICES=OpenMP
 #   make -f Makefile.kokkos KOKKOS_DEVICES=Cuda KOKKOS_ARCH=Ampere80
 #   make -f Makefile.kokkos KOKKOS_DEVICES=HIP  KOKKOS_ARCH=AMD_GFX90A
+#
+# MPI support:
+#   make -f Makefile.kokkos USE_MPI=1 KOKKOS_DEVICES=Cuda
 
 # Kokkos settings (override on command line or via environment)
 KOKKOS_PATH ?= $(HOME)/kokkos
 KOKKOS_DEVICES ?= OpenMP
 KOKKOS_ARCH ?=
+
+# MPI support (set USE_MPI=1 to enable)
+USE_MPI ?= 0
+
+# GPU-aware MPI (set USE_GPU_AWARE_MPI=1 for CUDA-aware/ROCm-aware MPI)
+USE_GPU_AWARE_MPI ?= 0
 
 # Project settings
 SRC_DIR = src-kokkos
@@ -23,7 +32,9 @@ SRC = $(SRC_DIR)/main.cpp \
       $(SRC_DIR)/integrator.cpp \
       $(SRC_DIR)/timestep.cpp \
       $(SRC_DIR)/initial_conditions.cpp \
-      $(SRC_DIR)/diagnostics.cpp
+      $(SRC_DIR)/diagnostics.cpp \
+      $(SRC_DIR)/sfc.cpp \
+      $(SRC_DIR)/mpi_comm.cpp
 
 # Default compiler depends on backend
 ifneq (,$(findstring Cuda,$(KOKKOS_DEVICES)))
@@ -39,6 +50,28 @@ endif
 
 CXXFLAGS = -O3 -std=c++17
 LDFLAGS =
+
+# MPI settings
+ifeq ($(USE_MPI),1)
+  CXXFLAGS += -DUSE_MPI
+  # GPU-aware MPI (CUDA-aware / ROCm-aware)
+  ifeq ($(USE_GPU_AWARE_MPI),1)
+    CXXFLAGS += -DUSE_GPU_AWARE_MPI=1
+  endif
+  # Use MPI compiler wrapper if not using nvcc_wrapper
+  ifneq (,$(findstring Cuda,$(KOKKOS_DEVICES)))
+    # For CUDA, add MPI flags manually
+    CXXFLAGS += $(shell mpicxx --showme:compile 2>/dev/null || echo "")
+    LDFLAGS += $(shell mpicxx --showme:link 2>/dev/null || echo "-lmpi")
+  else ifneq (,$(findstring HIP,$(KOKKOS_DEVICES)))
+    # For HIP/ROCm, similar approach
+    CXXFLAGS += $(shell mpicxx --showme:compile 2>/dev/null || echo "")
+    LDFLAGS += $(shell mpicxx --showme:link 2>/dev/null || echo "-lmpi")
+  else
+    # For other backends, use mpicxx wrapper
+    CXX = mpicxx
+  endif
+endif
 
 # Include Kokkos Makefile
 include $(KOKKOS_PATH)/Makefile.kokkos
