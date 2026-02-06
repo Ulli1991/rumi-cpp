@@ -25,7 +25,7 @@ MEMORY_TILING = true            # Shared memory tiling for force computation (GP
 # Plummer cluster parameters (only used if TEST_CASE = plummer)
 # =============================================================================
 PLUMMER_N = 1000000
-PLUMMER_M_TOTAL = 3.79e4            # Total mass in solar masses
+PLUMMER_M_TOTAL = 3.91e5            # Total mass in solar masses
 PLUMMER_R_HALF = 3.5                # Half-mass radius in parsecs
 PLUMMER_SEED = 42
 PLUMMER_MASS_DIST = kroupa_evolved  # equal, kroupa, or kroupa_evolved

@@ -294,48 +294,41 @@ int main(int argc, char** argv) {
             }
         } else {
             // HHS-FSI (per paper's Algorithm 4)
+            // Note: the post-step force+FROST recomputation is only needed for
+            // diagnostics. HHS recomputes FROST at the start of each step from
+            // the same state, so skipping it for non-diagnostic steps saves a
+            // full O(N^2) pass per step.
             while (t < t_final) {
                 auto step_t0 = std::chrono::high_resolution_clock::now();
 
-                auto hhs_t0 = std::chrono::high_resolution_clock::now();
                 if (use_distributed) {
                     hhs_fsi_step_distributed(dp, dt_max, G, soft2, dt_min, eta, use_n3l, 2);
                 } else {
                     hhs_fsi_step_dynamic(p, 0, p.N, dt_max, G, soft2, dt_min, eta, use_n3l);
                 }
-                auto hhs_t1 = std::chrono::high_resolution_clock::now();
-
-                // Recompute forces and FROST for diagnostics and next step
-                auto frost_t0 = std::chrono::high_resolution_clock::now();
-                if (use_distributed) {
-                    // Distributed: each rank computes for its slice, then allgather
-                    compute_acceleration_and_frost_distributed(dp, G, soft2, eta);
-                } else {
-                    compute_acceleration_and_frost<true>(work_p, G, soft2, eta);
-                }
-                auto frost_t1 = std::chrono::high_resolution_clock::now();
-
-                // Restore level structure for diagnostics
-                assign_levels(work_p, levels);
-                work_p.partition_by_level();
 
                 t += dt_max;
                 step++;
 
                 auto step_t1 = std::chrono::high_resolution_clock::now();
 
-                // Print timing for first few steps
                 if (my_rank == 0 && step <= 5) {
-                    std::printf("Step %d: HHS=%.3fs, FROST=%.3fs, total=%.3fs, dt=%.2e yr\n",
+                    std::printf("Step %d: %.3fs, dt=%.2e yr\n",
                         step,
-                        std::chrono::duration<double>(hhs_t1-hhs_t0).count(),
-                        std::chrono::duration<double>(frost_t1-frost_t0).count(),
                         std::chrono::duration<double>(step_t1-step_t0).count(),
                         dt_max/TIME_UNIT);
                     std::fflush(stdout);
                 }
 
                 if (step % print_interval == 0) {
+                    // Recompute forces + FROST only for diagnostics
+                    if (use_distributed) {
+                        compute_acceleration_and_frost_distributed(dp, G, soft2, eta);
+                    } else {
+                        compute_acceleration_and_frost<true>(work_p, G, soft2, eta);
+                    }
+                    assign_levels(work_p, levels);
+                    work_p.partition_by_level();
                     print_progress(t, step);
                 }
             }
@@ -344,6 +337,16 @@ int main(int argc, char** argv) {
         auto wall_end = std::chrono::high_resolution_clock::now();
         double wall_sec = std::chrono::duration<double>(wall_end - wall_start).count();
 
+        // Final diagnostics: recompute forces + FROST if not already done
+        if (step % print_interval != 0) {
+            if (use_distributed) {
+                compute_acceleration_and_frost_distributed(dp, G, soft2, eta);
+            } else {
+                compute_acceleration_and_frost<true>(work_p, G, soft2, eta);
+            }
+            assign_levels(work_p, levels);
+            work_p.partition_by_level();
+        }
         print_progress(t, step);
 
         auto diag_final = compute_diagnostics(work_p, G, soft2);
