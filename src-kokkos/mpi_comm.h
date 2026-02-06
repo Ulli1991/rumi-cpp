@@ -1,0 +1,129 @@
+#pragma once
+
+#include "particles.h"
+#include <Kokkos_Core.hpp>
+#include <vector>
+
+#ifdef USE_MPI
+#include <mpi.h>
+#endif
+
+// =============================================================================
+// GPU-aware MPI detection
+// =============================================================================
+// Set USE_GPU_AWARE_MPI=1 at compile time if your MPI supports direct GPU buffers
+// - NVIDIA: CUDA-aware OpenMPI (--mca mpi_cuda_support 1)
+// - AMD: ROCm-aware OpenMPI
+//
+// When enabled, MPI calls use device pointers directly (no host staging)
+// When disabled, data is copied to host before MPI transfer (portable fallback)
+// =============================================================================
+
+#ifndef USE_GPU_AWARE_MPI
+#define USE_GPU_AWARE_MPI 0
+#endif
+
+// Check if we're on a GPU backend
+#if defined(KOKKOS_ENABLE_CUDA) || defined(KOKKOS_ENABLE_HIP) || defined(KOKKOS_ENABLE_SYCL)
+#define HAVE_GPU_BACKEND 1
+#else
+#define HAVE_GPU_BACKEND 0
+#endif
+
+// Effective GPU-aware MPI: only use if both compiled with support AND on GPU backend
+#define EFFECTIVE_GPU_AWARE_MPI (USE_GPU_AWARE_MPI && HAVE_GPU_BACKEND)
+
+// =============================================================================
+// MPI Communication Module for Multi-GPU N-Body
+//
+// Architecture: Scatter-compute-gather paradigm (matching FROST paper)
+//
+// All ranks maintain a REPLICATED copy of ALL particles. The HHS recursion
+// (partitioning, drifts, kicks) runs identically on all ranks, keeping them
+// synchronized WITHOUT explicit communication.
+//
+// Only force computation is distributed: each rank computes forces for
+// particles [my_start, my_start + my_count), then Allgather accelerations.
+//
+// This gives O(N) communication per force computation instead of O(N * 2^L)
+// for ghost-exchange approaches.
+// =============================================================================
+
+// MPI wrapper that compiles with or without MPI
+namespace MPIComm {
+
+// Initialize MPI (no-op if MPI not enabled)
+void init(int* argc, char*** argv);
+
+// Finalize MPI
+void finalize();
+
+// Get rank and size
+int rank();
+int size();
+
+// Barrier
+void barrier();
+
+// Check if MPI is active (compiled with MPI and size > 1)
+bool is_distributed();
+
+} // namespace MPIComm
+
+// =============================================================================
+// Distributed Particles Manager
+// =============================================================================
+struct DistributedParticles {
+    // ALL particles, replicated on every rank
+    Particles local;
+
+    // This rank's responsibility for force computation
+    // Rank r computes forces for particles [my_start, my_start + my_count)
+    int my_start = 0;
+    int my_count = 0;
+
+    // Number of particles (same on all ranks in replicated mode)
+    int N_local = 0;
+
+    // Total particles (same as N_local in replicated mode)
+    int N_total = 0;
+
+    // Initialize distributed particles from a global particle set
+    // Only rank 0 should have the full particle set initially
+    // After this, ALL ranks have ALL particles (replicated)
+    void distribute_initial(Particles& global_particles);
+
+    // Allgather accelerations after distributed force computation
+    // Each rank has computed accelerations for [my_start, my_start + my_count)
+    // After this call, all ranks have full acceleration array
+    void allgather_accelerations();
+
+    // Allgather accelerations for a SUBSET of particles [start, start+count)
+    // Used when only a subset of particles were involved in force computation
+    // Each rank computed for its slice of the subset
+    void allgather_accelerations_subset(int start, int count);
+
+    // Allgather FROST timesteps after distributed FROST computation
+    void allgather_frost();
+
+    // Gather particle data from all ranks to rank 0
+    // In replicated mode, just returns local (all ranks have all data)
+    void gather_to_root(Particles& global_particles);
+
+    // Compute the slice of particles [start, start+count) that this rank
+    // is responsible for in distributed force computation
+    void get_force_slice(int start, int count, int& slice_start, int& slice_count) const;
+};
+
+// =============================================================================
+// MPI data types and tags
+// =============================================================================
+#ifdef USE_MPI
+
+// Message tags
+enum MPITags {
+    TAG_PARTICLE_COUNT = 100,
+    TAG_PARTICLE_DATA = 101,
+};
+
+#endif // USE_MPI

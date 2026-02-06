@@ -5,6 +5,7 @@
 #include "initial_conditions.h"
 #include "diagnostics.h"
 #include "constants.h"
+#include "mpi_comm.h"
 
 #include <Kokkos_Core.hpp>
 #include <cstdio>
@@ -71,11 +72,28 @@ static void print_usage(const char* prog) {
 static const char* outer_planet_names[] = {"Sun", "Jupiter", "Saturn", "Uranus", "Neptune"};
 
 int main(int argc, char** argv) {
+    // Initialize MPI before Kokkos (MPI may set device affinity)
+    MPIComm::init(&argc, &argv);
+
     Kokkos::initialize(argc, argv);
     {
-        std::printf("Kokkos configuration:\n"); std::fflush(stdout);
-        Kokkos::print_configuration(std::cout);
-        std::cout << std::flush;
+        int my_rank = MPIComm::rank();
+        int n_ranks = MPIComm::size();
+
+        if (my_rank == 0) {
+            std::printf("Kokkos configuration:\n"); std::fflush(stdout);
+            Kokkos::print_configuration(std::cout);
+            std::cout << std::flush;
+            if (n_ranks > 1) {
+                std::printf("\nMPI: %d ranks\n", n_ranks);
+#if EFFECTIVE_GPU_AWARE_MPI
+                std::printf("GPU-aware MPI: ENABLED\n");
+#else
+                std::printf("GPU-aware MPI: disabled (host-staged transfers)\n");
+#endif
+            }
+        }
+        MPIComm::barrier();
 
         std::string config_file = "config.txt";
         std::string test_override;
@@ -86,7 +104,7 @@ int main(int argc, char** argv) {
             else if (!std::strcmp(argv[i], "--test") && i+1 < argc)
                 test_override = argv[++i];
             else if (!std::strcmp(argv[i], "--help") || !std::strcmp(argv[i], "-h")) {
-                print_usage(argv[0]); Kokkos::finalize(); return 0;
+                print_usage(argv[0]); Kokkos::finalize(); MPIComm::finalize(); return 0;
             }
             // Silently skip Kokkos args (--kokkos-*)
             else if (std::strncmp(argv[i], "--kokkos", 8) == 0) {
@@ -95,7 +113,7 @@ int main(int argc, char** argv) {
             }
             else {
                 std::fprintf(stderr, "Unknown option: %s\n", argv[i]);
-                print_usage(argv[0]); Kokkos::finalize(); return 1;
+                print_usage(argv[0]); Kokkos::finalize(); MPIComm::finalize(); return 1;
             }
         }
 
@@ -140,63 +158,111 @@ int main(int argc, char** argv) {
         double t_final = t_final_yr * TIME_UNIT;
 
         Particles p;
+        DistributedParticles dp;  // For multi-GPU mode
         const char* const* names = nullptr;
-        std::printf("Initializing particles...\n"); std::fflush(stdout);
-        auto t_init0 = std::chrono::high_resolution_clock::now();
-        if (test == "outer_planets") {
-            init_outer_planets(p);
-            names = outer_planet_names;
-        } else if (test == "plummer") {
-            init_plummer(p, N_plummer, M_total_msun, r_half_pc, seed, mass_dist, age_gyr, metallicity);
-        } else {
-            std::fprintf(stderr, "Unknown test case: %s\n", test.c_str());
-            Kokkos::finalize(); return 1;
+        bool use_distributed = MPIComm::is_distributed();
+
+        if (my_rank == 0) {
+            std::printf("Initializing particles...\n"); std::fflush(stdout);
         }
+        auto t_init0 = std::chrono::high_resolution_clock::now();
+
+        // Initialize particles on rank 0 (or all ranks for single-GPU)
+        if (my_rank == 0 || !use_distributed) {
+            if (test == "outer_planets") {
+                init_outer_planets(p);
+                names = outer_planet_names;
+            } else if (test == "plummer") {
+                init_plummer(p, N_plummer, M_total_msun, r_half_pc, seed, mass_dist, age_gyr, metallicity);
+            } else {
+                std::fprintf(stderr, "Unknown test case: %s\n", test.c_str());
+                MPIComm::finalize();
+                Kokkos::finalize();
+                return 1;
+            }
+        }
+
+        // Distribute particles across ranks if using MPI
+        if (use_distributed) {
+            dp.distribute_initial(p);
+            // After distribution, each rank works with dp.local
+            // Rank 0's 'p' is no longer valid - use dp for all operations
+        }
+
         auto t_init1 = std::chrono::high_resolution_clock::now();
-        std::printf("Particle init: %.3f s\n", std::chrono::duration<double>(t_init1-t_init0).count());
-        std::fflush(stdout);
+        if (my_rank == 0) {
+            std::printf("Particle init: %.3f s\n", std::chrono::duration<double>(t_init1-t_init0).count());
+            std::fflush(stdout);
+        }
 
         bool is_cluster = (test == "plummer");
 
+        // Get particle count (local or total depending on mode)
+        int N_display = use_distributed ? dp.N_total : p.N;
+
         const char* mode_str = (integrator == "hhs") ? "hhs" : "fsi";
-        std::printf("=== Kokkos N-Body: %s, %s test, N=%d, N3L=%s ===\n",
-                    mode_str, test.c_str(), p.N, use_n3l ? "true" : "false");
-        std::fflush(stdout);
-        std::printf("G=%.4e  soft=%.4e cm  dt_max=%.4e yr  dt_min=%.4e yr  eta=%.4f\n",
-                    G, soft_cm, dt_max_yr, dt_min_yr, eta);
-        std::printf("t_final=%.4e yr  print_interval=%d  memory_tiling=%s\n\n",
-                    t_final_yr, print_interval, use_memory_tiling ? "true" : "false");
-        std::fflush(stdout);
+        if (my_rank == 0) {
+            std::printf("=== Kokkos N-Body: %s, %s test, N=%d, N3L=%s ===\n",
+                        mode_str, test.c_str(), N_display, use_n3l ? "true" : "false");
+            if (use_distributed) {
+                std::printf("    Distributed mode: %d ranks, %d local particles\n",
+                            n_ranks, dp.N_local);
+            }
+            std::fflush(stdout);
+            std::printf("G=%.4e  soft=%.4e cm  dt_max=%.4e yr  dt_min=%.4e yr  eta=%.4f\n",
+                        G, soft_cm, dt_max_yr, dt_min_yr, eta);
+            std::printf("t_final=%.4e yr  print_interval=%d  memory_tiling=%s\n\n",
+                        t_final_yr, print_interval, use_memory_tiling ? "true" : "false");
+            std::fflush(stdout);
+        }
 
         auto levels = build_levels(dt_max, dt_min);
 
-        // Initial force computation + FROST (always use N3L for FROST - single O(N²) computation)
-        std::printf("Computing initial forces...\n"); std::fflush(stdout);
+        // Get reference to working particles (local for distributed, p for single)
+        Particles& work_p = use_distributed ? dp.local : p;
+
+        // Initial force computation + FROST
+        if (my_rank == 0) {
+            std::printf("Computing initial forces...\n"); std::fflush(stdout);
+        }
         auto t0 = std::chrono::high_resolution_clock::now();
-        compute_acceleration_and_frost<true>(p, G, soft2, eta);
+
+        if (use_distributed) {
+            // Scatter-compute-gather: each rank computes its slice, then allgather
+            compute_acceleration_and_frost_distributed(dp, G, soft2, eta);
+        } else {
+            compute_acceleration_and_frost<true>(work_p, G, soft2, eta);
+        }
+
         auto t1 = std::chrono::high_resolution_clock::now();
-        std::printf("Initial forces: %.3f s\n", std::chrono::duration<double>(t1-t0).count());
-        std::fflush(stdout);
+        if (my_rank == 0) {
+            std::printf("Initial forces: %.3f s\n", std::chrono::duration<double>(t1-t0).count());
+            std::fflush(stdout);
+        }
 
-        assign_levels(p, levels);
-        p.partition_by_level();
+        assign_levels(work_p, levels);
+        work_p.partition_by_level();
 
-        print_timebin_table(p, levels, -1.0, 0.0, 0.0, 0.0, 0, is_cluster);
+        if (my_rank == 0) {
+            print_timebin_table(work_p, levels, -1.0, 0.0, 0.0, 0.0, 0, is_cluster);
+        }
 
         // Print dt range
-        {
-            auto h_dt = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.dt_frost);
+        if (my_rank == 0) {
+            auto h_dt = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), work_p.dt_frost);
             double mn = 1e30, mx = 0;
-            for (int i = 0; i < p.N; i++) {
+            for (int i = 0; i < work_p.N; i++) {
                 if (h_dt(i) < mn) mn = h_dt(i);
                 if (h_dt(i) > mx) mx = h_dt(i);
             }
             std::printf("Particle dt range: [%.4e, %.4e] yr\n\n", mn/TIME_UNIT, mx/TIME_UNIT);
         }
 
-        auto diag0 = compute_diagnostics(p, G, soft2);
+        auto diag0 = compute_diagnostics(work_p, G, soft2);
 
-        std::printf("Running...\n"); std::fflush(stdout);
+        if (my_rank == 0) {
+            std::printf("Running...\n"); std::fflush(stdout);
+        }
 
         auto wall_start = std::chrono::high_resolution_clock::now();
 
@@ -204,22 +270,25 @@ int main(int argc, char** argv) {
         int step = 0;
 
         auto print_progress = [&](double t_now, int step_now) {
-            auto diag = compute_diagnostics(p, G, soft2);
+            auto diag = compute_diagnostics(work_p, G, soft2);
             double dE, dP, dL;
-            compute_errors(diag, diag0, p, is_cluster, dE, dP, dL);
-            print_timebin_table(p, levels, dE, dP, dL, t_now/TIME_UNIT, step_now, is_cluster);
+            compute_errors(diag, diag0, work_p, is_cluster, dE, dP, dL);
+            if (my_rank == 0) {
+                print_timebin_table(work_p, levels, dE, dP, dL, t_now/TIME_UNIT, step_now, is_cluster);
+            }
         };
 
         if (integrator == "fsi") {
             double dt_global = levels.back();
             while (t < t_final) {
-                fsi_step(p, 0, p.N, G, soft2, dt_global);
+                // In replicated mode, work_p contains all particles on all ranks
+                fsi_step(work_p, 0, work_p.N, G, soft2, dt_global);
                 t += dt_global;
                 step++;
                 if (step % print_interval == 0) {
-                    compute_acceleration_and_frost<true>(p, G, soft2, eta);
-                    assign_levels(p, levels);
-                    p.partition_by_level();
+                    compute_acceleration_and_frost<true>(work_p, G, soft2, eta);
+                    assign_levels(work_p, levels);
+                    work_p.partition_by_level();
                     print_progress(t, step);
                 }
             }
@@ -229,17 +298,26 @@ int main(int argc, char** argv) {
                 auto step_t0 = std::chrono::high_resolution_clock::now();
 
                 auto hhs_t0 = std::chrono::high_resolution_clock::now();
-                hhs_fsi_step_dynamic(p, 0, p.N, dt_max, G, soft2, dt_min, eta, use_n3l);
+                if (use_distributed) {
+                    hhs_fsi_step_distributed(dp, dt_max, G, soft2, dt_min, eta, use_n3l, 2);
+                } else {
+                    hhs_fsi_step_dynamic(p, 0, p.N, dt_max, G, soft2, dt_min, eta, use_n3l);
+                }
                 auto hhs_t1 = std::chrono::high_resolution_clock::now();
 
-                // Recompute forces and FROST for diagnostics and next step (always N3L)
+                // Recompute forces and FROST for diagnostics and next step
                 auto frost_t0 = std::chrono::high_resolution_clock::now();
-                compute_acceleration_and_frost<true>(p, G, soft2, eta);
+                if (use_distributed) {
+                    // Distributed: each rank computes for its slice, then allgather
+                    compute_acceleration_and_frost_distributed(dp, G, soft2, eta);
+                } else {
+                    compute_acceleration_and_frost<true>(work_p, G, soft2, eta);
+                }
                 auto frost_t1 = std::chrono::high_resolution_clock::now();
 
                 // Restore level structure for diagnostics
-                assign_levels(p, levels);
-                p.partition_by_level();
+                assign_levels(work_p, levels);
+                work_p.partition_by_level();
 
                 t += dt_max;
                 step++;
@@ -247,7 +325,7 @@ int main(int argc, char** argv) {
                 auto step_t1 = std::chrono::high_resolution_clock::now();
 
                 // Print timing for first few steps
-                if (step <= 5) {
+                if (my_rank == 0 && step <= 5) {
                     std::printf("Step %d: HHS=%.3fs, FROST=%.3fs, total=%.3fs, dt=%.2e yr\n",
                         step,
                         std::chrono::duration<double>(hhs_t1-hhs_t0).count(),
@@ -268,11 +346,18 @@ int main(int argc, char** argv) {
 
         print_progress(t, step);
 
-        auto diag_final = compute_diagnostics(p, G, soft2);
-        print_final(diag_final, diag0, p, levels, is_cluster, wall_sec, step, names);
+        auto diag_final = compute_diagnostics(work_p, G, soft2);
+        if (my_rank == 0) {
+            print_final(diag_final, diag0, work_p, levels, is_cluster, wall_sec, step, names);
+        }
 
-        p.deallocate();
+        if (use_distributed) {
+            dp.local.deallocate();
+        } else {
+            p.deallocate();
+        }
     }
     Kokkos::finalize();
+    MPIComm::finalize();
     return 0;
 }

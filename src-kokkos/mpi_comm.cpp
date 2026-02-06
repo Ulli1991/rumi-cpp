@@ -1,0 +1,397 @@
+#include "mpi_comm.h"
+#include <cstdio>
+#include <algorithm>
+#include <numeric>
+
+// =============================================================================
+// MPIComm namespace implementation
+// =============================================================================
+
+namespace MPIComm {
+
+static int s_rank = 0;
+static int s_size = 1;
+
+void init(int* argc, char*** argv) {
+#ifdef USE_MPI
+    int provided;
+    MPI_Init_thread(argc, argv, MPI_THREAD_FUNNELED, &provided);
+    MPI_Comm_rank(MPI_COMM_WORLD, &s_rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &s_size);
+
+    if (s_rank == 0) {
+        std::printf("MPI initialized: %d ranks\n", s_size);
+    }
+#else
+    (void)argc; (void)argv;
+    s_rank = 0;
+    s_size = 1;
+#endif
+}
+
+void finalize() {
+#ifdef USE_MPI
+    MPI_Finalize();
+#endif
+}
+
+int rank() { return s_rank; }
+int size() { return s_size; }
+
+void barrier() {
+#ifdef USE_MPI
+    MPI_Barrier(MPI_COMM_WORLD);
+#endif
+}
+
+bool is_distributed() {
+#ifdef USE_MPI
+    return s_size > 1;
+#else
+    return false;
+#endif
+}
+
+} // namespace MPIComm
+
+// =============================================================================
+// DistributedParticles implementation
+// =============================================================================
+
+void DistributedParticles::distribute_initial(Particles& global_particles) {
+#ifdef USE_MPI
+    int my_rank = MPIComm::rank();
+    int n_ranks = MPIComm::size();
+
+    if (n_ranks == 1) {
+        // Single rank: just copy
+        local = global_particles;
+        N_local = local.N;
+        N_total = N_local;
+        my_start = 0;
+        my_count = N_local;
+        return;
+    }
+
+    // =========================================================================
+    // Replicated particles approach (scatter-compute-gather)
+    // All ranks get ALL particles. Each rank computes forces for a slice.
+    // =========================================================================
+
+    // Step 1: Rank 0 broadcasts total count
+    if (my_rank == 0) {
+        N_total = global_particles.N;
+    }
+    MPI_Bcast(&N_total, 1, MPI_INT, 0, MPI_COMM_WORLD);
+
+    // Step 2: Compute force computation responsibility for each rank
+    int base_count = N_total / n_ranks;
+    int remainder = N_total % n_ranks;
+
+    my_start = 0;
+    for (int r = 0; r < my_rank; r++) {
+        my_start += base_count + (r < remainder ? 1 : 0);
+    }
+    my_count = base_count + (my_rank < remainder ? 1 : 0);
+
+    // N_local = N_total because all ranks have all particles
+    N_local = N_total;
+
+    // Step 3: Allocate local particles (full size on all ranks)
+    local.allocate(N_total);
+
+    // Step 4: Broadcast ALL particles from rank 0 to all ranks
+    if (my_rank == 0) {
+        // Copy to host for broadcast
+        auto h_x = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), global_particles.x);
+        auto h_y = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), global_particles.y);
+        auto h_z = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), global_particles.z);
+        auto h_vx = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), global_particles.vx);
+        auto h_vy = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), global_particles.vy);
+        auto h_vz = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), global_particles.vz);
+        auto h_ax = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), global_particles.ax);
+        auto h_ay = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), global_particles.ay);
+        auto h_az = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), global_particles.az);
+        auto h_mass = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), global_particles.mass);
+        auto h_dt = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), global_particles.dt_frost);
+        auto h_level = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), global_particles.level);
+        auto h_orig = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), global_particles.orig_index);
+
+        // Broadcast each array
+        MPI_Bcast(h_x.data(), N_total, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+        MPI_Bcast(h_y.data(), N_total, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+        MPI_Bcast(h_z.data(), N_total, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+        MPI_Bcast(h_vx.data(), N_total, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+        MPI_Bcast(h_vy.data(), N_total, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+        MPI_Bcast(h_vz.data(), N_total, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+        MPI_Bcast(h_ax.data(), N_total, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+        MPI_Bcast(h_ay.data(), N_total, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+        MPI_Bcast(h_az.data(), N_total, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+        MPI_Bcast(h_mass.data(), N_total, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+        MPI_Bcast(h_dt.data(), N_total, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+        MPI_Bcast(h_level.data(), N_total, MPI_INT, 0, MPI_COMM_WORLD);
+        MPI_Bcast(h_orig.data(), N_total, MPI_INT, 0, MPI_COMM_WORLD);
+
+        // Copy to device
+        Kokkos::deep_copy(local.x, h_x);
+        Kokkos::deep_copy(local.y, h_y);
+        Kokkos::deep_copy(local.z, h_z);
+        Kokkos::deep_copy(local.vx, h_vx);
+        Kokkos::deep_copy(local.vy, h_vy);
+        Kokkos::deep_copy(local.vz, h_vz);
+        Kokkos::deep_copy(local.ax, h_ax);
+        Kokkos::deep_copy(local.ay, h_ay);
+        Kokkos::deep_copy(local.az, h_az);
+        Kokkos::deep_copy(local.mass, h_mass);
+        Kokkos::deep_copy(local.dt_frost, h_dt);
+        Kokkos::deep_copy(local.level, h_level);
+        Kokkos::deep_copy(local.orig_index, h_orig);
+    } else {
+        // Other ranks: allocate host buffers and receive broadcast
+        auto h_x = Kokkos::create_mirror_view(local.x);
+        auto h_y = Kokkos::create_mirror_view(local.y);
+        auto h_z = Kokkos::create_mirror_view(local.z);
+        auto h_vx = Kokkos::create_mirror_view(local.vx);
+        auto h_vy = Kokkos::create_mirror_view(local.vy);
+        auto h_vz = Kokkos::create_mirror_view(local.vz);
+        auto h_ax = Kokkos::create_mirror_view(local.ax);
+        auto h_ay = Kokkos::create_mirror_view(local.ay);
+        auto h_az = Kokkos::create_mirror_view(local.az);
+        auto h_mass = Kokkos::create_mirror_view(local.mass);
+        auto h_dt = Kokkos::create_mirror_view(local.dt_frost);
+        auto h_level = Kokkos::create_mirror_view(local.level);
+        auto h_orig = Kokkos::create_mirror_view(local.orig_index);
+
+        // Receive broadcast
+        MPI_Bcast(h_x.data(), N_total, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+        MPI_Bcast(h_y.data(), N_total, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+        MPI_Bcast(h_z.data(), N_total, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+        MPI_Bcast(h_vx.data(), N_total, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+        MPI_Bcast(h_vy.data(), N_total, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+        MPI_Bcast(h_vz.data(), N_total, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+        MPI_Bcast(h_ax.data(), N_total, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+        MPI_Bcast(h_ay.data(), N_total, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+        MPI_Bcast(h_az.data(), N_total, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+        MPI_Bcast(h_mass.data(), N_total, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+        MPI_Bcast(h_dt.data(), N_total, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+        MPI_Bcast(h_level.data(), N_total, MPI_INT, 0, MPI_COMM_WORLD);
+        MPI_Bcast(h_orig.data(), N_total, MPI_INT, 0, MPI_COMM_WORLD);
+
+        // Copy to device
+        Kokkos::deep_copy(local.x, h_x);
+        Kokkos::deep_copy(local.y, h_y);
+        Kokkos::deep_copy(local.z, h_z);
+        Kokkos::deep_copy(local.vx, h_vx);
+        Kokkos::deep_copy(local.vy, h_vy);
+        Kokkos::deep_copy(local.vz, h_vz);
+        Kokkos::deep_copy(local.ax, h_ax);
+        Kokkos::deep_copy(local.ay, h_ay);
+        Kokkos::deep_copy(local.az, h_az);
+        Kokkos::deep_copy(local.mass, h_mass);
+        Kokkos::deep_copy(local.dt_frost, h_dt);
+        Kokkos::deep_copy(local.level, h_level);
+        Kokkos::deep_copy(local.orig_index, h_orig);
+    }
+
+    if (my_rank == 0) {
+        std::printf("Replicated particles: %d total, rank 0 computes forces for [%d, %d)\n",
+                    N_total, my_start, my_start + my_count);
+    }
+
+    MPI_Barrier(MPI_COMM_WORLD);
+#else
+    // Non-MPI: just use global particles directly
+    local = global_particles;
+    N_local = local.N;
+    N_total = N_local;
+    my_start = 0;
+    my_count = N_local;
+#endif
+}
+
+void DistributedParticles::get_force_slice(int start, int count, int& slice_start, int& slice_count) const {
+#ifdef USE_MPI
+    int n_ranks = MPIComm::size();
+    int my_rank = MPIComm::rank();
+
+    if (n_ranks == 1) {
+        slice_start = start;
+        slice_count = count;
+        return;
+    }
+
+    // Distribute [start, start+count) evenly among ranks
+    int base = count / n_ranks;
+    int remainder = count % n_ranks;
+
+    slice_start = start;
+    for (int r = 0; r < my_rank; r++) {
+        slice_start += base + (r < remainder ? 1 : 0);
+    }
+    slice_count = base + (my_rank < remainder ? 1 : 0);
+
+    // Clamp to valid range
+    if (slice_start >= start + count) {
+        slice_start = start + count;
+        slice_count = 0;
+    } else if (slice_start + slice_count > start + count) {
+        slice_count = start + count - slice_start;
+    }
+#else
+    slice_start = start;
+    slice_count = count;
+#endif
+}
+
+void DistributedParticles::allgather_accelerations() {
+    allgather_accelerations_subset(0, N_total);
+}
+
+void DistributedParticles::allgather_accelerations_subset(int start, int count) {
+#ifdef USE_MPI
+    if (MPIComm::size() == 1 || count == 0) return;
+
+    int n_ranks = MPIComm::size();
+
+    // Compute counts and displacements for each rank's contribution
+    std::vector<int> all_counts(n_ranks);
+    std::vector<int> displs(n_ranks);
+
+    int base = count / n_ranks;
+    int remainder = count % n_ranks;
+
+    displs[0] = 0;
+    for (int r = 0; r < n_ranks; r++) {
+        all_counts[r] = base + (r < remainder ? 1 : 0);
+        if (r > 0) displs[r] = displs[r-1] + all_counts[r-1];
+    }
+
+    Kokkos::fence();  // Ensure GPU work complete before MPI
+
+#if EFFECTIVE_GPU_AWARE_MPI
+    // GPU-aware MPI: allgatherv directly on device memory
+    Kokkos::View<double*> recv_ax("recv_ax", count);
+    Kokkos::View<double*> recv_ay("recv_ay", count);
+    Kokkos::View<double*> recv_az("recv_az", count);
+
+    int my_slice_start, my_slice_count;
+    get_force_slice(start, count, my_slice_start, my_slice_count);
+
+    MPI_Allgatherv(local.ax.data() + my_slice_start, my_slice_count, MPI_DOUBLE,
+                   recv_ax.data(), all_counts.data(), displs.data(), MPI_DOUBLE,
+                   MPI_COMM_WORLD);
+    MPI_Allgatherv(local.ay.data() + my_slice_start, my_slice_count, MPI_DOUBLE,
+                   recv_ay.data(), all_counts.data(), displs.data(), MPI_DOUBLE,
+                   MPI_COMM_WORLD);
+    MPI_Allgatherv(local.az.data() + my_slice_start, my_slice_count, MPI_DOUBLE,
+                   recv_az.data(), all_counts.data(), displs.data(), MPI_DOUBLE,
+                   MPI_COMM_WORLD);
+
+    // Copy gathered data back to local arrays
+    auto lax = local.ax; auto lay = local.ay; auto laz = local.az;
+    int start_offset = start;
+    Kokkos::parallel_for("copy_gathered_acc", count, KOKKOS_LAMBDA(int i) {
+        lax(start_offset + i) = recv_ax(i);
+        lay(start_offset + i) = recv_ay(i);
+        laz(start_offset + i) = recv_az(i);
+    });
+    Kokkos::fence();
+
+#else
+    // Host-staged MPI path
+    int my_slice_start, my_slice_count;
+    get_force_slice(start, count, my_slice_start, my_slice_count);
+
+    // Copy my slice to host
+    auto h_ax = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
+        Kokkos::subview(local.ax, Kokkos::make_pair(my_slice_start, my_slice_start + my_slice_count)));
+    auto h_ay = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
+        Kokkos::subview(local.ay, Kokkos::make_pair(my_slice_start, my_slice_start + my_slice_count)));
+    auto h_az = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
+        Kokkos::subview(local.az, Kokkos::make_pair(my_slice_start, my_slice_start + my_slice_count)));
+
+    std::vector<double> send_ax(my_slice_count), send_ay(my_slice_count), send_az(my_slice_count);
+    for (int i = 0; i < my_slice_count; i++) {
+        send_ax[i] = h_ax(i);
+        send_ay[i] = h_ay(i);
+        send_az[i] = h_az(i);
+    }
+
+    std::vector<double> recv_ax(count), recv_ay(count), recv_az(count);
+
+    MPI_Allgatherv(send_ax.data(), my_slice_count, MPI_DOUBLE,
+                   recv_ax.data(), all_counts.data(), displs.data(), MPI_DOUBLE,
+                   MPI_COMM_WORLD);
+    MPI_Allgatherv(send_ay.data(), my_slice_count, MPI_DOUBLE,
+                   recv_ay.data(), all_counts.data(), displs.data(), MPI_DOUBLE,
+                   MPI_COMM_WORLD);
+    MPI_Allgatherv(send_az.data(), my_slice_count, MPI_DOUBLE,
+                   recv_az.data(), all_counts.data(), displs.data(), MPI_DOUBLE,
+                   MPI_COMM_WORLD);
+
+    // Copy back to device at correct offset
+    auto hg_ax = Kokkos::create_mirror_view(local.ax);
+    auto hg_ay = Kokkos::create_mirror_view(local.ay);
+    auto hg_az = Kokkos::create_mirror_view(local.az);
+
+    Kokkos::deep_copy(hg_ax, local.ax);
+    Kokkos::deep_copy(hg_ay, local.ay);
+    Kokkos::deep_copy(hg_az, local.az);
+
+    for (int i = 0; i < count; i++) {
+        hg_ax(start + i) = recv_ax[i];
+        hg_ay(start + i) = recv_ay[i];
+        hg_az(start + i) = recv_az[i];
+    }
+
+    Kokkos::deep_copy(local.ax, hg_ax);
+    Kokkos::deep_copy(local.ay, hg_ay);
+    Kokkos::deep_copy(local.az, hg_az);
+#endif // EFFECTIVE_GPU_AWARE_MPI
+
+#endif // USE_MPI
+}
+
+void DistributedParticles::allgather_frost() {
+#ifdef USE_MPI
+    if (MPIComm::size() == 1) return;
+
+    int n_ranks = MPIComm::size();
+
+    // Compute counts and displacements
+    std::vector<int> all_counts(n_ranks);
+    std::vector<int> displs(n_ranks);
+
+    int base = N_total / n_ranks;
+    int remainder = N_total % n_ranks;
+
+    displs[0] = 0;
+    for (int r = 0; r < n_ranks; r++) {
+        all_counts[r] = base + (r < remainder ? 1 : 0);
+        if (r > 0) displs[r] = displs[r-1] + all_counts[r-1];
+    }
+
+    Kokkos::fence();
+
+    // Copy my slice to host
+    auto h_dt = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
+        Kokkos::subview(local.dt_frost, Kokkos::make_pair(my_start, my_start + my_count)));
+
+    std::vector<double> send_dt(my_count), recv_dt(N_total);
+    for (int i = 0; i < my_count; i++) send_dt[i] = h_dt(i);
+
+    MPI_Allgatherv(send_dt.data(), my_count, MPI_DOUBLE,
+                   recv_dt.data(), all_counts.data(), displs.data(), MPI_DOUBLE,
+                   MPI_COMM_WORLD);
+
+    // Copy back to device
+    auto hg_dt = Kokkos::create_mirror_view(local.dt_frost);
+    for (int i = 0; i < N_total; i++) hg_dt(i) = recv_dt[i];
+    Kokkos::deep_copy(local.dt_frost, hg_dt);
+#endif
+}
+
+void DistributedParticles::gather_to_root(Particles& global_particles) {
+    // In replicated mode, all ranks have all particles
+    global_particles = local;
+}

@@ -120,36 +120,35 @@ void Particles::partition_by_level() {
     level_count = static_cast<int*>(std::calloc(n_levels, sizeof(int)));
     level_start = static_cast<int*>(std::calloc(n_levels, sizeof(int)));
 
-    // Create device Views for counts and cursors
-    Kokkos::View<int*> d_counts("d_counts", n_levels);
-    Kokkos::View<int*> d_cursors("d_cursors", n_levels);
-
-    // Step 1: Count particles per level on GPU
+    // Step 1: Count particles per level and compute prefix sums
+    // Use prefix scans per level for deterministic counting
     auto p_level = level;
-    Kokkos::parallel_for("count_levels", N, KOKKOS_LAMBDA(int i) {
-        Kokkos::atomic_fetch_add(&d_counts(p_level(i)), 1);
-    });
-    Kokkos::fence();
 
-    // Copy counts to host and compute prefix sums
-    auto h_counts = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), d_counts);
-    for (int l = 0; l < n_levels; l++) level_count[l] = h_counts(l);
     level_start[0] = 0;
-    for (int l = 1; l < n_levels; l++)
-        level_start[l] = level_start[l-1] + level_count[l-1];
+    for (int l = 0; l < n_levels; l++) {
+        int count_l = 0;
+        Kokkos::parallel_reduce("count_level", N,
+            KOKKOS_LAMBDA(int i, int& sum) {
+                if (p_level(i) == l) sum += 1;
+            }, count_l);
+        level_count[l] = count_l;
+        if (l > 0) level_start[l] = level_start[l-1] + level_count[l-1];
+    }
 
-    // Copy level_start to device cursors
-    auto h_cursors = Kokkos::create_mirror_view(d_cursors);
-    for (int l = 0; l < n_levels; l++) h_cursors(l) = level_start[l];
-    Kokkos::deep_copy(d_cursors, h_cursors);
-
-    // Step 2: Build permutation on GPU using atomics
+    // Step 2: Build permutation DETERMINISTICALLY using prefix scans
+    // (atomics would be non-deterministic across MPI ranks on different GPUs)
     auto perm = scratch_i;  // reuse scratch for permutation
-    Kokkos::parallel_for("build_perm", N, KOKKOS_LAMBDA(int i) {
-        int l = p_level(i);
-        int dest = Kokkos::atomic_fetch_add(&d_cursors(l), 1);
-        perm(dest) = i;  // perm[dest] = source index i
-    });
+    for (int l = 0; l < n_levels; l++) {
+        int l_start = level_start[l];
+        Kokkos::parallel_scan("level_perm_scan", N,
+            KOKKOS_LAMBDA(int i, int& partial_sum, bool is_final) {
+                int is_level = (p_level(i) == l) ? 1 : 0;
+                if (is_final && is_level) {
+                    perm(l_start + partial_sum) = i;
+                }
+                partial_sum += is_level;
+            });
+    }
     Kokkos::fence();
 
     // Step 3: Apply permutation with fused gather/copy (2 kernels instead of 26)

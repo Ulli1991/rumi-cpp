@@ -2,8 +2,13 @@
 #include "forces.h"
 #include "timestep.h"
 #include "constants.h"
+#include "mpi_comm.h"
 #include <Kokkos_Core.hpp>
 #include <vector>
+#include <cfloat>
+
+// Tile size for shared memory tiling (Rantala paper uses p=32)
+constexpr int DIST_TILE_SIZE = 32;
 
 // Fused function pointer types (force + kick combined)
 using AccKickFn = void(*)(Particles&, int, int, double, double, double);
@@ -15,6 +20,172 @@ static AccKickFn fn_self_acc_kick = nullptr;
 static AccGradKickFn fn_self_acc_grad_kick = nullptr;
 static CrossAccGradKickFn fn_cross_acc_grad_kick = nullptr;
 static CrossAccKickCacheFn fn_cross_acc_kick_cache = nullptr;
+
+// =============================================================================
+// Distributed force + FROST computation for between-step updates
+// Each rank computes for its slice [my_start, my_count) from ALL N particles
+// Then allgather both accelerations and FROST values
+// Uses tiled GPU kernel with shared memory for efficiency
+// =============================================================================
+void compute_acceleration_and_frost_distributed(DistributedParticles& dp,
+                                                 double G, double soft2, double eta) {
+#ifdef USE_MPI
+    if (MPIComm::size() == 1) {
+        // Single rank: use optimized single-GPU version
+        compute_acceleration_and_frost<true>(dp.local, G, soft2, eta);
+        return;
+    }
+
+    const int N = dp.N_total;
+    const int my_start = dp.my_start;
+    const int my_count = dp.my_count;
+
+    if (my_count == 0) {
+        dp.allgather_accelerations();
+        dp.allgather_frost();
+        return;
+    }
+
+    // Pack data for vectorized memory access
+    dp.local.pack();
+
+    auto pos = dp.local.pos_packed;
+    auto vel = dp.local.vel_packed;
+    auto pax = dp.local.ax;
+    auto pay = dp.local.ay;
+    auto paz = dp.local.az;
+    auto dt_f = dp.local.dt_frost;
+
+    // Tiled GPU kernel: each team handles DIST_TILE_SIZE i-particles from my slice
+    using team_policy = Kokkos::TeamPolicy<>;
+    using member_type = team_policy::member_type;
+    using scratch_space = Kokkos::DefaultExecutionSpace::scratch_memory_space;
+
+    size_t scratch_size = DIST_TILE_SIZE * 7 * sizeof(double);
+    int num_teams = (my_count + DIST_TILE_SIZE - 1) / DIST_TILE_SIZE;
+
+    Kokkos::parallel_for("dist_acc_frost_tiled",
+        team_policy(num_teams, DIST_TILE_SIZE).set_scratch_size(0, Kokkos::PerTeam(scratch_size)),
+        KOKKOS_LAMBDA(const member_type& team) {
+            // Each thread handles one i-particle from my slice
+            int ii = team.league_rank() * DIST_TILE_SIZE + team.team_rank();
+            int i = my_start + ii;
+
+            // Scratch memory for j-particle tiles
+            Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
+                tile_x(team.team_scratch(0), DIST_TILE_SIZE);
+            Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
+                tile_y(reinterpret_cast<double*>(tile_x.data() + DIST_TILE_SIZE), DIST_TILE_SIZE);
+            Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
+                tile_z(reinterpret_cast<double*>(tile_y.data() + DIST_TILE_SIZE), DIST_TILE_SIZE);
+            Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
+                tile_vx(reinterpret_cast<double*>(tile_z.data() + DIST_TILE_SIZE), DIST_TILE_SIZE);
+            Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
+                tile_vy(reinterpret_cast<double*>(tile_vx.data() + DIST_TILE_SIZE), DIST_TILE_SIZE);
+            Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
+                tile_vz(reinterpret_cast<double*>(tile_vy.data() + DIST_TILE_SIZE), DIST_TILE_SIZE);
+            Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
+                tile_m(reinterpret_cast<double*>(tile_vz.data() + DIST_TILE_SIZE), DIST_TILE_SIZE);
+
+            // Load i-particle data
+            double xi = 0, yi = 0, zi = 0, mi = 0;
+            double vxi = 0, vyi = 0, vzi = 0;
+            if (ii < my_count) {
+                xi = pos(i, 0); yi = pos(i, 1); zi = pos(i, 2); mi = pos(i, 3);
+                vxi = vel(i, 0); vyi = vel(i, 1); vzi = vel(i, 2);
+            }
+
+            double axi = 0, ayi = 0, azi = 0;
+            double t_min_i = DBL_MAX;
+
+            // Loop over ALL j-particles in tiles
+            for (int tile_start = 0; tile_start < N; tile_start += DIST_TILE_SIZE) {
+                int tile_end = (tile_start + DIST_TILE_SIZE < N) ? tile_start + DIST_TILE_SIZE : N;
+                int tile_count = tile_end - tile_start;
+
+                // Collaborative tile load
+                int t = team.team_rank();
+                if (t < tile_count) {
+                    int idx = tile_start + t;
+                    tile_x(t) = pos(idx, 0);
+                    tile_y(t) = pos(idx, 1);
+                    tile_z(t) = pos(idx, 2);
+                    tile_m(t) = pos(idx, 3);
+                    tile_vx(t) = vel(idx, 0);
+                    tile_vy(t) = vel(idx, 1);
+                    tile_vz(t) = vel(idx, 2);
+                }
+                team.team_barrier();
+
+                // Compute forces and FROST from this tile
+                if (ii < my_count) {
+                    for (int jt = 0; jt < tile_count; jt++) {
+                        int j = tile_start + jt;
+                        if (j == i) continue;
+
+                        double dx = tile_x(jt) - xi;
+                        double dy = tile_y(jt) - yi;
+                        double dz = tile_z(jt) - zi;
+                        double r2 = dx*dx + dy*dy + dz*dz;
+                        double r2s = r2 + soft2;
+                        double inv_r = 1.0 / Kokkos::sqrt(r2s);
+                        double inv_r3 = inv_r * inv_r * inv_r;
+
+                        double fj = G * tile_m(jt) * inv_r3;
+                        axi += fj * dx;
+                        ayi += fj * dy;
+                        azi += fj * dz;
+
+                        // FROST
+                        double dvx = tile_vx(jt) - vxi;
+                        double dvy = tile_vy(jt) - vyi;
+                        double dvz = tile_vz(jt) - vzi;
+                        double v_sq = dvx*dvx + dvy*dvy + dvz*dvz;
+                        double r_norm = Kokkos::sqrt(r2 + EPS);
+                        double v_norm = Kokkos::sqrt(v_sq + EPS);
+                        double mass_sum = mi + tile_m(jt);
+
+                        double t_ff = Kokkos::sqrt(r_norm * r_norm * r_norm / (G * mass_sum + EPS));
+                        double t_fb = r_norm / (v_norm + EPS);
+
+                        double r_dot_v = dx*dvx + dy*dvy + dz*dvz;
+                        double r2_safe = r2 + EPS;
+
+                        double dt_ff_dt = 1.5 * (r_dot_v / r2_safe) * t_ff;
+                        double factor = 1.0 + G * mass_sum / (v_sq * r_norm + EPS);
+                        double dt_fb_dt = (r_dot_v / r2_safe) * factor * t_fb;
+
+                        auto symmetrize = [](double t, double ddt) -> double {
+                            double ddt_safe = (Kokkos::fabs(ddt) > EPS) ? ddt : EPS;
+                            return t * (ddt + Kokkos::sqrt(1.0 + ddt * ddt) - 1.0) / ddt_safe;
+                        };
+
+                        double t_ff_sym = symmetrize(t_ff, dt_ff_dt);
+                        double t_fb_sym = symmetrize(t_fb, dt_fb_dt);
+                        double t_min_pair = Kokkos::fmin(t_ff_sym, t_fb_sym);
+                        t_min_i = Kokkos::fmin(t_min_i, t_min_pair);
+                    }
+                }
+                team.team_barrier();
+            }
+
+            // Write results
+            if (ii < my_count) {
+                pax(i) = axi;
+                pay(i) = ayi;
+                paz(i) = azi;
+                dt_f(i) = t_min_i * eta;
+            }
+        });
+    Kokkos::fence();
+
+    // Allgather accelerations and FROST
+    dp.allgather_accelerations();
+    dp.allgather_frost();
+#else
+    compute_acceleration_and_frost<true>(dp.local, G, soft2, eta);
+#endif
+}
 
 void set_force_dispatch(bool use_n3l) {
     if (use_n3l) {
@@ -31,7 +202,8 @@ void set_force_dispatch(bool use_n3l) {
 }
 
 // Helper: drift positions for [start, start+count)
-static void drift(Particles& p, int start, int count, double dt) {
+// Not static - also used by distributed FSI
+void drift(Particles& p, int start, int count, double dt) {
     auto px = p.x; auto py = p.y; auto pz = p.z;
     auto pvx = p.vx; auto pvy = p.vy; auto pvz = p.vz;
     Kokkos::parallel_for("drift", count, KOKKOS_LAMBDA(int ii) {
@@ -67,43 +239,60 @@ void fsi_step(Particles& p, int start, int count,
 //   - slow: dt_frost >= pivot (at beginning)
 //   - fast: dt_frost < pivot (at end)
 // Returns the count of slow particles
+//
+// IMPORTANT: This must be DETERMINISTIC across MPI ranks! We use prefix sums
+// instead of atomics to ensure all ranks produce identical permutations.
 // ==========================================================================
 static int partition_by_pivot(Particles& p, int start, int count, double pivot) {
     if (count <= 1) return count;
 
     auto dt_f = p.dt_frost;
     auto perm = p.scratch_i;
+    auto is_slow = p.scratch_i2;  // temporary: 1 if slow, 0 if fast
 
-    // Count slow particles using scalar reduction
+    // Step 1: Mark each particle as slow (1) or fast (0)
+    Kokkos::parallel_for("mark_slow", count, KOKKOS_LAMBDA(int ii) {
+        is_slow(ii) = (dt_f(start + ii) >= pivot) ? 1 : 0;
+    });
+    Kokkos::fence();
+
+    // Step 2: Exclusive prefix sum to get destination indices for slow particles
+    // slow_prefix[i] = number of slow particles with index < i
+    auto slow_prefix = p.scratch_i3;
+    Kokkos::parallel_scan("prefix_slow", count,
+        KOKKOS_LAMBDA(int ii, int& partial_sum, bool is_final) {
+            if (is_final) slow_prefix(ii) = partial_sum;
+            partial_sum += is_slow(ii);
+        });
+    Kokkos::fence();
+
+    // Get total slow count (last prefix + last is_slow value)
     int slow_count = 0;
-    Kokkos::parallel_reduce("count_slow", count,
-        KOKKOS_LAMBDA(int ii, int& lsum) {
-            if (dt_f(start + ii) >= pivot) lsum++;
+    Kokkos::parallel_reduce("total_slow", 1,
+        KOKKOS_LAMBDA(int, int& sum) {
+            sum = slow_prefix(count - 1) + is_slow(count - 1);
         }, slow_count);
     Kokkos::fence();
 
     if (slow_count == 0 || slow_count == count) {
-        // No partitioning needed - all slow or all fast
         return slow_count;
     }
 
-    // Initialize cursors on host and copy to device
-    Kokkos::View<int*> d_cursors("cursors", 2);
-    auto h_cursors = Kokkos::create_mirror_view(d_cursors);
-    h_cursors(0) = 0;           // slow cursor
-    h_cursors(1) = slow_count;  // fast cursor
-    Kokkos::deep_copy(d_cursors, h_cursors);
-
-    // Build permutation using atomic increments
-    Kokkos::parallel_for("build_perm", count, KOKKOS_LAMBDA(int ii) {
-        int i = start + ii;
+    // Step 3: Build permutation deterministically
+    // - Slow particle at position ii goes to slow_prefix(ii)
+    // - Fast particle at position ii goes to slow_count + (ii - slow_prefix(ii) - (1-is_slow(ii)))
+    //   = slow_count + (ii - slow_prefix(ii)) for fast particles
+    int sc = slow_count;
+    Kokkos::parallel_for("build_perm_deterministic", count, KOKKOS_LAMBDA(int ii) {
         int dest;
-        if (dt_f(i) >= pivot) {
-            dest = Kokkos::atomic_fetch_add(&d_cursors(0), 1);
+        if (is_slow(ii)) {
+            dest = slow_prefix(ii);
         } else {
-            dest = Kokkos::atomic_fetch_add(&d_cursors(1), 1);
+            // Fast particles: position among fast = ii - slow_prefix(ii)
+            // (since slow_prefix(ii) counts slow particles before ii)
+            dest = sc + (ii - slow_prefix(ii));
         }
-        perm(dest) = i;  // perm[dest] = source index
+        perm(dest) = start + ii;
     });
     Kokkos::fence();
 
@@ -193,5 +382,952 @@ void hhs_fsi_step_dynamic(Particles& p, int start, int count, double pivot_dt,
 
     // 7. Cross-Newton kick (dt/6)
     fn_cross_acc_kick_cache(p, slow_start, slow_count, fast_start, fast_count, G, soft2, pivot_dt * FSI_KICK);
+}
+
+// =============================================================================
+// Distributed (Multi-GPU) HHS Integration
+// =============================================================================
+// NEW DESIGN: Scatter-compute-gather paradigm (matching FROST paper)
+//
+// All ranks maintain replicated particle data. The HHS recursion runs
+// IDENTICALLY on all ranks (partitioning, drifts, kicks). Only force
+// computation is distributed:
+//   1. Each rank computes forces for its slice of particles
+//   2. Allgather accelerations after each force computation
+//
+// This achieves O(N) communication per step regardless of HHS depth.
+// =============================================================================
+
+// Kick velocities using pre-computed accelerations
+void kick_velocities(Particles& p, int start, int count, double dt) {
+    auto pvx = p.vx; auto pvy = p.vy; auto pvz = p.vz;
+    auto pax = p.ax; auto pay = p.ay; auto paz = p.az;
+
+    Kokkos::parallel_for("kick", count, KOKKOS_LAMBDA(int ii) {
+        int i = start + ii;
+        pvx(i) += pax(i) * dt;
+        pvy(i) += pay(i) * dt;
+        pvz(i) += paz(i) * dt;
+    });
+}
+
+// =============================================================================
+// Distributed force computation: scatter-compute-gather with tiled GPU kernels
+// Each rank computes forces for particles in its slice FROM ALL particles
+// in the working set [start, start+count). Then allgather accelerations.
+// Uses shared memory tiling per FROST paper.
+// =============================================================================
+static void self_acceleration_distributed(DistributedParticles& dp, int start, int count,
+                                          double G, double soft2) {
+    if (count <= 0) return;
+
+    int slice_start, slice_count;
+    dp.get_force_slice(start, count, slice_start, slice_count);
+    if (slice_count == 0) {
+        dp.allgather_accelerations_subset(start, count);
+        return;
+    }
+
+    auto px = dp.local.x; auto py = dp.local.y; auto pz = dp.local.z;
+    auto pax = dp.local.ax; auto pay = dp.local.ay; auto paz = dp.local.az;
+    auto pm = dp.local.mass;
+
+    const int j_start = start;
+    const int j_end = start + count;
+
+    using team_policy = Kokkos::TeamPolicy<>;
+    using member_type = team_policy::member_type;
+    using scratch_space = Kokkos::DefaultExecutionSpace::scratch_memory_space;
+
+    size_t scratch_size = DIST_TILE_SIZE * 4 * sizeof(double); // x,y,z,m
+    int num_teams = (slice_count + DIST_TILE_SIZE - 1) / DIST_TILE_SIZE;
+
+    Kokkos::parallel_for("dist_self_acc_tiled",
+        team_policy(num_teams, DIST_TILE_SIZE).set_scratch_size(0, Kokkos::PerTeam(scratch_size)),
+        KOKKOS_LAMBDA(const member_type& team) {
+            int ii = team.league_rank() * DIST_TILE_SIZE + team.team_rank();
+            int i = slice_start + ii;
+
+            Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
+                tile_x(team.team_scratch(0), DIST_TILE_SIZE);
+            Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
+                tile_y(tile_x.data() + DIST_TILE_SIZE, DIST_TILE_SIZE);
+            Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
+                tile_z(tile_y.data() + DIST_TILE_SIZE, DIST_TILE_SIZE);
+            Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
+                tile_m(tile_z.data() + DIST_TILE_SIZE, DIST_TILE_SIZE);
+
+            double xi = 0, yi = 0, zi = 0;
+            if (ii < slice_count) {
+                xi = px(i); yi = py(i); zi = pz(i);
+            }
+
+            double axi = 0, ayi = 0, azi = 0;
+
+            for (int tile_start = j_start; tile_start < j_end; tile_start += DIST_TILE_SIZE) {
+                int tile_end = (tile_start + DIST_TILE_SIZE < j_end) ? tile_start + DIST_TILE_SIZE : j_end;
+                int tile_count = tile_end - tile_start;
+
+                int t = team.team_rank();
+                if (t < tile_count) {
+                    int idx = tile_start + t;
+                    tile_x(t) = px(idx);
+                    tile_y(t) = py(idx);
+                    tile_z(t) = pz(idx);
+                    tile_m(t) = pm(idx);
+                }
+                team.team_barrier();
+
+                if (ii < slice_count) {
+                    for (int jt = 0; jt < tile_count; jt++) {
+                        int j = tile_start + jt;
+                        if (j == i) continue;
+
+                        double dx = tile_x(jt) - xi;
+                        double dy = tile_y(jt) - yi;
+                        double dz = tile_z(jt) - zi;
+
+                        double r2 = dx*dx + dy*dy + dz*dz + soft2;
+                        double inv_r = 1.0 / Kokkos::sqrt(r2);
+                        double inv_r3 = inv_r * inv_r * inv_r;
+                        double mj_inv_r3 = G * tile_m(jt) * inv_r3;
+
+                        axi += mj_inv_r3 * dx;
+                        ayi += mj_inv_r3 * dy;
+                        azi += mj_inv_r3 * dz;
+                    }
+                }
+                team.team_barrier();
+            }
+
+            if (ii < slice_count) {
+                pax(i) = axi;
+                pay(i) = ayi;
+                paz(i) = azi;
+            }
+        });
+    Kokkos::fence();
+
+    dp.allgather_accelerations_subset(start, count);
+}
+
+// Distributed gradient correction with tiled GPU kernel
+static void self_gradient_correction_distributed(DistributedParticles& dp, int start, int count,
+                                                  double G, double soft2, double dt) {
+    if (count <= 0) return;
+
+    int slice_start, slice_count;
+    dp.get_force_slice(start, count, slice_start, slice_count);
+    if (slice_count == 0) {
+        dp.allgather_accelerations_subset(start, count);
+        return;
+    }
+
+    auto px = dp.local.x; auto py = dp.local.y; auto pz = dp.local.z;
+    auto pax = dp.local.ax; auto pay = dp.local.ay; auto paz = dp.local.az;
+    auto pm = dp.local.mass;
+
+    const double coeff = G * dt * dt * GRAD_COEFF;
+    const int j_start = start;
+    const int j_end = start + count;
+
+    using team_policy = Kokkos::TeamPolicy<>;
+    using member_type = team_policy::member_type;
+    using scratch_space = Kokkos::DefaultExecutionSpace::scratch_memory_space;
+
+    // Need x,y,z,m,ax,ay,az for gradient correction
+    size_t scratch_size = DIST_TILE_SIZE * 7 * sizeof(double);
+    int num_teams = (slice_count + DIST_TILE_SIZE - 1) / DIST_TILE_SIZE;
+
+    Kokkos::parallel_for("dist_grad_corr_tiled",
+        team_policy(num_teams, DIST_TILE_SIZE).set_scratch_size(0, Kokkos::PerTeam(scratch_size)),
+        KOKKOS_LAMBDA(const member_type& team) {
+            int ii = team.league_rank() * DIST_TILE_SIZE + team.team_rank();
+            int i = slice_start + ii;
+
+            Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
+                tile_x(team.team_scratch(0), DIST_TILE_SIZE);
+            Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
+                tile_y(tile_x.data() + DIST_TILE_SIZE, DIST_TILE_SIZE);
+            Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
+                tile_z(tile_y.data() + DIST_TILE_SIZE, DIST_TILE_SIZE);
+            Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
+                tile_m(tile_z.data() + DIST_TILE_SIZE, DIST_TILE_SIZE);
+            Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
+                tile_ax(tile_m.data() + DIST_TILE_SIZE, DIST_TILE_SIZE);
+            Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
+                tile_ay(tile_ax.data() + DIST_TILE_SIZE, DIST_TILE_SIZE);
+            Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
+                tile_az(tile_ay.data() + DIST_TILE_SIZE, DIST_TILE_SIZE);
+
+            double xi = 0, yi = 0, zi = 0;
+            double axi = 0, ayi = 0, azi = 0;
+            if (ii < slice_count) {
+                xi = px(i); yi = py(i); zi = pz(i);
+                axi = pax(i); ayi = pay(i); azi = paz(i);
+            }
+
+            double cx = 0, cy = 0, cz = 0;
+
+            for (int tile_start = j_start; tile_start < j_end; tile_start += DIST_TILE_SIZE) {
+                int tile_end = (tile_start + DIST_TILE_SIZE < j_end) ? tile_start + DIST_TILE_SIZE : j_end;
+                int tile_count = tile_end - tile_start;
+
+                int t = team.team_rank();
+                if (t < tile_count) {
+                    int idx = tile_start + t;
+                    tile_x(t) = px(idx);
+                    tile_y(t) = py(idx);
+                    tile_z(t) = pz(idx);
+                    tile_m(t) = pm(idx);
+                    tile_ax(t) = pax(idx);
+                    tile_ay(t) = pay(idx);
+                    tile_az(t) = paz(idx);
+                }
+                team.team_barrier();
+
+                if (ii < slice_count) {
+                    for (int jt = 0; jt < tile_count; jt++) {
+                        int j = tile_start + jt;
+                        if (j == i) continue;
+
+                        double dx = tile_x(jt) - xi;
+                        double dy = tile_y(jt) - yi;
+                        double dz = tile_z(jt) - zi;
+
+                        double dax = tile_ax(jt) - axi;
+                        double day = tile_ay(jt) - ayi;
+                        double daz = tile_az(jt) - azi;
+
+                        double r2 = dx*dx + dy*dy + dz*dz + soft2;
+                        double inv_r2 = 1.0 / r2;
+                        double inv_r = 1.0 / Kokkos::sqrt(r2);
+                        double inv_r5 = inv_r2 * inv_r2 * inv_r;
+
+                        double r_dot_a = dx*dax + dy*day + dz*daz;
+                        double f = coeff * tile_m(jt) * inv_r5;
+
+                        cx += f * (r2 * dax - 3.0 * r_dot_a * dx);
+                        cy += f * (r2 * day - 3.0 * r_dot_a * dy);
+                        cz += f * (r2 * daz - 3.0 * r_dot_a * dz);
+                    }
+                }
+                team.team_barrier();
+            }
+
+            if (ii < slice_count) {
+                pax(i) += cx;
+                pay(i) += cy;
+                paz(i) += cz;
+            }
+        });
+    Kokkos::fence();
+
+    dp.allgather_accelerations_subset(start, count);
+}
+
+// =============================================================================
+// Distributed FSI step using scatter-compute-gather
+// All ranks execute identical code; only force computation is distributed
+// =============================================================================
+static void fsi_step_distributed(DistributedParticles& dp, int start, int count,
+                                 double G, double soft2, double dt) {
+    if (count <= 0) return;
+
+    // U kick (dt/6) - distributed force + allgather + kick
+    self_acceleration_distributed(dp, start, count, G, soft2);
+    kick_velocities(dp.local, start, count, dt * FSI_KICK);
+
+    // T drift (dt/2) - all ranks drift identically
+    drift(dp.local, start, count, dt * FSI_DRIFT);
+
+    // U-tilde kick (2dt/3) with gradient correction
+    self_acceleration_distributed(dp, start, count, G, soft2);
+    self_gradient_correction_distributed(dp, start, count, G, soft2, dt);
+    kick_velocities(dp.local, start, count, dt * FSI_MOD_KICK);
+
+    // T drift (dt/2)
+    drift(dp.local, start, count, dt * FSI_DRIFT);
+
+    // U kick (dt/6)
+    self_acceleration_distributed(dp, start, count, G, soft2);
+    kick_velocities(dp.local, start, count, dt * FSI_KICK);
+}
+
+// =============================================================================
+// Distributed cross-acceleration between slow and fast particles
+// Tiled GPU kernel per FROST paper
+// =============================================================================
+static void cross_acceleration_distributed(DistributedParticles& dp,
+                                           int slow_start, int slow_count,
+                                           int fast_start, int fast_count,
+                                           double G, double soft2) {
+    if (slow_count <= 0 || fast_count <= 0) return;
+
+    auto px = dp.local.x; auto py = dp.local.y; auto pz = dp.local.z;
+    auto pax = dp.local.ax; auto pay = dp.local.ay; auto paz = dp.local.az;
+    auto pm = dp.local.mass;
+
+    using team_policy = Kokkos::TeamPolicy<>;
+    using member_type = team_policy::member_type;
+    using scratch_space = Kokkos::DefaultExecutionSpace::scratch_memory_space;
+
+    size_t scratch_size = DIST_TILE_SIZE * 4 * sizeof(double);
+
+    // Slow particles: compute force from fast particles
+    int slice_start, slice_count;
+    dp.get_force_slice(slow_start, slow_count, slice_start, slice_count);
+
+    if (slice_count > 0) {
+        int num_teams = (slice_count + DIST_TILE_SIZE - 1) / DIST_TILE_SIZE;
+        const int f_start = fast_start;
+        const int f_end = fast_start + fast_count;
+
+        Kokkos::parallel_for("cross_slow_from_fast_tiled",
+            team_policy(num_teams, DIST_TILE_SIZE).set_scratch_size(0, Kokkos::PerTeam(scratch_size)),
+            KOKKOS_LAMBDA(const member_type& team) {
+                int ii = team.league_rank() * DIST_TILE_SIZE + team.team_rank();
+                int i = slice_start + ii;
+
+                Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
+                    tile_x(team.team_scratch(0), DIST_TILE_SIZE);
+                Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
+                    tile_y(tile_x.data() + DIST_TILE_SIZE, DIST_TILE_SIZE);
+                Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
+                    tile_z(tile_y.data() + DIST_TILE_SIZE, DIST_TILE_SIZE);
+                Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
+                    tile_m(tile_z.data() + DIST_TILE_SIZE, DIST_TILE_SIZE);
+
+                double xi = 0, yi = 0, zi = 0;
+                if (ii < slice_count) {
+                    xi = px(i); yi = py(i); zi = pz(i);
+                }
+
+                double axi = 0, ayi = 0, azi = 0;
+
+                for (int tile_st = f_start; tile_st < f_end; tile_st += DIST_TILE_SIZE) {
+                    int tile_end = (tile_st + DIST_TILE_SIZE < f_end) ? tile_st + DIST_TILE_SIZE : f_end;
+                    int tile_cnt = tile_end - tile_st;
+
+                    int t = team.team_rank();
+                    if (t < tile_cnt) {
+                        int idx = tile_st + t;
+                        tile_x(t) = px(idx);
+                        tile_y(t) = py(idx);
+                        tile_z(t) = pz(idx);
+                        tile_m(t) = pm(idx);
+                    }
+                    team.team_barrier();
+
+                    if (ii < slice_count) {
+                        for (int jt = 0; jt < tile_cnt; jt++) {
+                            double dx = tile_x(jt) - xi;
+                            double dy = tile_y(jt) - yi;
+                            double dz = tile_z(jt) - zi;
+
+                            double r2 = dx*dx + dy*dy + dz*dz + soft2;
+                            double inv_r = 1.0 / Kokkos::sqrt(r2);
+                            double inv_r3 = inv_r * inv_r * inv_r;
+                            double mj_inv_r3 = G * tile_m(jt) * inv_r3;
+
+                            axi += mj_inv_r3 * dx;
+                            ayi += mj_inv_r3 * dy;
+                            azi += mj_inv_r3 * dz;
+                        }
+                    }
+                    team.team_barrier();
+                }
+
+                if (ii < slice_count) {
+                    pax(i) = axi;
+                    pay(i) = ayi;
+                    paz(i) = azi;
+                }
+            });
+    }
+
+    // Fast particles: compute force from slow particles
+    int slice_start_f, slice_count_f;
+    dp.get_force_slice(fast_start, fast_count, slice_start_f, slice_count_f);
+
+    if (slice_count_f > 0) {
+        int num_teams_f = (slice_count_f + DIST_TILE_SIZE - 1) / DIST_TILE_SIZE;
+        const int s_start = slow_start;
+        const int s_end = slow_start + slow_count;
+
+        Kokkos::parallel_for("cross_fast_from_slow_tiled",
+            team_policy(num_teams_f, DIST_TILE_SIZE).set_scratch_size(0, Kokkos::PerTeam(scratch_size)),
+            KOKKOS_LAMBDA(const member_type& team) {
+                int ii = team.league_rank() * DIST_TILE_SIZE + team.team_rank();
+                int i = slice_start_f + ii;
+
+                Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
+                    tile_x(team.team_scratch(0), DIST_TILE_SIZE);
+                Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
+                    tile_y(tile_x.data() + DIST_TILE_SIZE, DIST_TILE_SIZE);
+                Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
+                    tile_z(tile_y.data() + DIST_TILE_SIZE, DIST_TILE_SIZE);
+                Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
+                    tile_m(tile_z.data() + DIST_TILE_SIZE, DIST_TILE_SIZE);
+
+                double xi = 0, yi = 0, zi = 0;
+                if (ii < slice_count_f) {
+                    xi = px(i); yi = py(i); zi = pz(i);
+                }
+
+                double axi = 0, ayi = 0, azi = 0;
+
+                for (int tile_st = s_start; tile_st < s_end; tile_st += DIST_TILE_SIZE) {
+                    int tile_end = (tile_st + DIST_TILE_SIZE < s_end) ? tile_st + DIST_TILE_SIZE : s_end;
+                    int tile_cnt = tile_end - tile_st;
+
+                    int t = team.team_rank();
+                    if (t < tile_cnt) {
+                        int idx = tile_st + t;
+                        tile_x(t) = px(idx);
+                        tile_y(t) = py(idx);
+                        tile_z(t) = pz(idx);
+                        tile_m(t) = pm(idx);
+                    }
+                    team.team_barrier();
+
+                    if (ii < slice_count_f) {
+                        for (int jt = 0; jt < tile_cnt; jt++) {
+                            double dx = tile_x(jt) - xi;
+                            double dy = tile_y(jt) - yi;
+                            double dz = tile_z(jt) - zi;
+
+                            double r2 = dx*dx + dy*dy + dz*dz + soft2;
+                            double inv_r = 1.0 / Kokkos::sqrt(r2);
+                            double inv_r3 = inv_r * inv_r * inv_r;
+                            double mj_inv_r3 = G * tile_m(jt) * inv_r3;
+
+                            axi += mj_inv_r3 * dx;
+                            ayi += mj_inv_r3 * dy;
+                            azi += mj_inv_r3 * dz;
+                        }
+                    }
+                    team.team_barrier();
+                }
+
+                if (ii < slice_count_f) {
+                    pax(i) = axi;
+                    pay(i) = ayi;
+                    paz(i) = azi;
+                }
+            });
+    }
+    Kokkos::fence();
+
+    dp.allgather_accelerations_subset(slow_start, slow_count);
+    dp.allgather_accelerations_subset(fast_start, fast_count);
+}
+
+// Cross-acceleration with gradient correction - tiled GPU kernel
+static void cross_acceleration_and_gradient_distributed(DistributedParticles& dp,
+                                                        int slow_start, int slow_count,
+                                                        int fast_start, int fast_count,
+                                                        double G, double soft2, double dt) {
+    // First compute cross-accelerations (already tiled)
+    cross_acceleration_distributed(dp, slow_start, slow_count,
+                                   fast_start, fast_count, G, soft2);
+
+    auto px = dp.local.x; auto py = dp.local.y; auto pz = dp.local.z;
+    auto pax = dp.local.ax; auto pay = dp.local.ay; auto paz = dp.local.az;
+    auto pm = dp.local.mass;
+
+    const double coeff = G * dt * dt * GRAD_COEFF;
+
+    using team_policy = Kokkos::TeamPolicy<>;
+    using member_type = team_policy::member_type;
+    using scratch_space = Kokkos::DefaultExecutionSpace::scratch_memory_space;
+
+    size_t scratch_size = DIST_TILE_SIZE * 7 * sizeof(double);
+
+    // Gradient correction for slow particles from fast
+    int slice_start, slice_count;
+    dp.get_force_slice(slow_start, slow_count, slice_start, slice_count);
+
+    if (slice_count > 0) {
+        int num_teams = (slice_count + DIST_TILE_SIZE - 1) / DIST_TILE_SIZE;
+        const int f_start = fast_start;
+        const int f_end = fast_start + fast_count;
+
+        Kokkos::parallel_for("cross_grad_slow_tiled",
+            team_policy(num_teams, DIST_TILE_SIZE).set_scratch_size(0, Kokkos::PerTeam(scratch_size)),
+            KOKKOS_LAMBDA(const member_type& team) {
+                int ii = team.league_rank() * DIST_TILE_SIZE + team.team_rank();
+                int i = slice_start + ii;
+
+                Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
+                    tile_x(team.team_scratch(0), DIST_TILE_SIZE);
+                Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
+                    tile_y(tile_x.data() + DIST_TILE_SIZE, DIST_TILE_SIZE);
+                Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
+                    tile_z(tile_y.data() + DIST_TILE_SIZE, DIST_TILE_SIZE);
+                Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
+                    tile_m(tile_z.data() + DIST_TILE_SIZE, DIST_TILE_SIZE);
+                Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
+                    tile_ax(tile_m.data() + DIST_TILE_SIZE, DIST_TILE_SIZE);
+                Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
+                    tile_ay(tile_ax.data() + DIST_TILE_SIZE, DIST_TILE_SIZE);
+                Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
+                    tile_az(tile_ay.data() + DIST_TILE_SIZE, DIST_TILE_SIZE);
+
+                double xi = 0, yi = 0, zi = 0;
+                double axi = 0, ayi = 0, azi = 0;
+                if (ii < slice_count) {
+                    xi = px(i); yi = py(i); zi = pz(i);
+                    axi = pax(i); ayi = pay(i); azi = paz(i);
+                }
+
+                double cx = 0, cy = 0, cz = 0;
+
+                for (int tile_st = f_start; tile_st < f_end; tile_st += DIST_TILE_SIZE) {
+                    int tile_end = (tile_st + DIST_TILE_SIZE < f_end) ? tile_st + DIST_TILE_SIZE : f_end;
+                    int tile_cnt = tile_end - tile_st;
+
+                    int t = team.team_rank();
+                    if (t < tile_cnt) {
+                        int idx = tile_st + t;
+                        tile_x(t) = px(idx);
+                        tile_y(t) = py(idx);
+                        tile_z(t) = pz(idx);
+                        tile_m(t) = pm(idx);
+                        tile_ax(t) = pax(idx);
+                        tile_ay(t) = pay(idx);
+                        tile_az(t) = paz(idx);
+                    }
+                    team.team_barrier();
+
+                    if (ii < slice_count) {
+                        for (int jt = 0; jt < tile_cnt; jt++) {
+                            double dx = tile_x(jt) - xi;
+                            double dy = tile_y(jt) - yi;
+                            double dz = tile_z(jt) - zi;
+
+                            double dax = tile_ax(jt) - axi;
+                            double day = tile_ay(jt) - ayi;
+                            double daz = tile_az(jt) - azi;
+
+                            double r2 = dx*dx + dy*dy + dz*dz + soft2;
+                            double inv_r2 = 1.0 / r2;
+                            double inv_r = 1.0 / Kokkos::sqrt(r2);
+                            double inv_r5 = inv_r2 * inv_r2 * inv_r;
+
+                            double r_dot_a = dx*dax + dy*day + dz*daz;
+                            double f = coeff * tile_m(jt) * inv_r5;
+
+                            cx += f * (r2 * dax - 3.0 * r_dot_a * dx);
+                            cy += f * (r2 * day - 3.0 * r_dot_a * dy);
+                            cz += f * (r2 * daz - 3.0 * r_dot_a * dz);
+                        }
+                    }
+                    team.team_barrier();
+                }
+
+                if (ii < slice_count) {
+                    pax(i) += cx;
+                    pay(i) += cy;
+                    paz(i) += cz;
+                }
+            });
+    }
+
+    // Gradient correction for fast particles from slow
+    int slice_start_f, slice_count_f;
+    dp.get_force_slice(fast_start, fast_count, slice_start_f, slice_count_f);
+
+    if (slice_count_f > 0) {
+        int num_teams_f = (slice_count_f + DIST_TILE_SIZE - 1) / DIST_TILE_SIZE;
+        const int s_start = slow_start;
+        const int s_end = slow_start + slow_count;
+
+        Kokkos::parallel_for("cross_grad_fast_tiled",
+            team_policy(num_teams_f, DIST_TILE_SIZE).set_scratch_size(0, Kokkos::PerTeam(scratch_size)),
+            KOKKOS_LAMBDA(const member_type& team) {
+                int ii = team.league_rank() * DIST_TILE_SIZE + team.team_rank();
+                int i = slice_start_f + ii;
+
+                Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
+                    tile_x(team.team_scratch(0), DIST_TILE_SIZE);
+                Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
+                    tile_y(tile_x.data() + DIST_TILE_SIZE, DIST_TILE_SIZE);
+                Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
+                    tile_z(tile_y.data() + DIST_TILE_SIZE, DIST_TILE_SIZE);
+                Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
+                    tile_m(tile_z.data() + DIST_TILE_SIZE, DIST_TILE_SIZE);
+                Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
+                    tile_ax(tile_m.data() + DIST_TILE_SIZE, DIST_TILE_SIZE);
+                Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
+                    tile_ay(tile_ax.data() + DIST_TILE_SIZE, DIST_TILE_SIZE);
+                Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
+                    tile_az(tile_ay.data() + DIST_TILE_SIZE, DIST_TILE_SIZE);
+
+                double xi = 0, yi = 0, zi = 0;
+                double axi = 0, ayi = 0, azi = 0;
+                if (ii < slice_count_f) {
+                    xi = px(i); yi = py(i); zi = pz(i);
+                    axi = pax(i); ayi = pay(i); azi = paz(i);
+                }
+
+                double cx = 0, cy = 0, cz = 0;
+
+                for (int tile_st = s_start; tile_st < s_end; tile_st += DIST_TILE_SIZE) {
+                    int tile_end = (tile_st + DIST_TILE_SIZE < s_end) ? tile_st + DIST_TILE_SIZE : s_end;
+                    int tile_cnt = tile_end - tile_st;
+
+                    int t = team.team_rank();
+                    if (t < tile_cnt) {
+                        int idx = tile_st + t;
+                        tile_x(t) = px(idx);
+                        tile_y(t) = py(idx);
+                        tile_z(t) = pz(idx);
+                        tile_m(t) = pm(idx);
+                        tile_ax(t) = pax(idx);
+                        tile_ay(t) = pay(idx);
+                        tile_az(t) = paz(idx);
+                    }
+                    team.team_barrier();
+
+                    if (ii < slice_count_f) {
+                        for (int jt = 0; jt < tile_cnt; jt++) {
+                            double dx = tile_x(jt) - xi;
+                            double dy = tile_y(jt) - yi;
+                            double dz = tile_z(jt) - zi;
+
+                            double dax = tile_ax(jt) - axi;
+                            double day = tile_ay(jt) - ayi;
+                            double daz = tile_az(jt) - azi;
+
+                            double r2 = dx*dx + dy*dy + dz*dz + soft2;
+                            double inv_r2 = 1.0 / r2;
+                            double inv_r = 1.0 / Kokkos::sqrt(r2);
+                            double inv_r5 = inv_r2 * inv_r2 * inv_r;
+
+                            double r_dot_a = dx*dax + dy*day + dz*daz;
+                            double f = coeff * tile_m(jt) * inv_r5;
+
+                            cx += f * (r2 * dax - 3.0 * r_dot_a * dx);
+                            cy += f * (r2 * day - 3.0 * r_dot_a * dy);
+                            cz += f * (r2 * daz - 3.0 * r_dot_a * dz);
+                        }
+                    }
+                    team.team_barrier();
+                }
+
+                if (ii < slice_count_f) {
+                    pax(i) += cx;
+                    pay(i) += cy;
+                    paz(i) += cz;
+                }
+            });
+    }
+    Kokkos::fence();
+
+    dp.allgather_accelerations_subset(slow_start, slow_count);
+    dp.allgather_accelerations_subset(fast_start, fast_count);
+}
+
+// Distributed FROST computation - tiled GPU kernel
+static void compute_frost_distributed(DistributedParticles& dp, int start, int count,
+                                      double G, double soft2, double eta) {
+    if (count <= 1) return;
+
+    int slice_start, slice_count;
+    dp.get_force_slice(start, count, slice_start, slice_count);
+
+    if (slice_count == 0) {
+#ifdef USE_MPI
+        // Still need to participate in allgather
+        if (MPIComm::size() > 1) {
+            int n_ranks = MPIComm::size();
+            std::vector<int> all_counts(n_ranks);
+            std::vector<int> displs(n_ranks);
+            int base = count / n_ranks;
+            int remainder = count % n_ranks;
+            displs[0] = 0;
+            for (int r = 0; r < n_ranks; r++) {
+                all_counts[r] = base + (r < remainder ? 1 : 0);
+                if (r > 0) displs[r] = displs[r-1] + all_counts[r-1];
+            }
+            std::vector<double> recv_dt(count);
+            MPI_Allgatherv(nullptr, 0, MPI_DOUBLE,
+                           recv_dt.data(), all_counts.data(), displs.data(), MPI_DOUBLE,
+                           MPI_COMM_WORLD);
+            auto hg_dt = Kokkos::create_mirror_view(dp.local.dt_frost);
+            Kokkos::deep_copy(hg_dt, dp.local.dt_frost);
+            for (int i = 0; i < count; i++) hg_dt(start + i) = recv_dt[i];
+            Kokkos::deep_copy(dp.local.dt_frost, hg_dt);
+        }
+#endif
+        return;
+    }
+
+    auto px = dp.local.x; auto py = dp.local.y; auto pz = dp.local.z;
+    auto pvx = dp.local.vx; auto pvy = dp.local.vy; auto pvz = dp.local.vz;
+    auto pm = dp.local.mass;
+    auto dt_f = dp.local.dt_frost;
+
+    const int j_start = start;
+    const int j_end = start + count;
+
+    using team_policy = Kokkos::TeamPolicy<>;
+    using member_type = team_policy::member_type;
+    using scratch_space = Kokkos::DefaultExecutionSpace::scratch_memory_space;
+
+    // Need x,y,z,vx,vy,vz,m for FROST
+    size_t scratch_size = DIST_TILE_SIZE * 7 * sizeof(double);
+    int num_teams = (slice_count + DIST_TILE_SIZE - 1) / DIST_TILE_SIZE;
+
+    Kokkos::parallel_for("dist_frost_tiled",
+        team_policy(num_teams, DIST_TILE_SIZE).set_scratch_size(0, Kokkos::PerTeam(scratch_size)),
+        KOKKOS_LAMBDA(const member_type& team) {
+            int ii = team.league_rank() * DIST_TILE_SIZE + team.team_rank();
+            int i = slice_start + ii;
+
+            Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
+                tile_x(team.team_scratch(0), DIST_TILE_SIZE);
+            Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
+                tile_y(tile_x.data() + DIST_TILE_SIZE, DIST_TILE_SIZE);
+            Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
+                tile_z(tile_y.data() + DIST_TILE_SIZE, DIST_TILE_SIZE);
+            Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
+                tile_vx(tile_z.data() + DIST_TILE_SIZE, DIST_TILE_SIZE);
+            Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
+                tile_vy(tile_vx.data() + DIST_TILE_SIZE, DIST_TILE_SIZE);
+            Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
+                tile_vz(tile_vy.data() + DIST_TILE_SIZE, DIST_TILE_SIZE);
+            Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
+                tile_m(tile_vz.data() + DIST_TILE_SIZE, DIST_TILE_SIZE);
+
+            double xi = 0, yi = 0, zi = 0;
+            double vxi = 0, vyi = 0, vzi = 0;
+            double mi = 0;
+            if (ii < slice_count) {
+                xi = px(i); yi = py(i); zi = pz(i);
+                vxi = pvx(i); vyi = pvy(i); vzi = pvz(i);
+                mi = pm(i);
+            }
+
+            double t_min = 1e30;
+
+            for (int tile_st = j_start; tile_st < j_end; tile_st += DIST_TILE_SIZE) {
+                int tile_end = (tile_st + DIST_TILE_SIZE < j_end) ? tile_st + DIST_TILE_SIZE : j_end;
+                int tile_cnt = tile_end - tile_st;
+
+                int t = team.team_rank();
+                if (t < tile_cnt) {
+                    int idx = tile_st + t;
+                    tile_x(t) = px(idx);
+                    tile_y(t) = py(idx);
+                    tile_z(t) = pz(idx);
+                    tile_vx(t) = pvx(idx);
+                    tile_vy(t) = pvy(idx);
+                    tile_vz(t) = pvz(idx);
+                    tile_m(t) = pm(idx);
+                }
+                team.team_barrier();
+
+                if (ii < slice_count) {
+                    for (int jt = 0; jt < tile_cnt; jt++) {
+                        int j = tile_st + jt;
+                        if (j == i) continue;
+
+                        double dx = tile_x(jt) - xi;
+                        double dy = tile_y(jt) - yi;
+                        double dz = tile_z(jt) - zi;
+                        double r2 = dx*dx + dy*dy + dz*dz;
+
+                        double dvx = tile_vx(jt) - vxi;
+                        double dvy = tile_vy(jt) - vyi;
+                        double dvz = tile_vz(jt) - vzi;
+                        double v_sq = dvx*dvx + dvy*dvy + dvz*dvz;
+
+                        double r_norm = Kokkos::sqrt(r2 + EPS);
+                        double v_norm = Kokkos::sqrt(v_sq + EPS);
+                        double mass_sum = mi + tile_m(jt);
+
+                        double t_ff = Kokkos::sqrt(r_norm * r_norm * r_norm / (G * mass_sum + EPS));
+                        double t_fb = r_norm / (v_norm + EPS);
+
+                        double r_dot_v = dx*dvx + dy*dvy + dz*dvz;
+                        double r2_safe = r2 + EPS;
+
+                        double dt_ff_dt = 1.5 * (r_dot_v / r2_safe) * t_ff;
+                        double factor = 1.0 + G * mass_sum / (v_sq * r_norm + EPS);
+                        double dt_fb_dt = (r_dot_v / r2_safe) * factor * t_fb;
+
+                        auto symmetrize = [](double t, double ddt) -> double {
+                            double ddt_safe = (Kokkos::fabs(ddt) > EPS) ? ddt : EPS;
+                            return t * (ddt + Kokkos::sqrt(1.0 + ddt * ddt) - 1.0) / ddt_safe;
+                        };
+
+                        double t_ff_sym = symmetrize(t_ff, dt_ff_dt);
+                        double t_fb_sym = symmetrize(t_fb, dt_fb_dt);
+                        double t_min_pair = Kokkos::fmin(t_ff_sym, t_fb_sym);
+                        t_min = Kokkos::fmin(t_min, t_min_pair);
+                    }
+                }
+                team.team_barrier();
+            }
+
+            if (ii < slice_count) {
+                dt_f(i) = t_min * eta;
+            }
+        });
+    Kokkos::fence();
+
+    // Allgather dt_frost values
+#ifdef USE_MPI
+    if (MPIComm::size() > 1) {
+        int n_ranks = MPIComm::size();
+        std::vector<int> all_counts(n_ranks);
+        std::vector<int> displs(n_ranks);
+
+        int base = count / n_ranks;
+        int remainder = count % n_ranks;
+        displs[0] = 0;
+        for (int r = 0; r < n_ranks; r++) {
+            all_counts[r] = base + (r < remainder ? 1 : 0);
+            if (r > 0) displs[r] = displs[r-1] + all_counts[r-1];
+        }
+
+        auto h_dt = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
+            Kokkos::subview(dp.local.dt_frost, Kokkos::make_pair(slice_start, slice_start + slice_count)));
+
+        std::vector<double> send_dt(slice_count), recv_dt(count);
+        for (int i = 0; i < slice_count; i++) send_dt[i] = h_dt(i);
+
+        MPI_Allgatherv(send_dt.data(), slice_count, MPI_DOUBLE,
+                       recv_dt.data(), all_counts.data(), displs.data(), MPI_DOUBLE,
+                       MPI_COMM_WORLD);
+
+        auto hg_dt = Kokkos::create_mirror_view(dp.local.dt_frost);
+        Kokkos::deep_copy(hg_dt, dp.local.dt_frost);
+        for (int i = 0; i < count; i++) hg_dt(start + i) = recv_dt[i];
+        Kokkos::deep_copy(dp.local.dt_frost, hg_dt);
+    }
+#endif
+}
+
+// =============================================================================
+// Recursive distributed HHS-FSI implementation (Algorithm 4 from FROST paper)
+// NEW: Scatter-compute-gather paradigm
+//
+// All ranks run IDENTICAL code for partitioning, drifts, kicks.
+// Only force computation is distributed, with Allgather after each.
+// This achieves O(N) communication per step regardless of HHS depth.
+// =============================================================================
+static void hhs_fsi_recursive_distributed(
+    DistributedParticles& dp,
+    int start, int count,           // Subset of particles to integrate
+    double pivot_dt,                // Current pivot timestep
+    double G, double soft2,
+    double dt_min, double eta,
+    bool use_n3l) {
+
+    (void)use_n3l;  // All ranks run identical code, N3L handled in single-GPU path
+
+    if (count == 0) return;
+
+    // Base case: at minimum timestep, use FSI on the subset
+    if (pivot_dt * 0.5 < dt_min) {
+        fsi_step_distributed(dp, start, count, G, soft2, pivot_dt);
+        return;
+    }
+
+    // Compute FROST for this subset using scatter-compute-gather
+    // Each rank computes FROST for its slice, then allgather
+    if (count > 1) {
+        compute_frost_distributed(dp, start, count, G, soft2, eta);
+    }
+
+    // Partition into slow (dt >= pivot) and fast (dt < pivot)
+    // All ranks do identical partitioning (deterministic)
+    int slow_count = partition_by_pivot(dp.local, start, count, pivot_dt);
+    int slow_start = start;
+    int fast_start = start + slow_count;
+    int fast_count = count - slow_count;
+
+    // Base case: all particles are slow (no fast particles)
+    if (fast_count == 0) {
+        fsi_step_distributed(dp, start, count, G, soft2, pivot_dt);
+        return;
+    }
+
+    // Base case: all particles are fast (no slow particles)
+    if (slow_count == 0) {
+        // Recurse twice with half the pivot
+        hhs_fsi_recursive_distributed(dp, start, count, pivot_dt * 0.5,
+                                      G, soft2, dt_min, eta, false);
+        hhs_fsi_recursive_distributed(dp, start, count, pivot_dt * 0.5,
+                                      G, soft2, dt_min, eta, false);
+        return;
+    }
+
+    // ==========================================================================
+    // ALGORITHM 4: HHS-FSI with slow (S) and fast (F) particles
+    // ==========================================================================
+
+    // Step 1: Cross-kick S↔F (dt/6) - distributed force + allgather + kick
+    cross_acceleration_distributed(dp, slow_start, slow_count, fast_start, fast_count, G, soft2);
+    kick_velocities(dp.local, slow_start, slow_count, pivot_dt * FSI_KICK);
+    kick_velocities(dp.local, fast_start, fast_count, pivot_dt * FSI_KICK);
+
+    // Step 2: FSI half-step on slow
+    fsi_step_distributed(dp, slow_start, slow_count, G, soft2, pivot_dt * 0.5);
+
+    // Step 3: Recurse on fast (first half)
+    hhs_fsi_recursive_distributed(dp, fast_start, fast_count, pivot_dt * 0.5,
+                                  G, soft2, dt_min, eta, false);
+
+    // Step 4: Cross-kick S↔F with gradient (2dt/3)
+    cross_acceleration_and_gradient_distributed(dp, slow_start, slow_count,
+                                                fast_start, fast_count,
+                                                G, soft2, pivot_dt);
+    kick_velocities(dp.local, slow_start, slow_count, pivot_dt * FSI_MOD_KICK);
+    kick_velocities(dp.local, fast_start, fast_count, pivot_dt * FSI_MOD_KICK);
+
+    // Step 5: Recurse on fast (second half)
+    hhs_fsi_recursive_distributed(dp, fast_start, fast_count, pivot_dt * 0.5,
+                                  G, soft2, dt_min, eta, false);
+
+    // Step 6: FSI half-step on slow
+    fsi_step_distributed(dp, slow_start, slow_count, G, soft2, pivot_dt * 0.5);
+
+    // Step 7: Cross-kick S↔F (dt/6)
+    cross_acceleration_distributed(dp, slow_start, slow_count, fast_start, fast_count, G, soft2);
+    kick_velocities(dp.local, slow_start, slow_count, pivot_dt * FSI_KICK);
+    kick_velocities(dp.local, fast_start, fast_count, pivot_dt * FSI_KICK);
+}
+
+// Distributed HHS-FSI - main entry point
+void hhs_fsi_step_distributed(DistributedParticles& dp, double pivot_dt,
+                              double G, double soft2, double dt_min,
+                              double eta, bool use_n3l, int global_levels) {
+    if (dp.N_total == 0) return;
+
+    (void)global_levels;  // Not used in new implementation
+
+#ifdef USE_MPI
+    bool is_distributed = MPIComm::size() > 1;
+#else
+    bool is_distributed = false;
+#endif
+
+    if (!is_distributed) {
+        // Single rank: use standard HHS (uses efficient fused kernels)
+        hhs_fsi_step_dynamic(dp.local, 0, dp.N_total, pivot_dt, G, soft2, dt_min, eta, use_n3l);
+        return;
+    }
+
+#ifdef USE_MPI
+    // In replicated mode, all ranks have all particles
+    // Just run the recursive implementation - all ranks execute identical code
+    // Only force computation is distributed (via Allgather after each)
+    hhs_fsi_recursive_distributed(dp, 0, dp.N_total, pivot_dt,
+                                  G, soft2, dt_min, eta, use_n3l);
+#endif
 }
 

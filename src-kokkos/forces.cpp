@@ -1209,6 +1209,431 @@ void kick_from_cache(Particles& p, int a_start, int a_count,
 }
 
 // ==========================================================================
+// Ghost gradient correction for distributed (multi-GPU) case
+// ==========================================================================
+void ghost_gradient_correction(Particles& local, const Particles& ghosts,
+                               double G, double soft2, double dt) {
+    int N_local = local.N;
+    int N_ghosts = ghosts.N;
+
+    if (N_ghosts == 0) return;
+
+    auto lx = local.x; auto ly = local.y; auto lz = local.z;
+    auto lax = local.ax; auto lay = local.ay; auto laz = local.az;
+
+    auto gx = ghosts.x; auto gy = ghosts.y; auto gz = ghosts.z;
+    auto gax = ghosts.ax; auto gay = ghosts.ay; auto gaz = ghosts.az;
+    auto gm = ghosts.mass;
+
+    const double coeff = G * dt * dt * GRAD_COEFF;
+
+    // Each local particle gets gradient correction from all ghost particles
+    // correction_i = sum_j { coeff * m_j / r^5 * [ r^2 * delta_a - 3 * (r · delta_a) * r ] }
+    // where delta_a = a_j - a_i
+    Kokkos::parallel_for("ghost_grad_corr", N_local, KOKKOS_LAMBDA(int i) {
+        double axi = lax(i), ayi = lay(i), azi = laz(i);
+        double cx = 0.0, cy = 0.0, cz = 0.0;
+
+        for (int j = 0; j < N_ghosts; j++) {
+            double dx = gx(j) - lx(i);
+            double dy = gy(j) - ly(i);
+            double dz = gz(j) - lz(i);
+
+            double dax = gax(j) - axi;
+            double day = gay(j) - ayi;
+            double daz = gaz(j) - azi;
+
+            double r2 = dx*dx + dy*dy + dz*dz + soft2;
+            double inv_r2 = 1.0 / r2;
+            double inv_r = 1.0 / Kokkos::sqrt(r2);
+            double inv_r5 = inv_r2 * inv_r2 * inv_r;
+
+            double r_dot_a = dx*dax + dy*day + dz*daz;
+            double f = coeff * gm(j) * inv_r5;
+
+            cx += f * (r2 * dax - 3.0 * r_dot_a * dx);
+            cy += f * (r2 * day - 3.0 * r_dot_a * dy);
+            cz += f * (r2 * daz - 3.0 * r_dot_a * dz);
+        }
+
+        lax(i) += cx;
+        lay(i) += cy;
+        laz(i) += cz;
+    });
+    Kokkos::fence();
+}
+
+// ==========================================================================
+// Ghost cross-kick functions for distributed HHS
+// ==========================================================================
+
+// Kick local slow particles from ghost fast particles
+void ghost_cross_kick_slow_from_fast(Particles& local, const Particles& ghosts,
+                                     int local_start, int local_count,
+                                     double pivot, double G, double soft2, double kick_dt) {
+    if (local_count == 0 || ghosts.N == 0) return;
+
+    auto lx = local.x; auto ly = local.y; auto lz = local.z;
+    auto lvx = local.vx; auto lvy = local.vy; auto lvz = local.vz;
+    auto lax = local.ax; auto lay = local.ay; auto laz = local.az;
+
+    auto gx = ghosts.x; auto gy = ghosts.y; auto gz = ghosts.z;
+    auto gm = ghosts.mass;
+    auto gdt = ghosts.dt_frost;
+
+    int N_ghosts = ghosts.N;
+
+    // Each local slow particle accumulates force from all ghost fast particles
+    Kokkos::parallel_for("ghost_cross_slow_from_fast", local_count, KOKKOS_LAMBDA(int ii) {
+        int i = local_start + ii;
+        double xi = lx(i), yi = ly(i), zi = lz(i);
+        double axi = 0.0, ayi = 0.0, azi = 0.0;
+
+        for (int j = 0; j < N_ghosts; j++) {
+            // Only consider fast ghosts (dt < pivot)
+            if (gdt(j) >= pivot) continue;
+
+            double dx = gx(j) - xi;
+            double dy = gy(j) - yi;
+            double dz = gz(j) - zi;
+
+            double r2 = dx*dx + dy*dy + dz*dz + soft2;
+            double inv_r = 1.0 / Kokkos::sqrt(r2);
+            double inv_r3 = inv_r * inv_r * inv_r;
+            double mj_inv_r3 = G * gm(j) * inv_r3;
+
+            axi += mj_inv_r3 * dx;
+            ayi += mj_inv_r3 * dy;
+            azi += mj_inv_r3 * dz;
+        }
+
+        // Store cross-acceleration and apply kick
+        lax(i) += axi;
+        lay(i) += ayi;
+        laz(i) += azi;
+        lvx(i) += axi * kick_dt;
+        lvy(i) += ayi * kick_dt;
+        lvz(i) += azi * kick_dt;
+    });
+    Kokkos::fence();
+}
+
+// Kick local fast particles from ghost slow particles
+void ghost_cross_kick_fast_from_slow(Particles& local, const Particles& ghosts,
+                                     int local_start, int local_count,
+                                     double pivot, double G, double soft2, double kick_dt) {
+    if (local_count == 0 || ghosts.N == 0) return;
+
+    auto lx = local.x; auto ly = local.y; auto lz = local.z;
+    auto lvx = local.vx; auto lvy = local.vy; auto lvz = local.vz;
+    auto lax = local.ax; auto lay = local.ay; auto laz = local.az;
+
+    auto gx = ghosts.x; auto gy = ghosts.y; auto gz = ghosts.z;
+    auto gm = ghosts.mass;
+    auto gdt = ghosts.dt_frost;
+
+    int N_ghosts = ghosts.N;
+
+    // Each local fast particle accumulates force from all ghost slow particles
+    Kokkos::parallel_for("ghost_cross_fast_from_slow", local_count, KOKKOS_LAMBDA(int ii) {
+        int i = local_start + ii;
+        double xi = lx(i), yi = ly(i), zi = lz(i);
+        double axi = 0.0, ayi = 0.0, azi = 0.0;
+
+        for (int j = 0; j < N_ghosts; j++) {
+            // Only consider slow ghosts (dt >= pivot)
+            if (gdt(j) < pivot) continue;
+
+            double dx = gx(j) - xi;
+            double dy = gy(j) - yi;
+            double dz = gz(j) - zi;
+
+            double r2 = dx*dx + dy*dy + dz*dz + soft2;
+            double inv_r = 1.0 / Kokkos::sqrt(r2);
+            double inv_r3 = inv_r * inv_r * inv_r;
+            double mj_inv_r3 = G * gm(j) * inv_r3;
+
+            axi += mj_inv_r3 * dx;
+            ayi += mj_inv_r3 * dy;
+            azi += mj_inv_r3 * dz;
+        }
+
+        // Store cross-acceleration and apply kick
+        lax(i) += axi;
+        lay(i) += ayi;
+        laz(i) += azi;
+        lvx(i) += axi * kick_dt;
+        lvy(i) += ayi * kick_dt;
+        lvz(i) += azi * kick_dt;
+    });
+    Kokkos::fence();
+}
+
+// Combined ghost cross-kicks for HHS (both directions)
+void ghost_cross_kicks_hhs(Particles& local, const Particles& ghosts,
+                           int slow_start, int slow_count,
+                           int fast_start, int fast_count,
+                           double pivot, double G, double soft2, double kick_dt) {
+    // Slow local particles kicked by fast ghosts
+    ghost_cross_kick_slow_from_fast(local, ghosts, slow_start, slow_count,
+                                    pivot, G, soft2, kick_dt);
+
+    // Fast local particles kicked by slow ghosts
+    ghost_cross_kick_fast_from_slow(local, ghosts, fast_start, fast_count,
+                                    pivot, G, soft2, kick_dt);
+}
+
+// Ghost cross-gradient correction for HHS middle kick
+// This computes gradient correction from ghost particles based on slow/fast partition
+static void ghost_cross_gradient_correction_slow_from_fast(
+    Particles& local, const Particles& ghosts,
+    int local_start, int local_count,
+    double pivot, double G, double soft2, double dt) {
+
+    if (local_count == 0 || ghosts.N == 0) return;
+
+    auto lx = local.x; auto ly = local.y; auto lz = local.z;
+    auto lax = local.ax; auto lay = local.ay; auto laz = local.az;
+
+    auto gx = ghosts.x; auto gy = ghosts.y; auto gz = ghosts.z;
+    auto gax = ghosts.ax; auto gay = ghosts.ay; auto gaz = ghosts.az;
+    auto gm = ghosts.mass;
+    auto gdt = ghosts.dt_frost;
+
+    const double coeff = G * dt * dt * GRAD_COEFF;
+    int N_ghosts = ghosts.N;
+
+    Kokkos::parallel_for("ghost_grad_slow_from_fast", local_count, KOKKOS_LAMBDA(int ii) {
+        int i = local_start + ii;
+        double axi = lax(i), ayi = lay(i), azi = laz(i);
+        double cx = 0.0, cy = 0.0, cz = 0.0;
+
+        for (int j = 0; j < N_ghosts; j++) {
+            // Only consider fast ghosts
+            if (gdt(j) >= pivot) continue;
+
+            double dx = gx(j) - lx(i);
+            double dy = gy(j) - ly(i);
+            double dz = gz(j) - lz(i);
+
+            double dax = gax(j) - axi;
+            double day = gay(j) - ayi;
+            double daz = gaz(j) - azi;
+
+            double r2 = dx*dx + dy*dy + dz*dz + soft2;
+            double inv_r2 = 1.0 / r2;
+            double inv_r = 1.0 / Kokkos::sqrt(r2);
+            double inv_r5 = inv_r2 * inv_r2 * inv_r;
+
+            double r_dot_a = dx*dax + dy*day + dz*daz;
+            double f = coeff * gm(j) * inv_r5;
+
+            cx += f * (r2 * dax - 3.0 * r_dot_a * dx);
+            cy += f * (r2 * day - 3.0 * r_dot_a * dy);
+            cz += f * (r2 * daz - 3.0 * r_dot_a * dz);
+        }
+
+        lax(i) += cx;
+        lay(i) += cy;
+        laz(i) += cz;
+    });
+    Kokkos::fence();
+}
+
+static void ghost_cross_gradient_correction_fast_from_slow(
+    Particles& local, const Particles& ghosts,
+    int local_start, int local_count,
+    double pivot, double G, double soft2, double dt) {
+
+    if (local_count == 0 || ghosts.N == 0) return;
+
+    auto lx = local.x; auto ly = local.y; auto lz = local.z;
+    auto lax = local.ax; auto lay = local.ay; auto laz = local.az;
+
+    auto gx = ghosts.x; auto gy = ghosts.y; auto gz = ghosts.z;
+    auto gax = ghosts.ax; auto gay = ghosts.ay; auto gaz = ghosts.az;
+    auto gm = ghosts.mass;
+    auto gdt = ghosts.dt_frost;
+
+    const double coeff = G * dt * dt * GRAD_COEFF;
+    int N_ghosts = ghosts.N;
+
+    Kokkos::parallel_for("ghost_grad_fast_from_slow", local_count, KOKKOS_LAMBDA(int ii) {
+        int i = local_start + ii;
+        double axi = lax(i), ayi = lay(i), azi = laz(i);
+        double cx = 0.0, cy = 0.0, cz = 0.0;
+
+        for (int j = 0; j < N_ghosts; j++) {
+            // Only consider slow ghosts
+            if (gdt(j) < pivot) continue;
+
+            double dx = gx(j) - lx(i);
+            double dy = gy(j) - ly(i);
+            double dz = gz(j) - lz(i);
+
+            double dax = gax(j) - axi;
+            double day = gay(j) - ayi;
+            double daz = gaz(j) - azi;
+
+            double r2 = dx*dx + dy*dy + dz*dz + soft2;
+            double inv_r2 = 1.0 / r2;
+            double inv_r = 1.0 / Kokkos::sqrt(r2);
+            double inv_r5 = inv_r2 * inv_r2 * inv_r;
+
+            double r_dot_a = dx*dax + dy*day + dz*daz;
+            double f = coeff * gm(j) * inv_r5;
+
+            cx += f * (r2 * dax - 3.0 * r_dot_a * dx);
+            cy += f * (r2 * day - 3.0 * r_dot_a * dy);
+            cz += f * (r2 * daz - 3.0 * r_dot_a * dz);
+        }
+
+        lax(i) += cx;
+        lay(i) += cy;
+        laz(i) += cz;
+    });
+    Kokkos::fence();
+}
+
+// Ghost cross-kicks with gradient correction for HHS middle kick
+// This computes ghost cross-forces, applies gradient correction, and kicks
+// The kicks are applied only with the ghost contribution (local cross is handled separately)
+void ghost_cross_kicks_hhs_with_gradient(Particles& local, const Particles& ghosts,
+                                         int slow_start, int slow_count,
+                                         int fast_start, int fast_count,
+                                         double pivot, double G, double soft2,
+                                         double grad_dt, double kick_dt) {
+    if (ghosts.N == 0) return;
+
+    auto lx = local.x; auto ly = local.y; auto lz = local.z;
+    auto lvx = local.vx; auto lvy = local.vy; auto lvz = local.vz;
+    auto lax = local.ax; auto lay = local.ay; auto laz = local.az;
+
+    auto gx = ghosts.x; auto gy = ghosts.y; auto gz = ghosts.z;
+    auto gax = ghosts.ax; auto gay = ghosts.ay; auto gaz = ghosts.az;
+    auto gm = ghosts.mass;
+    auto gdt = ghosts.dt_frost;
+
+    const double grad_coeff = G * grad_dt * grad_dt * GRAD_COEFF;
+    int N_ghosts = ghosts.N;
+
+    // Combined: compute ghost cross-forces, gradient correction, and kick for slow particles
+    if (slow_count > 0) {
+        Kokkos::parallel_for("ghost_cross_grad_kick_slow", slow_count, KOKKOS_LAMBDA(int ii) {
+            int i = slow_start + ii;
+            double xi = lx(i), yi = ly(i), zi = lz(i);
+            double axi_local = lax(i), ayi_local = lay(i), azi_local = laz(i);
+
+            // Accumulate ghost force and gradient correction
+            double axi = 0.0, ayi = 0.0, azi = 0.0;
+            double cx = 0.0, cy = 0.0, cz = 0.0;
+
+            for (int j = 0; j < N_ghosts; j++) {
+                if (gdt(j) >= pivot) continue;  // Only fast ghosts
+
+                double dx = gx(j) - xi;
+                double dy = gy(j) - yi;
+                double dz = gz(j) - zi;
+
+                double r2 = dx*dx + dy*dy + dz*dz + soft2;
+                double inv_r = 1.0 / Kokkos::sqrt(r2);
+                double inv_r2 = inv_r * inv_r;
+                double inv_r3 = inv_r2 * inv_r;
+                double mj_inv_r3 = G * gm(j) * inv_r3;
+
+                // Force contribution
+                axi += mj_inv_r3 * dx;
+                ayi += mj_inv_r3 * dy;
+                azi += mj_inv_r3 * dz;
+
+                // Gradient correction
+                double dax = gax(j) - axi_local;
+                double day = gay(j) - ayi_local;
+                double daz = gaz(j) - azi_local;
+                double inv_r5 = inv_r2 * inv_r2 * inv_r;
+                double r_dot_a = dx*dax + dy*day + dz*daz;
+                double f = grad_coeff * gm(j) * inv_r5;
+
+                cx += f * (r2 * dax - 3.0 * r_dot_a * dx);
+                cy += f * (r2 * day - 3.0 * r_dot_a * dy);
+                cz += f * (r2 * daz - 3.0 * r_dot_a * dz);
+            }
+
+            // Total ghost contribution (force + gradient)
+            double total_ax = axi + cx;
+            double total_ay = ayi + cy;
+            double total_az = azi + cz;
+
+            // Update acceleration and apply kick
+            lax(i) += total_ax;
+            lay(i) += total_ay;
+            laz(i) += total_az;
+            lvx(i) += total_ax * kick_dt;
+            lvy(i) += total_ay * kick_dt;
+            lvz(i) += total_az * kick_dt;
+        });
+    }
+
+    // Combined: compute ghost cross-forces, gradient correction, and kick for fast particles
+    if (fast_count > 0) {
+        Kokkos::parallel_for("ghost_cross_grad_kick_fast", fast_count, KOKKOS_LAMBDA(int ii) {
+            int i = fast_start + ii;
+            double xi = lx(i), yi = ly(i), zi = lz(i);
+            double axi_local = lax(i), ayi_local = lay(i), azi_local = laz(i);
+
+            // Accumulate ghost force and gradient correction
+            double axi = 0.0, ayi = 0.0, azi = 0.0;
+            double cx = 0.0, cy = 0.0, cz = 0.0;
+
+            for (int j = 0; j < N_ghosts; j++) {
+                if (gdt(j) < pivot) continue;  // Only slow ghosts
+
+                double dx = gx(j) - xi;
+                double dy = gy(j) - yi;
+                double dz = gz(j) - zi;
+
+                double r2 = dx*dx + dy*dy + dz*dz + soft2;
+                double inv_r = 1.0 / Kokkos::sqrt(r2);
+                double inv_r2 = inv_r * inv_r;
+                double inv_r3 = inv_r2 * inv_r;
+                double mj_inv_r3 = G * gm(j) * inv_r3;
+
+                // Force contribution
+                axi += mj_inv_r3 * dx;
+                ayi += mj_inv_r3 * dy;
+                azi += mj_inv_r3 * dz;
+
+                // Gradient correction
+                double dax = gax(j) - axi_local;
+                double day = gay(j) - ayi_local;
+                double daz = gaz(j) - azi_local;
+                double inv_r5 = inv_r2 * inv_r2 * inv_r;
+                double r_dot_a = dx*dax + dy*day + dz*daz;
+                double f = grad_coeff * gm(j) * inv_r5;
+
+                cx += f * (r2 * dax - 3.0 * r_dot_a * dx);
+                cy += f * (r2 * day - 3.0 * r_dot_a * dy);
+                cz += f * (r2 * daz - 3.0 * r_dot_a * dz);
+            }
+
+            // Total ghost contribution (force + gradient)
+            double total_ax = axi + cx;
+            double total_ay = ayi + cy;
+            double total_az = azi + cz;
+
+            // Update acceleration and apply kick
+            lax(i) += total_ax;
+            lay(i) += total_ay;
+            laz(i) += total_az;
+            lvx(i) += total_ax * kick_dt;
+            lvy(i) += total_ay * kick_dt;
+            lvz(i) += total_az * kick_dt;
+        });
+    }
+    Kokkos::fence();
+}
+
+// ==========================================================================
 // Explicit template instantiations
 // ==========================================================================
 template void compute_acceleration<true>(Particles&, double, double);
