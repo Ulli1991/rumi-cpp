@@ -15,4 +15,4 @@
 module purge
 module load gcc/14 cuda/13
 
-srun ./build-cuda/nbody-kokkos --config config.txt
+srun ./build/nbody-kokkos --config config.txt
