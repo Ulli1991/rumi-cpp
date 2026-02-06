@@ -28,11 +28,15 @@ static CrossAccKickCacheFn fn_cross_acc_kick_cache = nullptr;
 // Uses tiled GPU kernel with shared memory for efficiency
 // =============================================================================
 void compute_acceleration_and_frost_distributed(DistributedParticles& dp,
-                                                 double G, double soft2, double eta) {
+                                                 double G, double soft2, double eta,
+                                                 bool use_n3l) {
 #ifdef USE_MPI
     if (MPIComm::size() == 1) {
         // Single rank: use optimized single-GPU version
-        compute_acceleration_and_frost<true>(dp.local, G, soft2, eta);
+        if (use_n3l)
+            compute_acceleration_and_frost<true>(dp.local, G, soft2, eta);
+        else
+            compute_acceleration_and_frost<false>(dp.local, G, soft2, eta);
         return;
     }
 
@@ -183,7 +187,10 @@ void compute_acceleration_and_frost_distributed(DistributedParticles& dp,
     dp.allgather_accelerations();
     dp.allgather_frost();
 #else
-    compute_acceleration_and_frost<true>(dp.local, G, soft2, eta);
+    if (use_n3l)
+        compute_acceleration_and_frost<true>(dp.local, G, soft2, eta);
+    else
+        compute_acceleration_and_frost<false>(dp.local, G, soft2, eta);
 #endif
 }
 
@@ -344,9 +351,12 @@ void hhs_fsi_step_dynamic(Particles& p, int start, int count, double pivot_dt,
                           double eta, bool use_n3l) {
     if (count == 0) return;
 
-    // Compute FROST timesteps for this subset (always N3L - single O(N²) computation)
+    // Compute FROST timesteps for this subset
     if (count > 1) {
-        compute_frost_subset<true>(p, start, count, G, soft2, eta);
+        if (use_n3l)
+            compute_frost_subset<true>(p, start, count, G, soft2, eta);
+        else
+            compute_frost_subset<false>(p, start, count, G, soft2, eta);
     }
 
     // Partition into slow (dt >= pivot) and fast (dt < pivot)

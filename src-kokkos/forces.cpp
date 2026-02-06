@@ -8,7 +8,7 @@ bool use_kahan = false;
 bool use_memory_tiling = true;  // Toggle shared memory tiling
 
 // Tile size for shared memory tiling (tune for your GPU)
-constexpr int TILE_SIZE = 128;
+constexpr int TILE_SIZE = 32;
 
 // ==========================================================================
 // Full N-body acceleration: O(N(N-1)/2) with N3L or O(N^2) without
@@ -771,48 +771,110 @@ void compute_frost_subset(Particles& p, int start, int count,
             Kokkos::atomic_min(&dt_f(i), t_min_i);
         });
     } else {
-        // Full N^2 within subset
-        Kokkos::parallel_for("frost_subset_full", count, KOKKOS_LAMBDA(int ii) {
-            int i = start + ii;
-            double t_min_i = DBL_MAX;
+        // Full N^2 within subset - tiled with shared memory, no atomics
+        using team_policy = Kokkos::TeamPolicy<>;
+        using member_type = team_policy::member_type;
+        using scratch_space = Kokkos::DefaultExecutionSpace::scratch_memory_space;
 
-            for (int j = start; j < end; j++) {
-                if (j == i) continue;
-                double dx = px(j) - px(i);
-                double dy = py(j) - py(i);
-                double dz = pz(j) - pz(i);
-                double r2 = dx*dx + dy*dy + dz*dz;
+        // x,y,z,vx,vy,vz,m per tile element
+        size_t scratch_size = TILE_SIZE * 7 * sizeof(double);
+        int num_teams = (count + TILE_SIZE - 1) / TILE_SIZE;
 
-                double dvx = pvx(j) - pvx(i);
-                double dvy = pvy(j) - pvy(i);
-                double dvz = pvz(j) - pvz(i);
-                double v_sq = dvx*dvx + dvy*dvy + dvz*dvz;
-                double r_norm = Kokkos::sqrt(r2 + EPS);
-                double v_norm = Kokkos::sqrt(v_sq + EPS);
-                double mass_sum = m(i) + m(j);
+        Kokkos::parallel_for("frost_subset_tiled",
+            team_policy(num_teams, TILE_SIZE).set_scratch_size(0, Kokkos::PerTeam(scratch_size)),
+            KOKKOS_LAMBDA(const member_type& team) {
+                int ii = team.league_rank() * TILE_SIZE + team.team_rank();
+                int i = start + ii;
 
-                double t_ff = Kokkos::sqrt(r_norm * r_norm * r_norm / (G * mass_sum + EPS));
-                double t_fb = r_norm / (v_norm + EPS);
+                Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
+                    tile_x(team.team_scratch(0), TILE_SIZE);
+                Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
+                    tile_y(tile_x.data() + TILE_SIZE, TILE_SIZE);
+                Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
+                    tile_z(tile_y.data() + TILE_SIZE, TILE_SIZE);
+                Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
+                    tile_vx(tile_z.data() + TILE_SIZE, TILE_SIZE);
+                Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
+                    tile_vy(tile_vx.data() + TILE_SIZE, TILE_SIZE);
+                Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
+                    tile_vz(tile_vy.data() + TILE_SIZE, TILE_SIZE);
+                Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
+                    tile_m(tile_vz.data() + TILE_SIZE, TILE_SIZE);
 
-                double r_dot_v = dx*dvx + dy*dvy + dz*dvz;
-                double r2_safe = r2 + EPS;
+                double xi = 0, yi = 0, zi = 0;
+                double vxi = 0, vyi = 0, vzi = 0;
+                double mi = 0;
+                if (ii < count) {
+                    xi = px(i); yi = py(i); zi = pz(i);
+                    vxi = pvx(i); vyi = pvy(i); vzi = pvz(i);
+                    mi = m(i);
+                }
 
-                double dt_ff_dt = 1.5 * (r_dot_v / r2_safe) * t_ff;
-                double factor = 1.0 + G * mass_sum / (v_sq * r_norm + EPS);
-                double dt_fb_dt = (r_dot_v / r2_safe) * factor * t_fb;
+                double t_min_i = DBL_MAX;
 
-                auto symmetrize = [](double t, double ddt) -> double {
-                    double ddt_safe = (Kokkos::fabs(ddt) > EPS) ? ddt : EPS;
-                    return t * (ddt + Kokkos::sqrt(1.0 + ddt * ddt) - 1.0) / ddt_safe;
-                };
+                for (int tile_st = start; tile_st < end; tile_st += TILE_SIZE) {
+                    int tile_end = (tile_st + TILE_SIZE < end) ? tile_st + TILE_SIZE : end;
+                    int tile_cnt = tile_end - tile_st;
 
-                double t_ff_sym = symmetrize(t_ff, dt_ff_dt);
-                double t_fb_sym = symmetrize(t_fb, dt_fb_dt);
-                double t_min_pair = Kokkos::fmin(t_ff_sym, t_fb_sym);
-                t_min_i = Kokkos::fmin(t_min_i, t_min_pair);
-            }
-            dt_f(i) = t_min_i;
-        });
+                    int t = team.team_rank();
+                    if (t < tile_cnt) {
+                        int idx = tile_st + t;
+                        tile_x(t) = px(idx);
+                        tile_y(t) = py(idx);
+                        tile_z(t) = pz(idx);
+                        tile_vx(t) = pvx(idx);
+                        tile_vy(t) = pvy(idx);
+                        tile_vz(t) = pvz(idx);
+                        tile_m(t) = m(idx);
+                    }
+                    team.team_barrier();
+
+                    if (ii < count) {
+                        for (int jt = 0; jt < tile_cnt; jt++) {
+                            int j = tile_st + jt;
+                            if (j == i) continue;
+
+                            double dx = tile_x(jt) - xi;
+                            double dy = tile_y(jt) - yi;
+                            double dz = tile_z(jt) - zi;
+                            double r2 = dx*dx + dy*dy + dz*dz;
+
+                            double dvx = tile_vx(jt) - vxi;
+                            double dvy = tile_vy(jt) - vyi;
+                            double dvz = tile_vz(jt) - vzi;
+                            double v_sq = dvx*dvx + dvy*dvy + dvz*dvz;
+                            double r_norm = Kokkos::sqrt(r2 + EPS);
+                            double v_norm = Kokkos::sqrt(v_sq + EPS);
+                            double mass_sum = mi + tile_m(jt);
+
+                            double t_ff = Kokkos::sqrt(r_norm * r_norm * r_norm / (G * mass_sum + EPS));
+                            double t_fb = r_norm / (v_norm + EPS);
+
+                            double r_dot_v = dx*dvx + dy*dvy + dz*dvz;
+                            double r2_safe = r2 + EPS;
+
+                            double dt_ff_dt = 1.5 * (r_dot_v / r2_safe) * t_ff;
+                            double factor = 1.0 + G * mass_sum / (v_sq * r_norm + EPS);
+                            double dt_fb_dt = (r_dot_v / r2_safe) * factor * t_fb;
+
+                            auto symmetrize = [](double t_val, double ddt) -> double {
+                                double ddt_safe = (Kokkos::fabs(ddt) > EPS) ? ddt : EPS;
+                                return t_val * (ddt + Kokkos::sqrt(1.0 + ddt * ddt) - 1.0) / ddt_safe;
+                            };
+
+                            double t_ff_sym = symmetrize(t_ff, dt_ff_dt);
+                            double t_fb_sym = symmetrize(t_fb, dt_fb_dt);
+                            double t_min_pair = Kokkos::fmin(t_ff_sym, t_fb_sym);
+                            t_min_i = Kokkos::fmin(t_min_i, t_min_pair);
+                        }
+                    }
+                    team.team_barrier();
+                }
+
+                if (ii < count) {
+                    dt_f(i) = t_min_i;
+                }
+            });
     }
     Kokkos::fence();
 

@@ -229,9 +229,12 @@ int main(int argc, char** argv) {
 
         if (use_distributed) {
             // Scatter-compute-gather: each rank computes its slice, then allgather
-            compute_acceleration_and_frost_distributed(dp, G, soft2, eta);
+            compute_acceleration_and_frost_distributed(dp, G, soft2, eta, use_n3l);
         } else {
-            compute_acceleration_and_frost<true>(work_p, G, soft2, eta);
+            if (use_n3l)
+                compute_acceleration_and_frost<true>(work_p, G, soft2, eta);
+            else
+                compute_acceleration_and_frost<false>(work_p, G, soft2, eta);
         }
 
         auto t1 = std::chrono::high_resolution_clock::now();
@@ -286,7 +289,10 @@ int main(int argc, char** argv) {
                 t += dt_global;
                 step++;
                 if (step % print_interval == 0) {
-                    compute_acceleration_and_frost<true>(work_p, G, soft2, eta);
+                    if (use_n3l)
+                        compute_acceleration_and_frost<true>(work_p, G, soft2, eta);
+                    else
+                        compute_acceleration_and_frost<false>(work_p, G, soft2, eta);
                     assign_levels(work_p, levels);
                     work_p.partition_by_level();
                     print_progress(t, step);
@@ -323,9 +329,12 @@ int main(int argc, char** argv) {
                 if (step % print_interval == 0) {
                     // Recompute forces + FROST only for diagnostics
                     if (use_distributed) {
-                        compute_acceleration_and_frost_distributed(dp, G, soft2, eta);
+                        compute_acceleration_and_frost_distributed(dp, G, soft2, eta, use_n3l);
                     } else {
-                        compute_acceleration_and_frost<true>(work_p, G, soft2, eta);
+                        if (use_n3l)
+                            compute_acceleration_and_frost<true>(work_p, G, soft2, eta);
+                        else
+                            compute_acceleration_and_frost<false>(work_p, G, soft2, eta);
                     }
                     assign_levels(work_p, levels);
                     work_p.partition_by_level();
@@ -340,9 +349,12 @@ int main(int argc, char** argv) {
         // Final diagnostics: recompute forces + FROST if not already done
         if (step % print_interval != 0) {
             if (use_distributed) {
-                compute_acceleration_and_frost_distributed(dp, G, soft2, eta);
+                compute_acceleration_and_frost_distributed(dp, G, soft2, eta, use_n3l);
             } else {
-                compute_acceleration_and_frost<true>(work_p, G, soft2, eta);
+                if (use_n3l)
+                    compute_acceleration_and_frost<true>(work_p, G, soft2, eta);
+                else
+                    compute_acceleration_and_frost<false>(work_p, G, soft2, eta);
             }
             assign_levels(work_p, levels);
             work_p.partition_by_level();

@@ -49,4 +49,5 @@ void drift(Particles& p, int start, int count, double dt);
 // Distributed force + FROST computation for between-step updates
 // Each rank computes for its slice, then allgather accelerations and FROST
 void compute_acceleration_and_frost_distributed(DistributedParticles& dp,
-                                                 double G, double soft2, double eta);
+                                                 double G, double soft2, double eta,
+                                                 bool use_n3l = true);
