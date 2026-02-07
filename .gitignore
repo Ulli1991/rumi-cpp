@@ -22,6 +22,7 @@ Makefile.cmake
 *.err
 slurm-*.out
 job_*.sh
+job_mpi_multi*
 *.pbs
 *.sge
 job.*
