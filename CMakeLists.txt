@@ -24,9 +24,10 @@ add_executable(nbody-kokkos
     ${SRC_DIR}/initial_conditions.cpp
     ${SRC_DIR}/diagnostics.cpp
     ${SRC_DIR}/mpi_comm.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/initial_conditions/sse.cpp
 )
 
-target_include_directories(nbody-kokkos PRIVATE ${SRC_DIR})
+target_include_directories(nbody-kokkos PRIVATE ${SRC_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/initial_conditions)
 target_link_libraries(nbody-kokkos Kokkos::kokkos)
 target_compile_options(nbody-kokkos PRIVATE -O3)
 
