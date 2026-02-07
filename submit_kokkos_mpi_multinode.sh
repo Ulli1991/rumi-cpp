@@ -9,7 +9,7 @@
 #SBATCH --gres=gpu:a100:4
 #SBATCH --cpus-per-task=18
 #SBATCH --mem=500000
-#SBATCH --time=01:00:00
+#SBATCH --time=04:00:00
 #SBATCH --mail-type=BEGIN,FAIL
 #SBATCH --mail-user=uli@mpa-garching.mpg.de
 
@@ -39,4 +39,4 @@ export UCX_TLS=rc,cuda_copy,cuda_ipc,gdr_copy
 export UCX_RNDV_SCHEME=put_zcopy
 
 # Run with MPI - each rank gets one GPU via Kokkos device mapping
-srun ./build-cuda-mpi/nbody-kokkos --config config.txt --kokkos-map-device-id-by=mpi_rank
+srun ./build-mpi/nbody-kokkos --config config.txt --kokkos-map-device-id-by=mpi_rank
