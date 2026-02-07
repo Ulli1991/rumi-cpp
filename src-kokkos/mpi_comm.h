@@ -88,6 +88,11 @@ struct DistributedParticles {
     // Total particles (same as N_local in replicated mode)
     int N_total = 0;
 
+    // Pre-allocated MPI communication buffers (packed [ax,ay,az] interleaved)
+    // Avoids cudaMalloc/cudaFree per allgather call
+    Kokkos::View<double*> mpi_acc_send_buf;  // size: 3 * max_per_rank
+    Kokkos::View<double*> mpi_acc_recv_buf;  // size: 3 * N_total
+
     // Initialize distributed particles from a global particle set
     // Only rank 0 should have the full particle set initially
     // After this, ALL ranks have ALL particles (replicated)
@@ -99,12 +104,14 @@ struct DistributedParticles {
     void allgather_accelerations();
 
     // Allgather accelerations for a SUBSET of particles [start, start+count)
-    // Used when only a subset of particles were involved in force computation
-    // Each rank computed for its slice of the subset
+    // Packs ax/ay/az into a single MPI message (3x fewer MPI calls)
     void allgather_accelerations_subset(int start, int count);
 
     // Allgather FROST timesteps after distributed FROST computation
     void allgather_frost();
+
+    // Allgather FROST timesteps for a SUBSET of particles [start, start+count)
+    void allgather_frost_subset(int start, int count);
 
     // Gather particle data from all ranks to rank 0
     // In replicated mode, just returns local (all ranks have all data)

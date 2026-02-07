@@ -972,6 +972,8 @@ static void cross_acceleration_distributed(DistributedParticles& dp,
     }
     Kokkos::fence();
 
+    // Must use separate allgathers: each rank computed its slice of slow and
+    // its slice of fast independently, so the distributions don't match a combined range
     dp.allgather_accelerations_subset(slow_start, slow_count);
     dp.allgather_accelerations_subset(fast_start, fast_count);
 }
@@ -1178,6 +1180,7 @@ static void cross_acceleration_and_gradient_distributed(DistributedParticles& dp
     }
     Kokkos::fence();
 
+    // Must use separate allgathers: force slices were computed independently
     dp.allgather_accelerations_subset(slow_start, slow_count);
     dp.allgather_accelerations_subset(fast_start, fast_count);
 }
@@ -1191,29 +1194,7 @@ static void compute_frost_distributed(DistributedParticles& dp, int start, int c
     dp.get_force_slice(start, count, slice_start, slice_count);
 
     if (slice_count == 0) {
-#ifdef USE_MPI
-        // Still need to participate in allgather
-        if (MPIComm::size() > 1) {
-            int n_ranks = MPIComm::size();
-            std::vector<int> all_counts(n_ranks);
-            std::vector<int> displs(n_ranks);
-            int base = count / n_ranks;
-            int remainder = count % n_ranks;
-            displs[0] = 0;
-            for (int r = 0; r < n_ranks; r++) {
-                all_counts[r] = base + (r < remainder ? 1 : 0);
-                if (r > 0) displs[r] = displs[r-1] + all_counts[r-1];
-            }
-            std::vector<double> recv_dt(count);
-            MPI_Allgatherv(nullptr, 0, MPI_DOUBLE,
-                           recv_dt.data(), all_counts.data(), displs.data(), MPI_DOUBLE,
-                           MPI_COMM_WORLD);
-            auto hg_dt = Kokkos::create_mirror_view(dp.local.dt_frost);
-            Kokkos::deep_copy(hg_dt, dp.local.dt_frost);
-            for (int i = 0; i < count; i++) hg_dt(start + i) = recv_dt[i];
-            Kokkos::deep_copy(dp.local.dt_frost, hg_dt);
-        }
-#endif
+        dp.allgather_frost_subset(start, count);
         return;
     }
 
@@ -1331,37 +1312,8 @@ static void compute_frost_distributed(DistributedParticles& dp, int start, int c
         });
     Kokkos::fence();
 
-    // Allgather dt_frost values
-#ifdef USE_MPI
-    if (MPIComm::size() > 1) {
-        int n_ranks = MPIComm::size();
-        std::vector<int> all_counts(n_ranks);
-        std::vector<int> displs(n_ranks);
-
-        int base = count / n_ranks;
-        int remainder = count % n_ranks;
-        displs[0] = 0;
-        for (int r = 0; r < n_ranks; r++) {
-            all_counts[r] = base + (r < remainder ? 1 : 0);
-            if (r > 0) displs[r] = displs[r-1] + all_counts[r-1];
-        }
-
-        auto h_dt = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
-            Kokkos::subview(dp.local.dt_frost, Kokkos::make_pair(slice_start, slice_start + slice_count)));
-
-        std::vector<double> send_dt(slice_count), recv_dt(count);
-        for (int i = 0; i < slice_count; i++) send_dt[i] = h_dt(i);
-
-        MPI_Allgatherv(send_dt.data(), slice_count, MPI_DOUBLE,
-                       recv_dt.data(), all_counts.data(), displs.data(), MPI_DOUBLE,
-                       MPI_COMM_WORLD);
-
-        auto hg_dt = Kokkos::create_mirror_view(dp.local.dt_frost);
-        Kokkos::deep_copy(hg_dt, dp.local.dt_frost);
-        for (int i = 0; i < count; i++) hg_dt(start + i) = recv_dt[i];
-        Kokkos::deep_copy(dp.local.dt_frost, hg_dt);
-    }
-#endif
+    // Allgather dt_frost values (uses GPU-aware MPI when available)
+    dp.allgather_frost_subset(start, count);
 }
 
 // =============================================================================
