@@ -1,5 +1,6 @@
 #include "initial_conditions.h"
 #include "constants.h"
+#include "sse.h"
 #include <cmath>
 #include <cstdio>
 #include <random>
@@ -41,88 +42,22 @@ void init_outer_planets(Particles& p) {
 }
 
 // =========================================================================
-// Stellar evolution helpers (SSE-based, matching JAX version)
+// Stellar evolution via SSE (Hurley et al. 2000)
 // =========================================================================
 
-// Main sequence lifetime using SSE formulae (Hurley et al. 2000 / Tout et al. 1996)
-static double main_sequence_lifetime(double m_init, double Z) {
-    double lzs = std::log10(Z / 0.02);
-
-    // SSE coefficients from zdata.h
-    double a17 = 1593.890 + lzs * (2053.038 + lzs * (1231.226 + lzs * 232.7785));
-    double a18 = 2706.708 + lzs * (1483.131 + lzs * (577.2723 + lzs * 74.11230));
-    double a19 = 146.6143 + lzs * (-104.8442 + lzs * (-67.95374 + lzs * (-13.91127)));
-    double a20 = 0.0414196 + lzs * (0.0456488 + lzs * (0.0295854 + lzs * 0.00557148));
-    double a21 = 0.3426349;
-
-    double m = m_init;
-    double num = a17 + a18 * std::pow(m, 4) + a19 * std::pow(m, 5.5) + std::pow(m, 7);
-    double den = a20 * m * m + a21 * std::pow(m, 7);
-    double t_ms_myr = num / den;
-    return t_ms_myr / 1000.0; // Gyr
-}
-
-// Turn-off mass at given age (binary search)
 static double turnoff_mass(double age_gyr, double Z) {
+    SSEContext sse(Z);
+    double age_myr = age_gyr * 1000.0;
     double m_low = 0.1, m_high = 100.0;
     while (m_high - m_low > 0.001) {
         double m_mid = (m_low + m_high) / 2.0;
-        if (main_sequence_lifetime(m_mid, Z) > age_gyr)
+        SSEResult res = sse.evolve(m_mid, age_myr);
+        if (res.kw <= 1)
             m_low = m_mid;
         else
             m_high = m_mid;
     }
     return (m_low + m_high) / 2.0;
-}
-
-// Remnant type and mass (SSE prescriptions)
-struct Remnant {
-    char type; // 'W' = WD, 'N' = NS, 'B' = BH
-    double mass;
-};
-
-static Remnant remnant_type_and_mass(double m_init, double Z) {
-    const double mch = 1.44;
-    const double M_WD_max = 8.0;
-    const double M_NS_max = 25.0;
-
-    if (m_init < M_WD_max) {
-        double mc;
-        if (Z >= 1.0e-08) {
-            mc = std::min(0.36 + 0.104 * m_init, 0.58 + 0.061 * m_init);
-            mc = std::max(0.54 + 0.042 * m_init, mc);
-            if (m_init < 1.0) mc = 0.46;
-        } else {
-            mc = std::min(0.29 + 0.178 * m_init, 0.65 + 0.062 * m_init);
-            mc = std::max(0.54 + 0.073 * m_init, mc);
-        }
-        return {'W', std::min(mc, mch)};
-    } else if (m_init < M_NS_max) {
-        double mc_core = 0.15 * m_init + 0.5;
-        double m_ns;
-        if (mc_core < 2.5)
-            m_ns = 0.161767 * mc_core + 1.067055;
-        else
-            m_ns = 0.314154 * mc_core + 0.686088;
-        m_ns = std::clamp(m_ns, 1.1, 2.5);
-        return {'N', m_ns};
-    } else {
-        double m_bh;
-        if (Z >= 0.01)
-            m_bh = 0.2 * m_init + 2.0;
-        else
-            m_bh = 0.4 * m_init;
-        m_bh = std::clamp(m_bh, 3.0, 50.0);
-        return {'B', m_bh};
-    }
-}
-
-// Evolve star from initial mass to mass at given age
-static Remnant evolve_stellar_mass(double m_init, double age_gyr, double Z) {
-    double t_ms = main_sequence_lifetime(m_init, Z);
-    if (age_gyr < t_ms)
-        return {'M', m_init}; // still on MS
-    return remnant_type_and_mass(m_init, Z);
 }
 
 // Sample from Kroupa (2001) IMF
@@ -194,33 +129,39 @@ void init_plummer(Particles& p, int N, double M_total_msun, double r_half_pc, in
         double mx = *std::max_element(masses.begin(), masses.end()) * (M_total_msun / sum);
         std::printf("    Mass range: %.2f - %.2f M_sun\n", mn, mx);
     } else if (mass_distribution == "kroupa_evolved") {
+        SSEContext sse(metallicity);
+        double age_myr = age_gyr * 1000.0;
         auto m_initial = sample_kroupa_imf(N, rng);
-        int n_ms = 0, n_wd = 0, n_ns = 0, n_bh = 0;
+        int n_ms = 0, n_evolved = 0, n_wd = 0, n_ns = 0, n_bh = 0;
         std::vector<double> masses(N);
         for (int i = 0; i < N; i++) {
-            auto rem = evolve_stellar_mass(m_initial[i], age_gyr, metallicity);
-            masses[i] = rem.mass;
-            switch (rem.type) {
-                case 'M': n_ms++; break;
-                case 'W': n_wd++; break;
-                case 'N': n_ns++; break;
-                case 'B': n_bh++; break;
-            }
+            SSEResult res = sse.evolve(m_initial[i], age_myr);
+            masses[i] = res.mass;
+            if (res.kw <= 1) n_ms++;
+            else if (res.kw >= 2 && res.kw <= 9) n_evolved++;
+            else if (res.kw >= 10 && res.kw <= 12) n_wd++;
+            else if (res.kw == 13) n_ns++;
+            else if (res.kw == 14) n_bh++;
         }
-        double sum = 0;
-        for (int i = 0; i < N; i++) sum += masses[i];
-        for (int i = 0; i < N; i++) p.mass[i] = masses[i] * (M_total / sum);
+        // Use physical SSE masses directly (no rescaling)
+        // M_total is determined by the IMF sampling + SSE, not prescribed
+        M_total_msun = 0;
+        for (int i = 0; i < N; i++) M_total_msun += masses[i];
+        M_total = M_total_msun * MASS_UNIT;
+        for (int i = 0; i < N; i++) p.mass[i] = masses[i] * MASS_UNIT;
 
         double m_to = turnoff_mass(age_gyr, metallicity);
-        std::printf("  Stellar population at %.1f Gyr (Z=%.3f):\n", age_gyr, metallicity);
+        std::printf("  Stellar population at %.1f Gyr (Z=%.4f, full SSE):\n", age_gyr, metallicity);
         std::printf("    Turn-off mass: %.2f M_sun\n", m_to);
+        std::printf("    Total mass:    %.0f M_sun\n", M_total_msun);
         std::printf("    Main sequence: %d (%.1f%%)\n", n_ms, 100.0 * n_ms / N);
+        std::printf("    Evolved:       %d (%.1f%%)\n", n_evolved, 100.0 * n_evolved / N);
         std::printf("    White dwarfs:  %d (%.1f%%)\n", n_wd, 100.0 * n_wd / N);
         std::printf("    Neutron stars: %d (%.1f%%)\n", n_ns, 100.0 * n_ns / N);
         std::printf("    Black holes:   %d (%.1f%%)\n", n_bh, 100.0 * n_bh / N);
-        double mn = *std::min_element(masses.begin(), masses.end()) * (M_total_msun / sum);
-        double mx = *std::max_element(masses.begin(), masses.end()) * (M_total_msun / sum);
-        std::printf("    Mass range: %.2f - %.2f M_sun\n", mn, mx);
+        double mn = *std::min_element(masses.begin(), masses.end());
+        double mx = *std::max_element(masses.begin(), masses.end());
+        std::printf("    Mass range: %.4f - %.4f M_sun\n", mn, mx);
     }
 
     // Sample positions from Plummer distribution
