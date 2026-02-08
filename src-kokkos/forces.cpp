@@ -109,36 +109,21 @@ void compute_acceleration_and_timestep(Particles& p, double G, double soft2, dou
                 Kokkos::atomic_add(&pay(j), -fi * dy);
                 Kokkos::atomic_add(&paz(j), -fi * dz);
 
-                // Adaptive timestep
+                // Adaptive timestep (squared-space: 1 sqrt instead of 5)
                 double dvx = pvx(j) - pvx(i);
                 double dvy = pvy(j) - pvy(i);
                 double dvz = pvz(j) - pvz(i);
                 double v_sq = dvx*dvx + dvy*dvy + dvz*dvz;
-                double r_norm = Kokkos::sqrt(r2 + EPS);
-                double v_norm = Kokkos::sqrt(v_sq + EPS);
+                double r2_eps = r2 + EPS;
+                double r_norm = Kokkos::sqrt(r2_eps);
                 double mass_sum = m(i) + m(j);
 
-                double t_ff = Kokkos::sqrt(r_norm * r_norm * r_norm / (G * mass_sum + EPS));
-                double t_fb = r_norm / (v_norm + EPS);
+                double t_ff_sq = r2_eps * r_norm / (G * mass_sum + EPS);
+                double t_fb_sq = r2_eps / (v_sq + EPS);
+                double t_min_sq_pair = Kokkos::fmin(t_ff_sq, t_fb_sq);
 
-                double r_dot_v = dx*dvx + dy*dvy + dz*dvz;
-                double r2_safe = r2 + EPS;
-
-                double dt_ff_dt = 1.5 * (r_dot_v / r2_safe) * t_ff;
-                double factor = 1.0 + G * mass_sum / (v_sq * r_norm + EPS);
-                double dt_fb_dt = (r_dot_v / r2_safe) * factor * t_fb;
-
-                auto symmetrize = [](double t, double ddt) -> double {
-                    double ddt_safe = (Kokkos::fabs(ddt) > EPS) ? ddt : EPS;
-                    return t * (ddt + Kokkos::sqrt(1.0 + ddt * ddt) - 1.0) / ddt_safe;
-                };
-
-                double t_ff_sym = symmetrize(t_ff, dt_ff_dt);
-                double t_fb_sym = symmetrize(t_fb, dt_fb_dt);
-                double t_min_pair = Kokkos::fmin(t_ff_sym, t_fb_sym);
-
-                t_min_i = Kokkos::fmin(t_min_i, t_min_pair);
-                Kokkos::atomic_min(&dt_f(j), t_min_pair);
+                t_min_i = Kokkos::fmin(t_min_i, t_min_sq_pair);
+                Kokkos::atomic_min(&dt_f(j), t_min_sq_pair);
             }
             Kokkos::atomic_add(&pax(i), axi);
             Kokkos::atomic_add(&pay(i), ayi);
@@ -235,34 +220,19 @@ void compute_acceleration_and_timestep(Particles& p, double G, double soft2, dou
                             double fj = G * tile_m(jt) * inv_r3;
                             axi += fj * dx; ayi += fj * dy; azi += fj * dz;
 
-                            // Adaptive timestep
+                            // Adaptive timestep (squared-space: 1 sqrt instead of 5)
                             double dvx = tile_vx(jt) - vxi;
                             double dvy = tile_vy(jt) - vyi;
                             double dvz = tile_vz(jt) - vzi;
                             double v_sq = dvx*dvx + dvy*dvy + dvz*dvz;
-                            double r_norm = Kokkos::sqrt(r2 + EPS);
-                            double v_norm = Kokkos::sqrt(v_sq + EPS);
+                            double r2_eps = r2 + EPS;
+                            double r_norm = Kokkos::sqrt(r2_eps);
                             double mass_sum = mi + tile_m(jt);
 
-                            double t_ff = Kokkos::sqrt(r_norm * r_norm * r_norm / (G * mass_sum + EPS));
-                            double t_fb = r_norm / (v_norm + EPS);
-
-                            double r_dot_v = dx*dvx + dy*dvy + dz*dvz;
-                            double r2_safe = r2 + EPS;
-
-                            double dt_ff_dt = 1.5 * (r_dot_v / r2_safe) * t_ff;
-                            double factor = 1.0 + G * mass_sum / (v_sq * r_norm + EPS);
-                            double dt_fb_dt = (r_dot_v / r2_safe) * factor * t_fb;
-
-                            auto symmetrize = [](double t, double ddt) -> double {
-                                double ddt_safe = (Kokkos::fabs(ddt) > EPS) ? ddt : EPS;
-                                return t * (ddt + Kokkos::sqrt(1.0 + ddt * ddt) - 1.0) / ddt_safe;
-                            };
-
-                            double t_ff_sym = symmetrize(t_ff, dt_ff_dt);
-                            double t_fb_sym = symmetrize(t_fb, dt_fb_dt);
-                            double t_min_pair = Kokkos::fmin(t_ff_sym, t_fb_sym);
-                            t_min_i = Kokkos::fmin(t_min_i, t_min_pair);
+                            double t_ff_sq = r2_eps * r_norm / (G * mass_sum + EPS);
+                            double t_fb_sq = r2_eps / (v_sq + EPS);
+                            double t_min_sq_pair = Kokkos::fmin(t_ff_sq, t_fb_sq);
+                            t_min_i = Kokkos::fmin(t_min_i, t_min_sq_pair);
                         }
                     }
                     team.team_barrier();
@@ -270,7 +240,7 @@ void compute_acceleration_and_timestep(Particles& p, double G, double soft2, dou
 
                 if (i < N) {
                     pax(i) = axi; pay(i) = ayi; paz(i) = azi;
-                    dt_f(i) = t_min_i;
+                    dt_f(i) = Kokkos::sqrt(t_min_i);
                 }
             });
     } else {
@@ -292,45 +262,36 @@ void compute_acceleration_and_timestep(Particles& p, double G, double soft2, dou
                 double fj = G * m(j) * inv_r3;
                 axi += fj * dx; ayi += fj * dy; azi += fj * dz;
 
-                // Adaptive timestep
+                // Adaptive timestep (squared-space: 1 sqrt instead of 5)
                 double dvx = pvx(j) - pvx(i);
                 double dvy = pvy(j) - pvy(i);
                 double dvz = pvz(j) - pvz(i);
                 double v_sq = dvx*dvx + dvy*dvy + dvz*dvz;
-                double r_norm = Kokkos::sqrt(r2 + EPS);
-                double v_norm = Kokkos::sqrt(v_sq + EPS);
+                double r2_eps = r2 + EPS;
+                double r_norm = Kokkos::sqrt(r2_eps);
                 double mass_sum = m(i) + m(j);
 
-                double t_ff = Kokkos::sqrt(r_norm * r_norm * r_norm / (G * mass_sum + EPS));
-                double t_fb = r_norm / (v_norm + EPS);
-
-                double r_dot_v = dx*dvx + dy*dvy + dz*dvz;
-                double r2_safe = r2 + EPS;
-
-                double dt_ff_dt = 1.5 * (r_dot_v / r2_safe) * t_ff;
-                double factor = 1.0 + G * mass_sum / (v_sq * r_norm + EPS);
-                double dt_fb_dt = (r_dot_v / r2_safe) * factor * t_fb;
-
-                auto symmetrize = [](double t, double ddt) -> double {
-                    double ddt_safe = (Kokkos::fabs(ddt) > EPS) ? ddt : EPS;
-                    return t * (ddt + Kokkos::sqrt(1.0 + ddt * ddt) - 1.0) / ddt_safe;
-                };
-
-                double t_ff_sym = symmetrize(t_ff, dt_ff_dt);
-                double t_fb_sym = symmetrize(t_fb, dt_fb_dt);
-                double t_min_pair = Kokkos::fmin(t_ff_sym, t_fb_sym);
-                t_min_i = Kokkos::fmin(t_min_i, t_min_pair);
+                double t_ff_sq = r2_eps * r_norm / (G * mass_sum + EPS);
+                double t_fb_sq = r2_eps / (v_sq + EPS);
+                double t_min_sq_pair = Kokkos::fmin(t_ff_sq, t_fb_sq);
+                t_min_i = Kokkos::fmin(t_min_i, t_min_sq_pair);
             }
             pax(i) = axi; pay(i) = ayi; paz(i) = azi;
-            dt_f(i) = t_min_i;
+            dt_f(i) = Kokkos::sqrt(t_min_i);
         });
     }
     Kokkos::fence();
 
-    // Apply eta
-    Kokkos::parallel_for("apply_eta", N, KOKKOS_LAMBDA(int i) {
-        dt_f(i) *= eta;
-    });
+    // Apply sqrt + eta (N3L path stores t²; tiled/non-tiled paths already applied sqrt)
+    if constexpr (UseN3L) {
+        Kokkos::parallel_for("sqrt_eta", N, KOKKOS_LAMBDA(int i) {
+            dt_f(i) = Kokkos::sqrt(dt_f(i)) * eta;
+        });
+    } else {
+        Kokkos::parallel_for("apply_eta", N, KOKKOS_LAMBDA(int i) {
+            dt_f(i) *= eta;
+        });
+    }
     Kokkos::fence();
 }
 
@@ -727,10 +688,10 @@ void compute_timestep_subset(Particles& p, int start, int count,
     Kokkos::fence();
 
     if constexpr (UseN3L) {
-        // N3L: upper triangle with atomics
+        // N3L: upper triangle with atomics, squared-space timestep
         Kokkos::parallel_for("dt_subset_n3l", count, KOKKOS_LAMBDA(int ii) {
             int i = start + ii;
-            double t_min_i = DBL_MAX;
+            double t_min_sq_i = 1e60;
 
             for (int j = i + 1; j < end; j++) {
                 double dx = px(j) - px(i);
@@ -742,41 +703,31 @@ void compute_timestep_subset(Particles& p, int start, int count,
                 double dvy = pvy(j) - pvy(i);
                 double dvz = pvz(j) - pvz(i);
                 double v_sq = dvx*dvx + dvy*dvy + dvz*dvz;
-                double r_norm = Kokkos::sqrt(r2 + EPS);
-                double v_norm = Kokkos::sqrt(v_sq + EPS);
+
+                double r2_eps = r2 + EPS;
+                double r_norm = Kokkos::sqrt(r2_eps);
                 double mass_sum = m(i) + m(j);
+                double t_ff_sq = r2_eps * r_norm / (G * mass_sum + EPS);
+                double t_fb_sq = r2_eps / (v_sq + EPS);
 
-                double t_ff = Kokkos::sqrt(r_norm * r_norm * r_norm / (G * mass_sum + EPS));
-                double t_fb = r_norm / (v_norm + EPS);
-
-                double r_dot_v = dx*dvx + dy*dvy + dz*dvz;
-                double r2_safe = r2 + EPS;
-
-                double dt_ff_dt = 1.5 * (r_dot_v / r2_safe) * t_ff;
-                double factor = 1.0 + G * mass_sum / (v_sq * r_norm + EPS);
-                double dt_fb_dt = (r_dot_v / r2_safe) * factor * t_fb;
-
-                auto symmetrize = [](double t, double ddt) -> double {
-                    double ddt_safe = (Kokkos::fabs(ddt) > EPS) ? ddt : EPS;
-                    return t * (ddt + Kokkos::sqrt(1.0 + ddt * ddt) - 1.0) / ddt_safe;
-                };
-
-                double t_ff_sym = symmetrize(t_ff, dt_ff_dt);
-                double t_fb_sym = symmetrize(t_fb, dt_fb_dt);
-                double t_min_pair = Kokkos::fmin(t_ff_sym, t_fb_sym);
-
-                t_min_i = Kokkos::fmin(t_min_i, t_min_pair);
-                Kokkos::atomic_min(&dt_f(j), t_min_pair);
+                double t_min_sq_pair = Kokkos::fmin(t_ff_sq, t_fb_sq);
+                t_min_sq_i = Kokkos::fmin(t_min_sq_i, t_min_sq_pair);
+                Kokkos::atomic_min(&dt_f(j), t_min_sq_pair);
             }
-            Kokkos::atomic_min(&dt_f(i), t_min_i);
+            Kokkos::atomic_min(&dt_f(i), t_min_sq_i);
+        });
+        Kokkos::fence();
+
+        // Convert from t^2 to t and apply eta
+        Kokkos::parallel_for("sqrt_eta_n3l", count, KOKKOS_LAMBDA(int ii) {
+            dt_f(start + ii) = Kokkos::sqrt(dt_f(start + ii)) * eta;
         });
     } else {
-        // Full N^2 within subset - tiled with shared memory, no atomics
+        // Full N^2 within subset - tiled with shared memory, squared-space timestep
         using team_policy = Kokkos::TeamPolicy<>;
         using member_type = team_policy::member_type;
         using scratch_space = Kokkos::DefaultExecutionSpace::scratch_memory_space;
 
-        // x,y,z,vx,vy,vz,m per tile element
         size_t scratch_size = TILE_SIZE * 7 * sizeof(double);
         int num_teams = (count + TILE_SIZE - 1) / TILE_SIZE;
 
@@ -810,7 +761,7 @@ void compute_timestep_subset(Particles& p, int start, int count,
                     mi = m(i);
                 }
 
-                double t_min_i = DBL_MAX;
+                double t_min_sq = 1e60;
 
                 for (int tile_st = start; tile_st < end; tile_st += TILE_SIZE) {
                     int tile_end = (tile_st + TILE_SIZE < end) ? tile_st + TILE_SIZE : end;
@@ -843,45 +794,25 @@ void compute_timestep_subset(Particles& p, int start, int count,
                             double dvy = tile_vy(jt) - vyi;
                             double dvz = tile_vz(jt) - vzi;
                             double v_sq = dvx*dvx + dvy*dvy + dvz*dvz;
-                            double r_norm = Kokkos::sqrt(r2 + EPS);
-                            double v_norm = Kokkos::sqrt(v_sq + EPS);
+
+                            double r2_eps = r2 + EPS;
+                            double r_norm = Kokkos::sqrt(r2_eps);
                             double mass_sum = mi + tile_m(jt);
+                            double t_ff_sq = r2_eps * r_norm / (G * mass_sum + EPS);
+                            double t_fb_sq = r2_eps / (v_sq + EPS);
 
-                            double t_ff = Kokkos::sqrt(r_norm * r_norm * r_norm / (G * mass_sum + EPS));
-                            double t_fb = r_norm / (v_norm + EPS);
-
-                            double r_dot_v = dx*dvx + dy*dvy + dz*dvz;
-                            double r2_safe = r2 + EPS;
-
-                            double dt_ff_dt = 1.5 * (r_dot_v / r2_safe) * t_ff;
-                            double factor = 1.0 + G * mass_sum / (v_sq * r_norm + EPS);
-                            double dt_fb_dt = (r_dot_v / r2_safe) * factor * t_fb;
-
-                            auto symmetrize = [](double t_val, double ddt) -> double {
-                                double ddt_safe = (Kokkos::fabs(ddt) > EPS) ? ddt : EPS;
-                                return t_val * (ddt + Kokkos::sqrt(1.0 + ddt * ddt) - 1.0) / ddt_safe;
-                            };
-
-                            double t_ff_sym = symmetrize(t_ff, dt_ff_dt);
-                            double t_fb_sym = symmetrize(t_fb, dt_fb_dt);
-                            double t_min_pair = Kokkos::fmin(t_ff_sym, t_fb_sym);
-                            t_min_i = Kokkos::fmin(t_min_i, t_min_pair);
+                            double t_min_sq_pair = Kokkos::fmin(t_ff_sq, t_fb_sq);
+                            t_min_sq = Kokkos::fmin(t_min_sq, t_min_sq_pair);
                         }
                     }
                     team.team_barrier();
                 }
 
                 if (ii < count) {
-                    dt_f(i) = t_min_i;
+                    dt_f(i) = Kokkos::sqrt(t_min_sq) * eta;
                 }
             });
     }
-    Kokkos::fence();
-
-    // Apply eta
-    Kokkos::parallel_for("apply_eta_subset", count, KOKKOS_LAMBDA(int ii) {
-        dt_f(start + ii) *= eta;
-    });
     Kokkos::fence();
 }
 
