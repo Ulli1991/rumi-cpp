@@ -7,6 +7,10 @@
 // HHS adaptive timestep skip option (set from config)
 extern bool skip_second_timestep;       // Skip timestep recomputation on 2nd HHS half-step
 
+// Direct N² threshold: below this particle count, skip MPI distribution
+// and compute forces locally on each rank (eliminates allgather overhead)
+extern int direct_n2_threshold;         // 0 = disabled (always distributed)
+
 // Forward declaration for distributed particles
 struct DistributedParticles;
 
