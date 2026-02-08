@@ -36,3 +36,4 @@ PLUMMER_METALLICITY = 0.02          # Stellar metallicity Z (solar)
 # Output
 # =============================================================================
 PRINT_INTERVAL = 1
+PROFILING = true                    # Print performance breakdown at each print interval

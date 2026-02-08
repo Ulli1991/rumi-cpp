@@ -6,6 +6,7 @@
 #include "diagnostics.h"
 #include "constants.h"
 #include "mpi_comm.h"
+#include "profiling.h"
 
 #include <Kokkos_Core.hpp>
 #include <cstdio>
@@ -139,6 +140,7 @@ int main(int argc, char** argv) {
         grad_n3l = (cfg.get_str("GRAD_N3L", "false") == "true");
         use_kahan = (cfg.get_str("USE_KAHAN", "false") == "true");
         use_memory_tiling = (cfg.get_str("MEMORY_TILING", "true") == "true");
+        bool profiling_enabled = (cfg.get_str("PROFILING", "true") == "true");
 
         // USE_N3L: default true on CPU-like backends, false on GPU
         bool use_n3l_default = true;
@@ -211,9 +213,13 @@ int main(int argc, char** argv) {
             std::fflush(stdout);
             std::printf("G=%.4e  soft=%.4e cm  dt_max=%.4e yr  dt_min=%.4e yr  eta=%.4f\n",
                         G, soft_cm, dt_max_yr, dt_min_yr, eta);
-            std::printf("t_final=%.4e yr  print_interval=%d  memory_tiling=%s\n\n",
-                        t_final_yr, print_interval, use_memory_tiling ? "true" : "false");
+            std::printf("t_final=%.4e yr  print_interval=%d  memory_tiling=%s  profiling=%s\n\n",
+                        t_final_yr, print_interval, use_memory_tiling ? "true" : "false",
+                        profiling_enabled ? "true" : "false");
             std::fflush(stdout);
+            if (profiling_enabled) {
+                g_profiler.print_memory_report(N_display, n_ranks);
+            }
         }
 
         auto levels = build_levels(dt_max, dt_min);
@@ -284,10 +290,15 @@ int main(int argc, char** argv) {
         if (integrator == "fsi") {
             double dt_global = levels.back();
             while (t < t_final) {
+                auto step_t0 = std::chrono::high_resolution_clock::now();
                 // In replicated mode, work_p contains all particles on all ranks
                 fsi_step(work_p, 0, work_p.N, G, soft2, dt_global);
                 t += dt_global;
                 step++;
+                auto step_t1 = std::chrono::high_resolution_clock::now();
+                double step_wall = std::chrono::duration<double>(step_t1 - step_t0).count();
+                g_profiler.step_wall_total += step_wall;
+                g_profiler.step_count++;
                 if (step % print_interval == 0) {
                     if (use_n3l)
                         compute_acceleration_and_frost<true>(work_p, G, soft2, eta);
@@ -296,6 +307,10 @@ int main(int argc, char** argv) {
                     assign_levels(work_p, levels);
                     work_p.partition_by_level();
                     print_progress(t, step);
+                    if (my_rank == 0 && profiling_enabled) {
+                        g_profiler.print_report(N_display, n_ranks);
+                    }
+                    g_profiler.reset();
                 }
             }
         } else {
@@ -317,12 +332,13 @@ int main(int argc, char** argv) {
                 step++;
 
                 auto step_t1 = std::chrono::high_resolution_clock::now();
+                double step_wall = std::chrono::duration<double>(step_t1 - step_t0).count();
+                g_profiler.step_wall_total += step_wall;
+                g_profiler.step_count++;
 
                 if (my_rank == 0 && step <= 5) {
                     std::printf("Step %d: %.3fs, dt=%.2e yr\n",
-                        step,
-                        std::chrono::duration<double>(step_t1-step_t0).count(),
-                        dt_max/TIME_UNIT);
+                        step, step_wall, dt_max/TIME_UNIT);
                     std::fflush(stdout);
                 }
 
@@ -339,6 +355,10 @@ int main(int argc, char** argv) {
                     assign_levels(work_p, levels);
                     work_p.partition_by_level();
                     print_progress(t, step);
+                    if (my_rank == 0 && profiling_enabled) {
+                        g_profiler.print_report(N_display, n_ranks);
+                    }
+                    g_profiler.reset();
                 }
             }
         }
@@ -360,6 +380,10 @@ int main(int argc, char** argv) {
             work_p.partition_by_level();
         }
         print_progress(t, step);
+        if (my_rank == 0 && profiling_enabled && g_profiler.step_count > 0) {
+            g_profiler.print_report(N_display, n_ranks);
+        }
+        g_profiler.reset();
 
         auto diag_final = compute_diagnostics(work_p, G, soft2);
         if (my_rank == 0) {

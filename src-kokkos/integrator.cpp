@@ -3,9 +3,13 @@
 #include "timestep.h"
 #include "constants.h"
 #include "mpi_comm.h"
+#include "profiling.h"
 #include <Kokkos_Core.hpp>
 #include <vector>
 #include <cfloat>
+
+// Global profiler instance
+StepProfiler g_profiler;
 
 // Tile size for shared memory tiling (Rantala paper uses p=32)
 constexpr int DIST_TILE_SIZE = 32;
@@ -225,19 +229,29 @@ void drift(Particles& p, int start, int count, double dt) {
 void fsi_step(Particles& p, int start, int count,
               double G, double soft2, double dt) {
     // U kick (dt/6) - fused force + kick
+    g_profiler.start();
     fn_self_acc_kick(p, start, count, G, soft2, dt * FSI_KICK);
+    g_profiler.stop(StepProfiler::SELF_FORCE);
 
     // T drift (dt/2)
+    g_profiler.start();
     drift(p, start, count, dt * FSI_DRIFT);
+    g_profiler.stop(StepProfiler::DRIFT_KICK);
 
     // U-tilde kick (2dt/3) - fused force + gradient + kick
+    g_profiler.start();
     fn_self_acc_grad_kick(p, start, count, G, soft2, dt, dt * FSI_MOD_KICK);
+    g_profiler.stop(StepProfiler::SELF_GRAD);
 
     // T drift (dt/2)
+    g_profiler.start();
     drift(p, start, count, dt * FSI_DRIFT);
+    g_profiler.stop(StepProfiler::DRIFT_KICK);
 
     // U kick (dt/6) - fused force + kick
+    g_profiler.start();
     fn_self_acc_kick(p, start, count, G, soft2, dt * FSI_KICK);
+    g_profiler.stop(StepProfiler::SELF_FORCE);
 }
 
 // ==========================================================================
@@ -353,14 +367,18 @@ void hhs_fsi_step_dynamic(Particles& p, int start, int count, double pivot_dt,
 
     // Compute FROST timesteps for this subset
     if (count > 1) {
+        g_profiler.start();
         if (use_n3l)
             compute_frost_subset<true>(p, start, count, G, soft2, eta);
         else
             compute_frost_subset<false>(p, start, count, G, soft2, eta);
+        g_profiler.stop(StepProfiler::ADAPTIVE_DT);
     }
 
     // Partition into slow (dt >= pivot) and fast (dt < pivot)
+    g_profiler.start();
     int slow_count = partition_by_pivot(p, start, count, pivot_dt);
+    g_profiler.stop(StepProfiler::PARTITION);
     int slow_start = start;
     int fast_start = start + slow_count;
     int fast_count = count - slow_count;
@@ -373,7 +391,9 @@ void hhs_fsi_step_dynamic(Particles& p, int start, int count, double pivot_dt,
 
     // HHS-FSI structure (Algorithm 4 / Eq. 40)
     // 1. Cross-Newton kick (dt/6)
+    g_profiler.start();
     fn_cross_acc_kick_cache(p, slow_start, slow_count, fast_start, fast_count, G, soft2, pivot_dt * FSI_KICK);
+    g_profiler.stop(StepProfiler::CROSS_FORCE);
 
     // 2. FSI half-step on slow
     fsi_step(p, slow_start, slow_count, G, soft2, pivot_dt * 0.5);
@@ -382,7 +402,9 @@ void hhs_fsi_step_dynamic(Particles& p, int start, int count, double pivot_dt,
     hhs_fsi_step_dynamic(p, fast_start, fast_count, pivot_dt * 0.5, G, soft2, dt_min, eta, use_n3l);
 
     // 4. Cross-gradient kick (2dt/3)
+    g_profiler.start();
     fn_cross_acc_grad_kick(p, slow_start, slow_count, fast_start, fast_count, G, soft2, pivot_dt, pivot_dt * FSI_MOD_KICK);
+    g_profiler.stop(StepProfiler::CROSS_GRAD);
 
     // 5. Recurse on fast (second half) with pivot/2
     hhs_fsi_step_dynamic(p, fast_start, fast_count, pivot_dt * 0.5, G, soft2, dt_min, eta, use_n3l);
@@ -391,7 +413,9 @@ void hhs_fsi_step_dynamic(Particles& p, int start, int count, double pivot_dt,
     fsi_step(p, slow_start, slow_count, G, soft2, pivot_dt * 0.5);
 
     // 7. Cross-Newton kick (dt/6)
+    g_profiler.start();
     fn_cross_acc_kick_cache(p, slow_start, slow_count, fast_start, fast_count, G, soft2, pivot_dt * FSI_KICK);
+    g_profiler.stop(StepProfiler::CROSS_FORCE);
 }
 
 // =============================================================================
@@ -791,20 +815,32 @@ static void fsi_step_distributed(DistributedParticles& dp, int start, int count,
     if (count <= 0) return;
 
     // U kick (dt/6) - fused distributed force + kick
+    g_profiler.start();
     self_acceleration_kick_distributed(dp, start, count, G, soft2, dt * FSI_KICK);
+    g_profiler.stop(StepProfiler::SELF_FORCE);
 
     // T drift (dt/2) - all ranks drift identically
+    g_profiler.start();
     drift(dp.local, start, count, dt * FSI_DRIFT);
+    g_profiler.stop(StepProfiler::DRIFT_KICK);
 
     // U-tilde kick (2dt/3) with gradient correction - force then fused gradient + kick
+    g_profiler.start();
     self_acceleration_distributed(dp, start, count, G, soft2);
+    g_profiler.stop(StepProfiler::SELF_FORCE);
+    g_profiler.start();
     self_gradient_correction_kick_distributed(dp, start, count, G, soft2, dt, dt * FSI_MOD_KICK);
+    g_profiler.stop(StepProfiler::SELF_GRAD);
 
     // T drift (dt/2)
+    g_profiler.start();
     drift(dp.local, start, count, dt * FSI_DRIFT);
+    g_profiler.stop(StepProfiler::DRIFT_KICK);
 
     // U kick (dt/6) - fused distributed force + kick
+    g_profiler.start();
     self_acceleration_kick_distributed(dp, start, count, G, soft2, dt * FSI_KICK);
+    g_profiler.stop(StepProfiler::SELF_FORCE);
 }
 
 // =============================================================================
@@ -1345,12 +1381,16 @@ static void hhs_fsi_recursive_distributed(
     // Compute FROST for this subset using scatter-compute-gather
     // Each rank computes FROST for its slice, then allgather
     if (count > 1) {
+        g_profiler.start();
         compute_frost_distributed(dp, start, count, G, soft2, eta);
+        g_profiler.stop(StepProfiler::ADAPTIVE_DT);
     }
 
     // Partition into slow (dt >= pivot) and fast (dt < pivot)
     // All ranks do identical partitioning (deterministic)
+    g_profiler.start();
     int slow_count = partition_by_pivot(dp.local, start, count, pivot_dt);
+    g_profiler.stop(StepProfiler::PARTITION);
     int slow_start = start;
     int fast_start = start + slow_count;
     int fast_count = count - slow_count;
@@ -1375,10 +1415,14 @@ static void hhs_fsi_recursive_distributed(
     // ALGORITHM 4: HHS-FSI with slow (S) and fast (F) particles
     // ==========================================================================
 
-    // Step 1: Cross-kick S↔F (dt/6) - distributed force + allgather + kick
+    // Step 1: Cross-kick S<->F (dt/6) - distributed force + allgather + kick
+    g_profiler.start();
     cross_acceleration_distributed(dp, slow_start, slow_count, fast_start, fast_count, G, soft2);
+    g_profiler.stop(StepProfiler::CROSS_FORCE);
+    g_profiler.start();
     kick_velocities(dp.local, slow_start, slow_count, pivot_dt * FSI_KICK);
     kick_velocities(dp.local, fast_start, fast_count, pivot_dt * FSI_KICK);
+    g_profiler.stop(StepProfiler::DRIFT_KICK);
 
     // Step 2: FSI half-step on slow
     fsi_step_distributed(dp, slow_start, slow_count, G, soft2, pivot_dt * 0.5);
@@ -1387,12 +1431,16 @@ static void hhs_fsi_recursive_distributed(
     hhs_fsi_recursive_distributed(dp, fast_start, fast_count, pivot_dt * 0.5,
                                   G, soft2, dt_min, eta, false);
 
-    // Step 4: Cross-kick S↔F with gradient (2dt/3)
+    // Step 4: Cross-kick S<->F with gradient (2dt/3)
+    g_profiler.start();
     cross_acceleration_and_gradient_distributed(dp, slow_start, slow_count,
                                                 fast_start, fast_count,
                                                 G, soft2, pivot_dt);
+    g_profiler.stop(StepProfiler::CROSS_GRAD);
+    g_profiler.start();
     kick_velocities(dp.local, slow_start, slow_count, pivot_dt * FSI_MOD_KICK);
     kick_velocities(dp.local, fast_start, fast_count, pivot_dt * FSI_MOD_KICK);
+    g_profiler.stop(StepProfiler::DRIFT_KICK);
 
     // Step 5: Recurse on fast (second half)
     hhs_fsi_recursive_distributed(dp, fast_start, fast_count, pivot_dt * 0.5,
@@ -1401,10 +1449,14 @@ static void hhs_fsi_recursive_distributed(
     // Step 6: FSI half-step on slow
     fsi_step_distributed(dp, slow_start, slow_count, G, soft2, pivot_dt * 0.5);
 
-    // Step 7: Cross-kick S↔F (dt/6)
+    // Step 7: Cross-kick S<->F (dt/6)
+    g_profiler.start();
     cross_acceleration_distributed(dp, slow_start, slow_count, fast_start, fast_count, G, soft2);
+    g_profiler.stop(StepProfiler::CROSS_FORCE);
+    g_profiler.start();
     kick_velocities(dp.local, slow_start, slow_count, pivot_dt * FSI_KICK);
     kick_velocities(dp.local, fast_start, fast_count, pivot_dt * FSI_KICK);
+    g_profiler.stop(StepProfiler::DRIFT_KICK);
 }
 
 // Distributed HHS-FSI - main entry point
