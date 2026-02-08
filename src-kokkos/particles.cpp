@@ -14,7 +14,7 @@ void Particles::allocate(int n) {
     ay = Kokkos::View<double*>("ay", n);
     az = Kokkos::View<double*>("az", n);
     mass     = Kokkos::View<double*>("mass", n);
-    dt_frost = Kokkos::View<double*>("dt_frost", n);
+    dt_adapt = Kokkos::View<double*>("dt_adapt", n);
     level      = Kokkos::View<int*>("level", n);
     orig_index = Kokkos::View<int*>("orig_index", n);
 
@@ -54,7 +54,7 @@ void Particles::deallocate() {
     x = y = z = Kokkos::View<double*>();
     vx = vy = vz = Kokkos::View<double*>();
     ax = ay = az = Kokkos::View<double*>();
-    mass = dt_frost = Kokkos::View<double*>();
+    mass = dt_adapt = Kokkos::View<double*>();
     level = orig_index = Kokkos::View<int*>();
     scratch1 = scratch2 = scratch3 = Kokkos::View<double*>();
     scratch4 = scratch5 = scratch6 = Kokkos::View<double*>();
@@ -155,7 +155,7 @@ void Particles::partition_by_level() {
     auto px = x; auto py = y; auto pz = z;
     auto pvx = vx; auto pvy = vy; auto pvz = vz;
     auto pax = ax; auto pay = ay; auto paz = az;
-    auto pmass = mass; auto pdt = dt_frost;
+    auto pmass = mass; auto pdt = dt_adapt;
     auto porig = orig_index;
     int NN = N;
 

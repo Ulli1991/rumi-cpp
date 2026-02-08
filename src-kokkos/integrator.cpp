@@ -11,6 +11,9 @@
 // Global profiler instance
 StepProfiler g_profiler;
 
+// HHS adaptive timestep skip option
+bool skip_second_timestep = false;
+
 // Tile size for shared memory tiling (Rantala paper uses p=32)
 constexpr int DIST_TILE_SIZE = 32;
 
@@ -26,21 +29,21 @@ static CrossAccGradKickFn fn_cross_acc_grad_kick = nullptr;
 static CrossAccKickCacheFn fn_cross_acc_kick_cache = nullptr;
 
 // =============================================================================
-// Distributed force + FROST computation for between-step updates
+// Distributed force + timestep computation for between-step updates
 // Each rank computes for its slice [my_start, my_count) from ALL N particles
-// Then allgather both accelerations and FROST values
+// Then allgather both accelerations and timestep values
 // Uses tiled GPU kernel with shared memory for efficiency
 // =============================================================================
-void compute_acceleration_and_frost_distributed(DistributedParticles& dp,
+void compute_acceleration_and_timestep_distributed(DistributedParticles& dp,
                                                  double G, double soft2, double eta,
                                                  bool use_n3l) {
 #ifdef USE_MPI
     if (MPIComm::size() == 1) {
         // Single rank: use optimized single-GPU version
         if (use_n3l)
-            compute_acceleration_and_frost<true>(dp.local, G, soft2, eta);
+            compute_acceleration_and_timestep<true>(dp.local, G, soft2, eta);
         else
-            compute_acceleration_and_frost<false>(dp.local, G, soft2, eta);
+            compute_acceleration_and_timestep<false>(dp.local, G, soft2, eta);
         return;
     }
 
@@ -50,7 +53,7 @@ void compute_acceleration_and_frost_distributed(DistributedParticles& dp,
 
     if (my_count == 0) {
         dp.allgather_accelerations();
-        dp.allgather_frost();
+        dp.allgather_timestep();
         return;
     }
 
@@ -62,7 +65,7 @@ void compute_acceleration_and_frost_distributed(DistributedParticles& dp,
     auto pax = dp.local.ax;
     auto pay = dp.local.ay;
     auto paz = dp.local.az;
-    auto dt_f = dp.local.dt_frost;
+    auto dt_f = dp.local.dt_adapt;
 
     // Tiled GPU kernel: each team handles DIST_TILE_SIZE i-particles from my slice
     using team_policy = Kokkos::TeamPolicy<>;
@@ -72,7 +75,7 @@ void compute_acceleration_and_frost_distributed(DistributedParticles& dp,
     size_t scratch_size = DIST_TILE_SIZE * 7 * sizeof(double);
     int num_teams = (my_count + DIST_TILE_SIZE - 1) / DIST_TILE_SIZE;
 
-    Kokkos::parallel_for("dist_acc_frost_tiled",
+    Kokkos::parallel_for("dist_acc_dt_tiled",
         team_policy(num_teams, DIST_TILE_SIZE).set_scratch_size(0, Kokkos::PerTeam(scratch_size)),
         KOKKOS_LAMBDA(const member_type& team) {
             // Each thread handles one i-particle from my slice
@@ -125,7 +128,7 @@ void compute_acceleration_and_frost_distributed(DistributedParticles& dp,
                 }
                 team.team_barrier();
 
-                // Compute forces and FROST from this tile
+                // Compute forces and adaptive timestep from this tile
                 if (ii < my_count) {
                     for (int jt = 0; jt < tile_count; jt++) {
                         int j = tile_start + jt;
@@ -144,7 +147,7 @@ void compute_acceleration_and_frost_distributed(DistributedParticles& dp,
                         ayi += fj * dy;
                         azi += fj * dz;
 
-                        // FROST
+                        // Adaptive timestep
                         double dvx = tile_vx(jt) - vxi;
                         double dvy = tile_vy(jt) - vyi;
                         double dvz = tile_vz(jt) - vzi;
@@ -187,14 +190,14 @@ void compute_acceleration_and_frost_distributed(DistributedParticles& dp,
         });
     Kokkos::fence();
 
-    // Allgather accelerations and FROST
+    // Allgather accelerations and timesteps
     dp.allgather_accelerations();
-    dp.allgather_frost();
+    dp.allgather_timestep();
 #else
     if (use_n3l)
-        compute_acceleration_and_frost<true>(dp.local, G, soft2, eta);
+        compute_acceleration_and_timestep<true>(dp.local, G, soft2, eta);
     else
-        compute_acceleration_and_frost<false>(dp.local, G, soft2, eta);
+        compute_acceleration_and_timestep<false>(dp.local, G, soft2, eta);
 #endif
 }
 
@@ -257,8 +260,8 @@ void fsi_step(Particles& p, int start, int count,
 // ==========================================================================
 // Dynamic pivot-based partitioning for HHS (per paper's Algorithm 4)
 // Partitions particles [start, start+count) into:
-//   - slow: dt_frost >= pivot (at beginning)
-//   - fast: dt_frost < pivot (at end)
+//   - slow: dt_adapt >= pivot (at beginning)
+//   - fast: dt_adapt < pivot (at end)
 // Returns the count of slow particles
 //
 // IMPORTANT: This must be DETERMINISTIC across MPI ranks! We use prefix sums
@@ -267,7 +270,7 @@ void fsi_step(Particles& p, int start, int count,
 static int partition_by_pivot(Particles& p, int start, int count, double pivot) {
     if (count <= 1) return count;
 
-    auto dt_f = p.dt_frost;
+    auto dt_f = p.dt_adapt;
     auto perm = p.scratch_i;
     auto is_slow = p.scratch_i2;  // temporary: 1 if slow, 0 if fast
 
@@ -321,7 +324,7 @@ static int partition_by_pivot(Particles& p, int start, int count, double pivot) 
     auto px = p.x; auto py = p.y; auto pz = p.z;
     auto pvx = p.vx; auto pvy = p.vy; auto pvz = p.vz;
     auto pax = p.ax; auto pay = p.ay; auto paz = p.az;
-    auto pmass = p.mass; auto pdt = p.dt_frost;
+    auto pmass = p.mass; auto pdt = p.dt_adapt;
     auto porig = p.orig_index;
     auto plevel = p.level;
 
@@ -360,18 +363,18 @@ static int partition_by_pivot(Particles& p, int start, int count, double pivot) 
 // ==========================================================================
 // HHS-FSI with dynamic pivot-based partitioning (per paper's Algorithm 4)
 // ==========================================================================
-void hhs_fsi_step_dynamic(Particles& p, int start, int count, double pivot_dt,
+static void hhs_fsi_step_dynamic_impl(Particles& p, int start, int count, double pivot_dt,
                           double G, double soft2, double dt_min,
-                          double eta, bool use_n3l) {
+                          double eta, bool use_n3l, bool dt_valid) {
     if (count == 0) return;
 
-    // Compute FROST timesteps for this subset
-    if (count > 1) {
+    // Compute adaptive timesteps for this subset (skip if reusing from first half-step)
+    if (!dt_valid && count > 1) {
         g_profiler.start();
         if (use_n3l)
-            compute_frost_subset<true>(p, start, count, G, soft2, eta);
+            compute_timestep_subset<true>(p, start, count, G, soft2, eta);
         else
-            compute_frost_subset<false>(p, start, count, G, soft2, eta);
+            compute_timestep_subset<false>(p, start, count, G, soft2, eta);
         g_profiler.stop(StepProfiler::ADAPTIVE_DT);
     }
 
@@ -398,16 +401,19 @@ void hhs_fsi_step_dynamic(Particles& p, int start, int count, double pivot_dt,
     // 2. FSI half-step on slow
     fsi_step(p, slow_start, slow_count, G, soft2, pivot_dt * 0.5);
 
-    // 3. Recurse on fast (first half) with pivot/2
-    hhs_fsi_step_dynamic(p, fast_start, fast_count, pivot_dt * 0.5, G, soft2, dt_min, eta, use_n3l);
+    // 3. Recurse on fast (first half) with pivot/2 — always compute fresh timesteps
+    hhs_fsi_step_dynamic_impl(p, fast_start, fast_count, pivot_dt * 0.5, G, soft2, dt_min, eta, use_n3l, false);
 
     // 4. Cross-gradient kick (2dt/3)
     g_profiler.start();
     fn_cross_acc_grad_kick(p, slow_start, slow_count, fast_start, fast_count, G, soft2, pivot_dt, pivot_dt * FSI_MOD_KICK);
     g_profiler.stop(StepProfiler::CROSS_GRAD);
 
-    // 5. Recurse on fast (second half) with pivot/2
-    hhs_fsi_step_dynamic(p, fast_start, fast_count, pivot_dt * 0.5, G, soft2, dt_min, eta, use_n3l);
+    // 5. Recurse on fast (second half)
+    {
+        double sub_pivot = pivot_dt * 0.5;
+        hhs_fsi_step_dynamic_impl(p, fast_start, fast_count, sub_pivot, G, soft2, dt_min, eta, use_n3l, skip_second_timestep);
+    }
 
     // 6. FSI half-step on slow
     fsi_step(p, slow_start, slow_count, G, soft2, pivot_dt * 0.5);
@@ -416,6 +422,12 @@ void hhs_fsi_step_dynamic(Particles& p, int start, int count, double pivot_dt,
     g_profiler.start();
     fn_cross_acc_kick_cache(p, slow_start, slow_count, fast_start, fast_count, G, soft2, pivot_dt * FSI_KICK);
     g_profiler.stop(StepProfiler::CROSS_FORCE);
+}
+
+void hhs_fsi_step_dynamic(Particles& p, int start, int count, double pivot_dt,
+                          double G, double soft2, double dt_min,
+                          double eta, bool use_n3l) {
+    hhs_fsi_step_dynamic_impl(p, start, count, pivot_dt, G, soft2, dt_min, eta, use_n3l, false);
 }
 
 // =============================================================================
@@ -1221,8 +1233,8 @@ static void cross_acceleration_and_gradient_distributed(DistributedParticles& dp
     dp.allgather_accelerations_subset(fast_start, fast_count);
 }
 
-// Distributed FROST computation - tiled GPU kernel
-static void compute_frost_distributed(DistributedParticles& dp, int start, int count,
+// Distributed adaptive timestep computation - tiled GPU kernel
+static void compute_timestep_distributed(DistributedParticles& dp, int start, int count,
                                       double G, double soft2, double eta) {
     if (count <= 1) return;
 
@@ -1230,14 +1242,14 @@ static void compute_frost_distributed(DistributedParticles& dp, int start, int c
     dp.get_force_slice(start, count, slice_start, slice_count);
 
     if (slice_count == 0) {
-        dp.allgather_frost_subset(start, count);
+        dp.allgather_timestep_subset(start, count);
         return;
     }
 
     auto px = dp.local.x; auto py = dp.local.y; auto pz = dp.local.z;
     auto pvx = dp.local.vx; auto pvy = dp.local.vy; auto pvz = dp.local.vz;
     auto pm = dp.local.mass;
-    auto dt_f = dp.local.dt_frost;
+    auto dt_f = dp.local.dt_adapt;
 
     const int j_start = start;
     const int j_end = start + count;
@@ -1246,11 +1258,11 @@ static void compute_frost_distributed(DistributedParticles& dp, int start, int c
     using member_type = team_policy::member_type;
     using scratch_space = Kokkos::DefaultExecutionSpace::scratch_memory_space;
 
-    // Need x,y,z,vx,vy,vz,m for FROST
+    // Need x,y,z,vx,vy,vz,m for adaptive timestep
     size_t scratch_size = DIST_TILE_SIZE * 7 * sizeof(double);
     int num_teams = (slice_count + DIST_TILE_SIZE - 1) / DIST_TILE_SIZE;
 
-    Kokkos::parallel_for("dist_frost_tiled",
+    Kokkos::parallel_for("dist_dt_tiled",
         team_policy(num_teams, DIST_TILE_SIZE).set_scratch_size(0, Kokkos::PerTeam(scratch_size)),
         KOKKOS_LAMBDA(const member_type& team) {
             int ii = team.league_rank() * DIST_TILE_SIZE + team.team_rank();
@@ -1348,8 +1360,8 @@ static void compute_frost_distributed(DistributedParticles& dp, int start, int c
         });
     Kokkos::fence();
 
-    // Allgather dt_frost values (uses GPU-aware MPI when available)
-    dp.allgather_frost_subset(start, count);
+    // Allgather dt_adapt values (uses GPU-aware MPI when available)
+    dp.allgather_timestep_subset(start, count);
 }
 
 // =============================================================================
@@ -1366,7 +1378,7 @@ static void hhs_fsi_recursive_distributed(
     double pivot_dt,                // Current pivot timestep
     double G, double soft2,
     double dt_min, double eta,
-    bool use_n3l) {
+    bool use_n3l, bool dt_valid) {
 
     (void)use_n3l;  // All ranks run identical code, N3L handled in single-GPU path
 
@@ -1378,11 +1390,10 @@ static void hhs_fsi_recursive_distributed(
         return;
     }
 
-    // Compute FROST for this subset using scatter-compute-gather
-    // Each rank computes FROST for its slice, then allgather
-    if (count > 1) {
+    // Compute adaptive timesteps for this subset (skip if reusing from first half-step)
+    if (!dt_valid && count > 1) {
         g_profiler.start();
-        compute_frost_distributed(dp, start, count, G, soft2, eta);
+        compute_timestep_distributed(dp, start, count, G, soft2, eta);
         g_profiler.stop(StepProfiler::ADAPTIVE_DT);
     }
 
@@ -1403,11 +1414,11 @@ static void hhs_fsi_recursive_distributed(
 
     // Base case: all particles are fast (no slow particles)
     if (slow_count == 0) {
-        // Recurse twice with half the pivot
-        hhs_fsi_recursive_distributed(dp, start, count, pivot_dt * 0.5,
-                                      G, soft2, dt_min, eta, false);
-        hhs_fsi_recursive_distributed(dp, start, count, pivot_dt * 0.5,
-                                      G, soft2, dt_min, eta, false);
+        double sub_pivot = pivot_dt * 0.5;
+        hhs_fsi_recursive_distributed(dp, start, count, sub_pivot,
+                                      G, soft2, dt_min, eta, false, false);
+        hhs_fsi_recursive_distributed(dp, start, count, sub_pivot,
+                                      G, soft2, dt_min, eta, false, skip_second_timestep);
         return;
     }
 
@@ -1427,9 +1438,9 @@ static void hhs_fsi_recursive_distributed(
     // Step 2: FSI half-step on slow
     fsi_step_distributed(dp, slow_start, slow_count, G, soft2, pivot_dt * 0.5);
 
-    // Step 3: Recurse on fast (first half)
+    // Step 3: Recurse on fast (first half) — always compute fresh timesteps
     hhs_fsi_recursive_distributed(dp, fast_start, fast_count, pivot_dt * 0.5,
-                                  G, soft2, dt_min, eta, false);
+                                  G, soft2, dt_min, eta, false, false);
 
     // Step 4: Cross-kick S<->F with gradient (2dt/3)
     g_profiler.start();
@@ -1443,8 +1454,11 @@ static void hhs_fsi_recursive_distributed(
     g_profiler.stop(StepProfiler::DRIFT_KICK);
 
     // Step 5: Recurse on fast (second half)
-    hhs_fsi_recursive_distributed(dp, fast_start, fast_count, pivot_dt * 0.5,
-                                  G, soft2, dt_min, eta, false);
+    {
+        double sub_pivot = pivot_dt * 0.5;
+        hhs_fsi_recursive_distributed(dp, fast_start, fast_count, sub_pivot,
+                                      G, soft2, dt_min, eta, false, skip_second_timestep);
+    }
 
     // Step 6: FSI half-step on slow
     fsi_step_distributed(dp, slow_start, slow_count, G, soft2, pivot_dt * 0.5);
@@ -1484,7 +1498,7 @@ void hhs_fsi_step_distributed(DistributedParticles& dp, double pivot_dt,
     // Just run the recursive implementation - all ranks execute identical code
     // Only force computation is distributed (via Allgather after each)
     hhs_fsi_recursive_distributed(dp, 0, dp.N_total, pivot_dt,
-                                  G, soft2, dt_min, eta, use_n3l);
+                                  G, soft2, dt_min, eta, use_n3l, false);
 #endif
 }
 

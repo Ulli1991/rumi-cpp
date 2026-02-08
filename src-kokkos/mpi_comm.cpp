@@ -113,7 +113,7 @@ void DistributedParticles::distribute_initial(Particles& global_particles) {
         auto h_ay = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), global_particles.ay);
         auto h_az = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), global_particles.az);
         auto h_mass = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), global_particles.mass);
-        auto h_dt = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), global_particles.dt_frost);
+        auto h_dt = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), global_particles.dt_adapt);
         auto h_level = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), global_particles.level);
         auto h_orig = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), global_particles.orig_index);
 
@@ -143,7 +143,7 @@ void DistributedParticles::distribute_initial(Particles& global_particles) {
         Kokkos::deep_copy(local.ay, h_ay);
         Kokkos::deep_copy(local.az, h_az);
         Kokkos::deep_copy(local.mass, h_mass);
-        Kokkos::deep_copy(local.dt_frost, h_dt);
+        Kokkos::deep_copy(local.dt_adapt, h_dt);
         Kokkos::deep_copy(local.level, h_level);
         Kokkos::deep_copy(local.orig_index, h_orig);
     } else {
@@ -158,7 +158,7 @@ void DistributedParticles::distribute_initial(Particles& global_particles) {
         auto h_ay = Kokkos::create_mirror_view(local.ay);
         auto h_az = Kokkos::create_mirror_view(local.az);
         auto h_mass = Kokkos::create_mirror_view(local.mass);
-        auto h_dt = Kokkos::create_mirror_view(local.dt_frost);
+        auto h_dt = Kokkos::create_mirror_view(local.dt_adapt);
         auto h_level = Kokkos::create_mirror_view(local.level);
         auto h_orig = Kokkos::create_mirror_view(local.orig_index);
 
@@ -188,7 +188,7 @@ void DistributedParticles::distribute_initial(Particles& global_particles) {
         Kokkos::deep_copy(local.ay, h_ay);
         Kokkos::deep_copy(local.az, h_az);
         Kokkos::deep_copy(local.mass, h_mass);
-        Kokkos::deep_copy(local.dt_frost, h_dt);
+        Kokkos::deep_copy(local.dt_adapt, h_dt);
         Kokkos::deep_copy(local.level, h_level);
         Kokkos::deep_copy(local.orig_index, h_orig);
     }
@@ -356,11 +356,11 @@ void DistributedParticles::allgather_accelerations_subset(int start, int count) 
 #endif // USE_MPI
 }
 
-void DistributedParticles::allgather_frost() {
-    allgather_frost_subset(0, N_total);
+void DistributedParticles::allgather_timestep() {
+    allgather_timestep_subset(0, N_total);
 }
 
-void DistributedParticles::allgather_frost_subset(int start, int count) {
+void DistributedParticles::allgather_timestep_subset(int start, int count) {
 #ifdef USE_MPI
     if (MPIComm::size() == 1 || count == 0) return;
 
@@ -384,13 +384,13 @@ void DistributedParticles::allgather_frost_subset(int start, int count) {
     // GPU-aware: use device pointers directly, reuse recv buffer
     auto recv = Kokkos::subview(mpi_acc_recv_buf, Kokkos::make_pair(0, count));
 
-    MPI_Allgatherv(local.dt_frost.data() + slice_start, slice_count, MPI_DOUBLE,
+    MPI_Allgatherv(local.dt_adapt.data() + slice_start, slice_count, MPI_DOUBLE,
                    recv.data(), all_counts.data(), displs.data(), MPI_DOUBLE,
                    MPI_COMM_WORLD);
 
-    auto dt_f = local.dt_frost;
+    auto dt_f = local.dt_adapt;
     int st = start;
-    Kokkos::parallel_for("unpack_frost", count, KOKKOS_LAMBDA(int i) {
+    Kokkos::parallel_for("unpack_dt", count, KOKKOS_LAMBDA(int i) {
         dt_f(st + i) = recv(i);
     });
     Kokkos::fence();
@@ -398,7 +398,7 @@ void DistributedParticles::allgather_frost_subset(int start, int count) {
 #else
     // Host-staged: copy only the slice, not the full array
     auto h_dt = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
-        Kokkos::subview(local.dt_frost, Kokkos::make_pair(slice_start, slice_start + slice_count)));
+        Kokkos::subview(local.dt_adapt, Kokkos::make_pair(slice_start, slice_start + slice_count)));
 
     std::vector<double> send_dt(slice_count);
     for (int i = 0; i < slice_count; i++) send_dt[i] = h_dt(i);
@@ -409,7 +409,7 @@ void DistributedParticles::allgather_frost_subset(int start, int count) {
                    MPI_COMM_WORLD);
 
     Kokkos::View<double*, Kokkos::HostSpace, Kokkos::MemoryUnmanaged> h_recv_dt(recv_dt.data(), count);
-    Kokkos::deep_copy(Kokkos::subview(local.dt_frost, Kokkos::make_pair(start, start + count)), h_recv_dt);
+    Kokkos::deep_copy(Kokkos::subview(local.dt_adapt, Kokkos::make_pair(start, start + count)), h_recv_dt);
 #endif
 
 #endif // USE_MPI

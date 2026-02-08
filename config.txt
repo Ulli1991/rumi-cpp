@@ -20,6 +20,7 @@ GRAD_N3L = false                # N3L gradient correction (halves work, slightly
 USE_KAHAN = false               # Kahan summation in N3L gradient loops (CPU only, requires GRAD_N3L = true)
 USE_N3L = false                 # Newton's 3rd law optimization (default: true on CPU, false on GPU, but even if false its default in the O(N^2) parts)
 MEMORY_TILING = true            # Shared memory tiling for force computation (GPU optimization)
+SKIP_SECOND_TIMESTEP = false    # Skip timestep recomputation on 2nd HHS half-step recursion
 
 # =============================================================================
 # Plummer cluster parameters (only used if TEST_CASE = plummer)

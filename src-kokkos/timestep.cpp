@@ -26,13 +26,13 @@ void assign_levels(Particles& p, const std::vector<double>& levels) {
 
     auto d_levels = p.d_level_dts;
     auto p_level = p.level;
-    auto p_dt_frost = p.dt_frost;
+    auto p_dt_adapt = p.dt_adapt;
     int N = p.N;
 
     Kokkos::parallel_for("assign_levels", N, KOKKOS_LAMBDA(int i) {
         int l = nl - 1;
         for (int k = 0; k < nl; k++) {
-            if (d_levels(k) <= p_dt_frost(i)) {
+            if (d_levels(k) <= p_dt_adapt(i)) {
                 l = k;
                 break;
             }

@@ -13,7 +13,7 @@ template <bool UseN3L>
 void compute_acceleration(Particles& p, double G, double soft2);
 
 template <bool UseN3L>
-void compute_acceleration_and_frost(Particles& p, double G, double soft2, double eta);
+void compute_acceleration_and_timestep(Particles& p, double G, double soft2, double eta);
 
 // Self-interaction within [start, start+count)
 template <bool UseN3L>
@@ -47,10 +47,10 @@ void cross_acceleration_and_gradient(Particles& p,
                                      int b_start, int b_count,
                                      double G, double soft2, double dt);
 
-// Compute FROST timesteps for a subset of particles [start, start+count)
+// Compute adaptive timesteps for a subset of particles [start, start+count)
 // Only considers mutual interactions within the subset
 template <bool UseN3L>
-void compute_frost_subset(Particles& p, int start, int count,
+void compute_timestep_subset(Particles& p, int start, int count,
                           double G, double soft2, double eta);
 
 // ==========================================================================
@@ -107,7 +107,7 @@ void ghost_gradient_correction(Particles& local, const Particles& ghosts,
 // ==========================================================================
 
 // Compute forces from ghost particles on local particles and apply kick
-// Only considers ghost particles with dt_frost < pivot (fast ghosts) acting on
+// Only considers ghost particles with dt_adapt < pivot (fast ghosts) acting on
 // local particles in [local_start, local_start+local_count) which are slow (dt >= pivot)
 // This is one-way: we kick local particles, not ghosts (ghosts are kicked on their home rank)
 void ghost_cross_kick_slow_from_fast(Particles& local, const Particles& ghosts,
@@ -115,7 +115,7 @@ void ghost_cross_kick_slow_from_fast(Particles& local, const Particles& ghosts,
                                      double pivot, double G, double soft2, double kick_dt);
 
 // Compute forces from slow ghost particles on fast local particles and apply kick
-// Only considers ghost particles with dt_frost >= pivot (slow ghosts) acting on
+// Only considers ghost particles with dt_adapt >= pivot (slow ghosts) acting on
 // local particles in [local_start, local_start+local_count) which are fast (dt < pivot)
 void ghost_cross_kick_fast_from_slow(Particles& local, const Particles& ghosts,
                                      int local_start, int local_count,

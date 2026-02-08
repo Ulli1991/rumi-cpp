@@ -96,7 +96,7 @@ struct StepProfiler {
     }
 
     void print_memory_report(int N, int n_ranks) const {
-        // Per-particle memory: 11 doubles (x,y,z,vx,vy,vz,ax,ay,az,mass,dt_frost) = 88 B
+        // Per-particle memory: 11 doubles (x,y,z,vx,vy,vz,ax,ay,az,mass,dt_adapt) = 88 B
         //   + 2 ints (level, orig_index) = 8 B
         //   + 2 packed views [N][4] = 64 B
         //   + 11 double scratch + 3 int scratch = 100 B

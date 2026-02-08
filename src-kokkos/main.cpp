@@ -141,6 +141,7 @@ int main(int argc, char** argv) {
         use_kahan = (cfg.get_str("USE_KAHAN", "false") == "true");
         use_memory_tiling = (cfg.get_str("MEMORY_TILING", "true") == "true");
         bool profiling_enabled = (cfg.get_str("PROFILING", "true") == "true");
+        skip_second_timestep = (cfg.get_str("SKIP_SECOND_TIMESTEP", "false") == "true");
 
         // USE_N3L: default true on CPU-like backends, false on GPU
         bool use_n3l_default = true;
@@ -227,7 +228,7 @@ int main(int argc, char** argv) {
         // Get reference to working particles (local for distributed, p for single)
         Particles& work_p = use_distributed ? dp.local : p;
 
-        // Initial force computation + FROST
+        // Initial force computation + adaptive timestep
         if (my_rank == 0) {
             std::printf("Computing initial forces...\n"); std::fflush(stdout);
         }
@@ -235,12 +236,12 @@ int main(int argc, char** argv) {
 
         if (use_distributed) {
             // Scatter-compute-gather: each rank computes its slice, then allgather
-            compute_acceleration_and_frost_distributed(dp, G, soft2, eta, use_n3l);
+            compute_acceleration_and_timestep_distributed(dp, G, soft2, eta, use_n3l);
         } else {
             if (use_n3l)
-                compute_acceleration_and_frost<true>(work_p, G, soft2, eta);
+                compute_acceleration_and_timestep<true>(work_p, G, soft2, eta);
             else
-                compute_acceleration_and_frost<false>(work_p, G, soft2, eta);
+                compute_acceleration_and_timestep<false>(work_p, G, soft2, eta);
         }
 
         auto t1 = std::chrono::high_resolution_clock::now();
@@ -258,7 +259,7 @@ int main(int argc, char** argv) {
 
         // Print dt range
         if (my_rank == 0) {
-            auto h_dt = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), work_p.dt_frost);
+            auto h_dt = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), work_p.dt_adapt);
             double mn = 1e30, mx = 0;
             for (int i = 0; i < work_p.N; i++) {
                 if (h_dt(i) < mn) mn = h_dt(i);
@@ -301,9 +302,9 @@ int main(int argc, char** argv) {
                 g_profiler.step_count++;
                 if (step % print_interval == 0) {
                     if (use_n3l)
-                        compute_acceleration_and_frost<true>(work_p, G, soft2, eta);
+                        compute_acceleration_and_timestep<true>(work_p, G, soft2, eta);
                     else
-                        compute_acceleration_and_frost<false>(work_p, G, soft2, eta);
+                        compute_acceleration_and_timestep<false>(work_p, G, soft2, eta);
                     assign_levels(work_p, levels);
                     work_p.partition_by_level();
                     print_progress(t, step);
@@ -315,8 +316,8 @@ int main(int argc, char** argv) {
             }
         } else {
             // HHS-FSI (per paper's Algorithm 4)
-            // Note: the post-step force+FROST recomputation is only needed for
-            // diagnostics. HHS recomputes FROST at the start of each step from
+            // Note: the post-step force+timestep recomputation is only needed for
+            // diagnostics. HHS recomputes adaptive timesteps at the start of each step from
             // the same state, so skipping it for non-diagnostic steps saves a
             // full O(N^2) pass per step.
             while (t < t_final) {
@@ -343,14 +344,14 @@ int main(int argc, char** argv) {
                 }
 
                 if (step % print_interval == 0) {
-                    // Recompute forces + FROST only for diagnostics
+                    // Recompute forces + timestep only for diagnostics
                     if (use_distributed) {
-                        compute_acceleration_and_frost_distributed(dp, G, soft2, eta, use_n3l);
+                        compute_acceleration_and_timestep_distributed(dp, G, soft2, eta, use_n3l);
                     } else {
                         if (use_n3l)
-                            compute_acceleration_and_frost<true>(work_p, G, soft2, eta);
+                            compute_acceleration_and_timestep<true>(work_p, G, soft2, eta);
                         else
-                            compute_acceleration_and_frost<false>(work_p, G, soft2, eta);
+                            compute_acceleration_and_timestep<false>(work_p, G, soft2, eta);
                     }
                     assign_levels(work_p, levels);
                     work_p.partition_by_level();
@@ -366,15 +367,15 @@ int main(int argc, char** argv) {
         auto wall_end = std::chrono::high_resolution_clock::now();
         double wall_sec = std::chrono::duration<double>(wall_end - wall_start).count();
 
-        // Final diagnostics: recompute forces + FROST if not already done
+        // Final diagnostics: recompute forces + timestep if not already done
         if (step % print_interval != 0) {
             if (use_distributed) {
-                compute_acceleration_and_frost_distributed(dp, G, soft2, eta, use_n3l);
+                compute_acceleration_and_timestep_distributed(dp, G, soft2, eta, use_n3l);
             } else {
                 if (use_n3l)
-                    compute_acceleration_and_frost<true>(work_p, G, soft2, eta);
+                    compute_acceleration_and_timestep<true>(work_p, G, soft2, eta);
                 else
-                    compute_acceleration_and_frost<false>(work_p, G, soft2, eta);
+                    compute_acceleration_and_timestep<false>(work_p, G, soft2, eta);
             }
             assign_levels(work_p, levels);
             work_p.partition_by_level();

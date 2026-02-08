@@ -11,7 +11,7 @@ struct Particles {
     Kokkos::View<double*> vx, vy, vz;
     Kokkos::View<double*> ax, ay, az;
     Kokkos::View<double*> mass;
-    Kokkos::View<double*> dt_frost;
+    Kokkos::View<double*> dt_adapt;
     Kokkos::View<int*> level;
     Kokkos::View<int*> orig_index;
 

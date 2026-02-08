@@ -72,24 +72,24 @@ void compute_acceleration(Particles& p, double G, double soft2) {
 }
 
 // ==========================================================================
-// Full N^2 acceleration + FROST timestep (fused)
+// Full N^2 acceleration + adaptive timestep (fused)
 // ==========================================================================
 template <bool UseN3L>
-void compute_acceleration_and_frost(Particles& p, double G, double soft2, double eta) {
+void compute_acceleration_and_timestep(Particles& p, double G, double soft2, double eta) {
     const int N = p.N;
     auto px = p.x; auto py = p.y; auto pz = p.z;
     auto pvx = p.vx; auto pvy = p.vy; auto pvz = p.vz;
     auto pax = p.ax; auto pay = p.ay; auto paz = p.az;
     auto m = p.mass;
-    auto dt_f = p.dt_frost;
+    auto dt_f = p.dt_adapt;
 
-    Kokkos::parallel_for("zero_acc_frost", N, KOKKOS_LAMBDA(int i) {
+    Kokkos::parallel_for("zero_acc_dt", N, KOKKOS_LAMBDA(int i) {
         pax(i) = 0; pay(i) = 0; paz(i) = 0; dt_f(i) = DBL_MAX;
     });
     Kokkos::fence();
 
     if constexpr (UseN3L) {
-        Kokkos::parallel_for("acc_frost_n3l", N, KOKKOS_LAMBDA(int i) {
+        Kokkos::parallel_for("acc_dt_n3l", N, KOKKOS_LAMBDA(int i) {
             double axi = 0, ayi = 0, azi = 0;
             double t_min_i = DBL_MAX;
 
@@ -109,7 +109,7 @@ void compute_acceleration_and_frost(Particles& p, double G, double soft2, double
                 Kokkos::atomic_add(&pay(j), -fi * dy);
                 Kokkos::atomic_add(&paz(j), -fi * dz);
 
-                // FROST
+                // Adaptive timestep
                 double dvx = pvx(j) - pvx(i);
                 double dvy = pvy(j) - pvy(i);
                 double dvz = pvz(j) - pvz(i);
@@ -163,7 +163,7 @@ void compute_acceleration_and_frost(Particles& p, double G, double soft2, double
         auto pos = p.pos_packed;
         auto vel = p.vel_packed;
 
-        Kokkos::parallel_for("acc_frost_tiled",
+        Kokkos::parallel_for("acc_dt_tiled",
             team_policy(num_teams, TILE_SIZE).set_scratch_size(0, Kokkos::PerTeam(scratch_size)),
             KOKKOS_LAMBDA(const member_type& team) {
                 // Each thread handles one particle i
@@ -218,7 +218,7 @@ void compute_acceleration_and_frost(Particles& p, double G, double soft2, double
                     }
                     team.team_barrier();
 
-                    // Accumulate forces and FROST from this tile
+                    // Accumulate forces and adaptive timestep from this tile
                     if (i < N) {
                         for (int jt = 0; jt < tile_count; jt++) {
                             int j = tile_start + jt;
@@ -235,7 +235,7 @@ void compute_acceleration_and_frost(Particles& p, double G, double soft2, double
                             double fj = G * tile_m(jt) * inv_r3;
                             axi += fj * dx; ayi += fj * dy; azi += fj * dz;
 
-                            // FROST
+                            // Adaptive timestep
                             double dvx = tile_vx(jt) - vxi;
                             double dvy = tile_vy(jt) - vyi;
                             double dvz = tile_vz(jt) - vzi;
@@ -275,7 +275,7 @@ void compute_acceleration_and_frost(Particles& p, double G, double soft2, double
             });
     } else {
         // Original non-tiled version
-        Kokkos::parallel_for("acc_frost_full", N, KOKKOS_LAMBDA(int i) {
+        Kokkos::parallel_for("acc_dt_full", N, KOKKOS_LAMBDA(int i) {
             double axi = 0, ayi = 0, azi = 0;
             double t_min_i = DBL_MAX;
 
@@ -292,7 +292,7 @@ void compute_acceleration_and_frost(Particles& p, double G, double soft2, double
                 double fj = G * m(j) * inv_r3;
                 axi += fj * dx; ayi += fj * dy; azi += fj * dz;
 
-                // FROST
+                // Adaptive timestep
                 double dvx = pvx(j) - pvx(i);
                 double dvy = pvy(j) - pvy(i);
                 double dvz = pvz(j) - pvz(i);
@@ -706,29 +706,29 @@ void cross_acceleration_and_gradient(Particles& p,
 }
 
 // ==========================================================================
-// Compute FROST timesteps for a subset [start, start+count)
+// Compute adaptive timesteps for a subset [start, start+count)
 // Only considers mutual interactions within the subset (for HHS recursion)
 // ==========================================================================
 template <bool UseN3L>
-void compute_frost_subset(Particles& p, int start, int count,
+void compute_timestep_subset(Particles& p, int start, int count,
                           double G, double soft2, double eta) {
     if (count <= 1) return;  // No pairs to consider
 
     auto px = p.x; auto py = p.y; auto pz = p.z;
     auto pvx = p.vx; auto pvy = p.vy; auto pvz = p.vz;
     auto m = p.mass;
-    auto dt_f = p.dt_frost;
+    auto dt_f = p.dt_adapt;
     const int end = start + count;
 
-    // Initialize dt_frost to large value for subset
-    Kokkos::parallel_for("init_frost_subset", count, KOKKOS_LAMBDA(int ii) {
+    // Initialize dt_adapt to large value for subset
+    Kokkos::parallel_for("init_dt_subset", count, KOKKOS_LAMBDA(int ii) {
         dt_f(start + ii) = DBL_MAX;
     });
     Kokkos::fence();
 
     if constexpr (UseN3L) {
         // N3L: upper triangle with atomics
-        Kokkos::parallel_for("frost_subset_n3l", count, KOKKOS_LAMBDA(int ii) {
+        Kokkos::parallel_for("dt_subset_n3l", count, KOKKOS_LAMBDA(int ii) {
             int i = start + ii;
             double t_min_i = DBL_MAX;
 
@@ -780,7 +780,7 @@ void compute_frost_subset(Particles& p, int start, int count,
         size_t scratch_size = TILE_SIZE * 7 * sizeof(double);
         int num_teams = (count + TILE_SIZE - 1) / TILE_SIZE;
 
-        Kokkos::parallel_for("frost_subset_tiled",
+        Kokkos::parallel_for("dt_subset_tiled",
             team_policy(num_teams, TILE_SIZE).set_scratch_size(0, Kokkos::PerTeam(scratch_size)),
             KOKKOS_LAMBDA(const member_type& team) {
                 int ii = team.league_rank() * TILE_SIZE + team.team_rank();
@@ -1341,7 +1341,7 @@ void ghost_cross_kick_slow_from_fast(Particles& local, const Particles& ghosts,
 
     auto gx = ghosts.x; auto gy = ghosts.y; auto gz = ghosts.z;
     auto gm = ghosts.mass;
-    auto gdt = ghosts.dt_frost;
+    auto gdt = ghosts.dt_adapt;
 
     int N_ghosts = ghosts.N;
 
@@ -1392,7 +1392,7 @@ void ghost_cross_kick_fast_from_slow(Particles& local, const Particles& ghosts,
 
     auto gx = ghosts.x; auto gy = ghosts.y; auto gz = ghosts.z;
     auto gm = ghosts.mass;
-    auto gdt = ghosts.dt_frost;
+    auto gdt = ghosts.dt_adapt;
 
     int N_ghosts = ghosts.N;
 
@@ -1462,7 +1462,7 @@ void ghost_cross_kicks_hhs_with_gradient(Particles& local, const Particles& ghos
     auto gx = ghosts.x; auto gy = ghosts.y; auto gz = ghosts.z;
     auto gax = ghosts.ax; auto gay = ghosts.ay; auto gaz = ghosts.az;
     auto gm = ghosts.mass;
-    auto gdt = ghosts.dt_frost;
+    auto gdt = ghosts.dt_adapt;
 
     const double grad_coeff = G * grad_dt * grad_dt * GRAD_COEFF;
     int N_ghosts = ghosts.N;
@@ -1588,8 +1588,8 @@ void ghost_cross_kicks_hhs_with_gradient(Particles& local, const Particles& ghos
 // ==========================================================================
 template void compute_acceleration<true>(Particles&, double, double);
 template void compute_acceleration<false>(Particles&, double, double);
-template void compute_acceleration_and_frost<true>(Particles&, double, double, double);
-template void compute_acceleration_and_frost<false>(Particles&, double, double, double);
+template void compute_acceleration_and_timestep<true>(Particles&, double, double, double);
+template void compute_acceleration_and_timestep<false>(Particles&, double, double, double);
 template void self_acceleration<true>(Particles&, int, int, double, double);
 template void self_acceleration<false>(Particles&, int, int, double, double);
 template void self_gradient_correction<true>(Particles&, int, int, double, double, double);
@@ -1602,8 +1602,8 @@ template void cross_gradient_correction<true>(Particles&, int, int, int, int, do
 template void cross_gradient_correction<false>(Particles&, int, int, int, int, double, double, double);
 template void cross_acceleration_and_gradient<true>(Particles&, int, int, int, int, double, double, double);
 template void cross_acceleration_and_gradient<false>(Particles&, int, int, int, int, double, double, double);
-template void compute_frost_subset<true>(Particles&, int, int, double, double, double);
-template void compute_frost_subset<false>(Particles&, int, int, double, double, double);
+template void compute_timestep_subset<true>(Particles&, int, int, double, double, double);
+template void compute_timestep_subset<false>(Particles&, int, int, double, double, double);
 template void self_acceleration_kick<true>(Particles&, int, int, double, double, double);
 template void self_acceleration_kick<false>(Particles&, int, int, double, double, double);
 template void self_acceleration_and_gradient_kick<true>(Particles&, int, int, double, double, double, double);

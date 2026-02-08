@@ -107,11 +107,11 @@ struct DistributedParticles {
     // Packs ax/ay/az into a single MPI message (3x fewer MPI calls)
     void allgather_accelerations_subset(int start, int count);
 
-    // Allgather FROST timesteps after distributed FROST computation
-    void allgather_frost();
+    // Allgather adaptive timesteps after distributed computation
+    void allgather_timestep();
 
-    // Allgather FROST timesteps for a SUBSET of particles [start, start+count)
-    void allgather_frost_subset(int start, int count);
+    // Allgather adaptive timesteps for a SUBSET of particles [start, start+count)
+    void allgather_timestep_subset(int start, int count);
 
     // Gather particle data from all ranks to rank 0
     // In replicated mode, just returns local (all ranks have all data)

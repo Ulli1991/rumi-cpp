@@ -4,6 +4,9 @@
 #include <vector>
 #include <string>
 
+// HHS adaptive timestep skip option (set from config)
+extern bool skip_second_timestep;       // Skip timestep recomputation on 2nd HHS half-step
+
 // Forward declaration for distributed particles
 struct DistributedParticles;
 
@@ -16,7 +19,7 @@ void fsi_step(Particles& p, int start, int count,
 
 // HHS-FSI recursive step with dynamic pivot-based partitioning (per paper's Algorithm 4)
 // Partitions particles [start, start+count) into slow (dt >= pivot) and fast (dt < pivot)
-// Recomputes FROST for the current subset at each level
+// Recomputes adaptive timesteps for the current subset at each level
 void hhs_fsi_step_dynamic(Particles& p, int start, int count, double pivot_dt,
                           double G, double soft2, double dt_min,
                           double eta, bool use_n3l);
@@ -46,8 +49,8 @@ void kick_velocities(Particles& p, int start, int count, double dt);
 // Drift positions
 void drift(Particles& p, int start, int count, double dt);
 
-// Distributed force + FROST computation for between-step updates
-// Each rank computes for its slice, then allgather accelerations and FROST
-void compute_acceleration_and_frost_distributed(DistributedParticles& dp,
+// Distributed force + timestep computation for between-step updates
+// Each rank computes for its slice, then allgather accelerations and timesteps
+void compute_acceleration_and_timestep_distributed(DistributedParticles& dp,
                                                  double G, double soft2, double eta,
                                                  bool use_n3l = true);
