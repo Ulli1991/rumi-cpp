@@ -1389,7 +1389,8 @@ struct CpuSubset {
         }
     }
 
-    // Copy results back to device (positions, velocities, dt_adapt)
+    // Copy results back to device (positions, velocities, mass, dt_adapt)
+    // Must copy mass and dt_adapt because cpu_partition_by_pivot reorders all fields
     void copy_to_device(Particles& p, int start) {
         auto h_x = Kokkos::create_mirror_view(Kokkos::subview(p.x, Kokkos::pair<int,int>(start, start+count)));
         auto h_y = Kokkos::create_mirror_view(Kokkos::subview(p.y, Kokkos::pair<int,int>(start, start+count)));
@@ -1397,9 +1398,12 @@ struct CpuSubset {
         auto h_vx = Kokkos::create_mirror_view(Kokkos::subview(p.vx, Kokkos::pair<int,int>(start, start+count)));
         auto h_vy = Kokkos::create_mirror_view(Kokkos::subview(p.vy, Kokkos::pair<int,int>(start, start+count)));
         auto h_vz = Kokkos::create_mirror_view(Kokkos::subview(p.vz, Kokkos::pair<int,int>(start, start+count)));
+        auto h_m  = Kokkos::create_mirror_view(Kokkos::subview(p.mass, Kokkos::pair<int,int>(start, start+count)));
+        auto h_dt = Kokkos::create_mirror_view(Kokkos::subview(p.dt_adapt, Kokkos::pair<int,int>(start, start+count)));
         for (int i = 0; i < count; i++) {
             h_x(i) = x[i]; h_y(i) = y[i]; h_z(i) = z[i];
             h_vx(i) = vx[i]; h_vy(i) = vy[i]; h_vz(i) = vz[i];
+            h_m(i) = mass[i]; h_dt(i) = dt_adapt[i];
         }
         Kokkos::deep_copy(Kokkos::subview(p.x, Kokkos::pair<int,int>(start, start+count)), h_x);
         Kokkos::deep_copy(Kokkos::subview(p.y, Kokkos::pair<int,int>(start, start+count)), h_y);
@@ -1407,6 +1411,8 @@ struct CpuSubset {
         Kokkos::deep_copy(Kokkos::subview(p.vx, Kokkos::pair<int,int>(start, start+count)), h_vx);
         Kokkos::deep_copy(Kokkos::subview(p.vy, Kokkos::pair<int,int>(start, start+count)), h_vy);
         Kokkos::deep_copy(Kokkos::subview(p.vz, Kokkos::pair<int,int>(start, start+count)), h_vz);
+        Kokkos::deep_copy(Kokkos::subview(p.mass, Kokkos::pair<int,int>(start, start+count)), h_m);
+        Kokkos::deep_copy(Kokkos::subview(p.dt_adapt, Kokkos::pair<int,int>(start, start+count)), h_dt);
         Kokkos::fence();
     }
 };
