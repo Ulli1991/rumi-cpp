@@ -20,6 +20,9 @@ int direct_n2_threshold = 0;
 // CPU serial threshold for avoiding GPU kernel launch overhead on tiny subsets
 int cpu_serial_threshold = 0;
 
+// Fused force+gradient: use stale accelerations to compute gradient in same N² pass as force
+bool fuse_gradient = false;
+
 // TILE_SIZE defined in constants.h
 
 // Fused function pointer types (force + kick combined)
@@ -771,6 +774,170 @@ static void self_gradient_correction_kick_distributed(DistributedParticles& dp, 
 }
 
 // =============================================================================
+// Fused distributed force + gradient + kick using STALE accelerations.
+// Single tiled N² kernel computes force AND gradient simultaneously.
+// The gradient uses stale accelerations (from the previous force evaluation)
+// which are snapshotted before the kernel overwrites pax/pay/paz.
+// This trades O(dt³) accuracy for ~30% fewer FLOPS and field loads per pair.
+// =============================================================================
+static void self_acceleration_gradient_kick_fused_distributed(
+    DistributedParticles& dp, int start, int count,
+    double G, double soft2, double grad_dt, double kick_dt) {
+    if (count <= 0) return;
+
+    int slice_start, slice_count;
+    dp.get_force_slice(start, count, slice_start, slice_count);
+    if (slice_count == 0) {
+        dp.allgather_accelerations_subset(start, count);
+        kick_velocities(dp.local, start, count, kick_dt);
+        return;
+    }
+
+    RawView px{dp.local.x.data()}, py{dp.local.y.data()}, pz{dp.local.z.data()};
+    RawView pvx{dp.local.vx.data()}, pvy{dp.local.vy.data()}, pvz{dp.local.vz.data()};
+    RawView pax{dp.local.ax.data()}, pay{dp.local.ay.data()}, paz{dp.local.az.data()};
+    RawView pm{dp.local.mass.data()};
+
+    // Snapshot stale accelerations into scratch before the kernel overwrites them.
+    // pax/pay/paz currently hold accelerations from the previous force evaluation
+    // (step 1 of FSI, i.e. a(x₀)), which serve as the stale-a for the gradient.
+    RawView ax_stale{dp.local.scratch1.data()};
+    RawView ay_stale{dp.local.scratch2.data()};
+    RawView az_stale{dp.local.scratch3.data()};
+    Kokkos::parallel_for("snapshot_stale_a", count, KOKKOS_LAMBDA(int ii) {
+        int i = start + ii;
+        ax_stale(ii) = pax(i);
+        ay_stale(ii) = pay(i);
+        az_stale(ii) = paz(i);
+    });
+    Kokkos::fence();
+
+    const double coeff = G * grad_dt * grad_dt * GRAD_COEFF;
+    const int j_start = start;
+    const int j_end = start + count;
+    const double kdt = kick_dt;
+    const int stale_offset = start;  // ax_stale(ii) corresponds to particle start+ii
+
+    using team_policy = Kokkos::TeamPolicy<>;
+    using member_type = team_policy::member_type;
+    using scratch_space = Kokkos::DefaultExecutionSpace::scratch_memory_space;
+
+    // Tile: [x, y, z, m, ax_stale, ay_stale, az_stale] = 7 fields per j-particle
+    size_t scratch_size = TILE_SIZE * 7 * sizeof(double);
+    int num_teams = (slice_count + TILE_SIZE - 1) / TILE_SIZE;
+
+    Kokkos::parallel_for("dist_fused_force_grad_kick",
+        team_policy(num_teams, TILE_SIZE).set_scratch_size(0, Kokkos::PerTeam(scratch_size)),
+        KOKKOS_LAMBDA(const member_type& team) {
+            int ii = team.league_rank() * TILE_SIZE + team.team_rank();
+            int i = slice_start + ii;
+
+            Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
+                tile(team.team_scratch(0), TILE_SIZE * 7);
+
+            double xi = 0, yi = 0, zi = 0;
+            double axi_stale = 0, ayi_stale = 0, azi_stale = 0;
+            if (ii < slice_count) {
+                xi = px(i); yi = py(i); zi = pz(i);
+                axi_stale = ax_stale(i - stale_offset);
+                ayi_stale = ay_stale(i - stale_offset);
+                azi_stale = az_stale(i - stale_offset);
+            }
+
+            // Accumulators for force and gradient correction
+            double axi = 0, ayi = 0, azi = 0;
+            double cx = 0, cy = 0, cz = 0;
+
+            for (int tile_start = j_start; tile_start < j_end; tile_start += TILE_SIZE) {
+                int tile_end = (tile_start + TILE_SIZE < j_end) ? tile_start + TILE_SIZE : j_end;
+                int tile_count = tile_end - tile_start;
+
+                // Collaborative tile load: x,y,z,m from global arrays, ax/ay/az from stale snapshot
+                int t = team.team_rank();
+                if (t < tile_count) {
+                    int idx = tile_start + t;
+                    int base = t * 7;
+                    tile(base    ) = px(idx);
+                    tile(base + 1) = py(idx);
+                    tile(base + 2) = pz(idx);
+                    tile(base + 3) = pm(idx);
+                    tile(base + 4) = ax_stale(idx - stale_offset);
+                    tile(base + 5) = ay_stale(idx - stale_offset);
+                    tile(base + 6) = az_stale(idx - stale_offset);
+                }
+                team.team_barrier();
+
+                if (ii < slice_count) {
+                    for (int jt = 0; jt < tile_count; jt++) {
+                        int j = tile_start + jt;
+                        if (j == i) continue;
+
+                        int jb = jt * 7;
+                        double dx = tile(jb    ) - xi;
+                        double dy = tile(jb + 1) - yi;
+                        double dz = tile(jb + 2) - zi;
+                        double mj = tile(jb + 3);
+
+                        double r2 = dx*dx + dy*dy + dz*dz + soft2;
+                        double inv_r = fast_rsqrt(r2);
+
+                        // --- Force accumulation (shared geometry) ---
+                        double inv_r3 = inv_r * inv_r * inv_r;
+                        double mj_inv_r3 = G * mj * inv_r3;
+                        axi += mj_inv_r3 * dx;
+                        ayi += mj_inv_r3 * dy;
+                        azi += mj_inv_r3 * dz;
+
+                        // --- Gradient accumulation (using stale accelerations) ---
+                        double dax = tile(jb + 4) - axi_stale;
+                        double day = tile(jb + 5) - ayi_stale;
+                        double daz = tile(jb + 6) - azi_stale;
+
+                        double inv_r2 = inv_r * inv_r;
+                        double inv_r5 = inv_r2 * inv_r2 * inv_r;
+                        double r_dot_a = dx*dax + dy*day + dz*daz;
+                        double f = coeff * mj * inv_r5;
+
+                        cx += f * (r2 * dax - 3.0 * r_dot_a * dx);
+                        cy += f * (r2 * day - 3.0 * r_dot_a * dy);
+                        cz += f * (r2 * daz - 3.0 * r_dot_a * dz);
+                    }
+                }
+                team.team_barrier();
+            }
+
+            if (ii < slice_count) {
+                // Combined acceleration = force + gradient correction
+                double total_ax = axi + cx;
+                double total_ay = ayi + cy;
+                double total_az = azi + cz;
+                pax(i) = total_ax;
+                pay(i) = total_ay;
+                paz(i) = total_az;
+                // Fused kick from registers
+                pvx(i) += total_ax * kdt;
+                pvy(i) += total_ay * kdt;
+                pvz(i) += total_az * kdt;
+            }
+        });
+    Kokkos::fence();
+
+    // Allgather combined accelerations
+    dp.allgather_accelerations_subset(start, count);
+
+    // Kick non-local particles using allgathered accelerations
+    int ss = slice_start, sc = slice_count;
+    Kokkos::parallel_for("kick_fused_non_local", count, KOKKOS_LAMBDA(int ii) {
+        int i = start + ii;
+        if (i >= ss && i < ss + sc) return;  // already kicked in fused kernel
+        pvx(i) += pax(i) * kdt;
+        pvy(i) += pay(i) * kdt;
+        pvz(i) += paz(i) * kdt;
+    });
+    Kokkos::fence();
+}
+
+// =============================================================================
 // Distributed FSI step using scatter-compute-gather
 // All ranks execute identical code; only force computation is distributed
 // Uses fused force+kick kernels to reduce kernel launches and memory traffic
@@ -791,13 +958,21 @@ static void fsi_step_distributed(DistributedParticles& dp, int start, int count,
     drift(dp.local, start, count, dt * FSI_DRIFT);
     g_profiler.stop(StepProfiler::DRIFT_KICK);
 
-    // U-tilde kick (2dt/3) with gradient correction - force then fused gradient + kick
-    g_profiler.start();
-    self_acceleration_distributed(dp, start, count, G, soft2);
-    g_profiler.stop(StepProfiler::SELF_FORCE, self_pairs);
-    g_profiler.start();
-    self_gradient_correction_kick_distributed(dp, start, count, G, soft2, dt, dt * FSI_MOD_KICK);
-    g_profiler.stop(StepProfiler::SELF_GRAD, self_pairs);
+    // U-tilde kick (2dt/3) with gradient correction
+    if (fuse_gradient) {
+        // Fused: single N² pass computes force + gradient (using stale a) + kick
+        g_profiler.start();
+        self_acceleration_gradient_kick_fused_distributed(dp, start, count, G, soft2, dt, dt * FSI_MOD_KICK);
+        g_profiler.stop(StepProfiler::SELF_GRAD, self_pairs);
+    } else {
+        // Separate: force → allgather → gradient + kick
+        g_profiler.start();
+        self_acceleration_distributed(dp, start, count, G, soft2);
+        g_profiler.stop(StepProfiler::SELF_FORCE, self_pairs);
+        g_profiler.start();
+        self_gradient_correction_kick_distributed(dp, start, count, G, soft2, dt, dt * FSI_MOD_KICK);
+        g_profiler.stop(StepProfiler::SELF_GRAD, self_pairs);
+    }
 
     // T drift (dt/2)
     g_profiler.start();
@@ -970,6 +1145,245 @@ static void cross_acceleration_distributed(DistributedParticles& dp,
 
     // Must use separate allgathers: each rank computed its slice of slow and
     // its slice of fast independently, so the distributions don't match a combined range
+    dp.allgather_accelerations_subset(slow_start, slow_count);
+    dp.allgather_accelerations_subset(fast_start, fast_count);
+}
+
+// =============================================================================
+// Fused cross force + gradient using STALE accelerations.
+// Single tiled N² pass per direction (slow←fast, fast←slow) computes both
+// cross-force and gradient correction simultaneously.
+// Stale accelerations are snapshotted from pax/pay/paz before the kernel runs.
+// =============================================================================
+static void cross_acceleration_and_gradient_fused_distributed(
+    DistributedParticles& dp,
+    int slow_start, int slow_count,
+    int fast_start, int fast_count,
+    double G, double soft2, double grad_dt) {
+    if (slow_count <= 0 || fast_count <= 0) return;
+
+    RawView px{dp.local.x.data()}, py{dp.local.y.data()}, pz{dp.local.z.data()};
+    RawView pax{dp.local.ax.data()}, pay{dp.local.ay.data()}, paz{dp.local.az.data()};
+    RawView pm{dp.local.mass.data()};
+
+    // Snapshot stale accelerations for both groups into scratch buffers.
+    // These are the accelerations from the PREVIOUS force evaluation in this HHS level.
+    // scratch1/2/3 for slow particles (indexed by ii = i - slow_start)
+    // scratch4/5/6 for fast particles (indexed by jj = j - fast_start)
+    RawView ax_stale_s{dp.local.scratch1.data()};
+    RawView ay_stale_s{dp.local.scratch2.data()};
+    RawView az_stale_s{dp.local.scratch3.data()};
+    RawView ax_stale_f{dp.local.scratch4.data()};
+    RawView ay_stale_f{dp.local.scratch5.data()};
+    RawView az_stale_f{dp.local.scratch6.data()};
+    Kokkos::parallel_for("snap_stale_slow", slow_count, KOKKOS_LAMBDA(int ii) {
+        int i = slow_start + ii;
+        ax_stale_s(ii) = pax(i);
+        ay_stale_s(ii) = pay(i);
+        az_stale_s(ii) = paz(i);
+    });
+    Kokkos::parallel_for("snap_stale_fast", fast_count, KOKKOS_LAMBDA(int jj) {
+        int j = fast_start + jj;
+        ax_stale_f(jj) = pax(j);
+        ay_stale_f(jj) = pay(j);
+        az_stale_f(jj) = paz(j);
+    });
+    Kokkos::fence();
+
+    const double coeff = G * grad_dt * grad_dt * GRAD_COEFF;
+
+    using team_policy = Kokkos::TeamPolicy<>;
+    using member_type = team_policy::member_type;
+    using scratch_space = Kokkos::DefaultExecutionSpace::scratch_memory_space;
+
+    // Tile: [x, y, z, m, ax_stale, ay_stale, az_stale] = 7 fields
+    size_t scratch_size = TILE_SIZE * 7 * sizeof(double);
+
+    // --- Slow particles: force + gradient from fast particles ---
+    int slice_start, slice_count;
+    dp.get_force_slice(slow_start, slow_count, slice_start, slice_count);
+
+    if (slice_count > 0) {
+        int num_teams = (slice_count + TILE_SIZE - 1) / TILE_SIZE;
+        const int f_start = fast_start;
+        const int f_end = fast_start + fast_count;
+        const int f_off = fast_start;  // offset for stale fast array
+        const int s_off = slow_start;  // offset for stale slow array
+
+        Kokkos::parallel_for("cross_fused_slow_from_fast",
+            team_policy(num_teams, TILE_SIZE).set_scratch_size(0, Kokkos::PerTeam(scratch_size)),
+            KOKKOS_LAMBDA(const member_type& team) {
+                int ii = team.league_rank() * TILE_SIZE + team.team_rank();
+                int i = slice_start + ii;
+
+                Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
+                    tile(team.team_scratch(0), TILE_SIZE * 7);
+
+                double xi = 0, yi = 0, zi = 0;
+                double axi_stale = 0, ayi_stale = 0, azi_stale = 0;
+                if (ii < slice_count) {
+                    xi = px(i); yi = py(i); zi = pz(i);
+                    axi_stale = ax_stale_s(i - s_off);
+                    ayi_stale = ay_stale_s(i - s_off);
+                    azi_stale = az_stale_s(i - s_off);
+                }
+
+                double axi = 0, ayi = 0, azi = 0;
+                double cx = 0, cy = 0, cz = 0;
+
+                for (int tile_st = f_start; tile_st < f_end; tile_st += TILE_SIZE) {
+                    int tile_end = (tile_st + TILE_SIZE < f_end) ? tile_st + TILE_SIZE : f_end;
+                    int tile_cnt = tile_end - tile_st;
+
+                    int t = team.team_rank();
+                    if (t < tile_cnt) {
+                        int idx = tile_st + t;
+                        int tb = t * 7;
+                        tile(tb    ) = px(idx);
+                        tile(tb + 1) = py(idx);
+                        tile(tb + 2) = pz(idx);
+                        tile(tb + 3) = pm(idx);
+                        tile(tb + 4) = ax_stale_f(idx - f_off);
+                        tile(tb + 5) = ay_stale_f(idx - f_off);
+                        tile(tb + 6) = az_stale_f(idx - f_off);
+                    }
+                    team.team_barrier();
+
+                    if (ii < slice_count) {
+                        for (int jt = 0; jt < tile_cnt; jt++) {
+                            int jb = jt * 7;
+                            double dx = tile(jb    ) - xi;
+                            double dy = tile(jb + 1) - yi;
+                            double dz = tile(jb + 2) - zi;
+                            double mj = tile(jb + 3);
+
+                            double r2 = dx*dx + dy*dy + dz*dz + soft2;
+                            double inv_r = fast_rsqrt(r2);
+
+                            // Force
+                            double inv_r3 = inv_r * inv_r * inv_r;
+                            double mj_inv_r3 = G * mj * inv_r3;
+                            axi += mj_inv_r3 * dx;
+                            ayi += mj_inv_r3 * dy;
+                            azi += mj_inv_r3 * dz;
+
+                            // Gradient (stale)
+                            double dax = tile(jb + 4) - axi_stale;
+                            double day = tile(jb + 5) - ayi_stale;
+                            double daz = tile(jb + 6) - azi_stale;
+                            double inv_r2 = inv_r * inv_r;
+                            double inv_r5 = inv_r2 * inv_r2 * inv_r;
+                            double r_dot_a = dx*dax + dy*day + dz*daz;
+                            double f = coeff * mj * inv_r5;
+                            cx += f * (r2 * dax - 3.0 * r_dot_a * dx);
+                            cy += f * (r2 * day - 3.0 * r_dot_a * dy);
+                            cz += f * (r2 * daz - 3.0 * r_dot_a * dz);
+                        }
+                    }
+                    team.team_barrier();
+                }
+
+                if (ii < slice_count) {
+                    pax(i) = axi + cx;
+                    pay(i) = ayi + cy;
+                    paz(i) = azi + cz;
+                }
+            });
+    }
+
+    // --- Fast particles: force + gradient from slow particles ---
+    int slice_start_f, slice_count_f;
+    dp.get_force_slice(fast_start, fast_count, slice_start_f, slice_count_f);
+
+    if (slice_count_f > 0) {
+        int num_teams_f = (slice_count_f + TILE_SIZE - 1) / TILE_SIZE;
+        const int s_start = slow_start;
+        const int s_end = slow_start + slow_count;
+        const int s_off = slow_start;
+        const int f_off = fast_start;
+
+        Kokkos::parallel_for("cross_fused_fast_from_slow",
+            team_policy(num_teams_f, TILE_SIZE).set_scratch_size(0, Kokkos::PerTeam(scratch_size)),
+            KOKKOS_LAMBDA(const member_type& team) {
+                int ii = team.league_rank() * TILE_SIZE + team.team_rank();
+                int i = slice_start_f + ii;
+
+                Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
+                    tile(team.team_scratch(0), TILE_SIZE * 7);
+
+                double xi = 0, yi = 0, zi = 0;
+                double axi_stale = 0, ayi_stale = 0, azi_stale = 0;
+                if (ii < slice_count_f) {
+                    xi = px(i); yi = py(i); zi = pz(i);
+                    axi_stale = ax_stale_f(i - f_off);
+                    ayi_stale = ay_stale_f(i - f_off);
+                    azi_stale = az_stale_f(i - f_off);
+                }
+
+                double axi = 0, ayi = 0, azi = 0;
+                double cx = 0, cy = 0, cz = 0;
+
+                for (int tile_st = s_start; tile_st < s_end; tile_st += TILE_SIZE) {
+                    int tile_end = (tile_st + TILE_SIZE < s_end) ? tile_st + TILE_SIZE : s_end;
+                    int tile_cnt = tile_end - tile_st;
+
+                    int t = team.team_rank();
+                    if (t < tile_cnt) {
+                        int idx = tile_st + t;
+                        int tb = t * 7;
+                        tile(tb    ) = px(idx);
+                        tile(tb + 1) = py(idx);
+                        tile(tb + 2) = pz(idx);
+                        tile(tb + 3) = pm(idx);
+                        tile(tb + 4) = ax_stale_s(idx - s_off);
+                        tile(tb + 5) = ay_stale_s(idx - s_off);
+                        tile(tb + 6) = az_stale_s(idx - s_off);
+                    }
+                    team.team_barrier();
+
+                    if (ii < slice_count_f) {
+                        for (int jt = 0; jt < tile_cnt; jt++) {
+                            int jb = jt * 7;
+                            double dx = tile(jb    ) - xi;
+                            double dy = tile(jb + 1) - yi;
+                            double dz = tile(jb + 2) - zi;
+                            double mj = tile(jb + 3);
+
+                            double r2 = dx*dx + dy*dy + dz*dz + soft2;
+                            double inv_r = fast_rsqrt(r2);
+
+                            // Force
+                            double inv_r3 = inv_r * inv_r * inv_r;
+                            double mj_inv_r3 = G * mj * inv_r3;
+                            axi += mj_inv_r3 * dx;
+                            ayi += mj_inv_r3 * dy;
+                            azi += mj_inv_r3 * dz;
+
+                            // Gradient (stale)
+                            double dax = tile(jb + 4) - axi_stale;
+                            double day = tile(jb + 5) - ayi_stale;
+                            double daz = tile(jb + 6) - azi_stale;
+                            double inv_r2 = inv_r * inv_r;
+                            double inv_r5 = inv_r2 * inv_r2 * inv_r;
+                            double r_dot_a = dx*dax + dy*day + dz*daz;
+                            double f = coeff * mj * inv_r5;
+                            cx += f * (r2 * dax - 3.0 * r_dot_a * dx);
+                            cy += f * (r2 * day - 3.0 * r_dot_a * dy);
+                            cz += f * (r2 * daz - 3.0 * r_dot_a * dz);
+                        }
+                    }
+                    team.team_barrier();
+                }
+
+                if (ii < slice_count_f) {
+                    pax(i) = axi + cx;
+                    pay(i) = ayi + cy;
+                    paz(i) = azi + cz;
+                }
+            });
+    }
+    Kokkos::fence();
+
     dp.allgather_accelerations_subset(slow_start, slow_count);
     dp.allgather_accelerations_subset(fast_start, fast_count);
 }
@@ -1881,11 +2295,21 @@ static void hhs_fsi_recursive_distributed(
                                   G, soft2, dt_min, eta, false, false);
 
     // Step 4: Cross-kick S<->F with gradient (2dt/3)
-    g_profiler.start();
-    cross_acceleration_and_gradient_distributed(dp, slow_start, slow_count,
-                                                fast_start, fast_count,
-                                                G, soft2, pivot_dt);
-    g_profiler.stop(StepProfiler::CROSS_GRAD, cross_pairs * 2);  // force + gradient passes
+    if (fuse_gradient) {
+        // Fused: single N² pass per direction computes force + gradient (stale a)
+        g_profiler.start();
+        cross_acceleration_and_gradient_fused_distributed(dp, slow_start, slow_count,
+                                                          fast_start, fast_count,
+                                                          G, soft2, pivot_dt);
+        g_profiler.stop(StepProfiler::CROSS_GRAD, cross_pairs);
+    } else {
+        // Separate: force → allgather → gradient
+        g_profiler.start();
+        cross_acceleration_and_gradient_distributed(dp, slow_start, slow_count,
+                                                    fast_start, fast_count,
+                                                    G, soft2, pivot_dt);
+        g_profiler.stop(StepProfiler::CROSS_GRAD, cross_pairs * 2);
+    }
     g_profiler.start();
     kick_velocities(dp.local, slow_start, slow_count, pivot_dt * FSI_MOD_KICK);
     kick_velocities(dp.local, fast_start, fast_count, pivot_dt * FSI_MOD_KICK);

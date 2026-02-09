@@ -15,6 +15,10 @@ extern int direct_n2_threshold;         // 0 = disabled (always distributed)
 // instead of GPU kernels (eliminates kernel launch overhead for tiny subsets)
 extern int cpu_serial_threshold;        // 0 = disabled (always GPU)
 
+// Fused force+gradient toggle: when true, uses stale accelerations for gradient
+// in a single N² pass (saves ~30% wall time). When false, uses separate passes.
+extern bool fuse_gradient;              // default false (separate passes)
+
 // Forward declaration for distributed particles
 struct DistributedParticles;
 

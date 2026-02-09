@@ -144,6 +144,7 @@ int main(int argc, char** argv) {
         skip_second_timestep = (cfg.get_str("SKIP_SECOND_TIMESTEP", "false") == "true");
         direct_n2_threshold = std::stoi(cfg.get_str("DIRECT_N2_ON_DEEP_LEVELS", "0"));
         cpu_serial_threshold = std::stoi(cfg.get_str("DIRECT_CPU_N2_ON_VERY_DEEP_LEVELS", "0"));
+        fuse_gradient = (cfg.get_str("FUSE_GRADIENT", "false") == "true");
 
         // USE_N3L: default true on CPU-like backends, false on GPU
         bool use_n3l_default = true;
