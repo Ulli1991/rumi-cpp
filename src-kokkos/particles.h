@@ -43,4 +43,6 @@ struct Particles {
     void partition_by_level();
     void pack();    // Copy SoA to packed format
     void unpack();  // Copy packed back to SoA (for velocities after kick)
+    void pack_pos_range(int start, int count);  // Pack x,y,z,mass into pos_packed for [start, start+count)
+    void pack_vel_range(int start, int count);  // Pack vx,vy,vz into vel_packed for [start, start+count)
 };

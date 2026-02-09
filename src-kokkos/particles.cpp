@@ -111,6 +111,32 @@ void Particles::unpack() {
     Kokkos::fence();
 }
 
+void Particles::pack_pos_range(int start, int count) {
+    auto px = x; auto py = y; auto pz = z; auto pm = mass;
+    auto pos = pos_packed;
+    Kokkos::parallel_for("pack_pos_range", count, KOKKOS_LAMBDA(int ii) {
+        int i = start + ii;
+        pos(i, 0) = px(i);
+        pos(i, 1) = py(i);
+        pos(i, 2) = pz(i);
+        pos(i, 3) = pm(i);
+    });
+    Kokkos::fence();
+}
+
+void Particles::pack_vel_range(int start, int count) {
+    auto pvx = vx; auto pvy = vy; auto pvz = vz;
+    auto vel = vel_packed;
+    Kokkos::parallel_for("pack_vel_range", count, KOKKOS_LAMBDA(int ii) {
+        int i = start + ii;
+        vel(i, 0) = pvx(i);
+        vel(i, 1) = pvy(i);
+        vel(i, 2) = pvz(i);
+        vel(i, 3) = 0.0;
+    });
+    Kokkos::fence();
+}
+
 void Particles::partition_by_level() {
     if (N == 0 || n_levels == 0) return;
 

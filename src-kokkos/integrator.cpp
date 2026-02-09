@@ -445,9 +445,8 @@ static void self_acceleration_distributed(DistributedParticles& dp, int start, i
         return;
     }
 
-    RawView px{dp.local.x.data()}, py{dp.local.y.data()}, pz{dp.local.z.data()};
+    auto pos = dp.local.pos_packed;
     RawView pax{dp.local.ax.data()}, pay{dp.local.ay.data()}, paz{dp.local.az.data()};
-    RawView pm{dp.local.mass.data()};
 
     const int j_start = start;
     const int j_end = start + count;
@@ -471,7 +470,8 @@ static void self_acceleration_distributed(DistributedParticles& dp, int start, i
 
             double xi = 0, yi = 0, zi = 0;
             if (ii < slice_count) {
-                xi = px(i); yi = py(i); zi = pz(i);
+                double mi_pad;
+                load4(&pos(i, 0), xi, yi, zi, mi_pad);
             }
 
             double axi = 0, ayi = 0, azi = 0;
@@ -484,10 +484,7 @@ static void self_acceleration_distributed(DistributedParticles& dp, int start, i
                 if (t < tile_count) {
                     int idx = tile_start + t;
                     int base = t * 4;
-                    tile(base    ) = px(idx);
-                    tile(base + 1) = py(idx);
-                    tile(base + 2) = pz(idx);
-                    tile(base + 3) = pm(idx);
+                    load4(&pos(idx, 0), tile(base), tile(base+1), tile(base+2), tile(base+3));
                 }
                 team.team_barrier();
 
@@ -542,10 +539,9 @@ static void self_acceleration_kick_distributed(DistributedParticles& dp, int sta
         return;
     }
 
-    RawView px{dp.local.x.data()}, py{dp.local.y.data()}, pz{dp.local.z.data()};
+    auto pos = dp.local.pos_packed;
     RawView pvx{dp.local.vx.data()}, pvy{dp.local.vy.data()}, pvz{dp.local.vz.data()};
     RawView pax{dp.local.ax.data()}, pay{dp.local.ay.data()}, paz{dp.local.az.data()};
-    RawView pm{dp.local.mass.data()};
 
     const int j_start = start;
     const int j_end = start + count;
@@ -569,7 +565,8 @@ static void self_acceleration_kick_distributed(DistributedParticles& dp, int sta
 
             double xi = 0, yi = 0, zi = 0;
             if (ii < slice_count) {
-                xi = px(i); yi = py(i); zi = pz(i);
+                double mi_pad;
+                load4(&pos(i, 0), xi, yi, zi, mi_pad);
             }
 
             double axi = 0, ayi = 0, azi = 0;
@@ -582,10 +579,7 @@ static void self_acceleration_kick_distributed(DistributedParticles& dp, int sta
                 if (t < tile_count) {
                     int idx = tile_start + t;
                     int base = t * 4;
-                    tile(base    ) = px(idx);
-                    tile(base + 1) = py(idx);
-                    tile(base + 2) = pz(idx);
-                    tile(base + 3) = pm(idx);
+                    load4(&pos(idx, 0), tile(base), tile(base+1), tile(base+2), tile(base+3));
                 }
                 team.team_barrier();
 
@@ -655,10 +649,9 @@ static void self_gradient_correction_kick_distributed(DistributedParticles& dp, 
         return;
     }
 
-    RawView px{dp.local.x.data()}, py{dp.local.y.data()}, pz{dp.local.z.data()};
+    auto pos = dp.local.pos_packed;
     RawView pvx{dp.local.vx.data()}, pvy{dp.local.vy.data()}, pvz{dp.local.vz.data()};
     RawView pax{dp.local.ax.data()}, pay{dp.local.ay.data()}, paz{dp.local.az.data()};
-    RawView pm{dp.local.mass.data()};
 
     const double coeff = G * grad_dt * grad_dt * GRAD_COEFF;
     const int j_start = start;
@@ -685,7 +678,8 @@ static void self_gradient_correction_kick_distributed(DistributedParticles& dp, 
             double xi = 0, yi = 0, zi = 0;
             double axi = 0, ayi = 0, azi = 0;
             if (ii < slice_count) {
-                xi = px(i); yi = py(i); zi = pz(i);
+                double mi_pad;
+                load4(&pos(i, 0), xi, yi, zi, mi_pad);
                 axi = pax(i); ayi = pay(i); azi = paz(i);
             }
 
@@ -699,10 +693,7 @@ static void self_gradient_correction_kick_distributed(DistributedParticles& dp, 
                 if (t < tile_count) {
                     int idx = tile_start + t;
                     int base = t * 7;
-                    tile(base    ) = px(idx);
-                    tile(base + 1) = py(idx);
-                    tile(base + 2) = pz(idx);
-                    tile(base + 3) = pm(idx);
+                    load4(&pos(idx, 0), tile(base), tile(base+1), tile(base+2), tile(base+3));
                     tile(base + 4) = pax(idx);
                     tile(base + 5) = pay(idx);
                     tile(base + 6) = paz(idx);
@@ -790,10 +781,9 @@ static void self_acceleration_gradient_kick_fused_distributed(
         return;
     }
 
-    RawView px{dp.local.x.data()}, py{dp.local.y.data()}, pz{dp.local.z.data()};
+    auto pos = dp.local.pos_packed;
     RawView pvx{dp.local.vx.data()}, pvy{dp.local.vy.data()}, pvz{dp.local.vz.data()};
     RawView pax{dp.local.ax.data()}, pay{dp.local.ay.data()}, paz{dp.local.az.data()};
-    RawView pm{dp.local.mass.data()};
 
     // Snapshot stale accelerations into scratch before the kernel overwrites them.
     // pax/pay/paz currently hold accelerations from the previous force evaluation
@@ -835,7 +825,8 @@ static void self_acceleration_gradient_kick_fused_distributed(
             double xi = 0, yi = 0, zi = 0;
             double axi_stale = 0, ayi_stale = 0, azi_stale = 0;
             if (ii < slice_count) {
-                xi = px(i); yi = py(i); zi = pz(i);
+                double mi_pad;
+                load4(&pos(i, 0), xi, yi, zi, mi_pad);
                 axi_stale = ax_stale(i - stale_offset);
                 ayi_stale = ay_stale(i - stale_offset);
                 azi_stale = az_stale(i - stale_offset);
@@ -849,15 +840,12 @@ static void self_acceleration_gradient_kick_fused_distributed(
                 int tile_end = (tile_start + TILE_SIZE < j_end) ? tile_start + TILE_SIZE : j_end;
                 int tile_count = tile_end - tile_start;
 
-                // Collaborative tile load: x,y,z,m from global arrays, ax/ay/az from stale snapshot
+                // Collaborative tile load: x,y,z,m from packed view, ax/ay/az from stale snapshot
                 int t = team.team_rank();
                 if (t < tile_count) {
                     int idx = tile_start + t;
                     int base = t * 7;
-                    tile(base    ) = px(idx);
-                    tile(base + 1) = py(idx);
-                    tile(base + 2) = pz(idx);
-                    tile(base + 3) = pm(idx);
+                    load4(&pos(idx, 0), tile(base), tile(base+1), tile(base+2), tile(base+3));
                     tile(base + 4) = ax_stale(idx - stale_offset);
                     tile(base + 5) = ay_stale(idx - stale_offset);
                     tile(base + 6) = az_stale(idx - stale_offset);
@@ -945,6 +933,9 @@ static void fsi_step_distributed(DistributedParticles& dp, int start, int count,
 
     long long self_pairs = (long long)count * count;
 
+    // Sync packed positions for vectorized kernel loads
+    dp.local.pack_pos_range(start, count);
+
     // U kick (dt/6) - fused distributed force + kick
     g_profiler.start();
     self_acceleration_kick_distributed(dp, start, count, G, soft2, dt * FSI_KICK);
@@ -954,6 +945,9 @@ static void fsi_step_distributed(DistributedParticles& dp, int start, int count,
     g_profiler.start();
     drift(dp.local, start, count, dt * FSI_DRIFT);
     g_profiler.stop(StepProfiler::DRIFT_KICK);
+
+    // Re-sync packed positions after drift
+    dp.local.pack_pos_range(start, count);
 
     // U-tilde kick (2dt/3) with gradient correction
     if (fuse_gradient) {
@@ -976,6 +970,9 @@ static void fsi_step_distributed(DistributedParticles& dp, int start, int count,
     drift(dp.local, start, count, dt * FSI_DRIFT);
     g_profiler.stop(StepProfiler::DRIFT_KICK);
 
+    // Re-sync packed positions after drift
+    dp.local.pack_pos_range(start, count);
+
     // U kick (dt/6) - fused distributed force + kick
     g_profiler.start();
     self_acceleration_kick_distributed(dp, start, count, G, soft2, dt * FSI_KICK);
@@ -992,9 +989,8 @@ static void cross_acceleration_distributed(DistributedParticles& dp,
                                            double G, double soft2) {
     if (slow_count <= 0 || fast_count <= 0) return;
 
-    RawView px{dp.local.x.data()}, py{dp.local.y.data()}, pz{dp.local.z.data()};
+    auto pos = dp.local.pos_packed;
     RawView pax{dp.local.ax.data()}, pay{dp.local.ay.data()}, paz{dp.local.az.data()};
-    RawView pm{dp.local.mass.data()};
 
     using team_policy = Kokkos::TeamPolicy<>;
     using member_type = team_policy::member_type;
@@ -1022,7 +1018,8 @@ static void cross_acceleration_distributed(DistributedParticles& dp,
 
                 double xi = 0, yi = 0, zi = 0;
                 if (ii < slice_count) {
-                    xi = px(i); yi = py(i); zi = pz(i);
+                    double mi_pad;
+                    load4(&pos(i, 0), xi, yi, zi, mi_pad);
                 }
 
                 double axi = 0, ayi = 0, azi = 0;
@@ -1035,10 +1032,7 @@ static void cross_acceleration_distributed(DistributedParticles& dp,
                     if (t < tile_cnt) {
                         int idx = tile_st + t;
                         int base = t * 4;
-                        tile(base    ) = px(idx);
-                        tile(base + 1) = py(idx);
-                        tile(base + 2) = pz(idx);
-                        tile(base + 3) = pm(idx);
+                        load4(&pos(idx, 0), tile(base), tile(base+1), tile(base+2), tile(base+3));
                     }
                     team.team_barrier();
 
@@ -1091,7 +1085,8 @@ static void cross_acceleration_distributed(DistributedParticles& dp,
 
                 double xi = 0, yi = 0, zi = 0;
                 if (ii < slice_count_f) {
-                    xi = px(i); yi = py(i); zi = pz(i);
+                    double mi_pad;
+                    load4(&pos(i, 0), xi, yi, zi, mi_pad);
                 }
 
                 double axi = 0, ayi = 0, azi = 0;
@@ -1104,10 +1099,7 @@ static void cross_acceleration_distributed(DistributedParticles& dp,
                     if (t < tile_cnt) {
                         int idx = tile_st + t;
                         int tb = t * 4;
-                        tile(tb)   = px(idx);
-                        tile(tb+1) = py(idx);
-                        tile(tb+2) = pz(idx);
-                        tile(tb+3) = pm(idx);
+                        load4(&pos(idx, 0), tile(tb), tile(tb+1), tile(tb+2), tile(tb+3));
                     }
                     team.team_barrier();
 
@@ -1157,10 +1149,9 @@ static void cross_acceleration_kick_distributed(DistributedParticles& dp,
                                                  double G, double soft2, double kick_dt) {
     if (slow_count <= 0 || fast_count <= 0) return;
 
-    RawView px{dp.local.x.data()}, py{dp.local.y.data()}, pz{dp.local.z.data()};
+    auto pos = dp.local.pos_packed;
     RawView pvx{dp.local.vx.data()}, pvy{dp.local.vy.data()}, pvz{dp.local.vz.data()};
     RawView pax{dp.local.ax.data()}, pay{dp.local.ay.data()}, paz{dp.local.az.data()};
-    RawView pm{dp.local.mass.data()};
 
     using team_policy = Kokkos::TeamPolicy<>;
     using member_type = team_policy::member_type;
@@ -1189,7 +1180,8 @@ static void cross_acceleration_kick_distributed(DistributedParticles& dp,
 
                 double xi = 0, yi = 0, zi = 0;
                 if (ii < slice_count) {
-                    xi = px(i); yi = py(i); zi = pz(i);
+                    double mi_pad;
+                    load4(&pos(i, 0), xi, yi, zi, mi_pad);
                 }
 
                 double axi = 0, ayi = 0, azi = 0;
@@ -1202,10 +1194,7 @@ static void cross_acceleration_kick_distributed(DistributedParticles& dp,
                     if (t < tile_cnt) {
                         int idx = tile_st + t;
                         int base = t * 4;
-                        tile(base    ) = px(idx);
-                        tile(base + 1) = py(idx);
-                        tile(base + 2) = pz(idx);
-                        tile(base + 3) = pm(idx);
+                        load4(&pos(idx, 0), tile(base), tile(base+1), tile(base+2), tile(base+3));
                     }
                     team.team_barrier();
 
@@ -1260,7 +1249,8 @@ static void cross_acceleration_kick_distributed(DistributedParticles& dp,
 
                 double xi = 0, yi = 0, zi = 0;
                 if (ii < slice_count_f) {
-                    xi = px(i); yi = py(i); zi = pz(i);
+                    double mi_pad;
+                    load4(&pos(i, 0), xi, yi, zi, mi_pad);
                 }
 
                 double axi = 0, ayi = 0, azi = 0;
@@ -1273,10 +1263,7 @@ static void cross_acceleration_kick_distributed(DistributedParticles& dp,
                     if (t < tile_cnt) {
                         int idx = tile_st + t;
                         int tb = t * 4;
-                        tile(tb)   = px(idx);
-                        tile(tb+1) = py(idx);
-                        tile(tb+2) = pz(idx);
-                        tile(tb+3) = pm(idx);
+                        load4(&pos(idx, 0), tile(tb), tile(tb+1), tile(tb+2), tile(tb+3));
                     }
                     team.team_barrier();
 
@@ -1350,9 +1337,8 @@ static void cross_acceleration_and_gradient_fused_distributed(
     double G, double soft2, double grad_dt) {
     if (slow_count <= 0 || fast_count <= 0) return;
 
-    RawView px{dp.local.x.data()}, py{dp.local.y.data()}, pz{dp.local.z.data()};
+    auto pos = dp.local.pos_packed;
     RawView pax{dp.local.ax.data()}, pay{dp.local.ay.data()}, paz{dp.local.az.data()};
-    RawView pm{dp.local.mass.data()};
 
     // Snapshot stale accelerations for both groups into scratch buffers.
     // These are the accelerations from the PREVIOUS force evaluation in this HHS level.
@@ -1410,7 +1396,8 @@ static void cross_acceleration_and_gradient_fused_distributed(
                 double xi = 0, yi = 0, zi = 0;
                 double axi_stale = 0, ayi_stale = 0, azi_stale = 0;
                 if (ii < slice_count) {
-                    xi = px(i); yi = py(i); zi = pz(i);
+                    double mi_pad;
+                    load4(&pos(i, 0), xi, yi, zi, mi_pad);
                     axi_stale = ax_stale_s(i - s_off);
                     ayi_stale = ay_stale_s(i - s_off);
                     azi_stale = az_stale_s(i - s_off);
@@ -1427,10 +1414,7 @@ static void cross_acceleration_and_gradient_fused_distributed(
                     if (t < tile_cnt) {
                         int idx = tile_st + t;
                         int tb = t * 7;
-                        tile(tb    ) = px(idx);
-                        tile(tb + 1) = py(idx);
-                        tile(tb + 2) = pz(idx);
-                        tile(tb + 3) = pm(idx);
+                        load4(&pos(idx, 0), tile(tb), tile(tb+1), tile(tb+2), tile(tb+3));
                         tile(tb + 4) = ax_stale_f(idx - f_off);
                         tile(tb + 5) = ay_stale_f(idx - f_off);
                         tile(tb + 6) = az_stale_f(idx - f_off);
@@ -1502,7 +1486,8 @@ static void cross_acceleration_and_gradient_fused_distributed(
                 double xi = 0, yi = 0, zi = 0;
                 double axi_stale = 0, ayi_stale = 0, azi_stale = 0;
                 if (ii < slice_count_f) {
-                    xi = px(i); yi = py(i); zi = pz(i);
+                    double mi_pad;
+                    load4(&pos(i, 0), xi, yi, zi, mi_pad);
                     axi_stale = ax_stale_f(i - f_off);
                     ayi_stale = ay_stale_f(i - f_off);
                     azi_stale = az_stale_f(i - f_off);
@@ -1519,10 +1504,7 @@ static void cross_acceleration_and_gradient_fused_distributed(
                     if (t < tile_cnt) {
                         int idx = tile_st + t;
                         int tb = t * 7;
-                        tile(tb    ) = px(idx);
-                        tile(tb + 1) = py(idx);
-                        tile(tb + 2) = pz(idx);
-                        tile(tb + 3) = pm(idx);
+                        load4(&pos(idx, 0), tile(tb), tile(tb+1), tile(tb+2), tile(tb+3));
                         tile(tb + 4) = ax_stale_s(idx - s_off);
                         tile(tb + 5) = ay_stale_s(idx - s_off);
                         tile(tb + 6) = az_stale_s(idx - s_off);
@@ -1585,9 +1567,8 @@ static void cross_acceleration_and_gradient_distributed(DistributedParticles& dp
     cross_acceleration_distributed(dp, slow_start, slow_count,
                                    fast_start, fast_count, G, soft2);
 
-    RawView px{dp.local.x.data()}, py{dp.local.y.data()}, pz{dp.local.z.data()};
+    auto pos = dp.local.pos_packed;
     RawView pax{dp.local.ax.data()}, pay{dp.local.ay.data()}, paz{dp.local.az.data()};
-    RawView pm{dp.local.mass.data()};
 
     const double coeff = G * dt * dt * GRAD_COEFF;
 
@@ -1619,7 +1600,8 @@ static void cross_acceleration_and_gradient_distributed(DistributedParticles& dp
                 double xi = 0, yi = 0, zi = 0;
                 double axi = 0, ayi = 0, azi = 0;
                 if (ii < slice_count) {
-                    xi = px(i); yi = py(i); zi = pz(i);
+                    double mi_pad;
+                    load4(&pos(i, 0), xi, yi, zi, mi_pad);
                     axi = pax(i); ayi = pay(i); azi = paz(i);
                 }
 
@@ -1633,10 +1615,7 @@ static void cross_acceleration_and_gradient_distributed(DistributedParticles& dp
                     if (t < tile_cnt) {
                         int idx = tile_st + t;
                         int tb = t * 7;
-                        tile(tb)   = px(idx);
-                        tile(tb+1) = py(idx);
-                        tile(tb+2) = pz(idx);
-                        tile(tb+3) = pm(idx);
+                        load4(&pos(idx, 0), tile(tb), tile(tb+1), tile(tb+2), tile(tb+3));
                         tile(tb+4) = pax(idx);
                         tile(tb+5) = pay(idx);
                         tile(tb+6) = paz(idx);
@@ -1700,7 +1679,8 @@ static void cross_acceleration_and_gradient_distributed(DistributedParticles& dp
                 double xi = 0, yi = 0, zi = 0;
                 double axi = 0, ayi = 0, azi = 0;
                 if (ii < slice_count_f) {
-                    xi = px(i); yi = py(i); zi = pz(i);
+                    double mi_pad;
+                    load4(&pos(i, 0), xi, yi, zi, mi_pad);
                     axi = pax(i); ayi = pay(i); azi = paz(i);
                 }
 
@@ -1714,10 +1694,7 @@ static void cross_acceleration_and_gradient_distributed(DistributedParticles& dp
                     if (t < tile_cnt) {
                         int idx = tile_st + t;
                         int tb = t * 7;
-                        tile(tb)   = px(idx);
-                        tile(tb+1) = py(idx);
-                        tile(tb+2) = pz(idx);
-                        tile(tb+3) = pm(idx);
+                        load4(&pos(idx, 0), tile(tb), tile(tb+1), tile(tb+2), tile(tb+3));
                         tile(tb+4) = pax(idx);
                         tile(tb+5) = pay(idx);
                         tile(tb+6) = paz(idx);
@@ -1778,9 +1755,8 @@ static void compute_timestep_distributed(DistributedParticles& dp, int start, in
         return;
     }
 
-    RawView px{dp.local.x.data()}, py{dp.local.y.data()}, pz{dp.local.z.data()};
-    RawView pvx{dp.local.vx.data()}, pvy{dp.local.vy.data()}, pvz{dp.local.vz.data()};
-    RawView pm{dp.local.mass.data()};
+    auto pos = dp.local.pos_packed;
+    auto vel = dp.local.vel_packed;
     RawView dt_f{dp.local.dt_adapt.data()};
 
     const int j_start = start;
@@ -1790,7 +1766,7 @@ static void compute_timestep_distributed(DistributedParticles& dp, int start, in
     using member_type = team_policy::member_type;
     using scratch_space = Kokkos::DefaultExecutionSpace::scratch_memory_space;
 
-    // Need x,y,z,vx,vy,vz,m for adaptive timestep
+    // Need x,y,z,m,vx,vy,vz for adaptive timestep
     size_t scratch_size = TILE_SIZE * 7 * sizeof(double);
     int num_teams = (slice_count + TILE_SIZE - 1) / TILE_SIZE;
 
@@ -1804,13 +1780,12 @@ static void compute_timestep_distributed(DistributedParticles& dp, int start, in
             Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
                 tile(team.team_scratch(0), N * 7);
 
-            double xi = 0, yi = 0, zi = 0;
+            double xi = 0, yi = 0, zi = 0, mi = 0;
             double vxi = 0, vyi = 0, vzi = 0;
-            double mi = 0;
             if (ii < slice_count) {
-                xi = px(i); yi = py(i); zi = pz(i);
-                vxi = pvx(i); vyi = pvy(i); vzi = pvz(i);
-                mi = pm(i);
+                double vpad;
+                load4(&pos(i, 0), xi, yi, zi, mi);
+                load4(&vel(i, 0), vxi, vyi, vzi, vpad);
             }
 
             double t_min_sq = 1e60;
@@ -1823,13 +1798,9 @@ static void compute_timestep_distributed(DistributedParticles& dp, int start, in
                 if (t < tile_cnt) {
                     int idx = tile_st + t;
                     int tb = t * 7;
-                    tile(tb)   = px(idx);
-                    tile(tb+1) = py(idx);
-                    tile(tb+2) = pz(idx);
-                    tile(tb+3) = pvx(idx);
-                    tile(tb+4) = pvy(idx);
-                    tile(tb+5) = pvz(idx);
-                    tile(tb+6) = pm(idx);
+                    double vpad;
+                    load4(&pos(idx, 0), tile(tb), tile(tb+1), tile(tb+2), tile(tb+3));
+                    load4(&vel(idx, 0), tile(tb+4), tile(tb+5), tile(tb+6), vpad);
                 }
                 team.team_barrier();
 
@@ -1844,16 +1815,16 @@ static void compute_timestep_distributed(DistributedParticles& dp, int start, in
                         double dz = tile(jb+2) - zi;
                         double r2 = dx*dx + dy*dy + dz*dz;
 
-                        double dvx = tile(jb+3) - vxi;
-                        double dvy = tile(jb+4) - vyi;
-                        double dvz = tile(jb+5) - vzi;
+                        double dvx = tile(jb+4) - vxi;
+                        double dvy = tile(jb+5) - vyi;
+                        double dvz = tile(jb+6) - vzi;
                         double v_sq = dvx*dvx + dvy*dvy + dvz*dvz;
 
                         // Timestep using rsqrt: r^3 = r2s * r2s * inv_r
                         double r2s = r2 + soft2;
                         double inv_r = fast_rsqrt(r2s);
                         double r3 = r2s * r2s * inv_r;
-                        double mass_sum = mi + tile(jb+6);
+                        double mass_sum = mi + tile(jb+3);
                         double t_ff_sq = r3 / (G * mass_sum + EPS);
                         double t_fb_sq = r2s / (v_sq + EPS);
 
@@ -2417,6 +2388,8 @@ static void hhs_fsi_recursive_distributed(
     if (direct_n2_threshold > 0 && count <= direct_n2_threshold) {
         hhs_fsi_recursive_local(dp.local, start, count, pivot_dt,
                                 G, soft2, dt_min, eta, use_n3l, dt_valid);
+        // Re-sync packed views: local path modifies SoA directly without updating pos_packed
+        dp.local.pack_pos_range(start, count);
         return;
     }
 
@@ -2430,6 +2403,9 @@ static void hhs_fsi_recursive_distributed(
 
     // Compute adaptive timesteps for this subset (skip if reusing from first half-step)
     if (!dt_valid && count > 1) {
+        // Sync packed pos+vel for vectorized timestep kernel
+        dp.local.pack_pos_range(start, count);
+        dp.local.pack_vel_range(start, count);
         g_profiler.start();
         compute_timestep_distributed(dp, start, count, G, soft2, eta);
         g_profiler.stop(StepProfiler::ADAPTIVE_DT, (long long)count * count);
@@ -2461,6 +2437,9 @@ static void hhs_fsi_recursive_distributed(
     }
 
     long long cross_pairs = 2LL * slow_count * fast_count;
+
+    // Re-sync packed positions after partition reorder
+    dp.local.pack_pos_range(start, count);
 
     // ==========================================================================
     // ALGORITHM 4: HHS-FSI with slow (S) and fast (F) particles
