@@ -23,6 +23,9 @@ int cpu_serial_threshold = 0;
 // Fused force+gradient: use stale accelerations to compute gradient in same N² pass as force
 bool fuse_gradient = false;
 
+// Mixed precision: FP32 rsqrt seed + FP64 Newton-Raphson (Level 1)
+bool mixed_precision = false;
+
 // TILE_SIZE defined in constants.h
 
 // Fused function pointer types (force + kick combined)
@@ -65,6 +68,8 @@ void compute_acceleration_and_timestep_distributed(DistributedParticles& dp,
         dp.allgather_timestep();
         return;
     }
+
+    const bool mp = mixed_precision;
 
     // Pack data for vectorized memory access
     dp.local.pack();
@@ -129,7 +134,7 @@ void compute_acceleration_and_timestep_distributed(DistributedParticles& dp,
                         double mj = tile(jb + 3);
                         double r2 = dx*dx + dy*dy + dz*dz;
                         double r2s = r2 + soft2;
-                        double inv_r = fast_rsqrt(r2s);
+                        double inv_r = fast_rsqrt(r2s, mp);
                         double inv_r3 = inv_r * inv_r * inv_r;
 
                         axi += G * mj * inv_r3 * dx;
@@ -437,6 +442,7 @@ void kick_velocities(Particles& p, int start, int count, double dt) {
 static void self_acceleration_distributed(DistributedParticles& dp, int start, int count,
                                           double G, double soft2) {
     if (count <= 0) return;
+    const bool mp = mixed_precision;
 
     int slice_start, slice_count;
     dp.get_force_slice(start, count, slice_start, slice_count);
@@ -499,7 +505,7 @@ static void self_acceleration_distributed(DistributedParticles& dp, int start, i
                         double dz = tile(jb + 2) - zi;
 
                         double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                        double inv_r = fast_rsqrt(r2);
+                        double inv_r = fast_rsqrt(r2, mp);
                         double inv_r3 = inv_r * inv_r * inv_r;
                         double mj_inv_r3 = G * tile(jb + 3) * inv_r3;
 
@@ -530,6 +536,7 @@ static void self_acceleration_distributed(DistributedParticles& dp, int start, i
 static void self_acceleration_kick_distributed(DistributedParticles& dp, int start, int count,
                                                 double G, double soft2, double kick_dt) {
     if (count <= 0) return;
+    const bool mp = mixed_precision;
 
     int slice_start, slice_count;
     dp.get_force_slice(start, count, slice_start, slice_count);
@@ -594,7 +601,7 @@ static void self_acceleration_kick_distributed(DistributedParticles& dp, int sta
                         double dz = tile(jb + 2) - zi;
 
                         double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                        double inv_r = fast_rsqrt(r2);
+                        double inv_r = fast_rsqrt(r2, mp);
                         double inv_r3 = inv_r * inv_r * inv_r;
                         double mj_inv_r3 = G * tile(jb + 3) * inv_r3;
 
@@ -640,6 +647,7 @@ static void self_acceleration_kick_distributed(DistributedParticles& dp, int sta
 static void self_gradient_correction_kick_distributed(DistributedParticles& dp, int start, int count,
                                                        double G, double soft2, double grad_dt, double kick_dt) {
     if (count <= 0) return;
+    const bool mp = mixed_precision;
 
     int slice_start, slice_count;
     dp.get_force_slice(start, count, slice_start, slice_count);
@@ -715,7 +723,7 @@ static void self_gradient_correction_kick_distributed(DistributedParticles& dp, 
                         double daz = tile(jb + 6) - azi;
 
                         double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                        double inv_r = fast_rsqrt(r2);
+                        double inv_r = fast_rsqrt(r2, mp);
                         double inv_r2 = inv_r * inv_r;
                         double inv_r5 = inv_r2 * inv_r2 * inv_r;
 
@@ -772,6 +780,7 @@ static void self_acceleration_gradient_kick_fused_distributed(
     DistributedParticles& dp, int start, int count,
     double G, double soft2, double grad_dt, double kick_dt) {
     if (count <= 0) return;
+    const bool mp = mixed_precision;
 
     int slice_start, slice_count;
     dp.get_force_slice(start, count, slice_start, slice_count);
@@ -864,7 +873,7 @@ static void self_acceleration_gradient_kick_fused_distributed(
                         double mj = tile(jb + 3);
 
                         double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                        double inv_r = fast_rsqrt(r2);
+                        double inv_r = fast_rsqrt(r2, mp);
 
                         // --- Force accumulation (shared geometry) ---
                         double inv_r3 = inv_r * inv_r * inv_r;
@@ -988,6 +997,7 @@ static void cross_acceleration_distributed(DistributedParticles& dp,
                                            int fast_start, int fast_count,
                                            double G, double soft2) {
     if (slow_count <= 0 || fast_count <= 0) return;
+    const bool mp = mixed_precision;
 
     auto pos = dp.local.pos_packed;
     RawView pax{dp.local.ax.data()}, pay{dp.local.ay.data()}, paz{dp.local.az.data()};
@@ -1044,7 +1054,7 @@ static void cross_acceleration_distributed(DistributedParticles& dp,
                             double dz = tile(jb + 2) - zi;
 
                             double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                            double inv_r = fast_rsqrt(r2);
+                            double inv_r = fast_rsqrt(r2, mp);
                             double inv_r3 = inv_r * inv_r * inv_r;
                             double mj_inv_r3 = G * tile(jb + 3) * inv_r3;
 
@@ -1111,7 +1121,7 @@ static void cross_acceleration_distributed(DistributedParticles& dp,
                             double dz = tile(jb+2) - zi;
 
                             double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                            double inv_r = fast_rsqrt(r2);
+                            double inv_r = fast_rsqrt(r2, mp);
                             double inv_r3 = inv_r * inv_r * inv_r;
                             double mj_inv_r3 = G * tile(jb+3) * inv_r3;
 
@@ -1148,6 +1158,7 @@ static void cross_acceleration_kick_distributed(DistributedParticles& dp,
                                                  int fast_start, int fast_count,
                                                  double G, double soft2, double kick_dt) {
     if (slow_count <= 0 || fast_count <= 0) return;
+    const bool mp = mixed_precision;
 
     auto pos = dp.local.pos_packed;
     RawView pvx{dp.local.vx.data()}, pvy{dp.local.vy.data()}, pvz{dp.local.vz.data()};
@@ -1206,7 +1217,7 @@ static void cross_acceleration_kick_distributed(DistributedParticles& dp,
                             double dz = tile(jb + 2) - zi;
 
                             double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                            double inv_r = fast_rsqrt(r2);
+                            double inv_r = fast_rsqrt(r2, mp);
                             double inv_r3 = inv_r * inv_r * inv_r;
                             double mj_inv_r3 = G * tile(jb + 3) * inv_r3;
 
@@ -1275,7 +1286,7 @@ static void cross_acceleration_kick_distributed(DistributedParticles& dp,
                             double dz = tile(jb+2) - zi;
 
                             double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                            double inv_r = fast_rsqrt(r2);
+                            double inv_r = fast_rsqrt(r2, mp);
                             double inv_r3 = inv_r * inv_r * inv_r;
                             double mj_inv_r3 = G * tile(jb+3) * inv_r3;
 
@@ -1336,6 +1347,7 @@ static void cross_acceleration_and_gradient_fused_distributed(
     int fast_start, int fast_count,
     double G, double soft2, double grad_dt) {
     if (slow_count <= 0 || fast_count <= 0) return;
+    const bool mp = mixed_precision;
 
     auto pos = dp.local.pos_packed;
     RawView pax{dp.local.ax.data()}, pay{dp.local.ay.data()}, paz{dp.local.az.data()};
@@ -1430,7 +1442,7 @@ static void cross_acceleration_and_gradient_fused_distributed(
                             double mj = tile(jb + 3);
 
                             double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                            double inv_r = fast_rsqrt(r2);
+                            double inv_r = fast_rsqrt(r2, mp);
 
                             // Force
                             double inv_r3 = inv_r * inv_r * inv_r;
@@ -1520,7 +1532,7 @@ static void cross_acceleration_and_gradient_fused_distributed(
                             double mj = tile(jb + 3);
 
                             double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                            double inv_r = fast_rsqrt(r2);
+                            double inv_r = fast_rsqrt(r2, mp);
 
                             // Force
                             double inv_r3 = inv_r * inv_r * inv_r;
@@ -1567,6 +1579,7 @@ static void cross_acceleration_and_gradient_distributed(DistributedParticles& dp
     cross_acceleration_distributed(dp, slow_start, slow_count,
                                    fast_start, fast_count, G, soft2);
 
+    const bool mp = mixed_precision;
     auto pos = dp.local.pos_packed;
     RawView pax{dp.local.ax.data()}, pay{dp.local.ay.data()}, paz{dp.local.az.data()};
 
@@ -1634,7 +1647,7 @@ static void cross_acceleration_and_gradient_distributed(DistributedParticles& dp
                             double daz = tile(jb+6) - azi;
 
                             double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                            double inv_r = fast_rsqrt(r2);
+                            double inv_r = fast_rsqrt(r2, mp);
                             double inv_r2 = inv_r * inv_r;
                             double inv_r5 = inv_r2 * inv_r2 * inv_r;
 
@@ -1713,7 +1726,7 @@ static void cross_acceleration_and_gradient_distributed(DistributedParticles& dp
                             double daz = tile(jb+6) - azi;
 
                             double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                            double inv_r = fast_rsqrt(r2);
+                            double inv_r = fast_rsqrt(r2, mp);
                             double inv_r2 = inv_r * inv_r;
                             double inv_r5 = inv_r2 * inv_r2 * inv_r;
 
@@ -1746,6 +1759,7 @@ static void cross_acceleration_and_gradient_distributed(DistributedParticles& dp
 static void compute_timestep_distributed(DistributedParticles& dp, int start, int count,
                                       double G, double soft2, double eta) {
     if (count <= 1) return;
+    const bool mp = mixed_precision;
 
     int slice_start, slice_count;
     dp.get_force_slice(start, count, slice_start, slice_count);
@@ -1822,7 +1836,7 @@ static void compute_timestep_distributed(DistributedParticles& dp, int start, in
 
                         // Timestep using rsqrt: r^3 = r2s * r2s * inv_r
                         double r2s = r2 + soft2;
-                        double inv_r = fast_rsqrt(r2s);
+                        double inv_r = fast_rsqrt(r2s, mp);
                         double r3 = r2s * r2s * inv_r;
                         double mass_sum = mi + tile(jb+3);
                         double t_ff_sq = r3 / (G * mass_sum + EPS);

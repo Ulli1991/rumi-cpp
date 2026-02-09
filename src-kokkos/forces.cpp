@@ -1,5 +1,6 @@
 #include "forces.h"
 #include "constants.h"
+#include "integrator.h"
 #include <Kokkos_Core.hpp>
 #include <cfloat>
 
@@ -19,6 +20,8 @@ void compute_acceleration(Particles& p, double G, double soft2) {
     RawView pax{p.ax.data()}, pay{p.ay.data()}, paz{p.az.data()};
     RawView m{p.mass.data()};
 
+    const bool mp = mixed_precision;
+
     // Zero accelerations
     Kokkos::parallel_for("zero_acc", N, KOKKOS_LAMBDA(int i) {
         pax(i) = 0; pay(i) = 0; paz(i) = 0;
@@ -34,7 +37,7 @@ void compute_acceleration(Particles& p, double G, double soft2) {
                 double dy = py(j) - py(i);
                 double dz = pz(j) - pz(i);
                 double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                double inv_r = fast_rsqrt(r2);
+                double inv_r = fast_rsqrt(r2, mp);
                 double inv_r3 = inv_r * inv_r * inv_r;
 
                 double fj = G * m(j) * inv_r3;
@@ -59,7 +62,7 @@ void compute_acceleration(Particles& p, double G, double soft2) {
                 double dy = py(j) - py(i);
                 double dz = pz(j) - pz(i);
                 double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                double inv_r = fast_rsqrt(r2);
+                double inv_r = fast_rsqrt(r2, mp);
                 double inv_r3 = inv_r * inv_r * inv_r;
                 double fj = G * m(j) * inv_r3;
                 axi += fj * dx; ayi += fj * dy; azi += fj * dz;
@@ -82,6 +85,8 @@ void compute_acceleration_and_timestep(Particles& p, double G, double soft2, dou
     RawView m{p.mass.data()};
     RawView dt_f{p.dt_adapt.data()};
 
+    const bool mp = mixed_precision;
+
     Kokkos::parallel_for("zero_acc_dt", N, KOKKOS_LAMBDA(int i) {
         pax(i) = 0; pay(i) = 0; paz(i) = 0; dt_f(i) = DBL_MAX;
     });
@@ -98,7 +103,7 @@ void compute_acceleration_and_timestep(Particles& p, double G, double soft2, dou
                 double dz = pz(j) - pz(i);
                 double r2 = dx*dx + dy*dy + dz*dz;
                 double r2s = r2 + soft2;
-                double inv_r = fast_rsqrt(r2s);
+                double inv_r = fast_rsqrt(r2s, mp);
                 double inv_r3 = inv_r * inv_r * inv_r;
 
                 double fj = G * m(j) * inv_r3;
@@ -194,7 +199,7 @@ void compute_acceleration_and_timestep(Particles& p, double G, double soft2, dou
                             double mj = tile(jb + 3);
                             double r2 = dx*dx + dy*dy + dz*dz;
                             double r2s = r2 + soft2;
-                            double inv_r = fast_rsqrt(r2s);
+                            double inv_r = fast_rsqrt(r2s, mp);
                             double inv_r3 = inv_r * inv_r * inv_r;
 
                             axi += G * mj * inv_r3 * dx;
@@ -237,7 +242,7 @@ void compute_acceleration_and_timestep(Particles& p, double G, double soft2, dou
                 double dz = pz(j) - pz(i);
                 double r2 = dx*dx + dy*dy + dz*dz;
                 double r2s = r2 + soft2;
-                double inv_r = fast_rsqrt(r2s);
+                double inv_r = fast_rsqrt(r2s, mp);
                 double inv_r3 = inv_r * inv_r * inv_r;
 
                 double fj = G * m(j) * inv_r3;
@@ -286,6 +291,8 @@ void self_acceleration(Particles& p, int start, int count,
     RawView m{p.mass.data()};
     const int end = start + count;
 
+    const bool mp = mixed_precision;
+
     if constexpr (UseN3L) {
         // N3L needs zeroing first due to atomic adds
         Kokkos::parallel_for("zero_self", count, KOKKOS_LAMBDA(int ii) {
@@ -302,7 +309,7 @@ void self_acceleration(Particles& p, int start, int count,
                 double dy = py(j) - py(i);
                 double dz = pz(j) - pz(i);
                 double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                double inv_r = fast_rsqrt(r2);
+                double inv_r = fast_rsqrt(r2, mp);
                 double inv_r3 = inv_r * inv_r * inv_r;
                 double fj = G * m(j) * inv_r3;
                 double fi = G * m(i) * inv_r3;
@@ -328,7 +335,7 @@ void self_acceleration(Particles& p, int start, int count,
                 double dy = py(j) - yi;
                 double dz = pz(j) - zi;
                 double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                double inv_r = fast_rsqrt(r2);
+                double inv_r = fast_rsqrt(r2, mp);
                 double inv_r3 = inv_r * inv_r * inv_r;
                 double fj = G * m(j) * inv_r3;
                 axi += fj * dx; ayi += fj * dy; azi += fj * dz;
@@ -349,6 +356,8 @@ void self_gradient_correction(Particles& p, int start, int count,
     RawView pax{p.ax.data()}, pay{p.ay.data()}, paz{p.az.data()};
     RawView m{p.mass.data()};
     const double coeff = G * dt * dt * GRAD_COEFF;
+
+    const bool mp = mixed_precision;
 
     // Snapshot accelerations into scratch
     RawView ax0{p.scratch1.data()}, ay0{p.scratch2.data()}, az0{p.scratch3.data()};
@@ -376,7 +385,7 @@ void self_gradient_correction(Particles& p, int start, int count,
                 double dx = px(j) - px(i), dy = py(j) - py(i), dz = pz(j) - pz(i);
                 double dax = ax0(jj) - axi0, day = ay0(jj) - ayi0, daz = az0(jj) - azi0;
                 double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                double inv_r = fast_rsqrt(r2);
+                double inv_r = fast_rsqrt(r2, mp);
                 double inv_r2 = inv_r * inv_r;
                 double inv_r5 = inv_r2 * inv_r2 * inv_r;
                 double r_dot_a = dx*dax + dy*day + dz*daz;
@@ -418,7 +427,7 @@ void self_gradient_correction(Particles& p, int start, int count,
                 double day = ay0(jj) - ayi0;
                 double daz = az0(jj) - azi0;
                 double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                double inv_r = fast_rsqrt(r2);
+                double inv_r = fast_rsqrt(r2, mp);
                 double inv_r2 = inv_r * inv_r;
                 double inv_r5 = inv_r2 * inv_r2 * inv_r;
                 double r_dot_a = dx*dax + dy*day + dz*daz;
@@ -455,6 +464,7 @@ void cross_acceleration(Particles& p,
     RawView pax{p.ax.data()}, pay{p.ay.data()}, paz{p.az.data()};
     RawView m{p.mass.data()};
     const int b_end = b_start + b_count;
+    const bool mp = mixed_precision;
 
     if constexpr (UseN3L) {
         // N3L needs zeroing first due to atomic adds on B
@@ -477,7 +487,7 @@ void cross_acceleration(Particles& p,
                 double dy = py(j) - py(i);
                 double dz = pz(j) - pz(i);
                 double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                double inv_r = fast_rsqrt(r2);
+                double inv_r = fast_rsqrt(r2, mp);
                 double inv_r3 = inv_r * inv_r * inv_r;
                 double fj = G * m(j) * inv_r3;
                 double fi = G * m(i) * inv_r3;
@@ -502,7 +512,7 @@ void cross_acceleration(Particles& p,
                 double dy = py(j) - yi;
                 double dz = pz(j) - zi;
                 double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                double inv_r = fast_rsqrt(r2);
+                double inv_r = fast_rsqrt(r2, mp);
                 double inv_r3 = inv_r * inv_r * inv_r;
                 double fj = G * m(j) * inv_r3;
                 axi += fj * dx; ayi += fj * dy; azi += fj * dz;
@@ -519,7 +529,7 @@ void cross_acceleration(Particles& p,
                 double dy = py(i) - yj;
                 double dz = pz(i) - zj;
                 double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                double inv_r = fast_rsqrt(r2);
+                double inv_r = fast_rsqrt(r2, mp);
                 double inv_r3 = inv_r * inv_r * inv_r;
                 double fi = G * m(i) * inv_r3;
                 axj += fi * dx; ayj += fi * dy; azj += fi * dz;
@@ -542,6 +552,8 @@ void cross_gradient_correction(Particles& p,
     RawView pax{p.ax.data()}, pay{p.ay.data()}, paz{p.az.data()};
     RawView m{p.mass.data()};
     const double coeff = G * dt * dt * GRAD_COEFF;
+
+    const bool mp = mixed_precision;
 
     // Snapshot accelerations
     RawView ax0_a{p.scratch1.data()}, ay0_a{p.scratch2.data()}, az0_a{p.scratch3.data()};
@@ -569,7 +581,7 @@ void cross_gradient_correction(Particles& p,
                 double dx = px(j) - px(i), dy = py(j) - py(i), dz = pz(j) - pz(i);
                 double dax = ax0_b(jj) - axi0, day = ay0_b(jj) - ayi0, daz = az0_b(jj) - azi0;
                 double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                double inv_r = fast_rsqrt(r2);
+                double inv_r = fast_rsqrt(r2, mp);
                 double inv_r2 = inv_r * inv_r;
                 double inv_r5 = inv_r2 * inv_r2 * inv_r;
                 double r_dot_a = dx*dax + dy*day + dz*daz;
@@ -597,7 +609,7 @@ void cross_gradient_correction(Particles& p,
                 double dx = px(j) - px(i), dy = py(j) - py(i), dz = pz(j) - pz(i);
                 double dax = ax0_b(jj) - axi0, day = ay0_b(jj) - ayi0, daz = az0_b(jj) - azi0;
                 double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                double inv_r = fast_rsqrt(r2);
+                double inv_r = fast_rsqrt(r2, mp);
                 double inv_r2 = inv_r * inv_r;
                 double inv_r5 = inv_r2 * inv_r2 * inv_r;
                 double r_dot_a = dx*dax + dy*day + dz*daz;
@@ -619,7 +631,7 @@ void cross_gradient_correction(Particles& p,
                 double dx = px(i) - px(j), dy = py(i) - py(j), dz = pz(i) - pz(j);
                 double dax = ax0_a(ii) - axj0, day = ay0_a(ii) - ayj0, daz = az0_a(ii) - azj0;
                 double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                double inv_r = fast_rsqrt(r2);
+                double inv_r = fast_rsqrt(r2, mp);
                 double inv_r2 = inv_r * inv_r;
                 double inv_r5 = inv_r2 * inv_r2 * inv_r;
                 double r_dot_a = dx*dax + dy*day + dz*daz;
@@ -661,6 +673,8 @@ void compute_timestep_subset(Particles& p, int start, int count,
     RawView dt_f{p.dt_adapt.data()};
     const int end = start + count;
 
+    const bool mp = mixed_precision;
+
     // Initialize dt_adapt to large value for subset
     Kokkos::parallel_for("init_dt_subset", count, KOKKOS_LAMBDA(int ii) {
         dt_f(start + ii) = DBL_MAX;
@@ -685,7 +699,7 @@ void compute_timestep_subset(Particles& p, int start, int count,
                 double v_sq = dvx*dvx + dvy*dvy + dvz*dvz;
 
                 double r2s = r2 + soft2;
-                double inv_r_ts = fast_rsqrt(r2s);
+                double inv_r_ts = fast_rsqrt(r2s, mp);
                 double mass_sum = m(i) + m(j);
                 double r3 = r2s * r2s * inv_r_ts;
                 double t_ff_sq = r3 / (G * mass_sum + EPS);
@@ -769,7 +783,7 @@ void compute_timestep_subset(Particles& p, int start, int count,
                             double dvz = tile(jb + 6) - vzi;
                             double v_sq = dvx*dvx + dvy*dvy + dvz*dvz;
 
-                            double inv_r = fast_rsqrt(r2s);
+                            double inv_r = fast_rsqrt(r2s, mp);
                             double mass_sum = mi + mj;
                             double r3 = r2s * r2s * inv_r;
                             double t_ff_sq = r3 / (G * mass_sum + EPS);
@@ -801,6 +815,7 @@ void self_acceleration_kick(Particles& p, int start, int count,
     RawView pax{p.ax.data()}, pay{p.ay.data()}, paz{p.az.data()};
     RawView m{p.mass.data()};
     const int end = start + count;
+    const bool mp = mixed_precision;
 
     if constexpr (UseN3L) {
         // N3L needs zeroing first due to atomic adds
@@ -818,7 +833,7 @@ void self_acceleration_kick(Particles& p, int start, int count,
                 double dy = py(j) - py(i);
                 double dz = pz(j) - pz(i);
                 double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                double inv_r = fast_rsqrt(r2);
+                double inv_r = fast_rsqrt(r2, mp);
                 double inv_r3 = inv_r * inv_r * inv_r;
                 double fj = G * m(j) * inv_r3;
                 double fi = G * m(i) * inv_r3;
@@ -853,7 +868,7 @@ void self_acceleration_kick(Particles& p, int start, int count,
                 double dy = py(j) - yi;
                 double dz = pz(j) - zi;
                 double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                double inv_r = fast_rsqrt(r2);
+                double inv_r = fast_rsqrt(r2, mp);
                 double inv_r3 = inv_r * inv_r * inv_r;
                 double fj = G * m(j) * inv_r3;
                 axi += fj * dx; ayi += fj * dy; azi += fj * dz;
@@ -904,6 +919,7 @@ void cross_acceleration_kick(Particles& p,
     RawView pax{p.ax.data()}, pay{p.ay.data()}, paz{p.az.data()};
     RawView m{p.mass.data()};
     const int b_end = b_start + b_count;
+    const bool mp = mixed_precision;
 
     if constexpr (UseN3L) {
         // N3L needs zeroing first
@@ -925,7 +941,7 @@ void cross_acceleration_kick(Particles& p,
                 double dy = py(j) - py(i);
                 double dz = pz(j) - pz(i);
                 double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                double inv_r = fast_rsqrt(r2);
+                double inv_r = fast_rsqrt(r2, mp);
                 double inv_r3 = inv_r * inv_r * inv_r;
                 double fj = G * m(j) * inv_r3;
                 double fi = G * m(i) * inv_r3;
@@ -964,7 +980,7 @@ void cross_acceleration_kick(Particles& p,
                 double dy = py(j) - py(i);
                 double dz = pz(j) - pz(i);
                 double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                double inv_r = fast_rsqrt(r2);
+                double inv_r = fast_rsqrt(r2, mp);
                 double inv_r3 = inv_r * inv_r * inv_r;
                 double fj = G * m(j) * inv_r3;
                 axi += fj * dx; ayi += fj * dy; azi += fj * dz;
@@ -984,7 +1000,7 @@ void cross_acceleration_kick(Particles& p,
                 double dy = py(i) - py(j);
                 double dz = pz(i) - pz(j);
                 double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                double inv_r = fast_rsqrt(r2);
+                double inv_r = fast_rsqrt(r2, mp);
                 double inv_r3 = inv_r * inv_r * inv_r;
                 double fi = G * m(i) * inv_r3;
                 axj += fi * dx; ayj += fi * dy; azj += fi * dz;
@@ -1047,6 +1063,7 @@ void cross_acceleration_kick_and_cache(Particles& p,
     RawView cax_a{p.scratch4.data()}, cay_a{p.scratch5.data()}, caz_a{p.scratch6.data()};
     RawView cax_b{p.scratch7.data()}, cay_b{p.scratch8.data()}, caz_b{p.scratch9.data()};
     const int b_end = b_start + b_count;
+    const bool mp = mixed_precision;
 
     if constexpr (UseN3L) {
         // Zero accelerations
@@ -1068,7 +1085,7 @@ void cross_acceleration_kick_and_cache(Particles& p,
                 double dy = py(j) - py(i);
                 double dz = pz(j) - pz(i);
                 double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                double inv_r = fast_rsqrt(r2);
+                double inv_r = fast_rsqrt(r2, mp);
                 double inv_r3 = inv_r * inv_r * inv_r;
                 double fj = G * m(j) * inv_r3;
                 double fi = G * m(i) * inv_r3;
@@ -1110,7 +1127,7 @@ void cross_acceleration_kick_and_cache(Particles& p,
                 double dy = py(j) - py(i);
                 double dz = pz(j) - pz(i);
                 double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                double inv_r = fast_rsqrt(r2);
+                double inv_r = fast_rsqrt(r2, mp);
                 double inv_r3 = inv_r * inv_r * inv_r;
                 double fj = G * m(j) * inv_r3;
                 axi += fj * dx; ayi += fj * dy; azi += fj * dz;
@@ -1131,7 +1148,7 @@ void cross_acceleration_kick_and_cache(Particles& p,
                 double dy = py(i) - py(j);
                 double dz = pz(i) - pz(j);
                 double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                double inv_r = fast_rsqrt(r2);
+                double inv_r = fast_rsqrt(r2, mp);
                 double inv_r3 = inv_r * inv_r * inv_r;
                 double fi = G * m(i) * inv_r3;
                 axj += fi * dx; ayj += fi * dy; azj += fi * dz;
@@ -1194,6 +1211,8 @@ void ghost_gradient_correction(Particles& local, const Particles& ghosts,
 
     const double coeff = G * dt * dt * GRAD_COEFF;
 
+    const bool mp = mixed_precision;
+
     // Each local particle gets gradient correction from all ghost particles
     // correction_i = sum_j { coeff * m_j / r^5 * [ r^2 * delta_a - 3 * (r · delta_a) * r ] }
     // where delta_a = a_j - a_i
@@ -1211,7 +1230,7 @@ void ghost_gradient_correction(Particles& local, const Particles& ghosts,
             double daz = gaz(j) - azi;
 
             double r2 = dx*dx + dy*dy + dz*dz + soft2;
-            double inv_r = fast_rsqrt(r2);
+            double inv_r = fast_rsqrt(r2, mp);
             double inv_r2 = inv_r * inv_r;
             double inv_r5 = inv_r2 * inv_r2 * inv_r;
 
@@ -1249,6 +1268,7 @@ void ghost_cross_kick_slow_from_fast(Particles& local, const Particles& ghosts,
     RawView gdt{ghosts.dt_adapt.data()};
 
     int N_ghosts = ghosts.N;
+    const bool mp = mixed_precision;
 
     // Each local slow particle accumulates force from all ghost fast particles
     Kokkos::parallel_for("ghost_cross_slow_from_fast", local_count, KOKKOS_LAMBDA(int ii) {
@@ -1265,7 +1285,7 @@ void ghost_cross_kick_slow_from_fast(Particles& local, const Particles& ghosts,
             double dz = gz(j) - zi;
 
             double r2 = dx*dx + dy*dy + dz*dz + soft2;
-            double inv_r = fast_rsqrt(r2);
+            double inv_r = fast_rsqrt(r2, mp);
             double inv_r3 = inv_r * inv_r * inv_r;
             double mj_inv_r3 = G * gm(j) * inv_r3;
 
@@ -1300,6 +1320,7 @@ void ghost_cross_kick_fast_from_slow(Particles& local, const Particles& ghosts,
     RawView gdt{ghosts.dt_adapt.data()};
 
     int N_ghosts = ghosts.N;
+    const bool mp = mixed_precision;
 
     // Each local fast particle accumulates force from all ghost slow particles
     Kokkos::parallel_for("ghost_cross_fast_from_slow", local_count, KOKKOS_LAMBDA(int ii) {
@@ -1316,7 +1337,7 @@ void ghost_cross_kick_fast_from_slow(Particles& local, const Particles& ghosts,
             double dz = gz(j) - zi;
 
             double r2 = dx*dx + dy*dy + dz*dz + soft2;
-            double inv_r = fast_rsqrt(r2);
+            double inv_r = fast_rsqrt(r2, mp);
             double inv_r3 = inv_r * inv_r * inv_r;
             double mj_inv_r3 = G * gm(j) * inv_r3;
 
@@ -1371,6 +1392,7 @@ void ghost_cross_kicks_hhs_with_gradient(Particles& local, const Particles& ghos
 
     const double grad_coeff = G * grad_dt * grad_dt * GRAD_COEFF;
     int N_ghosts = ghosts.N;
+    const bool mp = mixed_precision;
 
     // Combined: compute ghost cross-forces, gradient correction, and kick for slow particles
     if (slow_count > 0) {
@@ -1391,7 +1413,7 @@ void ghost_cross_kicks_hhs_with_gradient(Particles& local, const Particles& ghos
                 double dz = gz(j) - zi;
 
                 double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                double inv_r = fast_rsqrt(r2);
+                double inv_r = fast_rsqrt(r2, mp);
                 double inv_r2 = inv_r * inv_r;
                 double inv_r3 = inv_r2 * inv_r;
                 double mj_inv_r3 = G * gm(j) * inv_r3;
@@ -1448,7 +1470,7 @@ void ghost_cross_kicks_hhs_with_gradient(Particles& local, const Particles& ghos
                 double dz = gz(j) - zi;
 
                 double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                double inv_r = fast_rsqrt(r2);
+                double inv_r = fast_rsqrt(r2, mp);
                 double inv_r2 = inv_r * inv_r;
                 double inv_r3 = inv_r2 * inv_r;
                 double mj_inv_r3 = G * gm(j) * inv_r3;

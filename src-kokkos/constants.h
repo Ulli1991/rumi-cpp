@@ -38,6 +38,31 @@ KOKKOS_INLINE_FUNCTION double fast_rsqrt(double x) {
 #endif
 }
 
+// Mixed-precision rsqrt: FP32 seed from hardware SFU + one Newton-Raphson
+// iteration in FP64. ~1e-14 relative precision, saves ~7 FP64 ops per pair.
+// When mixed=false, falls back to standard fast_rsqrt.
+// Guard: r2 can exceed float max (~3.4e38) for distant pairs in large clusters
+// (positions ~1e19 cm → r2 ~ 5e39). Falls back to FP64 rsqrt for those pairs.
+KOKKOS_INLINE_FUNCTION double fast_rsqrt(double x, bool mixed) {
+#if defined(__CUDA_ARCH__)
+    if (mixed && x < 3.0e38) {
+        float xf = (float)x;
+        double y = (double)__frsqrt_rn(xf);
+        return y * (1.5 - 0.5 * x * y * y);
+    }
+    return rsqrt(x);
+#elif defined(__HIP_DEVICE_COMPILE__)
+    if (mixed && x < 3.0e38) {
+        float xf = (float)x;
+        double y = (double)__frsqrt_rn(xf);
+        return y * (1.5 - 0.5 * x * y * y);
+    }
+    return rsqrt(x);
+#else
+    return 1.0 / std::sqrt(x);
+#endif
+}
+
 // Portable 256-bit vectorized load: reads 4 contiguous doubles in one transaction.
 // Requires 32-byte aligned source (guaranteed by LayoutRight packed views).
 KOKKOS_INLINE_FUNCTION void load4(const double* __restrict__ ptr,

@@ -19,6 +19,10 @@ extern int cpu_serial_threshold;        // 0 = disabled (always GPU)
 // in a single N² pass (saves ~30% wall time). When false, uses separate passes.
 extern bool fuse_gradient;              // default false (separate passes)
 
+// Mixed precision: FP32 rsqrt seed + FP64 Newton-Raphson refinement
+// ~1e-14 precision, ~15-20% faster force kernels. No impact on conservation.
+extern bool mixed_precision;            // default false (pure FP64)
+
 // Forward declaration for distributed particles
 struct DistributedParticles;
 
