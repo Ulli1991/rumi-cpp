@@ -17,6 +17,9 @@ bool skip_second_timestep = false;
 // Direct N² threshold for skipping MPI distribution on small subsets
 int direct_n2_threshold = 0;
 
+// CPU serial threshold for avoiding GPU kernel launch overhead on tiny subsets
+int cpu_serial_threshold = 0;
+
 // Tile size for shared memory tiling (Rantala paper uses p=32)
 constexpr int DIST_TILE_SIZE = 32;
 
@@ -1343,6 +1346,430 @@ static void compute_timestep_distributed(DistributedParticles& dp, int start, in
 }
 
 // =============================================================================
+// CPU serial HHS-FSI for very small subsets (avoids GPU kernel launch overhead)
+// Copies subset to host, runs plain C++ loops, copies back.
+// =============================================================================
+
+// Host-side data for CPU serial computation
+struct CpuSubset {
+    std::vector<double> x, y, z, vx, vy, vz, ax, ay, az, mass, dt_adapt;
+    int count;
+
+    void resize(int n) {
+        count = n;
+        x.resize(n); y.resize(n); z.resize(n);
+        vx.resize(n); vy.resize(n); vz.resize(n);
+        ax.resize(n); ay.resize(n); az.resize(n);
+        mass.resize(n); dt_adapt.resize(n);
+    }
+
+    // Copy subset [start, start+count) from device to host
+    void copy_from_device(Particles& p, int start) {
+        auto h_x = Kokkos::create_mirror_view(Kokkos::subview(p.x, Kokkos::pair<int,int>(start, start+count)));
+        auto h_y = Kokkos::create_mirror_view(Kokkos::subview(p.y, Kokkos::pair<int,int>(start, start+count)));
+        auto h_z = Kokkos::create_mirror_view(Kokkos::subview(p.z, Kokkos::pair<int,int>(start, start+count)));
+        auto h_vx = Kokkos::create_mirror_view(Kokkos::subview(p.vx, Kokkos::pair<int,int>(start, start+count)));
+        auto h_vy = Kokkos::create_mirror_view(Kokkos::subview(p.vy, Kokkos::pair<int,int>(start, start+count)));
+        auto h_vz = Kokkos::create_mirror_view(Kokkos::subview(p.vz, Kokkos::pair<int,int>(start, start+count)));
+        auto h_m  = Kokkos::create_mirror_view(Kokkos::subview(p.mass, Kokkos::pair<int,int>(start, start+count)));
+        auto h_dt = Kokkos::create_mirror_view(Kokkos::subview(p.dt_adapt, Kokkos::pair<int,int>(start, start+count)));
+        Kokkos::deep_copy(h_x, Kokkos::subview(p.x, Kokkos::pair<int,int>(start, start+count)));
+        Kokkos::deep_copy(h_y, Kokkos::subview(p.y, Kokkos::pair<int,int>(start, start+count)));
+        Kokkos::deep_copy(h_z, Kokkos::subview(p.z, Kokkos::pair<int,int>(start, start+count)));
+        Kokkos::deep_copy(h_vx, Kokkos::subview(p.vx, Kokkos::pair<int,int>(start, start+count)));
+        Kokkos::deep_copy(h_vy, Kokkos::subview(p.vy, Kokkos::pair<int,int>(start, start+count)));
+        Kokkos::deep_copy(h_vz, Kokkos::subview(p.vz, Kokkos::pair<int,int>(start, start+count)));
+        Kokkos::deep_copy(h_m, Kokkos::subview(p.mass, Kokkos::pair<int,int>(start, start+count)));
+        Kokkos::deep_copy(h_dt, Kokkos::subview(p.dt_adapt, Kokkos::pair<int,int>(start, start+count)));
+        Kokkos::fence();
+        for (int i = 0; i < count; i++) {
+            x[i] = h_x(i); y[i] = h_y(i); z[i] = h_z(i);
+            vx[i] = h_vx(i); vy[i] = h_vy(i); vz[i] = h_vz(i);
+            mass[i] = h_m(i); dt_adapt[i] = h_dt(i);
+        }
+    }
+
+    // Copy results back to device (positions, velocities, dt_adapt)
+    void copy_to_device(Particles& p, int start) {
+        auto h_x = Kokkos::create_mirror_view(Kokkos::subview(p.x, Kokkos::pair<int,int>(start, start+count)));
+        auto h_y = Kokkos::create_mirror_view(Kokkos::subview(p.y, Kokkos::pair<int,int>(start, start+count)));
+        auto h_z = Kokkos::create_mirror_view(Kokkos::subview(p.z, Kokkos::pair<int,int>(start, start+count)));
+        auto h_vx = Kokkos::create_mirror_view(Kokkos::subview(p.vx, Kokkos::pair<int,int>(start, start+count)));
+        auto h_vy = Kokkos::create_mirror_view(Kokkos::subview(p.vy, Kokkos::pair<int,int>(start, start+count)));
+        auto h_vz = Kokkos::create_mirror_view(Kokkos::subview(p.vz, Kokkos::pair<int,int>(start, start+count)));
+        for (int i = 0; i < count; i++) {
+            h_x(i) = x[i]; h_y(i) = y[i]; h_z(i) = z[i];
+            h_vx(i) = vx[i]; h_vy(i) = vy[i]; h_vz(i) = vz[i];
+        }
+        Kokkos::deep_copy(Kokkos::subview(p.x, Kokkos::pair<int,int>(start, start+count)), h_x);
+        Kokkos::deep_copy(Kokkos::subview(p.y, Kokkos::pair<int,int>(start, start+count)), h_y);
+        Kokkos::deep_copy(Kokkos::subview(p.z, Kokkos::pair<int,int>(start, start+count)), h_z);
+        Kokkos::deep_copy(Kokkos::subview(p.vx, Kokkos::pair<int,int>(start, start+count)), h_vx);
+        Kokkos::deep_copy(Kokkos::subview(p.vy, Kokkos::pair<int,int>(start, start+count)), h_vy);
+        Kokkos::deep_copy(Kokkos::subview(p.vz, Kokkos::pair<int,int>(start, start+count)), h_vz);
+        Kokkos::fence();
+    }
+};
+
+// CPU self-acceleration + kick (N3L: upper triangle, apply to both i and j)
+static void cpu_self_acc_kick(CpuSubset& s, int start, int count,
+                              double G, double soft2, double kick_dt) {
+    const int end = start + count;
+    for (int i = start; i < end; i++) {
+        s.ax[i] = 0; s.ay[i] = 0; s.az[i] = 0;
+    }
+    for (int i = start; i < end; i++) {
+        for (int j = i + 1; j < end; j++) {
+            double dx = s.x[j] - s.x[i];
+            double dy = s.y[j] - s.y[i];
+            double dz = s.z[j] - s.z[i];
+            double r2 = dx*dx + dy*dy + dz*dz + soft2;
+            double inv_r = 1.0 / std::sqrt(r2);
+            double inv_r3 = inv_r * inv_r * inv_r;
+            double fj = G * s.mass[j] * inv_r3;
+            double fi = G * s.mass[i] * inv_r3;
+            s.ax[i] += fj * dx; s.ay[i] += fj * dy; s.az[i] += fj * dz;
+            s.ax[j] -= fi * dx; s.ay[j] -= fi * dy; s.az[j] -= fi * dz;
+        }
+    }
+    for (int i = start; i < end; i++) {
+        s.vx[i] += s.ax[i] * kick_dt;
+        s.vy[i] += s.ay[i] * kick_dt;
+        s.vz[i] += s.az[i] * kick_dt;
+    }
+}
+
+// CPU self-acceleration (N3L, no kick)
+static void cpu_self_acc(CpuSubset& s, int start, int count,
+                         double G, double soft2) {
+    const int end = start + count;
+    for (int i = start; i < end; i++) {
+        s.ax[i] = 0; s.ay[i] = 0; s.az[i] = 0;
+    }
+    for (int i = start; i < end; i++) {
+        for (int j = i + 1; j < end; j++) {
+            double dx = s.x[j] - s.x[i];
+            double dy = s.y[j] - s.y[i];
+            double dz = s.z[j] - s.z[i];
+            double r2 = dx*dx + dy*dy + dz*dz + soft2;
+            double inv_r = 1.0 / std::sqrt(r2);
+            double inv_r3 = inv_r * inv_r * inv_r;
+            double fj = G * s.mass[j] * inv_r3;
+            double fi = G * s.mass[i] * inv_r3;
+            s.ax[i] += fj * dx; s.ay[i] += fj * dy; s.az[i] += fj * dz;
+            s.ax[j] -= fi * dx; s.ay[j] -= fi * dy; s.az[j] -= fi * dz;
+        }
+    }
+}
+
+// CPU self-gradient correction (N3L: upper triangle, modifies ax/ay/az in-place)
+static void cpu_self_grad(CpuSubset& s, int start, int count,
+                          double G, double soft2, double dt) {
+    const double coeff = G * dt * dt * GRAD_COEFF;
+    // Snapshot accelerations
+    std::vector<double> ax0(count), ay0(count), az0(count);
+    for (int i = 0; i < count; i++) {
+        ax0[i] = s.ax[start + i];
+        ay0[i] = s.ay[start + i];
+        az0[i] = s.az[start + i];
+    }
+    // N3L: upper triangle
+    for (int ii = 0; ii < count; ii++) {
+        int i = start + ii;
+        for (int jj = ii + 1; jj < count; jj++) {
+            int j = start + jj;
+            double dx = s.x[j] - s.x[i];
+            double dy = s.y[j] - s.y[i];
+            double dz = s.z[j] - s.z[i];
+            double dax = ax0[jj] - ax0[ii];
+            double day = ay0[jj] - ay0[ii];
+            double daz = az0[jj] - az0[ii];
+            double r2 = dx*dx + dy*dy + dz*dz + soft2;
+            double inv_r2 = 1.0 / r2;
+            double inv_r = 1.0 / std::sqrt(r2);
+            double inv_r5 = inv_r2 * inv_r2 * inv_r;
+            double r_dot_a = dx*dax + dy*day + dz*daz;
+            double term_x = r2 * dax - 3.0 * r_dot_a * dx;
+            double term_y = r2 * day - 3.0 * r_dot_a * dy;
+            double term_z = r2 * daz - 3.0 * r_dot_a * dz;
+            double fj = coeff * s.mass[j] * inv_r5;
+            double fi = coeff * s.mass[i] * inv_r5;
+            s.ax[i] += fj * term_x; s.ay[i] += fj * term_y; s.az[i] += fj * term_z;
+            s.ax[j] -= fi * term_x; s.ay[j] -= fi * term_y; s.az[j] -= fi * term_z;
+        }
+    }
+}
+
+// CPU self-acceleration + gradient + kick (FSI middle step)
+static void cpu_self_acc_grad_kick(CpuSubset& s, int start, int count,
+                                   double G, double soft2, double grad_dt, double kick_dt) {
+    cpu_self_acc(s, start, count, G, soft2);
+    cpu_self_grad(s, start, count, G, soft2, grad_dt);
+    const int end = start + count;
+    for (int i = start; i < end; i++) {
+        s.vx[i] += s.ax[i] * kick_dt;
+        s.vy[i] += s.ay[i] * kick_dt;
+        s.vz[i] += s.az[i] * kick_dt;
+    }
+}
+
+// CPU cross-acceleration + kick (N3L: each pair computed once, applied to both)
+static void cpu_cross_acc_kick(CpuSubset& s,
+                               int a_start, int a_count,
+                               int b_start, int b_count,
+                               double G, double soft2, double kick_dt) {
+    const int a_end = a_start + a_count;
+    const int b_end = b_start + b_count;
+    // Zero accelerations
+    for (int i = a_start; i < a_end; i++) { s.ax[i] = 0; s.ay[i] = 0; s.az[i] = 0; }
+    for (int j = b_start; j < b_end; j++) { s.ax[j] = 0; s.ay[j] = 0; s.az[j] = 0; }
+    // N3L: compute each (i,j) pair once
+    for (int i = a_start; i < a_end; i++) {
+        for (int j = b_start; j < b_end; j++) {
+            double dx = s.x[j] - s.x[i];
+            double dy = s.y[j] - s.y[i];
+            double dz = s.z[j] - s.z[i];
+            double r2 = dx*dx + dy*dy + dz*dz + soft2;
+            double inv_r = 1.0 / std::sqrt(r2);
+            double inv_r3 = inv_r * inv_r * inv_r;
+            double fj = G * s.mass[j] * inv_r3;
+            double fi = G * s.mass[i] * inv_r3;
+            s.ax[i] += fj * dx; s.ay[i] += fj * dy; s.az[i] += fj * dz;
+            s.ax[j] -= fi * dx; s.ay[j] -= fi * dy; s.az[j] -= fi * dz;
+        }
+    }
+    // Kick both groups
+    for (int i = a_start; i < a_end; i++) {
+        s.vx[i] += s.ax[i] * kick_dt;
+        s.vy[i] += s.ay[i] * kick_dt;
+        s.vz[i] += s.az[i] * kick_dt;
+    }
+    for (int j = b_start; j < b_end; j++) {
+        s.vx[j] += s.ax[j] * kick_dt;
+        s.vy[j] += s.ay[j] * kick_dt;
+        s.vz[j] += s.az[j] * kick_dt;
+    }
+}
+
+// CPU cross-acceleration + gradient + kick (N3L: each pair once)
+static void cpu_cross_acc_grad_kick(CpuSubset& s,
+                                    int a_start, int a_count,
+                                    int b_start, int b_count,
+                                    double G, double soft2, double grad_dt, double kick_dt) {
+    const int a_end = a_start + a_count;
+    const int b_end = b_start + b_count;
+    const double coeff = G * grad_dt * grad_dt * GRAD_COEFF;
+
+    // Cross-acceleration (N3L: each pair once)
+    for (int i = a_start; i < a_end; i++) { s.ax[i] = 0; s.ay[i] = 0; s.az[i] = 0; }
+    for (int j = b_start; j < b_end; j++) { s.ax[j] = 0; s.ay[j] = 0; s.az[j] = 0; }
+    for (int i = a_start; i < a_end; i++) {
+        for (int j = b_start; j < b_end; j++) {
+            double dx = s.x[j] - s.x[i], dy = s.y[j] - s.y[i], dz = s.z[j] - s.z[i];
+            double r2 = dx*dx + dy*dy + dz*dz + soft2;
+            double inv_r = 1.0 / std::sqrt(r2);
+            double inv_r3 = inv_r * inv_r * inv_r;
+            double fj = G * s.mass[j] * inv_r3;
+            double fi = G * s.mass[i] * inv_r3;
+            s.ax[i] += fj * dx; s.ay[i] += fj * dy; s.az[i] += fj * dz;
+            s.ax[j] -= fi * dx; s.ay[j] -= fi * dy; s.az[j] -= fi * dz;
+        }
+    }
+
+    // Snapshot accelerations for gradient
+    std::vector<double> ax0_a(a_count), ay0_a(a_count), az0_a(a_count);
+    std::vector<double> ax0_b(b_count), ay0_b(b_count), az0_b(b_count);
+    for (int i = 0; i < a_count; i++) {
+        ax0_a[i] = s.ax[a_start+i]; ay0_a[i] = s.ay[a_start+i]; az0_a[i] = s.az[a_start+i];
+    }
+    for (int j = 0; j < b_count; j++) {
+        ax0_b[j] = s.ax[b_start+j]; ay0_b[j] = s.ay[b_start+j]; az0_b[j] = s.az[b_start+j];
+    }
+
+    // Gradient correction (N3L: each pair once)
+    for (int ii = 0; ii < a_count; ii++) {
+        int i = a_start + ii;
+        for (int jj = 0; jj < b_count; jj++) {
+            int j = b_start + jj;
+            double dx = s.x[j] - s.x[i], dy = s.y[j] - s.y[i], dz = s.z[j] - s.z[i];
+            double dax = ax0_b[jj] - ax0_a[ii], day = ay0_b[jj] - ay0_a[ii], daz = az0_b[jj] - az0_a[ii];
+            double r2 = dx*dx + dy*dy + dz*dz + soft2;
+            double inv_r2 = 1.0 / r2;
+            double inv_r = 1.0 / std::sqrt(r2);
+            double inv_r5 = inv_r2 * inv_r2 * inv_r;
+            double r_dot_a = dx*dax + dy*day + dz*daz;
+            double term_x = r2 * dax - 3.0 * r_dot_a * dx;
+            double term_y = r2 * day - 3.0 * r_dot_a * dy;
+            double term_z = r2 * daz - 3.0 * r_dot_a * dz;
+            double fj = coeff * s.mass[j] * inv_r5;
+            double fi = coeff * s.mass[i] * inv_r5;
+            s.ax[i] += fj * term_x; s.ay[i] += fj * term_y; s.az[i] += fj * term_z;
+            s.ax[j] -= fi * term_x; s.ay[j] -= fi * term_y; s.az[j] -= fi * term_z;
+        }
+    }
+
+    // Kick both groups
+    for (int i = a_start; i < a_end; i++) {
+        s.vx[i] += s.ax[i] * kick_dt;
+        s.vy[i] += s.ay[i] * kick_dt;
+        s.vz[i] += s.az[i] * kick_dt;
+    }
+    for (int j = b_start; j < b_end; j++) {
+        s.vx[j] += s.ax[j] * kick_dt;
+        s.vy[j] += s.ay[j] * kick_dt;
+        s.vz[j] += s.az[j] * kick_dt;
+    }
+}
+
+// CPU drift
+static void cpu_drift(CpuSubset& s, int start, int count, double dt) {
+    for (int i = start; i < start + count; i++) {
+        s.x[i] += s.vx[i] * dt;
+        s.y[i] += s.vy[i] * dt;
+        s.z[i] += s.vz[i] * dt;
+    }
+}
+
+// CPU timestep computation (N3L: upper triangle, squared-space)
+static void cpu_compute_timestep(CpuSubset& s, int start, int count,
+                                 double G, double soft2, double eta) {
+    const int end = start + count;
+    for (int i = start; i < end; i++) s.dt_adapt[i] = 1e60;
+    for (int i = start; i < end; i++) {
+        for (int j = i + 1; j < end; j++) {
+            double dx = s.x[j] - s.x[i];
+            double dy = s.y[j] - s.y[i];
+            double dz = s.z[j] - s.z[i];
+            double dvx = s.vx[j] - s.vx[i];
+            double dvy = s.vy[j] - s.vy[i];
+            double dvz = s.vz[j] - s.vz[i];
+            double r2 = dx*dx + dy*dy + dz*dz;
+            double v_sq = dvx*dvx + dvy*dvy + dvz*dvz;
+            double r2_eps = r2 + EPS;
+            double r_norm = std::sqrt(r2_eps);
+            double mass_sum = s.mass[i] + s.mass[j];
+            double t_ff_sq = r2_eps * r_norm / (G * mass_sum + EPS);
+            double t_fb_sq = r2_eps / (v_sq + EPS);
+            double t_min_sq_pair = std::min(t_ff_sq, t_fb_sq);
+            s.dt_adapt[i] = std::min(s.dt_adapt[i], t_min_sq_pair);
+            s.dt_adapt[j] = std::min(s.dt_adapt[j], t_min_sq_pair);
+        }
+    }
+    for (int i = start; i < end; i++) {
+        s.dt_adapt[i] = std::sqrt(s.dt_adapt[i]) * eta;
+    }
+}
+
+// CPU partition by pivot (returns slow count, reorders data in-place)
+static int cpu_partition_by_pivot(CpuSubset& s, int start, int count, double pivot) {
+    if (count <= 1) return count;
+    // Count slow particles
+    int slow_count = 0;
+    for (int i = start; i < start + count; i++) {
+        if (s.dt_adapt[i] >= pivot) slow_count++;
+    }
+    if (slow_count == 0 || slow_count == count) return slow_count;
+
+    // Build reordered copies
+    std::vector<double> tx(count), ty(count), tz(count);
+    std::vector<double> tvx(count), tvy(count), tvz(count);
+    std::vector<double> tax(count), tay(count), taz(count);
+    std::vector<double> tm(count), tdt(count);
+    int si = 0, fi = slow_count;
+    for (int i = 0; i < count; i++) {
+        int src = start + i;
+        int dst = (s.dt_adapt[src] >= pivot) ? si++ : fi++;
+        tx[dst] = s.x[src]; ty[dst] = s.y[src]; tz[dst] = s.z[src];
+        tvx[dst] = s.vx[src]; tvy[dst] = s.vy[src]; tvz[dst] = s.vz[src];
+        tax[dst] = s.ax[src]; tay[dst] = s.ay[src]; taz[dst] = s.az[src];
+        tm[dst] = s.mass[src]; tdt[dst] = s.dt_adapt[src];
+    }
+    for (int i = 0; i < count; i++) {
+        int dst = start + i;
+        s.x[dst] = tx[i]; s.y[dst] = ty[i]; s.z[dst] = tz[i];
+        s.vx[dst] = tvx[i]; s.vy[dst] = tvy[i]; s.vz[dst] = tvz[i];
+        s.ax[dst] = tax[i]; s.ay[dst] = tay[i]; s.az[dst] = taz[i];
+        s.mass[dst] = tm[i]; s.dt_adapt[dst] = tdt[i];
+    }
+    return slow_count;
+}
+
+// CPU FSI step
+static void cpu_fsi_step(CpuSubset& s, int start, int count,
+                         double G, double soft2, double dt) {
+    cpu_self_acc_kick(s, start, count, G, soft2, dt * FSI_KICK);
+    cpu_drift(s, start, count, dt * FSI_DRIFT);
+    cpu_self_acc_grad_kick(s, start, count, G, soft2, dt, dt * FSI_MOD_KICK);
+    cpu_drift(s, start, count, dt * FSI_DRIFT);
+    cpu_self_acc_kick(s, start, count, G, soft2, dt * FSI_KICK);
+}
+
+// CPU HHS-FSI recursion
+static void cpu_hhs_recursive(CpuSubset& s, int start, int count,
+                              double pivot_dt, double G, double soft2,
+                              double dt_min, double eta, bool dt_valid) {
+    if (count == 0) return;
+
+    if (pivot_dt * 0.5 < dt_min) {
+        cpu_fsi_step(s, start, count, G, soft2, pivot_dt);
+        return;
+    }
+
+    if (!dt_valid && count > 1) {
+        cpu_compute_timestep(s, start, count, G, soft2, eta);
+    }
+
+    int slow_count = cpu_partition_by_pivot(s, start, count, pivot_dt);
+    int slow_start = start;
+    int fast_start = start + slow_count;
+    int fast_count = count - slow_count;
+
+    if (fast_count == 0) {
+        cpu_fsi_step(s, start, count, G, soft2, pivot_dt);
+        return;
+    }
+
+    if (slow_count == 0) {
+        double sub_pivot = pivot_dt * 0.5;
+        cpu_hhs_recursive(s, start, count, sub_pivot, G, soft2, dt_min, eta, false);
+        cpu_hhs_recursive(s, start, count, sub_pivot, G, soft2, dt_min, eta, skip_second_timestep);
+        return;
+    }
+
+    // Step 1: Cross-kick (dt/6)
+    cpu_cross_acc_kick(s, slow_start, slow_count, fast_start, fast_count, G, soft2, pivot_dt * FSI_KICK);
+
+    // Step 2: FSI half-step on slow
+    cpu_fsi_step(s, slow_start, slow_count, G, soft2, pivot_dt * 0.5);
+
+    // Step 3: Recurse on fast (first half)
+    cpu_hhs_recursive(s, fast_start, fast_count, pivot_dt * 0.5, G, soft2, dt_min, eta, false);
+
+    // Step 4: Cross-gradient kick (2dt/3)
+    cpu_cross_acc_grad_kick(s, slow_start, slow_count, fast_start, fast_count, G, soft2, pivot_dt, pivot_dt * FSI_MOD_KICK);
+
+    // Step 5: Recurse on fast (second half)
+    cpu_hhs_recursive(s, fast_start, fast_count, pivot_dt * 0.5, G, soft2, dt_min, eta, skip_second_timestep);
+
+    // Step 6: FSI half-step on slow
+    cpu_fsi_step(s, slow_start, slow_count, G, soft2, pivot_dt * 0.5);
+
+    // Step 7: Cross-kick (dt/6)
+    cpu_cross_acc_kick(s, slow_start, slow_count, fast_start, fast_count, G, soft2, pivot_dt * FSI_KICK);
+}
+
+// Entry point: copy subset to host, run CPU HHS, copy back
+static void hhs_fsi_recursive_cpu(Particles& p, int start, int count,
+                                  double pivot_dt, double G, double soft2,
+                                  double dt_min, double eta, bool dt_valid) {
+    CpuSubset s;
+    s.resize(count);
+    s.copy_from_device(p, start);
+    cpu_hhs_recursive(s, 0, count, pivot_dt, G, soft2, dt_min, eta, dt_valid);
+    s.copy_to_device(p, start);
+}
+
+// =============================================================================
 // Local (non-distributed) HHS-FSI recursion for small subsets
 // Same algorithm as the distributed version, but all ranks compute full N²
 // locally without MPI allgather. Uses non-caching cross-kicks.
@@ -1356,6 +1783,12 @@ static void hhs_fsi_recursive_local(
     bool use_n3l, bool dt_valid) {
 
     if (count == 0) return;
+
+    // CPU serial path for very small subsets
+    if (cpu_serial_threshold > 0 && count <= cpu_serial_threshold) {
+        hhs_fsi_recursive_cpu(p, start, count, pivot_dt, G, soft2, dt_min, eta, dt_valid);
+        return;
+    }
 
     // Base case: at minimum timestep, use FSI on the subset
     if (pivot_dt * 0.5 < dt_min) {

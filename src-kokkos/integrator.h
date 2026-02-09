@@ -11,6 +11,10 @@ extern bool skip_second_timestep;       // Skip timestep recomputation on 2nd HH
 // and compute forces locally on each rank (eliminates allgather overhead)
 extern int direct_n2_threshold;         // 0 = disabled (always distributed)
 
+// CPU serial threshold: below this particle count, use CPU serial loops
+// instead of GPU kernels (eliminates kernel launch overhead for tiny subsets)
+extern int cpu_serial_threshold;        // 0 = disabled (always GPU)
+
 // Forward declaration for distributed particles
 struct DistributedParticles;
 

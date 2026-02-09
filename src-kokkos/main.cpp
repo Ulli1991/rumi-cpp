@@ -143,6 +143,7 @@ int main(int argc, char** argv) {
         bool profiling_enabled = (cfg.get_str("PROFILING", "true") == "true");
         skip_second_timestep = (cfg.get_str("SKIP_SECOND_TIMESTEP", "false") == "true");
         direct_n2_threshold = std::stoi(cfg.get_str("DIRECT_N2_ON_DEEP_LEVELS", "0"));
+        cpu_serial_threshold = std::stoi(cfg.get_str("DIRECT_CPU_N2_ON_VERY_DEEP_LEVELS", "0"));
 
         // USE_N3L: default true on CPU-like backends, false on GPU
         bool use_n3l_default = true;
