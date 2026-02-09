@@ -69,10 +69,8 @@ void compute_acceleration_and_timestep_distributed(DistributedParticles& dp,
 
     auto pos = dp.local.pos_packed;
     auto vel = dp.local.vel_packed;
-    auto pax = dp.local.ax;
-    auto pay = dp.local.ay;
-    auto paz = dp.local.az;
-    auto dt_f = dp.local.dt_adapt;
+    RawView pax{dp.local.ax.data()}, pay{dp.local.ay.data()}, paz{dp.local.az.data()};
+    RawView dt_f{dp.local.dt_adapt.data()};
 
     // Tiled GPU kernel: each team handles DIST_TILE_SIZE i-particles from my slice
     using team_policy = Kokkos::TeamPolicy<>;
@@ -195,8 +193,8 @@ void set_force_dispatch(bool use_n3l) {
 // Helper: drift positions for [start, start+count)
 // Not static - also used by distributed FSI
 void drift(Particles& p, int start, int count, double dt) {
-    auto px = p.x; auto py = p.y; auto pz = p.z;
-    auto pvx = p.vx; auto pvy = p.vy; auto pvz = p.vz;
+    RawView px{p.x.data()}, py{p.y.data()}, pz{p.z.data()};
+    RawView pvx{p.vx.data()}, pvy{p.vy.data()}, pvz{p.vz.data()};
     Kokkos::parallel_for("drift", count, KOKKOS_LAMBDA(int ii) {
         int i = start + ii;
         px(i) += pvx(i) * dt;
@@ -247,7 +245,7 @@ void fsi_step(Particles& p, int start, int count,
 static int partition_by_pivot(Particles& p, int start, int count, double pivot) {
     if (count <= 1) return count;
 
-    auto dt_f = p.dt_adapt;
+    RawView dt_f{p.dt_adapt.data()};
     auto perm = p.scratch_i;
     auto is_slow = p.scratch_i2;  // temporary: 1 if slow, 0 if fast
 
@@ -298,10 +296,10 @@ static int partition_by_pivot(Particles& p, int start, int count, double pivot) 
     Kokkos::fence();
 
     // Apply permutation: fused gather of all 13 fields (11 doubles + 2 ints)
-    auto px = p.x; auto py = p.y; auto pz = p.z;
-    auto pvx = p.vx; auto pvy = p.vy; auto pvz = p.vz;
-    auto pax = p.ax; auto pay = p.ay; auto paz = p.az;
-    auto pmass = p.mass; auto pdt = p.dt_adapt;
+    RawView px{p.x.data()}, py{p.y.data()}, pz{p.z.data()};
+    RawView pvx{p.vx.data()}, pvy{p.vy.data()}, pvz{p.vz.data()};
+    RawView pax{p.ax.data()}, pay{p.ay.data()}, paz{p.az.data()};
+    RawView pmass{p.mass.data()}, pdt{p.dt_adapt.data()};
     auto porig = p.orig_index;
     auto plevel = p.level;
 
@@ -423,8 +421,8 @@ void hhs_fsi_step_dynamic(Particles& p, int start, int count, double pivot_dt,
 
 // Kick velocities using pre-computed accelerations
 void kick_velocities(Particles& p, int start, int count, double dt) {
-    auto pvx = p.vx; auto pvy = p.vy; auto pvz = p.vz;
-    auto pax = p.ax; auto pay = p.ay; auto paz = p.az;
+    RawView pvx{p.vx.data()}, pvy{p.vy.data()}, pvz{p.vz.data()};
+    RawView pax{p.ax.data()}, pay{p.ay.data()}, paz{p.az.data()};
 
     Kokkos::parallel_for("kick", count, KOKKOS_LAMBDA(int ii) {
         int i = start + ii;
@@ -451,9 +449,9 @@ static void self_acceleration_distributed(DistributedParticles& dp, int start, i
         return;
     }
 
-    auto px = dp.local.x; auto py = dp.local.y; auto pz = dp.local.z;
-    auto pax = dp.local.ax; auto pay = dp.local.ay; auto paz = dp.local.az;
-    auto pm = dp.local.mass;
+    RawView px{dp.local.x.data()}, py{dp.local.y.data()}, pz{dp.local.z.data()};
+    RawView pax{dp.local.ax.data()}, pay{dp.local.ay.data()}, paz{dp.local.az.data()};
+    RawView pm{dp.local.mass.data()};
 
     const int j_start = start;
     const int j_end = start + count;
@@ -548,10 +546,10 @@ static void self_acceleration_kick_distributed(DistributedParticles& dp, int sta
         return;
     }
 
-    auto px = dp.local.x; auto py = dp.local.y; auto pz = dp.local.z;
-    auto pvx = dp.local.vx; auto pvy = dp.local.vy; auto pvz = dp.local.vz;
-    auto pax = dp.local.ax; auto pay = dp.local.ay; auto paz = dp.local.az;
-    auto pm = dp.local.mass;
+    RawView px{dp.local.x.data()}, py{dp.local.y.data()}, pz{dp.local.z.data()};
+    RawView pvx{dp.local.vx.data()}, pvy{dp.local.vy.data()}, pvz{dp.local.vz.data()};
+    RawView pax{dp.local.ax.data()}, pay{dp.local.ay.data()}, paz{dp.local.az.data()};
+    RawView pm{dp.local.mass.data()};
 
     const int j_start = start;
     const int j_end = start + count;
@@ -661,10 +659,10 @@ static void self_gradient_correction_kick_distributed(DistributedParticles& dp, 
         return;
     }
 
-    auto px = dp.local.x; auto py = dp.local.y; auto pz = dp.local.z;
-    auto pvx = dp.local.vx; auto pvy = dp.local.vy; auto pvz = dp.local.vz;
-    auto pax = dp.local.ax; auto pay = dp.local.ay; auto paz = dp.local.az;
-    auto pm = dp.local.mass;
+    RawView px{dp.local.x.data()}, py{dp.local.y.data()}, pz{dp.local.z.data()};
+    RawView pvx{dp.local.vx.data()}, pvy{dp.local.vy.data()}, pvz{dp.local.vz.data()};
+    RawView pax{dp.local.ax.data()}, pay{dp.local.ay.data()}, paz{dp.local.az.data()};
+    RawView pm{dp.local.mass.data()};
 
     const double coeff = G * grad_dt * grad_dt * GRAD_COEFF;
     const int j_start = start;
@@ -785,10 +783,12 @@ static void fsi_step_distributed(DistributedParticles& dp, int start, int count,
                                  double G, double soft2, double dt) {
     if (count <= 0) return;
 
+    long long self_pairs = (long long)count * count;
+
     // U kick (dt/6) - fused distributed force + kick
     g_profiler.start();
     self_acceleration_kick_distributed(dp, start, count, G, soft2, dt * FSI_KICK);
-    g_profiler.stop(StepProfiler::SELF_FORCE);
+    g_profiler.stop(StepProfiler::SELF_FORCE, self_pairs);
 
     // T drift (dt/2) - all ranks drift identically
     g_profiler.start();
@@ -798,10 +798,10 @@ static void fsi_step_distributed(DistributedParticles& dp, int start, int count,
     // U-tilde kick (2dt/3) with gradient correction - force then fused gradient + kick
     g_profiler.start();
     self_acceleration_distributed(dp, start, count, G, soft2);
-    g_profiler.stop(StepProfiler::SELF_FORCE);
+    g_profiler.stop(StepProfiler::SELF_FORCE, self_pairs);
     g_profiler.start();
     self_gradient_correction_kick_distributed(dp, start, count, G, soft2, dt, dt * FSI_MOD_KICK);
-    g_profiler.stop(StepProfiler::SELF_GRAD);
+    g_profiler.stop(StepProfiler::SELF_GRAD, self_pairs);
 
     // T drift (dt/2)
     g_profiler.start();
@@ -811,7 +811,7 @@ static void fsi_step_distributed(DistributedParticles& dp, int start, int count,
     // U kick (dt/6) - fused distributed force + kick
     g_profiler.start();
     self_acceleration_kick_distributed(dp, start, count, G, soft2, dt * FSI_KICK);
-    g_profiler.stop(StepProfiler::SELF_FORCE);
+    g_profiler.stop(StepProfiler::SELF_FORCE, self_pairs);
 }
 
 // =============================================================================
@@ -824,9 +824,9 @@ static void cross_acceleration_distributed(DistributedParticles& dp,
                                            double G, double soft2) {
     if (slow_count <= 0 || fast_count <= 0) return;
 
-    auto px = dp.local.x; auto py = dp.local.y; auto pz = dp.local.z;
-    auto pax = dp.local.ax; auto pay = dp.local.ay; auto paz = dp.local.az;
-    auto pm = dp.local.mass;
+    RawView px{dp.local.x.data()}, py{dp.local.y.data()}, pz{dp.local.z.data()};
+    RawView pax{dp.local.ax.data()}, pay{dp.local.ay.data()}, paz{dp.local.az.data()};
+    RawView pm{dp.local.mass.data()};
 
     using team_policy = Kokkos::TeamPolicy<>;
     using member_type = team_policy::member_type;
@@ -987,9 +987,9 @@ static void cross_acceleration_and_gradient_distributed(DistributedParticles& dp
     cross_acceleration_distributed(dp, slow_start, slow_count,
                                    fast_start, fast_count, G, soft2);
 
-    auto px = dp.local.x; auto py = dp.local.y; auto pz = dp.local.z;
-    auto pax = dp.local.ax; auto pay = dp.local.ay; auto paz = dp.local.az;
-    auto pm = dp.local.mass;
+    RawView px{dp.local.x.data()}, py{dp.local.y.data()}, pz{dp.local.z.data()};
+    RawView pax{dp.local.ax.data()}, pay{dp.local.ay.data()}, paz{dp.local.az.data()};
+    RawView pm{dp.local.mass.data()};
 
     const double coeff = G * dt * dt * GRAD_COEFF;
 
@@ -1180,10 +1180,10 @@ static void compute_timestep_distributed(DistributedParticles& dp, int start, in
         return;
     }
 
-    auto px = dp.local.x; auto py = dp.local.y; auto pz = dp.local.z;
-    auto pvx = dp.local.vx; auto pvy = dp.local.vy; auto pvz = dp.local.vz;
-    auto pm = dp.local.mass;
-    auto dt_f = dp.local.dt_adapt;
+    RawView px{dp.local.x.data()}, py{dp.local.y.data()}, pz{dp.local.z.data()};
+    RawView pvx{dp.local.vx.data()}, pvy{dp.local.vy.data()}, pvz{dp.local.vz.data()};
+    RawView pm{dp.local.mass.data()};
+    RawView dt_f{dp.local.dt_adapt.data()};
 
     const int j_start = start;
     const int j_end = start + count;
@@ -1834,7 +1834,7 @@ static void hhs_fsi_recursive_distributed(
     if (!dt_valid && count > 1) {
         g_profiler.start();
         compute_timestep_distributed(dp, start, count, G, soft2, eta);
-        g_profiler.stop(StepProfiler::ADAPTIVE_DT);
+        g_profiler.stop(StepProfiler::ADAPTIVE_DT, (long long)count * count);
     }
 
     // Partition into slow (dt >= pivot) and fast (dt < pivot)
@@ -1862,6 +1862,8 @@ static void hhs_fsi_recursive_distributed(
         return;
     }
 
+    long long cross_pairs = 2LL * slow_count * fast_count;
+
     // ==========================================================================
     // ALGORITHM 4: HHS-FSI with slow (S) and fast (F) particles
     // ==========================================================================
@@ -1869,7 +1871,7 @@ static void hhs_fsi_recursive_distributed(
     // Step 1: Cross-kick S<->F (dt/6) - distributed force + allgather + kick
     g_profiler.start();
     cross_acceleration_distributed(dp, slow_start, slow_count, fast_start, fast_count, G, soft2);
-    g_profiler.stop(StepProfiler::CROSS_FORCE);
+    g_profiler.stop(StepProfiler::CROSS_FORCE, cross_pairs);
     g_profiler.start();
     kick_velocities(dp.local, slow_start, slow_count, pivot_dt * FSI_KICK);
     kick_velocities(dp.local, fast_start, fast_count, pivot_dt * FSI_KICK);
@@ -1887,7 +1889,7 @@ static void hhs_fsi_recursive_distributed(
     cross_acceleration_and_gradient_distributed(dp, slow_start, slow_count,
                                                 fast_start, fast_count,
                                                 G, soft2, pivot_dt);
-    g_profiler.stop(StepProfiler::CROSS_GRAD);
+    g_profiler.stop(StepProfiler::CROSS_GRAD, cross_pairs * 2);  // force + gradient passes
     g_profiler.start();
     kick_velocities(dp.local, slow_start, slow_count, pivot_dt * FSI_MOD_KICK);
     kick_velocities(dp.local, fast_start, fast_count, pivot_dt * FSI_MOD_KICK);
@@ -1906,7 +1908,7 @@ static void hhs_fsi_recursive_distributed(
     // Step 7: Cross-kick S<->F (dt/6)
     g_profiler.start();
     cross_acceleration_distributed(dp, slow_start, slow_count, fast_start, fast_count, G, soft2);
-    g_profiler.stop(StepProfiler::CROSS_FORCE);
+    g_profiler.stop(StepProfiler::CROSS_FORCE, cross_pairs);
     g_profiler.start();
     kick_velocities(dp.local, slow_start, slow_count, pivot_dt * FSI_KICK);
     kick_velocities(dp.local, fast_start, fast_count, pivot_dt * FSI_KICK);

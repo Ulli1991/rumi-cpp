@@ -16,9 +16,9 @@ constexpr int TILE_SIZE = 32;
 template <bool UseN3L>
 void compute_acceleration(Particles& p, double G, double soft2) {
     const int N = p.N;
-    auto px = p.x; auto py = p.y; auto pz = p.z;
-    auto pax = p.ax; auto pay = p.ay; auto paz = p.az;
-    auto m = p.mass;
+    RawView px{p.x.data()}, py{p.y.data()}, pz{p.z.data()};
+    RawView pax{p.ax.data()}, pay{p.ay.data()}, paz{p.az.data()};
+    RawView m{p.mass.data()};
 
     // Zero accelerations
     Kokkos::parallel_for("zero_acc", N, KOKKOS_LAMBDA(int i) {
@@ -77,11 +77,11 @@ void compute_acceleration(Particles& p, double G, double soft2) {
 template <bool UseN3L>
 void compute_acceleration_and_timestep(Particles& p, double G, double soft2, double eta) {
     const int N = p.N;
-    auto px = p.x; auto py = p.y; auto pz = p.z;
-    auto pvx = p.vx; auto pvy = p.vy; auto pvz = p.vz;
-    auto pax = p.ax; auto pay = p.ay; auto paz = p.az;
-    auto m = p.mass;
-    auto dt_f = p.dt_adapt;
+    RawView px{p.x.data()}, py{p.y.data()}, pz{p.z.data()};
+    RawView pvx{p.vx.data()}, pvy{p.vy.data()}, pvz{p.vz.data()};
+    RawView pax{p.ax.data()}, pay{p.ay.data()}, paz{p.az.data()};
+    RawView m{p.mass.data()};
+    RawView dt_f{p.dt_adapt.data()};
 
     Kokkos::parallel_for("zero_acc_dt", N, KOKKOS_LAMBDA(int i) {
         pax(i) = 0; pay(i) = 0; paz(i) = 0; dt_f(i) = DBL_MAX;
@@ -286,9 +286,9 @@ void compute_acceleration_and_timestep(Particles& p, double G, double soft2, dou
 template <bool UseN3L>
 void self_acceleration(Particles& p, int start, int count,
                        double G, double soft2) {
-    auto px = p.x; auto py = p.y; auto pz = p.z;
-    auto pax = p.ax; auto pay = p.ay; auto paz = p.az;
-    auto m = p.mass;
+    RawView px{p.x.data()}, py{p.y.data()}, pz{p.z.data()};
+    RawView pax{p.ax.data()}, pay{p.ay.data()}, paz{p.az.data()};
+    RawView m{p.mass.data()};
     const int end = start + count;
 
     if constexpr (UseN3L) {
@@ -350,13 +350,13 @@ void self_acceleration(Particles& p, int start, int count,
 template <bool UseN3L>
 void self_gradient_correction(Particles& p, int start, int count,
                               double G, double soft2, double dt) {
-    auto px = p.x; auto py = p.y; auto pz = p.z;
-    auto pax = p.ax; auto pay = p.ay; auto paz = p.az;
-    auto m = p.mass;
+    RawView px{p.x.data()}, py{p.y.data()}, pz{p.z.data()};
+    RawView pax{p.ax.data()}, pay{p.ay.data()}, paz{p.az.data()};
+    RawView m{p.mass.data()};
     const double coeff = G * dt * dt * GRAD_COEFF;
 
     // Snapshot accelerations into scratch
-    auto ax0 = p.scratch1; auto ay0 = p.scratch2; auto az0 = p.scratch3;
+    RawView ax0{p.scratch1.data()}, ay0{p.scratch2.data()}, az0{p.scratch3.data()};
     Kokkos::parallel_for("snap_self_grad", count, KOKKOS_LAMBDA(int ii) {
         ax0(ii) = pax(start + ii);
         ay0(ii) = pay(start + ii);
@@ -366,7 +366,7 @@ void self_gradient_correction(Particles& p, int start, int count,
 
     if (grad_n3l && UseN3L) {
         // N3L gradient: upper triangle with atomics
-        auto cx_acc = p.scratch4; auto cy_acc = p.scratch5; auto cz_acc = p.scratch6;
+        RawView cx_acc{p.scratch4.data()}, cy_acc{p.scratch5.data()}, cz_acc{p.scratch6.data()};
         Kokkos::parallel_for("zero_grad_n3l", count, KOKKOS_LAMBDA(int i) {
             cx_acc(i) = 0; cy_acc(i) = 0; cz_acc(i) = 0;
         });
@@ -456,9 +456,9 @@ void cross_acceleration(Particles& p,
                         int a_start, int a_count,
                         int b_start, int b_count,
                         double G, double soft2) {
-    auto px = p.x; auto py = p.y; auto pz = p.z;
-    auto pax = p.ax; auto pay = p.ay; auto paz = p.az;
-    auto m = p.mass;
+    RawView px{p.x.data()}, py{p.y.data()}, pz{p.z.data()};
+    RawView pax{p.ax.data()}, pay{p.ay.data()}, paz{p.az.data()};
+    RawView m{p.mass.data()};
     const int b_end = b_start + b_count;
 
     if constexpr (UseN3L) {
@@ -543,14 +543,14 @@ void cross_gradient_correction(Particles& p,
                                int a_start, int a_count,
                                int b_start, int b_count,
                                double G, double soft2, double dt) {
-    auto px = p.x; auto py = p.y; auto pz = p.z;
-    auto pax = p.ax; auto pay = p.ay; auto paz = p.az;
-    auto m = p.mass;
+    RawView px{p.x.data()}, py{p.y.data()}, pz{p.z.data()};
+    RawView pax{p.ax.data()}, pay{p.ay.data()}, paz{p.az.data()};
+    RawView m{p.mass.data()};
     const double coeff = G * dt * dt * GRAD_COEFF;
 
     // Snapshot accelerations
-    auto ax0_a = p.scratch1; auto ay0_a = p.scratch2; auto az0_a = p.scratch3;
-    auto ax0_b = p.scratch4; auto ay0_b = p.scratch5; auto az0_b = p.scratch6;
+    RawView ax0_a{p.scratch1.data()}, ay0_a{p.scratch2.data()}, az0_a{p.scratch3.data()};
+    RawView ax0_b{p.scratch4.data()}, ay0_b{p.scratch5.data()}, az0_b{p.scratch6.data()};
     Kokkos::parallel_for("snap_cross_a", a_count, KOKKOS_LAMBDA(int ii) {
         ax0_a(ii) = pax(a_start + ii);
         ay0_a(ii) = pay(a_start + ii);
@@ -660,10 +660,10 @@ void compute_timestep_subset(Particles& p, int start, int count,
                           double G, double soft2, double eta) {
     if (count <= 1) return;  // No pairs to consider
 
-    auto px = p.x; auto py = p.y; auto pz = p.z;
-    auto pvx = p.vx; auto pvy = p.vy; auto pvz = p.vz;
-    auto m = p.mass;
-    auto dt_f = p.dt_adapt;
+    RawView px{p.x.data()}, py{p.y.data()}, pz{p.z.data()};
+    RawView pvx{p.vx.data()}, pvy{p.vy.data()}, pvz{p.vz.data()};
+    RawView m{p.mass.data()};
+    RawView dt_f{p.dt_adapt.data()};
     const int end = start + count;
 
     // Initialize dt_adapt to large value for subset
@@ -801,10 +801,10 @@ void compute_timestep_subset(Particles& p, int start, int count,
 template <bool UseN3L>
 void self_acceleration_kick(Particles& p, int start, int count,
                             double G, double soft2, double kick_dt) {
-    auto px = p.x; auto py = p.y; auto pz = p.z;
-    auto pvx = p.vx; auto pvy = p.vy; auto pvz = p.vz;
-    auto pax = p.ax; auto pay = p.ay; auto paz = p.az;
-    auto m = p.mass;
+    RawView px{p.x.data()}, py{p.y.data()}, pz{p.z.data()};
+    RawView pvx{p.vx.data()}, pvy{p.vy.data()}, pvz{p.vz.data()};
+    RawView pax{p.ax.data()}, pay{p.ay.data()}, paz{p.az.data()};
+    RawView m{p.mass.data()};
     const int end = start + count;
 
     if constexpr (UseN3L) {
@@ -885,8 +885,8 @@ void self_acceleration_and_gradient_kick(Particles& p, int start, int count,
     self_gradient_correction<UseN3L>(p, start, count, G, soft2, grad_dt);
 
     // Finally apply kick
-    auto pvx = p.vx; auto pvy = p.vy; auto pvz = p.vz;
-    auto pax = p.ax; auto pay = p.ay; auto paz = p.az;
+    RawView pvx{p.vx.data()}, pvy{p.vy.data()}, pvz{p.vz.data()};
+    RawView pax{p.ax.data()}, pay{p.ay.data()}, paz{p.az.data()};
     Kokkos::parallel_for("kick_grad", count, KOKKOS_LAMBDA(int ii) {
         int i = start + ii;
         pvx(i) += pax(i) * kick_dt;
@@ -904,10 +904,10 @@ void cross_acceleration_kick(Particles& p,
                              int a_start, int a_count,
                              int b_start, int b_count,
                              double G, double soft2, double kick_dt) {
-    auto px = p.x; auto py = p.y; auto pz = p.z;
-    auto pvx = p.vx; auto pvy = p.vy; auto pvz = p.vz;
-    auto pax = p.ax; auto pay = p.ay; auto paz = p.az;
-    auto m = p.mass;
+    RawView px{p.x.data()}, py{p.y.data()}, pz{p.z.data()};
+    RawView pvx{p.vx.data()}, pvy{p.vy.data()}, pvz{p.vz.data()};
+    RawView pax{p.ax.data()}, pay{p.ay.data()}, paz{p.az.data()};
+    RawView m{p.mass.data()};
     const int b_end = b_start + b_count;
 
     if constexpr (UseN3L) {
@@ -1017,8 +1017,8 @@ void cross_acceleration_and_gradient_kick(Particles& p,
     cross_gradient_correction<UseN3L>(p, a_start, a_count, b_start, b_count, G, soft2, grad_dt);
 
     // Apply kick to both groups
-    auto pvx = p.vx; auto pvy = p.vy; auto pvz = p.vz;
-    auto pax = p.ax; auto pay = p.ay; auto paz = p.az;
+    RawView pvx{p.vx.data()}, pvy{p.vy.data()}, pvz{p.vz.data()};
+    RawView pax{p.ax.data()}, pay{p.ay.data()}, paz{p.az.data()};
 
     Kokkos::parallel_for("kick_cross_grad_a", a_count, KOKKOS_LAMBDA(int ii) {
         int i = a_start + ii;
@@ -1044,13 +1044,13 @@ void cross_acceleration_kick_and_cache(Particles& p,
                                        int a_start, int a_count,
                                        int b_start, int b_count,
                                        double G, double soft2, double kick_dt) {
-    auto px = p.x; auto py = p.y; auto pz = p.z;
-    auto pvx = p.vx; auto pvy = p.vy; auto pvz = p.vz;
-    auto pax = p.ax; auto pay = p.ay; auto paz = p.az;
-    auto m = p.mass;
+    RawView px{p.x.data()}, py{p.y.data()}, pz{p.z.data()};
+    RawView pvx{p.vx.data()}, pvy{p.vy.data()}, pvz{p.vz.data()};
+    RawView pax{p.ax.data()}, pay{p.ay.data()}, paz{p.az.data()};
+    RawView m{p.mass.data()};
     // Cache arrays (indexed by absolute position)
-    auto cax_a = p.scratch4; auto cay_a = p.scratch5; auto caz_a = p.scratch6;
-    auto cax_b = p.scratch7; auto cay_b = p.scratch8; auto caz_b = p.scratch9;
+    RawView cax_a{p.scratch4.data()}, cay_a{p.scratch5.data()}, caz_a{p.scratch6.data()};
+    RawView cax_b{p.scratch7.data()}, cay_b{p.scratch8.data()}, caz_b{p.scratch9.data()};
     const int b_end = b_start + b_count;
 
     if constexpr (UseN3L) {
@@ -1156,10 +1156,10 @@ void cross_acceleration_kick_and_cache(Particles& p,
 // ==========================================================================
 void kick_from_cache(Particles& p, int a_start, int a_count,
                      int b_start, int b_count, double kick_dt) {
-    auto pvx = p.vx; auto pvy = p.vy; auto pvz = p.vz;
-    auto pax = p.ax; auto pay = p.ay; auto paz = p.az;
-    auto cax_a = p.scratch4; auto cay_a = p.scratch5; auto caz_a = p.scratch6;
-    auto cax_b = p.scratch7; auto cay_b = p.scratch8; auto caz_b = p.scratch9;
+    RawView pvx{p.vx.data()}, pvy{p.vy.data()}, pvz{p.vz.data()};
+    RawView pax{p.ax.data()}, pay{p.ay.data()}, paz{p.az.data()};
+    RawView cax_a{p.scratch4.data()}, cay_a{p.scratch5.data()}, caz_a{p.scratch6.data()};
+    RawView cax_b{p.scratch7.data()}, cay_b{p.scratch8.data()}, caz_b{p.scratch9.data()};
 
     // Restore cached accelerations and kick group A
     Kokkos::parallel_for("kick_cache_a", a_count, KOKKOS_LAMBDA(int ii) {
@@ -1190,12 +1190,12 @@ void ghost_gradient_correction(Particles& local, const Particles& ghosts,
 
     if (N_ghosts == 0) return;
 
-    auto lx = local.x; auto ly = local.y; auto lz = local.z;
-    auto lax = local.ax; auto lay = local.ay; auto laz = local.az;
+    RawView lx{local.x.data()}, ly{local.y.data()}, lz{local.z.data()};
+    RawView lax{local.ax.data()}, lay{local.ay.data()}, laz{local.az.data()};
 
-    auto gx = ghosts.x; auto gy = ghosts.y; auto gz = ghosts.z;
-    auto gax = ghosts.ax; auto gay = ghosts.ay; auto gaz = ghosts.az;
-    auto gm = ghosts.mass;
+    RawView gx{ghosts.x.data()}, gy{ghosts.y.data()}, gz{ghosts.z.data()};
+    RawView gax{ghosts.ax.data()}, gay{ghosts.ay.data()}, gaz{ghosts.az.data()};
+    RawView gm{ghosts.mass.data()};
 
     const double coeff = G * dt * dt * GRAD_COEFF;
 
@@ -1245,13 +1245,13 @@ void ghost_cross_kick_slow_from_fast(Particles& local, const Particles& ghosts,
                                      double pivot, double G, double soft2, double kick_dt) {
     if (local_count == 0 || ghosts.N == 0) return;
 
-    auto lx = local.x; auto ly = local.y; auto lz = local.z;
-    auto lvx = local.vx; auto lvy = local.vy; auto lvz = local.vz;
-    auto lax = local.ax; auto lay = local.ay; auto laz = local.az;
+    RawView lx{local.x.data()}, ly{local.y.data()}, lz{local.z.data()};
+    RawView lvx{local.vx.data()}, lvy{local.vy.data()}, lvz{local.vz.data()};
+    RawView lax{local.ax.data()}, lay{local.ay.data()}, laz{local.az.data()};
 
-    auto gx = ghosts.x; auto gy = ghosts.y; auto gz = ghosts.z;
-    auto gm = ghosts.mass;
-    auto gdt = ghosts.dt_adapt;
+    RawView gx{ghosts.x.data()}, gy{ghosts.y.data()}, gz{ghosts.z.data()};
+    RawView gm{ghosts.mass.data()};
+    RawView gdt{ghosts.dt_adapt.data()};
 
     int N_ghosts = ghosts.N;
 
@@ -1296,13 +1296,13 @@ void ghost_cross_kick_fast_from_slow(Particles& local, const Particles& ghosts,
                                      double pivot, double G, double soft2, double kick_dt) {
     if (local_count == 0 || ghosts.N == 0) return;
 
-    auto lx = local.x; auto ly = local.y; auto lz = local.z;
-    auto lvx = local.vx; auto lvy = local.vy; auto lvz = local.vz;
-    auto lax = local.ax; auto lay = local.ay; auto laz = local.az;
+    RawView lx{local.x.data()}, ly{local.y.data()}, lz{local.z.data()};
+    RawView lvx{local.vx.data()}, lvy{local.vy.data()}, lvz{local.vz.data()};
+    RawView lax{local.ax.data()}, lay{local.ay.data()}, laz{local.az.data()};
 
-    auto gx = ghosts.x; auto gy = ghosts.y; auto gz = ghosts.z;
-    auto gm = ghosts.mass;
-    auto gdt = ghosts.dt_adapt;
+    RawView gx{ghosts.x.data()}, gy{ghosts.y.data()}, gz{ghosts.z.data()};
+    RawView gm{ghosts.mass.data()};
+    RawView gdt{ghosts.dt_adapt.data()};
 
     int N_ghosts = ghosts.N;
 
@@ -1365,14 +1365,14 @@ void ghost_cross_kicks_hhs_with_gradient(Particles& local, const Particles& ghos
                                          double grad_dt, double kick_dt) {
     if (ghosts.N == 0) return;
 
-    auto lx = local.x; auto ly = local.y; auto lz = local.z;
-    auto lvx = local.vx; auto lvy = local.vy; auto lvz = local.vz;
-    auto lax = local.ax; auto lay = local.ay; auto laz = local.az;
+    RawView lx{local.x.data()}, ly{local.y.data()}, lz{local.z.data()};
+    RawView lvx{local.vx.data()}, lvy{local.vy.data()}, lvz{local.vz.data()};
+    RawView lax{local.ax.data()}, lay{local.ay.data()}, laz{local.az.data()};
 
-    auto gx = ghosts.x; auto gy = ghosts.y; auto gz = ghosts.z;
-    auto gax = ghosts.ax; auto gay = ghosts.ay; auto gaz = ghosts.az;
-    auto gm = ghosts.mass;
-    auto gdt = ghosts.dt_adapt;
+    RawView gx{ghosts.x.data()}, gy{ghosts.y.data()}, gz{ghosts.z.data()};
+    RawView gax{ghosts.ax.data()}, gay{ghosts.ay.data()}, gaz{ghosts.az.data()};
+    RawView gm{ghosts.mass.data()};
+    RawView gdt{ghosts.dt_adapt.data()};
 
     const double grad_coeff = G * grad_dt * grad_dt * GRAD_COEFF;
     int N_ghosts = ghosts.N;

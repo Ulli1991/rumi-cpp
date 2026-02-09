@@ -38,5 +38,12 @@ KOKKOS_INLINE_FUNCTION double fast_rsqrt(double x) {
 #endif
 }
 
+// Raw pointer wrapper: matches Kokkos View operator() interface but uses
+// __restrict__ for compiler alias analysis. Trivially copyable for lambda capture.
+struct RawView {
+    double* __restrict__ ptr;
+    KOKKOS_INLINE_FUNCTION double& operator()(int i) const { return ptr[i]; }
+};
+
 // Plummer sphere
 constexpr double PLUMMER_SCALE_FACTOR = 1.305;
