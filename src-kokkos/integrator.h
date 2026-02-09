@@ -19,6 +19,10 @@ extern int cpu_serial_threshold;        // 0 = disabled (always GPU)
 // in a single N² pass (saves ~30% wall time). When false, uses separate passes.
 extern bool fuse_gradient;              // default false (separate passes)
 
+extern bool use_integer_positions;      // INTEGER_POSITIONS config toggle
+extern double int_pos_scale;            // physical_pos = int_pos * scale
+extern double int_pos_inv_scale;        // 1.0 / scale (for drift)
+
 // Forward declaration for distributed particles
 struct DistributedParticles;
 

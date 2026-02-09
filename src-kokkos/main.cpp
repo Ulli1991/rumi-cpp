@@ -18,6 +18,7 @@
 #include <fstream>
 #include <chrono>
 #include <iostream>
+#include <cmath>
 
 // ---------------------------------------------------------------------------
 // Config file parser
@@ -145,6 +146,8 @@ int main(int argc, char** argv) {
         direct_n2_threshold = std::stoi(cfg.get_str("DIRECT_N2_ON_DEEP_LEVELS", "0"));
         cpu_serial_threshold = std::stoi(cfg.get_str("DIRECT_CPU_N2_ON_VERY_DEEP_LEVELS", "0"));
         fuse_gradient = (cfg.get_str("FUSE_GRADIENT", "false") == "true");
+        use_integer_positions = (cfg.get_str("INTEGER_POSITIONS", "false") == "true");
+        double domain_halfsize = cfg.get_double("DOMAIN_HALFSIZE_PC", 200.0);
 
         // USE_N3L: default true on CPU-like backends, false on GPU
         bool use_n3l_default = true;
@@ -161,6 +164,11 @@ int main(int argc, char** argv) {
         double dt_max = dt_max_myr / TIME_UNIT_MYR;   // Myr → code TU
         double dt_min = dt_min_myr / TIME_UNIT_MYR;   // Myr → code TU
         double t_final = t_final_myr / TIME_UNIT_MYR;  // Myr → code TU
+
+        if (use_integer_positions) {
+            int_pos_scale = domain_halfsize / (double)(1LL << 62);
+            int_pos_inv_scale = 1.0 / int_pos_scale;
+        }
 
         Particles p;
         DistributedParticles dp;  // For multi-GPU mode
@@ -185,6 +193,30 @@ int main(int argc, char** argv) {
                 Kokkos::finalize();
                 return 1;
             }
+        }
+
+        // Convert initial positions to integer representation (before MPI distribution)
+        if (use_integer_positions && (my_rank == 0 || !use_distributed)) {
+            auto h_x = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.x);
+            auto h_y = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.y);
+            auto h_z = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.z);
+            auto h_ix = Kokkos::create_mirror_view(p.ix);
+            auto h_iy = Kokkos::create_mirror_view(p.iy);
+            auto h_iz = Kokkos::create_mirror_view(p.iz);
+            for (int i = 0; i < p.N; i++) {
+                h_ix(i) = llrint(h_x(i) * int_pos_inv_scale);
+                h_iy(i) = llrint(h_y(i) * int_pos_inv_scale);
+                h_iz(i) = llrint(h_z(i) * int_pos_inv_scale);
+                h_x(i) = (double)h_ix(i) * int_pos_scale;  // snap to integer grid
+                h_y(i) = (double)h_iy(i) * int_pos_scale;
+                h_z(i) = (double)h_iz(i) * int_pos_scale;
+            }
+            Kokkos::deep_copy(p.ix, h_ix);
+            Kokkos::deep_copy(p.iy, h_iy);
+            Kokkos::deep_copy(p.iz, h_iz);
+            Kokkos::deep_copy(p.x, h_x);
+            Kokkos::deep_copy(p.y, h_y);
+            Kokkos::deep_copy(p.z, h_z);
         }
 
         // Distribute particles across ranks if using MPI
@@ -216,9 +248,14 @@ int main(int argc, char** argv) {
             std::fflush(stdout);
             std::printf("G=%.4e  soft=%.4e pc  dt_max=%.4e Myr  dt_min=%.4e Myr  eta=%.4f\n",
                         G, soft_pc, dt_max_myr, dt_min_myr, eta);
-            std::printf("t_final=%.4e Myr  print_interval=%d  memory_tiling=%s  profiling=%s\n\n",
+            std::printf("t_final=%.4e Myr  print_interval=%d  memory_tiling=%s  profiling=%s\n",
                         t_final_myr, print_interval, use_memory_tiling ? "true" : "false",
                         profiling_enabled ? "true" : "false");
+            if (use_integer_positions) {
+                std::printf("Integer positions: domain=%.1f pc, resolution=%.2e pc\n",
+                            domain_halfsize, int_pos_scale);
+            }
+            std::printf("\n");
             std::fflush(stdout);
             if (profiling_enabled) {
                 g_profiler.print_memory_report(N_display, n_ranks);

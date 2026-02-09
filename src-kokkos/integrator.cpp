@@ -7,6 +7,7 @@
 #include <Kokkos_Core.hpp>
 #include <vector>
 #include <cfloat>
+#include <cmath>
 
 // Global profiler instance
 StepProfiler g_profiler;
@@ -22,6 +23,10 @@ int cpu_serial_threshold = 0;
 
 // Fused force+gradient: use stale accelerations to compute gradient in same N² pass as force
 bool fuse_gradient = false;
+
+bool use_integer_positions = false;
+double int_pos_scale = 0.0;
+double int_pos_inv_scale = 0.0;
 
 // TILE_SIZE defined in constants.h
 
@@ -196,12 +201,27 @@ void set_force_dispatch(bool use_n3l) {
 void drift(Particles& p, int start, int count, double dt) {
     RawView px{p.x.data()}, py{p.y.data()}, pz{p.z.data()};
     RawView pvx{p.vx.data()}, pvy{p.vy.data()}, pvz{p.vz.data()};
-    Kokkos::parallel_for("drift", count, KOKKOS_LAMBDA(int ii) {
-        int i = start + ii;
-        px(i) += pvx(i) * dt;
-        py(i) += pvy(i) * dt;
-        pz(i) += pvz(i) * dt;
-    });
+    if (use_integer_positions) {
+        auto pix = p.ix; auto piy = p.iy; auto piz = p.iz;
+        double scale = int_pos_scale;
+        double inv_scale = int_pos_inv_scale;
+        Kokkos::parallel_for("drift_int", count, KOKKOS_LAMBDA(int ii) {
+            int i = start + ii;
+            pix(i) += llrint(pvx(i) * dt * inv_scale);
+            piy(i) += llrint(pvy(i) * dt * inv_scale);
+            piz(i) += llrint(pvz(i) * dt * inv_scale);
+            px(i) = (double)pix(i) * scale;
+            py(i) = (double)piy(i) * scale;
+            pz(i) = (double)piz(i) * scale;
+        });
+    } else {
+        Kokkos::parallel_for("drift", count, KOKKOS_LAMBDA(int ii) {
+            int i = start + ii;
+            px(i) += pvx(i) * dt;
+            py(i) += pvy(i) * dt;
+            pz(i) += pvz(i) * dt;
+        });
+    }
     // No fence - next operation will handle dependency
 }
 
@@ -293,20 +313,22 @@ static int partition_by_pivot(Particles& p, int start, int count, double pivot) 
     });
     Kokkos::fence();
 
-    // Apply permutation: fused gather of all 13 fields (11 doubles + 2 ints)
+    // Apply permutation: fused gather of all fields
     RawView px{p.x.data()}, py{p.y.data()}, pz{p.z.data()};
     RawView pvx{p.vx.data()}, pvy{p.vy.data()}, pvz{p.vz.data()};
     RawView pax{p.ax.data()}, pay{p.ay.data()}, paz{p.az.data()};
     RawView pmass{p.mass.data()}, pdt{p.dt_adapt.data()};
     auto porig = p.orig_index;
     auto plevel = p.level;
+    auto pix = p.ix; auto piy = p.iy; auto piz = p.iz;
 
-    // Scratch: 11 doubles + 2 ints
+    // Scratch: 11 doubles + 2 ints + 3 int64s
     auto t1 = p.scratch1;  auto t2 = p.scratch2;  auto t3 = p.scratch3;
     auto t4 = p.scratch4;  auto t5 = p.scratch5;  auto t6 = p.scratch6;
     auto t7 = p.scratch7;  auto t8 = p.scratch8;  auto t9 = p.scratch9;
     auto t10 = p.scratch10; auto t11 = p.scratch11;
     auto ti1 = p.scratch_i2; auto ti2 = p.scratch_i3;
+    auto tl1 = p.scratch_l1; auto tl2 = p.scratch_l2; auto tl3 = p.scratch_l3;
 
     // Single fused gather of all fields
     Kokkos::parallel_for("gather_all", count, KOKKOS_LAMBDA(int ii) {
@@ -316,6 +338,7 @@ static int partition_by_pivot(Particles& p, int start, int count, double pivot) 
         t7(ii) = pax(src);  t8(ii) = pay(src);  t9(ii) = paz(src);
         t10(ii) = pmass(src); t11(ii) = pdt(src);
         ti1(ii) = porig(src); ti2(ii) = plevel(src);
+        tl1(ii) = pix(src); tl2(ii) = piy(src); tl3(ii) = piz(src);
     });
     Kokkos::fence();
 
@@ -327,6 +350,7 @@ static int partition_by_pivot(Particles& p, int start, int count, double pivot) 
         pax(dst) = t7(ii);  pay(dst) = t8(ii);  paz(dst) = t9(ii);
         pmass(dst) = t10(ii); pdt(dst) = t11(ii);
         porig(dst) = ti1(ii); plevel(dst) = ti2(ii);
+        pix(dst) = tl1(ii); piy(dst) = tl2(ii); piz(dst) = tl3(ii);
     });
     Kokkos::fence();
 
@@ -1864,6 +1888,7 @@ static void compute_timestep_distributed(DistributedParticles& dp, int start, in
 // Host-side data for CPU serial computation
 struct CpuSubset {
     std::vector<double> x, y, z, vx, vy, vz, ax, ay, az, mass, dt_adapt;
+    std::vector<int64_t> ix, iy, iz;
     int count;
 
     void resize(int n) {
@@ -1872,6 +1897,7 @@ struct CpuSubset {
         vx.resize(n); vy.resize(n); vz.resize(n);
         ax.resize(n); ay.resize(n); az.resize(n);
         mass.resize(n); dt_adapt.resize(n);
+        ix.resize(n); iy.resize(n); iz.resize(n);
     }
 
     // Copy subset [start, start+count) from device to host
@@ -1884,6 +1910,9 @@ struct CpuSubset {
         auto h_vz = Kokkos::create_mirror_view(Kokkos::subview(p.vz, Kokkos::pair<int,int>(start, start+count)));
         auto h_m  = Kokkos::create_mirror_view(Kokkos::subview(p.mass, Kokkos::pair<int,int>(start, start+count)));
         auto h_dt = Kokkos::create_mirror_view(Kokkos::subview(p.dt_adapt, Kokkos::pair<int,int>(start, start+count)));
+        auto h_ix = Kokkos::create_mirror_view(Kokkos::subview(p.ix, Kokkos::pair<int,int>(start, start+count)));
+        auto h_iy = Kokkos::create_mirror_view(Kokkos::subview(p.iy, Kokkos::pair<int,int>(start, start+count)));
+        auto h_iz = Kokkos::create_mirror_view(Kokkos::subview(p.iz, Kokkos::pair<int,int>(start, start+count)));
         Kokkos::deep_copy(h_x, Kokkos::subview(p.x, Kokkos::pair<int,int>(start, start+count)));
         Kokkos::deep_copy(h_y, Kokkos::subview(p.y, Kokkos::pair<int,int>(start, start+count)));
         Kokkos::deep_copy(h_z, Kokkos::subview(p.z, Kokkos::pair<int,int>(start, start+count)));
@@ -1892,15 +1921,19 @@ struct CpuSubset {
         Kokkos::deep_copy(h_vz, Kokkos::subview(p.vz, Kokkos::pair<int,int>(start, start+count)));
         Kokkos::deep_copy(h_m, Kokkos::subview(p.mass, Kokkos::pair<int,int>(start, start+count)));
         Kokkos::deep_copy(h_dt, Kokkos::subview(p.dt_adapt, Kokkos::pair<int,int>(start, start+count)));
+        Kokkos::deep_copy(h_ix, Kokkos::subview(p.ix, Kokkos::pair<int,int>(start, start+count)));
+        Kokkos::deep_copy(h_iy, Kokkos::subview(p.iy, Kokkos::pair<int,int>(start, start+count)));
+        Kokkos::deep_copy(h_iz, Kokkos::subview(p.iz, Kokkos::pair<int,int>(start, start+count)));
         Kokkos::fence();
         for (int i = 0; i < count; i++) {
             x[i] = h_x(i); y[i] = h_y(i); z[i] = h_z(i);
             vx[i] = h_vx(i); vy[i] = h_vy(i); vz[i] = h_vz(i);
             mass[i] = h_m(i); dt_adapt[i] = h_dt(i);
+            ix[i] = h_ix(i); iy[i] = h_iy(i); iz[i] = h_iz(i);
         }
     }
 
-    // Copy results back to device (positions, velocities, mass, dt_adapt)
+    // Copy results back to device (positions, velocities, mass, dt_adapt, ix/iy/iz)
     // Must copy mass and dt_adapt because cpu_partition_by_pivot reorders all fields
     void copy_to_device(Particles& p, int start) {
         auto h_x = Kokkos::create_mirror_view(Kokkos::subview(p.x, Kokkos::pair<int,int>(start, start+count)));
@@ -1911,10 +1944,14 @@ struct CpuSubset {
         auto h_vz = Kokkos::create_mirror_view(Kokkos::subview(p.vz, Kokkos::pair<int,int>(start, start+count)));
         auto h_m  = Kokkos::create_mirror_view(Kokkos::subview(p.mass, Kokkos::pair<int,int>(start, start+count)));
         auto h_dt = Kokkos::create_mirror_view(Kokkos::subview(p.dt_adapt, Kokkos::pair<int,int>(start, start+count)));
+        auto h_ix = Kokkos::create_mirror_view(Kokkos::subview(p.ix, Kokkos::pair<int,int>(start, start+count)));
+        auto h_iy = Kokkos::create_mirror_view(Kokkos::subview(p.iy, Kokkos::pair<int,int>(start, start+count)));
+        auto h_iz = Kokkos::create_mirror_view(Kokkos::subview(p.iz, Kokkos::pair<int,int>(start, start+count)));
         for (int i = 0; i < count; i++) {
             h_x(i) = x[i]; h_y(i) = y[i]; h_z(i) = z[i];
             h_vx(i) = vx[i]; h_vy(i) = vy[i]; h_vz(i) = vz[i];
             h_m(i) = mass[i]; h_dt(i) = dt_adapt[i];
+            h_ix(i) = ix[i]; h_iy(i) = iy[i]; h_iz(i) = iz[i];
         }
         Kokkos::deep_copy(Kokkos::subview(p.x, Kokkos::pair<int,int>(start, start+count)), h_x);
         Kokkos::deep_copy(Kokkos::subview(p.y, Kokkos::pair<int,int>(start, start+count)), h_y);
@@ -1924,6 +1961,9 @@ struct CpuSubset {
         Kokkos::deep_copy(Kokkos::subview(p.vz, Kokkos::pair<int,int>(start, start+count)), h_vz);
         Kokkos::deep_copy(Kokkos::subview(p.mass, Kokkos::pair<int,int>(start, start+count)), h_m);
         Kokkos::deep_copy(Kokkos::subview(p.dt_adapt, Kokkos::pair<int,int>(start, start+count)), h_dt);
+        Kokkos::deep_copy(Kokkos::subview(p.ix, Kokkos::pair<int,int>(start, start+count)), h_ix);
+        Kokkos::deep_copy(Kokkos::subview(p.iy, Kokkos::pair<int,int>(start, start+count)), h_iy);
+        Kokkos::deep_copy(Kokkos::subview(p.iz, Kokkos::pair<int,int>(start, start+count)), h_iz);
         Kokkos::fence();
     }
 };
@@ -2140,10 +2180,23 @@ static void cpu_cross_acc_grad_kick(CpuSubset& s,
 
 // CPU drift
 static void cpu_drift(CpuSubset& s, int start, int count, double dt) {
-    for (int i = start; i < start + count; i++) {
-        s.x[i] += s.vx[i] * dt;
-        s.y[i] += s.vy[i] * dt;
-        s.z[i] += s.vz[i] * dt;
+    if (use_integer_positions) {
+        double scale = int_pos_scale;
+        double inv_scale = int_pos_inv_scale;
+        for (int i = start; i < start + count; i++) {
+            s.ix[i] += llrint(s.vx[i] * dt * inv_scale);
+            s.iy[i] += llrint(s.vy[i] * dt * inv_scale);
+            s.iz[i] += llrint(s.vz[i] * dt * inv_scale);
+            s.x[i] = (double)s.ix[i] * scale;
+            s.y[i] = (double)s.iy[i] * scale;
+            s.z[i] = (double)s.iz[i] * scale;
+        }
+    } else {
+        for (int i = start; i < start + count; i++) {
+            s.x[i] += s.vx[i] * dt;
+            s.y[i] += s.vy[i] * dt;
+            s.z[i] += s.vz[i] * dt;
+        }
     }
 }
 
@@ -2192,6 +2245,7 @@ static int cpu_partition_by_pivot(CpuSubset& s, int start, int count, double piv
     std::vector<double> tvx(count), tvy(count), tvz(count);
     std::vector<double> tax(count), tay(count), taz(count);
     std::vector<double> tm(count), tdt(count);
+    std::vector<int64_t> tix(count), tiy(count), tiz(count);
     int si = 0, fi = slow_count;
     for (int i = 0; i < count; i++) {
         int src = start + i;
@@ -2200,6 +2254,7 @@ static int cpu_partition_by_pivot(CpuSubset& s, int start, int count, double piv
         tvx[dst] = s.vx[src]; tvy[dst] = s.vy[src]; tvz[dst] = s.vz[src];
         tax[dst] = s.ax[src]; tay[dst] = s.ay[src]; taz[dst] = s.az[src];
         tm[dst] = s.mass[src]; tdt[dst] = s.dt_adapt[src];
+        tix[dst] = s.ix[src]; tiy[dst] = s.iy[src]; tiz[dst] = s.iz[src];
     }
     for (int i = 0; i < count; i++) {
         int dst = start + i;
@@ -2207,6 +2262,7 @@ static int cpu_partition_by_pivot(CpuSubset& s, int start, int count, double piv
         s.vx[dst] = tvx[i]; s.vy[dst] = tvy[i]; s.vz[dst] = tvz[i];
         s.ax[dst] = tax[i]; s.ay[dst] = tay[i]; s.az[dst] = taz[i];
         s.mass[dst] = tm[i]; s.dt_adapt[dst] = tdt[i];
+        s.ix[dst] = tix[i]; s.iy[dst] = tiy[i]; s.iz[dst] = tiz[i];
     }
     return slow_count;
 }

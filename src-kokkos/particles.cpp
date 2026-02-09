@@ -17,6 +17,9 @@ void Particles::allocate(int n) {
     dt_adapt = Kokkos::View<double*>("dt_adapt", n);
     level      = Kokkos::View<int*>("level", n);
     orig_index = Kokkos::View<int*>("orig_index", n);
+    ix = Kokkos::View<int64_t*>("ix", n);
+    iy = Kokkos::View<int64_t*>("iy", n);
+    iz = Kokkos::View<int64_t*>("iz", n);
 
     // Initialize orig_index on host then copy
     {
@@ -43,6 +46,9 @@ void Particles::allocate(int n) {
     scratch_i  = Kokkos::View<int*>("si", n);
     scratch_i2 = Kokkos::View<int*>("si2", n);
     scratch_i3 = Kokkos::View<int*>("si3", n);
+    scratch_l1 = Kokkos::View<int64_t*>("sl1", n);
+    scratch_l2 = Kokkos::View<int64_t*>("sl2", n);
+    scratch_l3 = Kokkos::View<int64_t*>("sl3", n);
 
     // Packed views for vectorized memory access (LayoutRight for double4 loads)
     pos_packed = Kokkos::View<double*[4], Kokkos::LayoutRight>("pos_packed", n);
@@ -61,6 +67,8 @@ void Particles::deallocate() {
     scratch7 = scratch8 = scratch9 = Kokkos::View<double*>();
     scratch10 = scratch11 = Kokkos::View<double*>();
     scratch_i = scratch_i2 = scratch_i3 = Kokkos::View<int*>();
+    ix = iy = iz = Kokkos::View<int64_t*>();
+    scratch_l1 = scratch_l2 = scratch_l3 = Kokkos::View<int64_t*>();
     d_level_dts = Kokkos::View<double*>();
     pos_packed = Kokkos::View<double*[4], Kokkos::LayoutRight>();
     vel_packed = Kokkos::View<double*[4], Kokkos::LayoutRight>();
@@ -191,6 +199,8 @@ void Particles::partition_by_level() {
     auto t7 = scratch7;  auto t8 = scratch8;  auto t9 = scratch9;
     auto t10 = scratch10; auto t11 = scratch11;
     auto ti1 = scratch_i2; auto ti2 = scratch_i3;
+    auto pix = ix; auto piy = iy; auto piz = iz;
+    auto tl1 = scratch_l1; auto tl2 = scratch_l2; auto tl3 = scratch_l3;
 
     // Single fused gather of all fields
     Kokkos::parallel_for("gather_all", NN, KOKKOS_LAMBDA(int i) {
@@ -200,6 +210,7 @@ void Particles::partition_by_level() {
         t7(i) = pax(src);  t8(i) = pay(src);  t9(i) = paz(src);
         t10(i) = pmass(src); t11(i) = pdt(src);
         ti1(i) = porig(src); ti2(i) = p_level(src);
+        tl1(i) = pix(src); tl2(i) = piy(src); tl3(i) = piz(src);
     });
     Kokkos::fence();
 
@@ -210,6 +221,7 @@ void Particles::partition_by_level() {
         pax(i) = t7(i);  pay(i) = t8(i);  paz(i) = t9(i);
         pmass(i) = t10(i); pdt(i) = t11(i);
         porig(i) = ti1(i); p_level(i) = ti2(i);
+        pix(i) = tl1(i); piy(i) = tl2(i); piz(i) = tl3(i);
     });
     Kokkos::fence();
 }

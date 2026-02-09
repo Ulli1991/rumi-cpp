@@ -8,6 +8,7 @@ struct Particles {
 
     // SoA using Kokkos Views (default memory space)
     Kokkos::View<double*> x, y, z;
+    Kokkos::View<int64_t*> ix, iy, iz;   // Integer positions (source of truth when enabled)
     Kokkos::View<double*> vx, vy, vz;
     Kokkos::View<double*> ax, ay, az;
     Kokkos::View<double*> mass;
@@ -37,6 +38,7 @@ struct Particles {
     Kokkos::View<double*> scratch10, scratch11;
     Kokkos::View<int*> scratch_i;   // used for permutation
     Kokkos::View<int*> scratch_i2, scratch_i3;
+    Kokkos::View<int64_t*> scratch_l1, scratch_l2, scratch_l3;  // int64 scratch for permutation
 
     void allocate(int n);
     void deallocate();
