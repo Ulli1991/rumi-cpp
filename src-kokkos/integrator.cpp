@@ -23,9 +23,6 @@ int cpu_serial_threshold = 0;
 // Fused force+gradient: use stale accelerations to compute gradient in same N² pass as force
 bool fuse_gradient = false;
 
-// Mixed precision: FP32 rsqrt seed + FP64 Newton-Raphson (Level 1)
-bool mixed_precision = false;
-
 // TILE_SIZE defined in constants.h
 
 // Fused function pointer types (force + kick combined)
