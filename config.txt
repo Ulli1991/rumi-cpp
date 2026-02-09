@@ -19,7 +19,7 @@ SOFTENING_AU = 206.265                    # Softening length in AU (206.265 AU =
 GRAD_N3L = false                          # N3L gradient correction (halves work, slightly less momentum conservation)
 USE_N3L = false                           # Newton's 3rd law optimization (default: true on CPU, false on GPU)
 MEMORY_TILING = true                      # Shared memory tiling for force computation (GPU optimization)
-SKIP_SECOND_TIMESTEP = false              # Skip timestep recomputation on 2nd HHS half-step recursion
+SKIP_SECOND_TIMESTEP = false              # Skip timestep recomputation on 2nd HHS half-step recursion (its fast, formally incorrect but in practive very low DeltaE)
 DIRECT_N2_ON_DEEP_LEVELS = 50000          # do full N^2 below this thrshold without MPI to help with MPI comms overhead (many particles on intermediate hirarchies)
 DIRECT_CPU_N2_ON_VERY_DEEP_LEVELS = 500   # do full N^2 below this thrshold on the CPU to avoid kernel launch overhead (few particles on very deep hirarchies)
 
@@ -37,5 +37,5 @@ PLUMMER_METALLICITY = 0.02          # Stellar metallicity Z (solar)
 # =============================================================================
 # Output
 # =============================================================================
-PRINT_INTERVAL = 10
+PRINT_INTERVAL = 1
 PROFILING = true                    # Print performance breakdown at each print interval
