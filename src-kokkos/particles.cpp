@@ -44,9 +44,9 @@ void Particles::allocate(int n) {
     scratch_i2 = Kokkos::View<int*>("si2", n);
     scratch_i3 = Kokkos::View<int*>("si3", n);
 
-    // Packed views for vectorized memory access
-    pos_packed = Kokkos::View<double*[4]>("pos_packed", n);
-    vel_packed = Kokkos::View<double*[4]>("vel_packed", n);
+    // Packed views for vectorized memory access (LayoutRight for double4 loads)
+    pos_packed = Kokkos::View<double*[4], Kokkos::LayoutRight>("pos_packed", n);
+    vel_packed = Kokkos::View<double*[4], Kokkos::LayoutRight>("vel_packed", n);
 }
 
 void Particles::deallocate() {
@@ -62,8 +62,8 @@ void Particles::deallocate() {
     scratch10 = scratch11 = Kokkos::View<double*>();
     scratch_i = scratch_i2 = scratch_i3 = Kokkos::View<int*>();
     d_level_dts = Kokkos::View<double*>();
-    pos_packed = Kokkos::View<double*[4]>();
-    vel_packed = Kokkos::View<double*[4]>();
+    pos_packed = Kokkos::View<double*[4], Kokkos::LayoutRight>();
+    vel_packed = Kokkos::View<double*[4], Kokkos::LayoutRight>();
     std::free(level_start); level_start = nullptr;
     std::free(level_count); level_count = nullptr;
     N = 0; n_levels = 0;

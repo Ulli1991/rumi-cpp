@@ -20,8 +20,7 @@ int direct_n2_threshold = 0;
 // CPU serial threshold for avoiding GPU kernel launch overhead on tiny subsets
 int cpu_serial_threshold = 0;
 
-// Tile size for shared memory tiling (Rantala paper uses p=32)
-constexpr int DIST_TILE_SIZE = 32;
+// TILE_SIZE defined in constants.h
 
 // Fused function pointer types (force + kick combined)
 using AccKickFn = void(*)(Particles&, int, int, double, double, double);
@@ -72,49 +71,46 @@ void compute_acceleration_and_timestep_distributed(DistributedParticles& dp,
     RawView pax{dp.local.ax.data()}, pay{dp.local.ay.data()}, paz{dp.local.az.data()};
     RawView dt_f{dp.local.dt_adapt.data()};
 
-    // Tiled GPU kernel: each team handles DIST_TILE_SIZE i-particles from my slice
+    // Tiled GPU kernel: each team handles TILE_SIZE i-particles from my slice
     using team_policy = Kokkos::TeamPolicy<>;
     using member_type = team_policy::member_type;
     using scratch_space = Kokkos::DefaultExecutionSpace::scratch_memory_space;
 
-    size_t scratch_size = DIST_TILE_SIZE * 7 * sizeof(double);
-    int num_teams = (my_count + DIST_TILE_SIZE - 1) / DIST_TILE_SIZE;
+    size_t scratch_size = TILE_SIZE * 7 * sizeof(double);
+    int num_teams = (my_count + TILE_SIZE - 1) / TILE_SIZE;
 
     Kokkos::parallel_for("dist_acc_dt_tiled",
-        team_policy(num_teams, DIST_TILE_SIZE).set_scratch_size(0, Kokkos::PerTeam(scratch_size)),
+        team_policy(num_teams, TILE_SIZE).set_scratch_size(0, Kokkos::PerTeam(scratch_size)),
         KOKKOS_LAMBDA(const member_type& team) {
-            int ii = team.league_rank() * DIST_TILE_SIZE + team.team_rank();
+            int ii = team.league_rank() * TILE_SIZE + team.team_rank();
             int i = my_start + ii;
 
             // AoS interleaved tile: [x,y,z,m,vx,vy,vz] per j-particle
             Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                tile(team.team_scratch(0), DIST_TILE_SIZE * 7);
+                tile(team.team_scratch(0), TILE_SIZE * 7);
 
             double xi = 0, yi = 0, zi = 0, mi = 0;
             double vxi = 0, vyi = 0, vzi = 0;
             if (ii < my_count) {
-                xi = pos(i, 0); yi = pos(i, 1); zi = pos(i, 2); mi = pos(i, 3);
-                vxi = vel(i, 0); vyi = vel(i, 1); vzi = vel(i, 2);
+                double vpad;
+                load4(&pos(i, 0), xi, yi, zi, mi);
+                load4(&vel(i, 0), vxi, vyi, vzi, vpad);
             }
 
             double axi = 0, ayi = 0, azi = 0;
             double t_min_i = DBL_MAX;
 
-            for (int tile_start = 0; tile_start < N; tile_start += DIST_TILE_SIZE) {
-                int tile_end = (tile_start + DIST_TILE_SIZE < N) ? tile_start + DIST_TILE_SIZE : N;
+            for (int tile_start = 0; tile_start < N; tile_start += TILE_SIZE) {
+                int tile_end = (tile_start + TILE_SIZE < N) ? tile_start + TILE_SIZE : N;
                 int tile_count = tile_end - tile_start;
 
                 int t = team.team_rank();
                 if (t < tile_count) {
                     int idx = tile_start + t;
                     int base = t * 7;
-                    tile(base    ) = pos(idx, 0);
-                    tile(base + 1) = pos(idx, 1);
-                    tile(base + 2) = pos(idx, 2);
-                    tile(base + 3) = pos(idx, 3);
-                    tile(base + 4) = vel(idx, 0);
-                    tile(base + 5) = vel(idx, 1);
-                    tile(base + 6) = vel(idx, 2);
+                    double vpad;
+                    load4(&pos(idx, 0), tile(base), tile(base+1), tile(base+2), tile(base+3));
+                    load4(&vel(idx, 0), tile(base+4), tile(base+5), tile(base+6), vpad);
                 }
                 team.team_barrier();
 
@@ -460,18 +456,18 @@ static void self_acceleration_distributed(DistributedParticles& dp, int start, i
     using member_type = team_policy::member_type;
     using scratch_space = Kokkos::DefaultExecutionSpace::scratch_memory_space;
 
-    size_t scratch_size = DIST_TILE_SIZE * 4 * sizeof(double); // x,y,z,m
-    int num_teams = (slice_count + DIST_TILE_SIZE - 1) / DIST_TILE_SIZE;
+    size_t scratch_size = TILE_SIZE * 4 * sizeof(double); // x,y,z,m
+    int num_teams = (slice_count + TILE_SIZE - 1) / TILE_SIZE;
 
     Kokkos::parallel_for("dist_self_acc_tiled",
-        team_policy(num_teams, DIST_TILE_SIZE).set_scratch_size(0, Kokkos::PerTeam(scratch_size)),
+        team_policy(num_teams, TILE_SIZE).set_scratch_size(0, Kokkos::PerTeam(scratch_size)),
         KOKKOS_LAMBDA(const member_type& team) {
-            int ii = team.league_rank() * DIST_TILE_SIZE + team.team_rank();
+            int ii = team.league_rank() * TILE_SIZE + team.team_rank();
             int i = slice_start + ii;
 
             // AoS interleaved tile: [x,y,z,m] per j-particle
             Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                tile(team.team_scratch(0), DIST_TILE_SIZE * 4);
+                tile(team.team_scratch(0), TILE_SIZE * 4);
 
             double xi = 0, yi = 0, zi = 0;
             if (ii < slice_count) {
@@ -480,8 +476,8 @@ static void self_acceleration_distributed(DistributedParticles& dp, int start, i
 
             double axi = 0, ayi = 0, azi = 0;
 
-            for (int tile_start = j_start; tile_start < j_end; tile_start += DIST_TILE_SIZE) {
-                int tile_end = (tile_start + DIST_TILE_SIZE < j_end) ? tile_start + DIST_TILE_SIZE : j_end;
+            for (int tile_start = j_start; tile_start < j_end; tile_start += TILE_SIZE) {
+                int tile_end = (tile_start + TILE_SIZE < j_end) ? tile_start + TILE_SIZE : j_end;
                 int tile_count = tile_end - tile_start;
 
                 int t = team.team_rank();
@@ -559,17 +555,17 @@ static void self_acceleration_kick_distributed(DistributedParticles& dp, int sta
     using member_type = team_policy::member_type;
     using scratch_space = Kokkos::DefaultExecutionSpace::scratch_memory_space;
 
-    size_t scratch_size = DIST_TILE_SIZE * 4 * sizeof(double);
-    int num_teams = (slice_count + DIST_TILE_SIZE - 1) / DIST_TILE_SIZE;
+    size_t scratch_size = TILE_SIZE * 4 * sizeof(double);
+    int num_teams = (slice_count + TILE_SIZE - 1) / TILE_SIZE;
 
     Kokkos::parallel_for("dist_self_acc_kick_tiled",
-        team_policy(num_teams, DIST_TILE_SIZE).set_scratch_size(0, Kokkos::PerTeam(scratch_size)),
+        team_policy(num_teams, TILE_SIZE).set_scratch_size(0, Kokkos::PerTeam(scratch_size)),
         KOKKOS_LAMBDA(const member_type& team) {
-            int ii = team.league_rank() * DIST_TILE_SIZE + team.team_rank();
+            int ii = team.league_rank() * TILE_SIZE + team.team_rank();
             int i = slice_start + ii;
 
             Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                tile(team.team_scratch(0), DIST_TILE_SIZE * 4);
+                tile(team.team_scratch(0), TILE_SIZE * 4);
 
             double xi = 0, yi = 0, zi = 0;
             if (ii < slice_count) {
@@ -578,8 +574,8 @@ static void self_acceleration_kick_distributed(DistributedParticles& dp, int sta
 
             double axi = 0, ayi = 0, azi = 0;
 
-            for (int tile_start = j_start; tile_start < j_end; tile_start += DIST_TILE_SIZE) {
-                int tile_end = (tile_start + DIST_TILE_SIZE < j_end) ? tile_start + DIST_TILE_SIZE : j_end;
+            for (int tile_start = j_start; tile_start < j_end; tile_start += TILE_SIZE) {
+                int tile_end = (tile_start + TILE_SIZE < j_end) ? tile_start + TILE_SIZE : j_end;
                 int tile_count = tile_end - tile_start;
 
                 int t = team.team_rank();
@@ -673,18 +669,18 @@ static void self_gradient_correction_kick_distributed(DistributedParticles& dp, 
     using member_type = team_policy::member_type;
     using scratch_space = Kokkos::DefaultExecutionSpace::scratch_memory_space;
 
-    size_t scratch_size = DIST_TILE_SIZE * 7 * sizeof(double);
-    int num_teams = (slice_count + DIST_TILE_SIZE - 1) / DIST_TILE_SIZE;
+    size_t scratch_size = TILE_SIZE * 7 * sizeof(double);
+    int num_teams = (slice_count + TILE_SIZE - 1) / TILE_SIZE;
 
     Kokkos::parallel_for("dist_grad_kick_tiled",
-        team_policy(num_teams, DIST_TILE_SIZE).set_scratch_size(0, Kokkos::PerTeam(scratch_size)),
+        team_policy(num_teams, TILE_SIZE).set_scratch_size(0, Kokkos::PerTeam(scratch_size)),
         KOKKOS_LAMBDA(const member_type& team) {
-            int ii = team.league_rank() * DIST_TILE_SIZE + team.team_rank();
+            int ii = team.league_rank() * TILE_SIZE + team.team_rank();
             int i = slice_start + ii;
 
             // AoS interleaved tile: [x,y,z,m,ax,ay,az] per j-particle
             Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                tile(team.team_scratch(0), DIST_TILE_SIZE * 7);
+                tile(team.team_scratch(0), TILE_SIZE * 7);
 
             double xi = 0, yi = 0, zi = 0;
             double axi = 0, ayi = 0, azi = 0;
@@ -695,8 +691,8 @@ static void self_gradient_correction_kick_distributed(DistributedParticles& dp, 
 
             double cx = 0, cy = 0, cz = 0;
 
-            for (int tile_start = j_start; tile_start < j_end; tile_start += DIST_TILE_SIZE) {
-                int tile_end = (tile_start + DIST_TILE_SIZE < j_end) ? tile_start + DIST_TILE_SIZE : j_end;
+            for (int tile_start = j_start; tile_start < j_end; tile_start += TILE_SIZE) {
+                int tile_end = (tile_start + TILE_SIZE < j_end) ? tile_start + TILE_SIZE : j_end;
                 int tile_count = tile_end - tile_start;
 
                 int t = team.team_rank();
@@ -832,25 +828,25 @@ static void cross_acceleration_distributed(DistributedParticles& dp,
     using member_type = team_policy::member_type;
     using scratch_space = Kokkos::DefaultExecutionSpace::scratch_memory_space;
 
-    size_t scratch_size = DIST_TILE_SIZE * 4 * sizeof(double);
+    size_t scratch_size = TILE_SIZE * 4 * sizeof(double);
 
     // Slow particles: compute force from fast particles
     int slice_start, slice_count;
     dp.get_force_slice(slow_start, slow_count, slice_start, slice_count);
 
     if (slice_count > 0) {
-        int num_teams = (slice_count + DIST_TILE_SIZE - 1) / DIST_TILE_SIZE;
+        int num_teams = (slice_count + TILE_SIZE - 1) / TILE_SIZE;
         const int f_start = fast_start;
         const int f_end = fast_start + fast_count;
 
         Kokkos::parallel_for("cross_slow_from_fast_tiled",
-            team_policy(num_teams, DIST_TILE_SIZE).set_scratch_size(0, Kokkos::PerTeam(scratch_size)),
+            team_policy(num_teams, TILE_SIZE).set_scratch_size(0, Kokkos::PerTeam(scratch_size)),
             KOKKOS_LAMBDA(const member_type& team) {
-                int ii = team.league_rank() * DIST_TILE_SIZE + team.team_rank();
+                int ii = team.league_rank() * TILE_SIZE + team.team_rank();
                 int i = slice_start + ii;
 
                 Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                    tile(team.team_scratch(0), DIST_TILE_SIZE * 4);
+                    tile(team.team_scratch(0), TILE_SIZE * 4);
 
                 double xi = 0, yi = 0, zi = 0;
                 if (ii < slice_count) {
@@ -859,8 +855,8 @@ static void cross_acceleration_distributed(DistributedParticles& dp,
 
                 double axi = 0, ayi = 0, azi = 0;
 
-                for (int tile_st = f_start; tile_st < f_end; tile_st += DIST_TILE_SIZE) {
-                    int tile_end = (tile_st + DIST_TILE_SIZE < f_end) ? tile_st + DIST_TILE_SIZE : f_end;
+                for (int tile_st = f_start; tile_st < f_end; tile_st += TILE_SIZE) {
+                    int tile_end = (tile_st + TILE_SIZE < f_end) ? tile_st + TILE_SIZE : f_end;
                     int tile_cnt = tile_end - tile_st;
 
                     int t = team.team_rank();
@@ -907,17 +903,17 @@ static void cross_acceleration_distributed(DistributedParticles& dp,
     dp.get_force_slice(fast_start, fast_count, slice_start_f, slice_count_f);
 
     if (slice_count_f > 0) {
-        int num_teams_f = (slice_count_f + DIST_TILE_SIZE - 1) / DIST_TILE_SIZE;
+        int num_teams_f = (slice_count_f + TILE_SIZE - 1) / TILE_SIZE;
         const int s_start = slow_start;
         const int s_end = slow_start + slow_count;
 
         Kokkos::parallel_for("cross_fast_from_slow_tiled",
-            team_policy(num_teams_f, DIST_TILE_SIZE).set_scratch_size(0, Kokkos::PerTeam(scratch_size)),
+            team_policy(num_teams_f, TILE_SIZE).set_scratch_size(0, Kokkos::PerTeam(scratch_size)),
             KOKKOS_LAMBDA(const member_type& team) {
-                int ii = team.league_rank() * DIST_TILE_SIZE + team.team_rank();
+                int ii = team.league_rank() * TILE_SIZE + team.team_rank();
                 int i = slice_start_f + ii;
 
-                const int N = DIST_TILE_SIZE;
+                const int N = TILE_SIZE;
                 Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
                     tile(team.team_scratch(0), N * 4);
 
@@ -928,8 +924,8 @@ static void cross_acceleration_distributed(DistributedParticles& dp,
 
                 double axi = 0, ayi = 0, azi = 0;
 
-                for (int tile_st = s_start; tile_st < s_end; tile_st += DIST_TILE_SIZE) {
-                    int tile_end = (tile_st + DIST_TILE_SIZE < s_end) ? tile_st + DIST_TILE_SIZE : s_end;
+                for (int tile_st = s_start; tile_st < s_end; tile_st += TILE_SIZE) {
+                    int tile_end = (tile_st + TILE_SIZE < s_end) ? tile_st + TILE_SIZE : s_end;
                     int tile_cnt = tile_end - tile_st;
 
                     int t = team.team_rank();
@@ -997,24 +993,24 @@ static void cross_acceleration_and_gradient_distributed(DistributedParticles& dp
     using member_type = team_policy::member_type;
     using scratch_space = Kokkos::DefaultExecutionSpace::scratch_memory_space;
 
-    size_t scratch_size = DIST_TILE_SIZE * 7 * sizeof(double);
+    size_t scratch_size = TILE_SIZE * 7 * sizeof(double);
 
     // Gradient correction for slow particles from fast
     int slice_start, slice_count;
     dp.get_force_slice(slow_start, slow_count, slice_start, slice_count);
 
     if (slice_count > 0) {
-        int num_teams = (slice_count + DIST_TILE_SIZE - 1) / DIST_TILE_SIZE;
+        int num_teams = (slice_count + TILE_SIZE - 1) / TILE_SIZE;
         const int f_start = fast_start;
         const int f_end = fast_start + fast_count;
 
         Kokkos::parallel_for("cross_grad_slow_tiled",
-            team_policy(num_teams, DIST_TILE_SIZE).set_scratch_size(0, Kokkos::PerTeam(scratch_size)),
+            team_policy(num_teams, TILE_SIZE).set_scratch_size(0, Kokkos::PerTeam(scratch_size)),
             KOKKOS_LAMBDA(const member_type& team) {
-                int ii = team.league_rank() * DIST_TILE_SIZE + team.team_rank();
+                int ii = team.league_rank() * TILE_SIZE + team.team_rank();
                 int i = slice_start + ii;
 
-                const int N = DIST_TILE_SIZE;
+                const int N = TILE_SIZE;
                 Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
                     tile(team.team_scratch(0), N * 7);
 
@@ -1027,8 +1023,8 @@ static void cross_acceleration_and_gradient_distributed(DistributedParticles& dp
 
                 double cx = 0, cy = 0, cz = 0;
 
-                for (int tile_st = f_start; tile_st < f_end; tile_st += DIST_TILE_SIZE) {
-                    int tile_end = (tile_st + DIST_TILE_SIZE < f_end) ? tile_st + DIST_TILE_SIZE : f_end;
+                for (int tile_st = f_start; tile_st < f_end; tile_st += TILE_SIZE) {
+                    int tile_end = (tile_st + TILE_SIZE < f_end) ? tile_st + TILE_SIZE : f_end;
                     int tile_cnt = tile_end - tile_st;
 
                     int t = team.team_rank();
@@ -1085,17 +1081,17 @@ static void cross_acceleration_and_gradient_distributed(DistributedParticles& dp
     dp.get_force_slice(fast_start, fast_count, slice_start_f, slice_count_f);
 
     if (slice_count_f > 0) {
-        int num_teams_f = (slice_count_f + DIST_TILE_SIZE - 1) / DIST_TILE_SIZE;
+        int num_teams_f = (slice_count_f + TILE_SIZE - 1) / TILE_SIZE;
         const int s_start = slow_start;
         const int s_end = slow_start + slow_count;
 
         Kokkos::parallel_for("cross_grad_fast_tiled",
-            team_policy(num_teams_f, DIST_TILE_SIZE).set_scratch_size(0, Kokkos::PerTeam(scratch_size)),
+            team_policy(num_teams_f, TILE_SIZE).set_scratch_size(0, Kokkos::PerTeam(scratch_size)),
             KOKKOS_LAMBDA(const member_type& team) {
-                int ii = team.league_rank() * DIST_TILE_SIZE + team.team_rank();
+                int ii = team.league_rank() * TILE_SIZE + team.team_rank();
                 int i = slice_start_f + ii;
 
-                const int N = DIST_TILE_SIZE;
+                const int N = TILE_SIZE;
                 Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
                     tile(team.team_scratch(0), N * 7);
 
@@ -1108,8 +1104,8 @@ static void cross_acceleration_and_gradient_distributed(DistributedParticles& dp
 
                 double cx = 0, cy = 0, cz = 0;
 
-                for (int tile_st = s_start; tile_st < s_end; tile_st += DIST_TILE_SIZE) {
-                    int tile_end = (tile_st + DIST_TILE_SIZE < s_end) ? tile_st + DIST_TILE_SIZE : s_end;
+                for (int tile_st = s_start; tile_st < s_end; tile_st += TILE_SIZE) {
+                    int tile_end = (tile_st + TILE_SIZE < s_end) ? tile_st + TILE_SIZE : s_end;
                     int tile_cnt = tile_end - tile_st;
 
                     int t = team.team_rank();
@@ -1193,16 +1189,16 @@ static void compute_timestep_distributed(DistributedParticles& dp, int start, in
     using scratch_space = Kokkos::DefaultExecutionSpace::scratch_memory_space;
 
     // Need x,y,z,vx,vy,vz,m for adaptive timestep
-    size_t scratch_size = DIST_TILE_SIZE * 7 * sizeof(double);
-    int num_teams = (slice_count + DIST_TILE_SIZE - 1) / DIST_TILE_SIZE;
+    size_t scratch_size = TILE_SIZE * 7 * sizeof(double);
+    int num_teams = (slice_count + TILE_SIZE - 1) / TILE_SIZE;
 
     Kokkos::parallel_for("dist_dt_tiled",
-        team_policy(num_teams, DIST_TILE_SIZE).set_scratch_size(0, Kokkos::PerTeam(scratch_size)),
+        team_policy(num_teams, TILE_SIZE).set_scratch_size(0, Kokkos::PerTeam(scratch_size)),
         KOKKOS_LAMBDA(const member_type& team) {
-            int ii = team.league_rank() * DIST_TILE_SIZE + team.team_rank();
+            int ii = team.league_rank() * TILE_SIZE + team.team_rank();
             int i = slice_start + ii;
 
-            const int N = DIST_TILE_SIZE;
+            const int N = TILE_SIZE;
             Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
                 tile(team.team_scratch(0), N * 7);
 
@@ -1217,8 +1213,8 @@ static void compute_timestep_distributed(DistributedParticles& dp, int start, in
 
             double t_min_sq = 1e60;
 
-            for (int tile_st = j_start; tile_st < j_end; tile_st += DIST_TILE_SIZE) {
-                int tile_end = (tile_st + DIST_TILE_SIZE < j_end) ? tile_st + DIST_TILE_SIZE : j_end;
+            for (int tile_st = j_start; tile_st < j_end; tile_st += TILE_SIZE) {
+                int tile_end = (tile_st + TILE_SIZE < j_end) ? tile_st + TILE_SIZE : j_end;
                 int tile_cnt = tile_end - tile_st;
 
                 int t = team.team_rank();

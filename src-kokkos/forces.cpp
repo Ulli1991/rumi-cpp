@@ -7,8 +7,7 @@ bool grad_n3l = false;
 bool use_kahan = false;
 bool use_memory_tiling = true;  // Toggle shared memory tiling
 
-// Tile size for shared memory tiling (tune for your GPU)
-constexpr int TILE_SIZE = 32;
+// TILE_SIZE defined in constants.h
 
 // ==========================================================================
 // Full N-body acceleration: O(N(N-1)/2) with N3L or O(N^2) without
@@ -159,10 +158,10 @@ void compute_acceleration_and_timestep(Particles& p, double G, double soft2, dou
 
                 double xi = 0, yi = 0, zi = 0;
                 double vxi = 0, vyi = 0, vzi = 0;
-                double mi = 0;
+                double mi = 0, pad = 0;
                 if (i < N) {
-                    xi = pos(i, 0); yi = pos(i, 1); zi = pos(i, 2); mi = pos(i, 3);
-                    vxi = vel(i, 0); vyi = vel(i, 1); vzi = vel(i, 2);
+                    load4(&pos(i, 0), xi, yi, zi, mi);
+                    load4(&vel(i, 0), vxi, vyi, vzi, pad);
                 }
 
                 double axi = 0, ayi = 0, azi = 0;
@@ -172,18 +171,14 @@ void compute_acceleration_and_timestep(Particles& p, double G, double soft2, dou
                     int tile_end = (tile_start + TILE_SIZE < N) ? tile_start + TILE_SIZE : N;
                     int tile_count = tile_end - tile_start;
 
-                    // Collaborative AoS tile load
+                    // Collaborative AoS tile load with vectorized reads
                     int t = team.team_rank();
                     if (t < tile_count) {
                         int idx = tile_start + t;
                         int base = t * 7;
-                        tile(base    ) = pos(idx, 0);
-                        tile(base + 1) = pos(idx, 1);
-                        tile(base + 2) = pos(idx, 2);
-                        tile(base + 3) = pos(idx, 3);
-                        tile(base + 4) = vel(idx, 0);
-                        tile(base + 5) = vel(idx, 1);
-                        tile(base + 6) = vel(idx, 2);
+                        double vpad;
+                        load4(&pos(idx, 0), tile(base), tile(base+1), tile(base+2), tile(base+3));
+                        load4(&vel(idx, 0), tile(base+4), tile(base+5), tile(base+6), vpad);
                     }
                     team.team_barrier();
 

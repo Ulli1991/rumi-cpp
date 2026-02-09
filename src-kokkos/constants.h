@@ -38,12 +38,27 @@ KOKKOS_INLINE_FUNCTION double fast_rsqrt(double x) {
 #endif
 }
 
+// Portable 256-bit vectorized load: reads 4 contiguous doubles in one transaction.
+// Requires 32-byte aligned source (guaranteed by LayoutRight packed views).
+KOKKOS_INLINE_FUNCTION void load4(const double* __restrict__ ptr,
+                                   double& a, double& b, double& c, double& d) {
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
+    const double4 v = *reinterpret_cast<const double4*>(ptr);
+    a = v.x; b = v.y; c = v.z; d = v.w;
+#else
+    a = ptr[0]; b = ptr[1]; c = ptr[2]; d = ptr[3];
+#endif
+}
+
 // Raw pointer wrapper: matches Kokkos View operator() interface but uses
 // __restrict__ for compiler alias analysis. Trivially copyable for lambda capture.
 struct RawView {
     double* __restrict__ ptr;
     KOKKOS_INLINE_FUNCTION double& operator()(int i) const { return ptr[i]; }
 };
+
+// Tile size for shared memory tiling in all N^2 GPU kernels
+constexpr int TILE_SIZE = 128;
 
 // Plummer sphere
 constexpr double PLUMMER_SCALE_FACTOR = 1.305;
