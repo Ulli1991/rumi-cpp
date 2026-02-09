@@ -35,7 +35,7 @@ void compute_acceleration(Particles& p, double G, double soft2) {
                 double dy = py(j) - py(i);
                 double dz = pz(j) - pz(i);
                 double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                double inv_r = 1.0 / Kokkos::sqrt(r2);
+                double inv_r = fast_rsqrt(r2);
                 double inv_r3 = inv_r * inv_r * inv_r;
 
                 double fj = G * m(j) * inv_r3;
@@ -60,7 +60,7 @@ void compute_acceleration(Particles& p, double G, double soft2) {
                 double dy = py(j) - py(i);
                 double dz = pz(j) - pz(i);
                 double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                double inv_r = 1.0 / Kokkos::sqrt(r2);
+                double inv_r = fast_rsqrt(r2);
                 double inv_r3 = inv_r * inv_r * inv_r;
                 double fj = G * m(j) * inv_r3;
                 axi += fj * dx; ayi += fj * dy; azi += fj * dz;
@@ -99,7 +99,7 @@ void compute_acceleration_and_timestep(Particles& p, double G, double soft2, dou
                 double dz = pz(j) - pz(i);
                 double r2 = dx*dx + dy*dy + dz*dz;
                 double r2s = r2 + soft2;
-                double inv_r = 1.0 / Kokkos::sqrt(r2s);
+                double inv_r = fast_rsqrt(r2s);
                 double inv_r3 = inv_r * inv_r * inv_r;
 
                 double fj = G * m(j) * inv_r3;
@@ -109,17 +109,17 @@ void compute_acceleration_and_timestep(Particles& p, double G, double soft2, dou
                 Kokkos::atomic_add(&pay(j), -fi * dy);
                 Kokkos::atomic_add(&paz(j), -fi * dz);
 
-                // Adaptive timestep (squared-space: 1 sqrt instead of 5)
+                // Adaptive timestep: reuse inv_r, no extra sqrt
                 double dvx = pvx(j) - pvx(i);
                 double dvy = pvy(j) - pvy(i);
                 double dvz = pvz(j) - pvz(i);
                 double v_sq = dvx*dvx + dvy*dvy + dvz*dvz;
-                double r2_eps = r2 + EPS;
-                double r_norm = Kokkos::sqrt(r2_eps);
                 double mass_sum = m(i) + m(j);
 
-                double t_ff_sq = r2_eps * r_norm / (G * mass_sum + EPS);
-                double t_fb_sq = r2_eps / (v_sq + EPS);
+                // r2s^1.5 = r2s * r2s * inv_r (reuses rsqrt from force)
+                double r3 = r2s * r2s * inv_r;
+                double t_ff_sq = r3 / (G * mass_sum + EPS);
+                double t_fb_sq = r2s / (v_sq + EPS);
                 double t_min_sq_pair = Kokkos::fmin(t_ff_sq, t_fb_sq);
 
                 t_min_i = Kokkos::fmin(t_min_i, t_min_sq_pair);
@@ -151,26 +151,12 @@ void compute_acceleration_and_timestep(Particles& p, double G, double soft2, dou
         Kokkos::parallel_for("acc_dt_tiled",
             team_policy(num_teams, TILE_SIZE).set_scratch_size(0, Kokkos::PerTeam(scratch_size)),
             KOKKOS_LAMBDA(const member_type& team) {
-                // Each thread handles one particle i
                 int i = team.league_rank() * TILE_SIZE + team.team_rank();
 
-                // Scratch memory views for tile data
+                // AoS interleaved tile: [x,y,z,m,vx,vy,vz] per j-particle
                 Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                    tile_x(team.team_scratch(0), TILE_SIZE);
-                Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                    tile_y(reinterpret_cast<double*>(tile_x.data() + TILE_SIZE), TILE_SIZE);
-                Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                    tile_z(reinterpret_cast<double*>(tile_y.data() + TILE_SIZE), TILE_SIZE);
-                Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                    tile_vx(reinterpret_cast<double*>(tile_z.data() + TILE_SIZE), TILE_SIZE);
-                Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                    tile_vy(reinterpret_cast<double*>(tile_vx.data() + TILE_SIZE), TILE_SIZE);
-                Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                    tile_vz(reinterpret_cast<double*>(tile_vy.data() + TILE_SIZE), TILE_SIZE);
-                Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                    tile_m(reinterpret_cast<double*>(tile_vz.data() + TILE_SIZE), TILE_SIZE);
+                    tile(team.team_scratch(0), TILE_SIZE * 7);
 
-                // Load particle i's data using packed views (vectorized load)
                 double xi = 0, yi = 0, zi = 0;
                 double vxi = 0, vyi = 0, vzi = 0;
                 double mi = 0;
@@ -182,55 +168,55 @@ void compute_acceleration_and_timestep(Particles& p, double G, double soft2, dou
                 double axi = 0, ayi = 0, azi = 0;
                 double t_min_i = DBL_MAX;
 
-                // Loop over tiles of j particles
                 for (int tile_start = 0; tile_start < N; tile_start += TILE_SIZE) {
                     int tile_end = (tile_start + TILE_SIZE < N) ? tile_start + TILE_SIZE : N;
                     int tile_count = tile_end - tile_start;
 
-                    // Collaborative load using packed views (2 vector loads instead of 7 scalar)
+                    // Collaborative AoS tile load
                     int t = team.team_rank();
                     if (t < tile_count) {
                         int idx = tile_start + t;
-                        // Load position + mass (4 doubles)
-                        tile_x(t) = pos(idx, 0);
-                        tile_y(t) = pos(idx, 1);
-                        tile_z(t) = pos(idx, 2);
-                        tile_m(t) = pos(idx, 3);
-                        // Load velocity (3 doubles)
-                        tile_vx(t) = vel(idx, 0);
-                        tile_vy(t) = vel(idx, 1);
-                        tile_vz(t) = vel(idx, 2);
+                        int base = t * 7;
+                        tile(base    ) = pos(idx, 0);
+                        tile(base + 1) = pos(idx, 1);
+                        tile(base + 2) = pos(idx, 2);
+                        tile(base + 3) = pos(idx, 3);
+                        tile(base + 4) = vel(idx, 0);
+                        tile(base + 5) = vel(idx, 1);
+                        tile(base + 6) = vel(idx, 2);
                     }
                     team.team_barrier();
 
-                    // Accumulate forces and adaptive timestep from this tile
                     if (i < N) {
                         for (int jt = 0; jt < tile_count; jt++) {
                             int j = tile_start + jt;
                             if (j == i) continue;
 
-                            double dx = tile_x(jt) - xi;
-                            double dy = tile_y(jt) - yi;
-                            double dz = tile_z(jt) - zi;
+                            int jb = jt * 7;
+                            double dx = tile(jb    ) - xi;
+                            double dy = tile(jb + 1) - yi;
+                            double dz = tile(jb + 2) - zi;
+                            double mj = tile(jb + 3);
                             double r2 = dx*dx + dy*dy + dz*dz;
                             double r2s = r2 + soft2;
-                            double inv_r = 1.0 / Kokkos::sqrt(r2s);
+                            double inv_r = fast_rsqrt(r2s);
                             double inv_r3 = inv_r * inv_r * inv_r;
 
-                            double fj = G * tile_m(jt) * inv_r3;
-                            axi += fj * dx; ayi += fj * dy; azi += fj * dz;
+                            axi += G * mj * inv_r3 * dx;
+                            ayi += G * mj * inv_r3 * dy;
+                            azi += G * mj * inv_r3 * dz;
 
-                            // Adaptive timestep (squared-space: 1 sqrt instead of 5)
-                            double dvx = tile_vx(jt) - vxi;
-                            double dvy = tile_vy(jt) - vyi;
-                            double dvz = tile_vz(jt) - vzi;
+                            // Adaptive timestep: reuse inv_r, no extra sqrt
+                            double dvx = tile(jb + 4) - vxi;
+                            double dvy = tile(jb + 5) - vyi;
+                            double dvz = tile(jb + 6) - vzi;
                             double v_sq = dvx*dvx + dvy*dvy + dvz*dvz;
-                            double r2_eps = r2 + EPS;
-                            double r_norm = Kokkos::sqrt(r2_eps);
-                            double mass_sum = mi + tile_m(jt);
+                            double mass_sum = mi + mj;
 
-                            double t_ff_sq = r2_eps * r_norm / (G * mass_sum + EPS);
-                            double t_fb_sq = r2_eps / (v_sq + EPS);
+                            // r2s^1.5 = r2s * r2s * inv_r (reuses rsqrt)
+                            double r3 = r2s * r2s * inv_r;
+                            double t_ff_sq = r3 / (G * mass_sum + EPS);
+                            double t_fb_sq = r2s / (v_sq + EPS);
                             double t_min_sq_pair = Kokkos::fmin(t_ff_sq, t_fb_sq);
                             t_min_i = Kokkos::fmin(t_min_i, t_min_sq_pair);
                         }
@@ -256,23 +242,22 @@ void compute_acceleration_and_timestep(Particles& p, double G, double soft2, dou
                 double dz = pz(j) - pz(i);
                 double r2 = dx*dx + dy*dy + dz*dz;
                 double r2s = r2 + soft2;
-                double inv_r = 1.0 / Kokkos::sqrt(r2s);
+                double inv_r = fast_rsqrt(r2s);
                 double inv_r3 = inv_r * inv_r * inv_r;
 
                 double fj = G * m(j) * inv_r3;
                 axi += fj * dx; ayi += fj * dy; azi += fj * dz;
 
-                // Adaptive timestep (squared-space: 1 sqrt instead of 5)
+                // Adaptive timestep: reuse inv_r, no extra sqrt
                 double dvx = pvx(j) - pvx(i);
                 double dvy = pvy(j) - pvy(i);
                 double dvz = pvz(j) - pvz(i);
                 double v_sq = dvx*dvx + dvy*dvy + dvz*dvz;
-                double r2_eps = r2 + EPS;
-                double r_norm = Kokkos::sqrt(r2_eps);
                 double mass_sum = m(i) + m(j);
 
-                double t_ff_sq = r2_eps * r_norm / (G * mass_sum + EPS);
-                double t_fb_sq = r2_eps / (v_sq + EPS);
+                double r3 = r2s * r2s * inv_r;
+                double t_ff_sq = r3 / (G * mass_sum + EPS);
+                double t_fb_sq = r2s / (v_sq + EPS);
                 double t_min_sq_pair = Kokkos::fmin(t_ff_sq, t_fb_sq);
                 t_min_i = Kokkos::fmin(t_min_i, t_min_sq_pair);
             }
@@ -322,7 +307,7 @@ void self_acceleration(Particles& p, int start, int count,
                 double dy = py(j) - py(i);
                 double dz = pz(j) - pz(i);
                 double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                double inv_r = 1.0 / Kokkos::sqrt(r2);
+                double inv_r = fast_rsqrt(r2);
                 double inv_r3 = inv_r * inv_r * inv_r;
                 double fj = G * m(j) * inv_r3;
                 double fi = G * m(i) * inv_r3;
@@ -348,7 +333,7 @@ void self_acceleration(Particles& p, int start, int count,
                 double dy = py(j) - yi;
                 double dz = pz(j) - zi;
                 double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                double inv_r = 1.0 / Kokkos::sqrt(r2);
+                double inv_r = fast_rsqrt(r2);
                 double inv_r3 = inv_r * inv_r * inv_r;
                 double fj = G * m(j) * inv_r3;
                 axi += fj * dx; ayi += fj * dy; azi += fj * dz;
@@ -396,8 +381,8 @@ void self_gradient_correction(Particles& p, int start, int count,
                 double dx = px(j) - px(i), dy = py(j) - py(i), dz = pz(j) - pz(i);
                 double dax = ax0(jj) - axi0, day = ay0(jj) - ayi0, daz = az0(jj) - azi0;
                 double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                double inv_r2 = 1.0 / r2;
-                double inv_r = 1.0 / Kokkos::sqrt(r2);
+                double inv_r = fast_rsqrt(r2);
+                double inv_r2 = inv_r * inv_r;
                 double inv_r5 = inv_r2 * inv_r2 * inv_r;
                 double r_dot_a = dx*dax + dy*day + dz*daz;
                 double term_x = r2 * dax - 3.0 * r_dot_a * dx;
@@ -438,8 +423,8 @@ void self_gradient_correction(Particles& p, int start, int count,
                 double day = ay0(jj) - ayi0;
                 double daz = az0(jj) - azi0;
                 double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                double inv_r2 = 1.0 / r2;
-                double inv_r = 1.0 / Kokkos::sqrt(r2);
+                double inv_r = fast_rsqrt(r2);
+                double inv_r2 = inv_r * inv_r;
                 double inv_r5 = inv_r2 * inv_r2 * inv_r;
                 double r_dot_a = dx*dax + dy*day + dz*daz;
                 double f = coeff * m(j) * inv_r5;
@@ -497,7 +482,7 @@ void cross_acceleration(Particles& p,
                 double dy = py(j) - py(i);
                 double dz = pz(j) - pz(i);
                 double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                double inv_r = 1.0 / Kokkos::sqrt(r2);
+                double inv_r = fast_rsqrt(r2);
                 double inv_r3 = inv_r * inv_r * inv_r;
                 double fj = G * m(j) * inv_r3;
                 double fi = G * m(i) * inv_r3;
@@ -522,7 +507,7 @@ void cross_acceleration(Particles& p,
                 double dy = py(j) - yi;
                 double dz = pz(j) - zi;
                 double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                double inv_r = 1.0 / Kokkos::sqrt(r2);
+                double inv_r = fast_rsqrt(r2);
                 double inv_r3 = inv_r * inv_r * inv_r;
                 double fj = G * m(j) * inv_r3;
                 axi += fj * dx; ayi += fj * dy; azi += fj * dz;
@@ -539,7 +524,7 @@ void cross_acceleration(Particles& p,
                 double dy = py(i) - yj;
                 double dz = pz(i) - zj;
                 double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                double inv_r = 1.0 / Kokkos::sqrt(r2);
+                double inv_r = fast_rsqrt(r2);
                 double inv_r3 = inv_r * inv_r * inv_r;
                 double fi = G * m(i) * inv_r3;
                 axj += fi * dx; ayj += fi * dy; azj += fi * dz;
@@ -589,8 +574,8 @@ void cross_gradient_correction(Particles& p,
                 double dx = px(j) - px(i), dy = py(j) - py(i), dz = pz(j) - pz(i);
                 double dax = ax0_b(jj) - axi0, day = ay0_b(jj) - ayi0, daz = az0_b(jj) - azi0;
                 double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                double inv_r2 = 1.0 / r2;
-                double inv_r = 1.0 / Kokkos::sqrt(r2);
+                double inv_r = fast_rsqrt(r2);
+                double inv_r2 = inv_r * inv_r;
                 double inv_r5 = inv_r2 * inv_r2 * inv_r;
                 double r_dot_a = dx*dax + dy*day + dz*daz;
                 double term_x = r2 * dax - 3.0 * r_dot_a * dx;
@@ -617,8 +602,8 @@ void cross_gradient_correction(Particles& p,
                 double dx = px(j) - px(i), dy = py(j) - py(i), dz = pz(j) - pz(i);
                 double dax = ax0_b(jj) - axi0, day = ay0_b(jj) - ayi0, daz = az0_b(jj) - azi0;
                 double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                double inv_r2 = 1.0 / r2;
-                double inv_r = 1.0 / Kokkos::sqrt(r2);
+                double inv_r = fast_rsqrt(r2);
+                double inv_r2 = inv_r * inv_r;
                 double inv_r5 = inv_r2 * inv_r2 * inv_r;
                 double r_dot_a = dx*dax + dy*day + dz*daz;
                 double f = coeff * m(j) * inv_r5;
@@ -639,8 +624,8 @@ void cross_gradient_correction(Particles& p,
                 double dx = px(i) - px(j), dy = py(i) - py(j), dz = pz(i) - pz(j);
                 double dax = ax0_a(ii) - axj0, day = ay0_a(ii) - ayj0, daz = az0_a(ii) - azj0;
                 double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                double inv_r2 = 1.0 / r2;
-                double inv_r = 1.0 / Kokkos::sqrt(r2);
+                double inv_r = fast_rsqrt(r2);
+                double inv_r2 = inv_r * inv_r;
                 double inv_r5 = inv_r2 * inv_r2 * inv_r;
                 double r_dot_a = dx*dax + dy*day + dz*daz;
                 double f = coeff * m(i) * inv_r5;
@@ -704,11 +689,12 @@ void compute_timestep_subset(Particles& p, int start, int count,
                 double dvz = pvz(j) - pvz(i);
                 double v_sq = dvx*dvx + dvy*dvy + dvz*dvz;
 
-                double r2_eps = r2 + EPS;
-                double r_norm = Kokkos::sqrt(r2_eps);
+                double r2s = r2 + soft2;
+                double inv_r_ts = fast_rsqrt(r2s);
                 double mass_sum = m(i) + m(j);
-                double t_ff_sq = r2_eps * r_norm / (G * mass_sum + EPS);
-                double t_fb_sq = r2_eps / (v_sq + EPS);
+                double r3 = r2s * r2s * inv_r_ts;
+                double t_ff_sq = r3 / (G * mass_sum + EPS);
+                double t_fb_sq = r2s / (v_sq + EPS);
 
                 double t_min_sq_pair = Kokkos::fmin(t_ff_sq, t_fb_sq);
                 t_min_sq_i = Kokkos::fmin(t_min_sq_i, t_min_sq_pair);
@@ -737,20 +723,9 @@ void compute_timestep_subset(Particles& p, int start, int count,
                 int ii = team.league_rank() * TILE_SIZE + team.team_rank();
                 int i = start + ii;
 
+                // AoS interleaved tile: [x,y,z,m,vx,vy,vz] per j-particle
                 Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                    tile_x(team.team_scratch(0), TILE_SIZE);
-                Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                    tile_y(tile_x.data() + TILE_SIZE, TILE_SIZE);
-                Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                    tile_z(tile_y.data() + TILE_SIZE, TILE_SIZE);
-                Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                    tile_vx(tile_z.data() + TILE_SIZE, TILE_SIZE);
-                Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                    tile_vy(tile_vx.data() + TILE_SIZE, TILE_SIZE);
-                Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                    tile_vz(tile_vy.data() + TILE_SIZE, TILE_SIZE);
-                Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                    tile_m(tile_vz.data() + TILE_SIZE, TILE_SIZE);
+                    tile(team.team_scratch(0), TILE_SIZE * 7);
 
                 double xi = 0, yi = 0, zi = 0;
                 double vxi = 0, vyi = 0, vzi = 0;
@@ -764,19 +739,20 @@ void compute_timestep_subset(Particles& p, int start, int count,
                 double t_min_sq = 1e60;
 
                 for (int tile_st = start; tile_st < end; tile_st += TILE_SIZE) {
-                    int tile_end = (tile_st + TILE_SIZE < end) ? tile_st + TILE_SIZE : end;
-                    int tile_cnt = tile_end - tile_st;
+                    int tile_end_idx = (tile_st + TILE_SIZE < end) ? tile_st + TILE_SIZE : end;
+                    int tile_cnt = tile_end_idx - tile_st;
 
                     int t = team.team_rank();
                     if (t < tile_cnt) {
                         int idx = tile_st + t;
-                        tile_x(t) = px(idx);
-                        tile_y(t) = py(idx);
-                        tile_z(t) = pz(idx);
-                        tile_vx(t) = pvx(idx);
-                        tile_vy(t) = pvy(idx);
-                        tile_vz(t) = pvz(idx);
-                        tile_m(t) = m(idx);
+                        int base = t * 7;
+                        tile(base    ) = px(idx);
+                        tile(base + 1) = py(idx);
+                        tile(base + 2) = pz(idx);
+                        tile(base + 3) = m(idx);
+                        tile(base + 4) = pvx(idx);
+                        tile(base + 5) = pvy(idx);
+                        tile(base + 6) = pvz(idx);
                     }
                     team.team_barrier();
 
@@ -785,21 +761,24 @@ void compute_timestep_subset(Particles& p, int start, int count,
                             int j = tile_st + jt;
                             if (j == i) continue;
 
-                            double dx = tile_x(jt) - xi;
-                            double dy = tile_y(jt) - yi;
-                            double dz = tile_z(jt) - zi;
+                            int jb = jt * 7;
+                            double dx = tile(jb    ) - xi;
+                            double dy = tile(jb + 1) - yi;
+                            double dz = tile(jb + 2) - zi;
+                            double mj = tile(jb + 3);
                             double r2 = dx*dx + dy*dy + dz*dz;
+                            double r2s = r2 + soft2;
 
-                            double dvx = tile_vx(jt) - vxi;
-                            double dvy = tile_vy(jt) - vyi;
-                            double dvz = tile_vz(jt) - vzi;
+                            double dvx = tile(jb + 4) - vxi;
+                            double dvy = tile(jb + 5) - vyi;
+                            double dvz = tile(jb + 6) - vzi;
                             double v_sq = dvx*dvx + dvy*dvy + dvz*dvz;
 
-                            double r2_eps = r2 + EPS;
-                            double r_norm = Kokkos::sqrt(r2_eps);
-                            double mass_sum = mi + tile_m(jt);
-                            double t_ff_sq = r2_eps * r_norm / (G * mass_sum + EPS);
-                            double t_fb_sq = r2_eps / (v_sq + EPS);
+                            double inv_r = fast_rsqrt(r2s);
+                            double mass_sum = mi + mj;
+                            double r3 = r2s * r2s * inv_r;
+                            double t_ff_sq = r3 / (G * mass_sum + EPS);
+                            double t_fb_sq = r2s / (v_sq + EPS);
 
                             double t_min_sq_pair = Kokkos::fmin(t_ff_sq, t_fb_sq);
                             t_min_sq = Kokkos::fmin(t_min_sq, t_min_sq_pair);
@@ -844,7 +823,7 @@ void self_acceleration_kick(Particles& p, int start, int count,
                 double dy = py(j) - py(i);
                 double dz = pz(j) - pz(i);
                 double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                double inv_r = 1.0 / Kokkos::sqrt(r2);
+                double inv_r = fast_rsqrt(r2);
                 double inv_r3 = inv_r * inv_r * inv_r;
                 double fj = G * m(j) * inv_r3;
                 double fi = G * m(i) * inv_r3;
@@ -879,7 +858,7 @@ void self_acceleration_kick(Particles& p, int start, int count,
                 double dy = py(j) - yi;
                 double dz = pz(j) - zi;
                 double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                double inv_r = 1.0 / Kokkos::sqrt(r2);
+                double inv_r = fast_rsqrt(r2);
                 double inv_r3 = inv_r * inv_r * inv_r;
                 double fj = G * m(j) * inv_r3;
                 axi += fj * dx; ayi += fj * dy; azi += fj * dz;
@@ -951,7 +930,7 @@ void cross_acceleration_kick(Particles& p,
                 double dy = py(j) - py(i);
                 double dz = pz(j) - pz(i);
                 double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                double inv_r = 1.0 / Kokkos::sqrt(r2);
+                double inv_r = fast_rsqrt(r2);
                 double inv_r3 = inv_r * inv_r * inv_r;
                 double fj = G * m(j) * inv_r3;
                 double fi = G * m(i) * inv_r3;
@@ -990,7 +969,7 @@ void cross_acceleration_kick(Particles& p,
                 double dy = py(j) - py(i);
                 double dz = pz(j) - pz(i);
                 double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                double inv_r = 1.0 / Kokkos::sqrt(r2);
+                double inv_r = fast_rsqrt(r2);
                 double inv_r3 = inv_r * inv_r * inv_r;
                 double fj = G * m(j) * inv_r3;
                 axi += fj * dx; ayi += fj * dy; azi += fj * dz;
@@ -1010,7 +989,7 @@ void cross_acceleration_kick(Particles& p,
                 double dy = py(i) - py(j);
                 double dz = pz(i) - pz(j);
                 double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                double inv_r = 1.0 / Kokkos::sqrt(r2);
+                double inv_r = fast_rsqrt(r2);
                 double inv_r3 = inv_r * inv_r * inv_r;
                 double fi = G * m(i) * inv_r3;
                 axj += fi * dx; ayj += fi * dy; azj += fi * dz;
@@ -1094,7 +1073,7 @@ void cross_acceleration_kick_and_cache(Particles& p,
                 double dy = py(j) - py(i);
                 double dz = pz(j) - pz(i);
                 double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                double inv_r = 1.0 / Kokkos::sqrt(r2);
+                double inv_r = fast_rsqrt(r2);
                 double inv_r3 = inv_r * inv_r * inv_r;
                 double fj = G * m(j) * inv_r3;
                 double fi = G * m(i) * inv_r3;
@@ -1136,7 +1115,7 @@ void cross_acceleration_kick_and_cache(Particles& p,
                 double dy = py(j) - py(i);
                 double dz = pz(j) - pz(i);
                 double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                double inv_r = 1.0 / Kokkos::sqrt(r2);
+                double inv_r = fast_rsqrt(r2);
                 double inv_r3 = inv_r * inv_r * inv_r;
                 double fj = G * m(j) * inv_r3;
                 axi += fj * dx; ayi += fj * dy; azi += fj * dz;
@@ -1157,7 +1136,7 @@ void cross_acceleration_kick_and_cache(Particles& p,
                 double dy = py(i) - py(j);
                 double dz = pz(i) - pz(j);
                 double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                double inv_r = 1.0 / Kokkos::sqrt(r2);
+                double inv_r = fast_rsqrt(r2);
                 double inv_r3 = inv_r * inv_r * inv_r;
                 double fi = G * m(i) * inv_r3;
                 axj += fi * dx; ayj += fi * dy; azj += fi * dz;
@@ -1237,8 +1216,8 @@ void ghost_gradient_correction(Particles& local, const Particles& ghosts,
             double daz = gaz(j) - azi;
 
             double r2 = dx*dx + dy*dy + dz*dz + soft2;
-            double inv_r2 = 1.0 / r2;
-            double inv_r = 1.0 / Kokkos::sqrt(r2);
+            double inv_r = fast_rsqrt(r2);
+            double inv_r2 = inv_r * inv_r;
             double inv_r5 = inv_r2 * inv_r2 * inv_r;
 
             double r_dot_a = dx*dax + dy*day + dz*daz;
@@ -1291,7 +1270,7 @@ void ghost_cross_kick_slow_from_fast(Particles& local, const Particles& ghosts,
             double dz = gz(j) - zi;
 
             double r2 = dx*dx + dy*dy + dz*dz + soft2;
-            double inv_r = 1.0 / Kokkos::sqrt(r2);
+            double inv_r = fast_rsqrt(r2);
             double inv_r3 = inv_r * inv_r * inv_r;
             double mj_inv_r3 = G * gm(j) * inv_r3;
 
@@ -1342,7 +1321,7 @@ void ghost_cross_kick_fast_from_slow(Particles& local, const Particles& ghosts,
             double dz = gz(j) - zi;
 
             double r2 = dx*dx + dy*dy + dz*dz + soft2;
-            double inv_r = 1.0 / Kokkos::sqrt(r2);
+            double inv_r = fast_rsqrt(r2);
             double inv_r3 = inv_r * inv_r * inv_r;
             double mj_inv_r3 = G * gm(j) * inv_r3;
 
@@ -1417,7 +1396,7 @@ void ghost_cross_kicks_hhs_with_gradient(Particles& local, const Particles& ghos
                 double dz = gz(j) - zi;
 
                 double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                double inv_r = 1.0 / Kokkos::sqrt(r2);
+                double inv_r = fast_rsqrt(r2);
                 double inv_r2 = inv_r * inv_r;
                 double inv_r3 = inv_r2 * inv_r;
                 double mj_inv_r3 = G * gm(j) * inv_r3;
@@ -1474,7 +1453,7 @@ void ghost_cross_kicks_hhs_with_gradient(Particles& local, const Particles& ghos
                 double dz = gz(j) - zi;
 
                 double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                double inv_r = 1.0 / Kokkos::sqrt(r2);
+                double inv_r = fast_rsqrt(r2);
                 double inv_r2 = inv_r * inv_r;
                 double inv_r3 = inv_r2 * inv_r;
                 double mj_inv_r3 = G * gm(j) * inv_r3;

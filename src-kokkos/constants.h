@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cmath>
+#include <Kokkos_Core.hpp>
 
 // CGS physical constants
 constexpr double G_CGS = 6.67e-8;           // cm³ g⁻¹ s⁻²
@@ -25,6 +26,17 @@ constexpr double FSI_MOD_KICK = 2.0 / 3.0;
 
 // Gradient correction coefficient: G * dt² / 24 (from Eq. 29 of Rantala+2020: factor 2 in g_i × 1/48 = 1/24)
 constexpr double GRAD_COEFF = 1.0 / 24.0;
+
+// Portable reciprocal square root: uses hardware rsqrt when available
+KOKKOS_INLINE_FUNCTION double fast_rsqrt(double x) {
+#if defined(__CUDA_ARCH__)
+    return rsqrt(x);
+#elif defined(__HIP_DEVICE_COMPILE__)
+    return rsqrt(x);
+#else
+    return 1.0 / std::sqrt(x);
+#endif
+}
 
 // Plummer sphere
 constexpr double PLUMMER_SCALE_FACTOR = 1.305;

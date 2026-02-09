@@ -85,27 +85,13 @@ void compute_acceleration_and_timestep_distributed(DistributedParticles& dp,
     Kokkos::parallel_for("dist_acc_dt_tiled",
         team_policy(num_teams, DIST_TILE_SIZE).set_scratch_size(0, Kokkos::PerTeam(scratch_size)),
         KOKKOS_LAMBDA(const member_type& team) {
-            // Each thread handles one i-particle from my slice
             int ii = team.league_rank() * DIST_TILE_SIZE + team.team_rank();
             int i = my_start + ii;
 
-            // Scratch memory for j-particle tiles
+            // AoS interleaved tile: [x,y,z,m,vx,vy,vz] per j-particle
             Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                tile_x(team.team_scratch(0), DIST_TILE_SIZE);
-            Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                tile_y(reinterpret_cast<double*>(tile_x.data() + DIST_TILE_SIZE), DIST_TILE_SIZE);
-            Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                tile_z(reinterpret_cast<double*>(tile_y.data() + DIST_TILE_SIZE), DIST_TILE_SIZE);
-            Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                tile_vx(reinterpret_cast<double*>(tile_z.data() + DIST_TILE_SIZE), DIST_TILE_SIZE);
-            Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                tile_vy(reinterpret_cast<double*>(tile_vx.data() + DIST_TILE_SIZE), DIST_TILE_SIZE);
-            Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                tile_vz(reinterpret_cast<double*>(tile_vy.data() + DIST_TILE_SIZE), DIST_TILE_SIZE);
-            Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                tile_m(reinterpret_cast<double*>(tile_vz.data() + DIST_TILE_SIZE), DIST_TILE_SIZE);
+                tile(team.team_scratch(0), DIST_TILE_SIZE * 7);
 
-            // Load i-particle data
             double xi = 0, yi = 0, zi = 0, mi = 0;
             double vxi = 0, vyi = 0, vzi = 0;
             if (ii < my_count) {
@@ -116,55 +102,53 @@ void compute_acceleration_and_timestep_distributed(DistributedParticles& dp,
             double axi = 0, ayi = 0, azi = 0;
             double t_min_i = DBL_MAX;
 
-            // Loop over ALL j-particles in tiles
             for (int tile_start = 0; tile_start < N; tile_start += DIST_TILE_SIZE) {
                 int tile_end = (tile_start + DIST_TILE_SIZE < N) ? tile_start + DIST_TILE_SIZE : N;
                 int tile_count = tile_end - tile_start;
 
-                // Collaborative tile load
                 int t = team.team_rank();
                 if (t < tile_count) {
                     int idx = tile_start + t;
-                    tile_x(t) = pos(idx, 0);
-                    tile_y(t) = pos(idx, 1);
-                    tile_z(t) = pos(idx, 2);
-                    tile_m(t) = pos(idx, 3);
-                    tile_vx(t) = vel(idx, 0);
-                    tile_vy(t) = vel(idx, 1);
-                    tile_vz(t) = vel(idx, 2);
+                    int base = t * 7;
+                    tile(base    ) = pos(idx, 0);
+                    tile(base + 1) = pos(idx, 1);
+                    tile(base + 2) = pos(idx, 2);
+                    tile(base + 3) = pos(idx, 3);
+                    tile(base + 4) = vel(idx, 0);
+                    tile(base + 5) = vel(idx, 1);
+                    tile(base + 6) = vel(idx, 2);
                 }
                 team.team_barrier();
 
-                // Compute forces and adaptive timestep from this tile
                 if (ii < my_count) {
                     for (int jt = 0; jt < tile_count; jt++) {
                         int j = tile_start + jt;
                         if (j == i) continue;
 
-                        double dx = tile_x(jt) - xi;
-                        double dy = tile_y(jt) - yi;
-                        double dz = tile_z(jt) - zi;
+                        int jb = jt * 7;
+                        double dx = tile(jb    ) - xi;
+                        double dy = tile(jb + 1) - yi;
+                        double dz = tile(jb + 2) - zi;
+                        double mj = tile(jb + 3);
                         double r2 = dx*dx + dy*dy + dz*dz;
                         double r2s = r2 + soft2;
-                        double inv_r = 1.0 / Kokkos::sqrt(r2s);
+                        double inv_r = fast_rsqrt(r2s);
                         double inv_r3 = inv_r * inv_r * inv_r;
 
-                        double fj = G * tile_m(jt) * inv_r3;
-                        axi += fj * dx;
-                        ayi += fj * dy;
-                        azi += fj * dz;
+                        axi += G * mj * inv_r3 * dx;
+                        ayi += G * mj * inv_r3 * dy;
+                        azi += G * mj * inv_r3 * dz;
 
-                        // Adaptive timestep (squared-space: 1 sqrt instead of 5)
-                        double dvx = tile_vx(jt) - vxi;
-                        double dvy = tile_vy(jt) - vyi;
-                        double dvz = tile_vz(jt) - vzi;
+                        // Adaptive timestep: reuse inv_r, no extra sqrt
+                        double dvx = tile(jb + 4) - vxi;
+                        double dvy = tile(jb + 5) - vyi;
+                        double dvz = tile(jb + 6) - vzi;
                         double v_sq = dvx*dvx + dvy*dvy + dvz*dvz;
-                        double r2_eps = r2 + EPS;
-                        double r_norm = Kokkos::sqrt(r2_eps);
-                        double mass_sum = mi + tile_m(jt);
+                        double mass_sum = mi + mj;
 
-                        double t_ff_sq = r2_eps * r_norm / (G * mass_sum + EPS);
-                        double t_fb_sq = r2_eps / (v_sq + EPS);
+                        double r3 = r2s * r2s * inv_r;
+                        double t_ff_sq = r3 / (G * mass_sum + EPS);
+                        double t_fb_sq = r2s / (v_sq + EPS);
                         double t_min_sq_pair = Kokkos::fmin(t_ff_sq, t_fb_sq);
                         t_min_i = Kokkos::fmin(t_min_i, t_min_sq_pair);
                     }
@@ -172,7 +156,6 @@ void compute_acceleration_and_timestep_distributed(DistributedParticles& dp,
                 team.team_barrier();
             }
 
-            // Write results (sqrt from squared-space + eta)
             if (ii < my_count) {
                 pax(i) = axi;
                 pay(i) = ayi;
@@ -488,14 +471,9 @@ static void self_acceleration_distributed(DistributedParticles& dp, int start, i
             int ii = team.league_rank() * DIST_TILE_SIZE + team.team_rank();
             int i = slice_start + ii;
 
+            // AoS interleaved tile: [x,y,z,m] per j-particle
             Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                tile_x(team.team_scratch(0), DIST_TILE_SIZE);
-            Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                tile_y(tile_x.data() + DIST_TILE_SIZE, DIST_TILE_SIZE);
-            Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                tile_z(tile_y.data() + DIST_TILE_SIZE, DIST_TILE_SIZE);
-            Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                tile_m(tile_z.data() + DIST_TILE_SIZE, DIST_TILE_SIZE);
+                tile(team.team_scratch(0), DIST_TILE_SIZE * 4);
 
             double xi = 0, yi = 0, zi = 0;
             if (ii < slice_count) {
@@ -511,10 +489,11 @@ static void self_acceleration_distributed(DistributedParticles& dp, int start, i
                 int t = team.team_rank();
                 if (t < tile_count) {
                     int idx = tile_start + t;
-                    tile_x(t) = px(idx);
-                    tile_y(t) = py(idx);
-                    tile_z(t) = pz(idx);
-                    tile_m(t) = pm(idx);
+                    int base = t * 4;
+                    tile(base    ) = px(idx);
+                    tile(base + 1) = py(idx);
+                    tile(base + 2) = pz(idx);
+                    tile(base + 3) = pm(idx);
                 }
                 team.team_barrier();
 
@@ -523,14 +502,15 @@ static void self_acceleration_distributed(DistributedParticles& dp, int start, i
                         int j = tile_start + jt;
                         if (j == i) continue;
 
-                        double dx = tile_x(jt) - xi;
-                        double dy = tile_y(jt) - yi;
-                        double dz = tile_z(jt) - zi;
+                        int jb = jt * 4;
+                        double dx = tile(jb    ) - xi;
+                        double dy = tile(jb + 1) - yi;
+                        double dz = tile(jb + 2) - zi;
 
                         double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                        double inv_r = 1.0 / Kokkos::sqrt(r2);
+                        double inv_r = fast_rsqrt(r2);
                         double inv_r3 = inv_r * inv_r * inv_r;
-                        double mj_inv_r3 = G * tile_m(jt) * inv_r3;
+                        double mj_inv_r3 = G * tile(jb + 3) * inv_r3;
 
                         axi += mj_inv_r3 * dx;
                         ayi += mj_inv_r3 * dy;
@@ -591,13 +571,7 @@ static void self_acceleration_kick_distributed(DistributedParticles& dp, int sta
             int i = slice_start + ii;
 
             Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                tile_x(team.team_scratch(0), DIST_TILE_SIZE);
-            Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                tile_y(tile_x.data() + DIST_TILE_SIZE, DIST_TILE_SIZE);
-            Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                tile_z(tile_y.data() + DIST_TILE_SIZE, DIST_TILE_SIZE);
-            Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                tile_m(tile_z.data() + DIST_TILE_SIZE, DIST_TILE_SIZE);
+                tile(team.team_scratch(0), DIST_TILE_SIZE * 4);
 
             double xi = 0, yi = 0, zi = 0;
             if (ii < slice_count) {
@@ -613,10 +587,11 @@ static void self_acceleration_kick_distributed(DistributedParticles& dp, int sta
                 int t = team.team_rank();
                 if (t < tile_count) {
                     int idx = tile_start + t;
-                    tile_x(t) = px(idx);
-                    tile_y(t) = py(idx);
-                    tile_z(t) = pz(idx);
-                    tile_m(t) = pm(idx);
+                    int base = t * 4;
+                    tile(base    ) = px(idx);
+                    tile(base + 1) = py(idx);
+                    tile(base + 2) = pz(idx);
+                    tile(base + 3) = pm(idx);
                 }
                 team.team_barrier();
 
@@ -625,14 +600,15 @@ static void self_acceleration_kick_distributed(DistributedParticles& dp, int sta
                         int j = tile_start + jt;
                         if (j == i) continue;
 
-                        double dx = tile_x(jt) - xi;
-                        double dy = tile_y(jt) - yi;
-                        double dz = tile_z(jt) - zi;
+                        int jb = jt * 4;
+                        double dx = tile(jb    ) - xi;
+                        double dy = tile(jb + 1) - yi;
+                        double dz = tile(jb + 2) - zi;
 
                         double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                        double inv_r = 1.0 / Kokkos::sqrt(r2);
+                        double inv_r = fast_rsqrt(r2);
                         double inv_r3 = inv_r * inv_r * inv_r;
-                        double mj_inv_r3 = G * tile_m(jt) * inv_r3;
+                        double mj_inv_r3 = G * tile(jb + 3) * inv_r3;
 
                         axi += mj_inv_r3 * dx;
                         ayi += mj_inv_r3 * dy;
@@ -643,11 +619,9 @@ static void self_acceleration_kick_distributed(DistributedParticles& dp, int sta
             }
 
             if (ii < slice_count) {
-                // Store forces (needed for allgather)
                 pax(i) = axi;
                 pay(i) = ayi;
                 paz(i) = azi;
-                // Fused kick directly from registers
                 pvx(i) += axi * kdt;
                 pvy(i) += ayi * kdt;
                 pvz(i) += azi * kdt;
@@ -710,20 +684,9 @@ static void self_gradient_correction_kick_distributed(DistributedParticles& dp, 
             int ii = team.league_rank() * DIST_TILE_SIZE + team.team_rank();
             int i = slice_start + ii;
 
+            // AoS interleaved tile: [x,y,z,m,ax,ay,az] per j-particle
             Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                tile_x(team.team_scratch(0), DIST_TILE_SIZE);
-            Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                tile_y(tile_x.data() + DIST_TILE_SIZE, DIST_TILE_SIZE);
-            Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                tile_z(tile_y.data() + DIST_TILE_SIZE, DIST_TILE_SIZE);
-            Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                tile_m(tile_z.data() + DIST_TILE_SIZE, DIST_TILE_SIZE);
-            Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                tile_ax(tile_m.data() + DIST_TILE_SIZE, DIST_TILE_SIZE);
-            Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                tile_ay(tile_ax.data() + DIST_TILE_SIZE, DIST_TILE_SIZE);
-            Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                tile_az(tile_ay.data() + DIST_TILE_SIZE, DIST_TILE_SIZE);
+                tile(team.team_scratch(0), DIST_TILE_SIZE * 7);
 
             double xi = 0, yi = 0, zi = 0;
             double axi = 0, ayi = 0, azi = 0;
@@ -741,13 +704,14 @@ static void self_gradient_correction_kick_distributed(DistributedParticles& dp, 
                 int t = team.team_rank();
                 if (t < tile_count) {
                     int idx = tile_start + t;
-                    tile_x(t) = px(idx);
-                    tile_y(t) = py(idx);
-                    tile_z(t) = pz(idx);
-                    tile_m(t) = pm(idx);
-                    tile_ax(t) = pax(idx);
-                    tile_ay(t) = pay(idx);
-                    tile_az(t) = paz(idx);
+                    int base = t * 7;
+                    tile(base    ) = px(idx);
+                    tile(base + 1) = py(idx);
+                    tile(base + 2) = pz(idx);
+                    tile(base + 3) = pm(idx);
+                    tile(base + 4) = pax(idx);
+                    tile(base + 5) = pay(idx);
+                    tile(base + 6) = paz(idx);
                 }
                 team.team_barrier();
 
@@ -756,21 +720,22 @@ static void self_gradient_correction_kick_distributed(DistributedParticles& dp, 
                         int j = tile_start + jt;
                         if (j == i) continue;
 
-                        double dx = tile_x(jt) - xi;
-                        double dy = tile_y(jt) - yi;
-                        double dz = tile_z(jt) - zi;
+                        int jb = jt * 7;
+                        double dx = tile(jb    ) - xi;
+                        double dy = tile(jb + 1) - yi;
+                        double dz = tile(jb + 2) - zi;
 
-                        double dax = tile_ax(jt) - axi;
-                        double day = tile_ay(jt) - ayi;
-                        double daz = tile_az(jt) - azi;
+                        double dax = tile(jb + 4) - axi;
+                        double day = tile(jb + 5) - ayi;
+                        double daz = tile(jb + 6) - azi;
 
                         double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                        double inv_r2 = 1.0 / r2;
-                        double inv_r = 1.0 / Kokkos::sqrt(r2);
+                        double inv_r = fast_rsqrt(r2);
+                        double inv_r2 = inv_r * inv_r;
                         double inv_r5 = inv_r2 * inv_r2 * inv_r;
 
                         double r_dot_a = dx*dax + dy*day + dz*daz;
-                        double f = coeff * tile_m(jt) * inv_r5;
+                        double f = coeff * tile(jb + 3) * inv_r5;
 
                         cx += f * (r2 * dax - 3.0 * r_dot_a * dx);
                         cy += f * (r2 * day - 3.0 * r_dot_a * dy);
@@ -885,13 +850,7 @@ static void cross_acceleration_distributed(DistributedParticles& dp,
                 int i = slice_start + ii;
 
                 Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                    tile_x(team.team_scratch(0), DIST_TILE_SIZE);
-                Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                    tile_y(tile_x.data() + DIST_TILE_SIZE, DIST_TILE_SIZE);
-                Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                    tile_z(tile_y.data() + DIST_TILE_SIZE, DIST_TILE_SIZE);
-                Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                    tile_m(tile_z.data() + DIST_TILE_SIZE, DIST_TILE_SIZE);
+                    tile(team.team_scratch(0), DIST_TILE_SIZE * 4);
 
                 double xi = 0, yi = 0, zi = 0;
                 if (ii < slice_count) {
@@ -907,23 +866,25 @@ static void cross_acceleration_distributed(DistributedParticles& dp,
                     int t = team.team_rank();
                     if (t < tile_cnt) {
                         int idx = tile_st + t;
-                        tile_x(t) = px(idx);
-                        tile_y(t) = py(idx);
-                        tile_z(t) = pz(idx);
-                        tile_m(t) = pm(idx);
+                        int base = t * 4;
+                        tile(base    ) = px(idx);
+                        tile(base + 1) = py(idx);
+                        tile(base + 2) = pz(idx);
+                        tile(base + 3) = pm(idx);
                     }
                     team.team_barrier();
 
                     if (ii < slice_count) {
                         for (int jt = 0; jt < tile_cnt; jt++) {
-                            double dx = tile_x(jt) - xi;
-                            double dy = tile_y(jt) - yi;
-                            double dz = tile_z(jt) - zi;
+                            int jb = jt * 4;
+                            double dx = tile(jb    ) - xi;
+                            double dy = tile(jb + 1) - yi;
+                            double dz = tile(jb + 2) - zi;
 
                             double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                            double inv_r = 1.0 / Kokkos::sqrt(r2);
+                            double inv_r = fast_rsqrt(r2);
                             double inv_r3 = inv_r * inv_r * inv_r;
-                            double mj_inv_r3 = G * tile_m(jt) * inv_r3;
+                            double mj_inv_r3 = G * tile(jb + 3) * inv_r3;
 
                             axi += mj_inv_r3 * dx;
                             ayi += mj_inv_r3 * dy;
@@ -956,14 +917,9 @@ static void cross_acceleration_distributed(DistributedParticles& dp,
                 int ii = team.league_rank() * DIST_TILE_SIZE + team.team_rank();
                 int i = slice_start_f + ii;
 
+                const int N = DIST_TILE_SIZE;
                 Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                    tile_x(team.team_scratch(0), DIST_TILE_SIZE);
-                Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                    tile_y(tile_x.data() + DIST_TILE_SIZE, DIST_TILE_SIZE);
-                Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                    tile_z(tile_y.data() + DIST_TILE_SIZE, DIST_TILE_SIZE);
-                Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                    tile_m(tile_z.data() + DIST_TILE_SIZE, DIST_TILE_SIZE);
+                    tile(team.team_scratch(0), N * 4);
 
                 double xi = 0, yi = 0, zi = 0;
                 if (ii < slice_count_f) {
@@ -979,23 +935,25 @@ static void cross_acceleration_distributed(DistributedParticles& dp,
                     int t = team.team_rank();
                     if (t < tile_cnt) {
                         int idx = tile_st + t;
-                        tile_x(t) = px(idx);
-                        tile_y(t) = py(idx);
-                        tile_z(t) = pz(idx);
-                        tile_m(t) = pm(idx);
+                        int tb = t * 4;
+                        tile(tb)   = px(idx);
+                        tile(tb+1) = py(idx);
+                        tile(tb+2) = pz(idx);
+                        tile(tb+3) = pm(idx);
                     }
                     team.team_barrier();
 
                     if (ii < slice_count_f) {
                         for (int jt = 0; jt < tile_cnt; jt++) {
-                            double dx = tile_x(jt) - xi;
-                            double dy = tile_y(jt) - yi;
-                            double dz = tile_z(jt) - zi;
+                            int jb = jt * 4;
+                            double dx = tile(jb)   - xi;
+                            double dy = tile(jb+1) - yi;
+                            double dz = tile(jb+2) - zi;
 
                             double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                            double inv_r = 1.0 / Kokkos::sqrt(r2);
+                            double inv_r = fast_rsqrt(r2);
                             double inv_r3 = inv_r * inv_r * inv_r;
-                            double mj_inv_r3 = G * tile_m(jt) * inv_r3;
+                            double mj_inv_r3 = G * tile(jb+3) * inv_r3;
 
                             axi += mj_inv_r3 * dx;
                             ayi += mj_inv_r3 * dy;
@@ -1056,20 +1014,9 @@ static void cross_acceleration_and_gradient_distributed(DistributedParticles& dp
                 int ii = team.league_rank() * DIST_TILE_SIZE + team.team_rank();
                 int i = slice_start + ii;
 
+                const int N = DIST_TILE_SIZE;
                 Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                    tile_x(team.team_scratch(0), DIST_TILE_SIZE);
-                Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                    tile_y(tile_x.data() + DIST_TILE_SIZE, DIST_TILE_SIZE);
-                Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                    tile_z(tile_y.data() + DIST_TILE_SIZE, DIST_TILE_SIZE);
-                Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                    tile_m(tile_z.data() + DIST_TILE_SIZE, DIST_TILE_SIZE);
-                Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                    tile_ax(tile_m.data() + DIST_TILE_SIZE, DIST_TILE_SIZE);
-                Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                    tile_ay(tile_ax.data() + DIST_TILE_SIZE, DIST_TILE_SIZE);
-                Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                    tile_az(tile_ay.data() + DIST_TILE_SIZE, DIST_TILE_SIZE);
+                    tile(team.team_scratch(0), N * 7);
 
                 double xi = 0, yi = 0, zi = 0;
                 double axi = 0, ayi = 0, azi = 0;
@@ -1087,33 +1034,35 @@ static void cross_acceleration_and_gradient_distributed(DistributedParticles& dp
                     int t = team.team_rank();
                     if (t < tile_cnt) {
                         int idx = tile_st + t;
-                        tile_x(t) = px(idx);
-                        tile_y(t) = py(idx);
-                        tile_z(t) = pz(idx);
-                        tile_m(t) = pm(idx);
-                        tile_ax(t) = pax(idx);
-                        tile_ay(t) = pay(idx);
-                        tile_az(t) = paz(idx);
+                        int tb = t * 7;
+                        tile(tb)   = px(idx);
+                        tile(tb+1) = py(idx);
+                        tile(tb+2) = pz(idx);
+                        tile(tb+3) = pm(idx);
+                        tile(tb+4) = pax(idx);
+                        tile(tb+5) = pay(idx);
+                        tile(tb+6) = paz(idx);
                     }
                     team.team_barrier();
 
                     if (ii < slice_count) {
                         for (int jt = 0; jt < tile_cnt; jt++) {
-                            double dx = tile_x(jt) - xi;
-                            double dy = tile_y(jt) - yi;
-                            double dz = tile_z(jt) - zi;
+                            int jb = jt * 7;
+                            double dx = tile(jb)   - xi;
+                            double dy = tile(jb+1) - yi;
+                            double dz = tile(jb+2) - zi;
 
-                            double dax = tile_ax(jt) - axi;
-                            double day = tile_ay(jt) - ayi;
-                            double daz = tile_az(jt) - azi;
+                            double dax = tile(jb+4) - axi;
+                            double day = tile(jb+5) - ayi;
+                            double daz = tile(jb+6) - azi;
 
                             double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                            double inv_r2 = 1.0 / r2;
-                            double inv_r = 1.0 / Kokkos::sqrt(r2);
+                            double inv_r = fast_rsqrt(r2);
+                            double inv_r2 = inv_r * inv_r;
                             double inv_r5 = inv_r2 * inv_r2 * inv_r;
 
                             double r_dot_a = dx*dax + dy*day + dz*daz;
-                            double f = coeff * tile_m(jt) * inv_r5;
+                            double f = coeff * tile(jb+3) * inv_r5;
 
                             cx += f * (r2 * dax - 3.0 * r_dot_a * dx);
                             cy += f * (r2 * day - 3.0 * r_dot_a * dy);
@@ -1146,20 +1095,9 @@ static void cross_acceleration_and_gradient_distributed(DistributedParticles& dp
                 int ii = team.league_rank() * DIST_TILE_SIZE + team.team_rank();
                 int i = slice_start_f + ii;
 
+                const int N = DIST_TILE_SIZE;
                 Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                    tile_x(team.team_scratch(0), DIST_TILE_SIZE);
-                Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                    tile_y(tile_x.data() + DIST_TILE_SIZE, DIST_TILE_SIZE);
-                Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                    tile_z(tile_y.data() + DIST_TILE_SIZE, DIST_TILE_SIZE);
-                Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                    tile_m(tile_z.data() + DIST_TILE_SIZE, DIST_TILE_SIZE);
-                Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                    tile_ax(tile_m.data() + DIST_TILE_SIZE, DIST_TILE_SIZE);
-                Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                    tile_ay(tile_ax.data() + DIST_TILE_SIZE, DIST_TILE_SIZE);
-                Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                    tile_az(tile_ay.data() + DIST_TILE_SIZE, DIST_TILE_SIZE);
+                    tile(team.team_scratch(0), N * 7);
 
                 double xi = 0, yi = 0, zi = 0;
                 double axi = 0, ayi = 0, azi = 0;
@@ -1177,33 +1115,35 @@ static void cross_acceleration_and_gradient_distributed(DistributedParticles& dp
                     int t = team.team_rank();
                     if (t < tile_cnt) {
                         int idx = tile_st + t;
-                        tile_x(t) = px(idx);
-                        tile_y(t) = py(idx);
-                        tile_z(t) = pz(idx);
-                        tile_m(t) = pm(idx);
-                        tile_ax(t) = pax(idx);
-                        tile_ay(t) = pay(idx);
-                        tile_az(t) = paz(idx);
+                        int tb = t * 7;
+                        tile(tb)   = px(idx);
+                        tile(tb+1) = py(idx);
+                        tile(tb+2) = pz(idx);
+                        tile(tb+3) = pm(idx);
+                        tile(tb+4) = pax(idx);
+                        tile(tb+5) = pay(idx);
+                        tile(tb+6) = paz(idx);
                     }
                     team.team_barrier();
 
                     if (ii < slice_count_f) {
                         for (int jt = 0; jt < tile_cnt; jt++) {
-                            double dx = tile_x(jt) - xi;
-                            double dy = tile_y(jt) - yi;
-                            double dz = tile_z(jt) - zi;
+                            int jb = jt * 7;
+                            double dx = tile(jb)   - xi;
+                            double dy = tile(jb+1) - yi;
+                            double dz = tile(jb+2) - zi;
 
-                            double dax = tile_ax(jt) - axi;
-                            double day = tile_ay(jt) - ayi;
-                            double daz = tile_az(jt) - azi;
+                            double dax = tile(jb+4) - axi;
+                            double day = tile(jb+5) - ayi;
+                            double daz = tile(jb+6) - azi;
 
                             double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                            double inv_r2 = 1.0 / r2;
-                            double inv_r = 1.0 / Kokkos::sqrt(r2);
+                            double inv_r = fast_rsqrt(r2);
+                            double inv_r2 = inv_r * inv_r;
                             double inv_r5 = inv_r2 * inv_r2 * inv_r;
 
                             double r_dot_a = dx*dax + dy*day + dz*daz;
-                            double f = coeff * tile_m(jt) * inv_r5;
+                            double f = coeff * tile(jb+3) * inv_r5;
 
                             cx += f * (r2 * dax - 3.0 * r_dot_a * dx);
                             cy += f * (r2 * day - 3.0 * r_dot_a * dy);
@@ -1262,20 +1202,9 @@ static void compute_timestep_distributed(DistributedParticles& dp, int start, in
             int ii = team.league_rank() * DIST_TILE_SIZE + team.team_rank();
             int i = slice_start + ii;
 
+            const int N = DIST_TILE_SIZE;
             Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                tile_x(team.team_scratch(0), DIST_TILE_SIZE);
-            Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                tile_y(tile_x.data() + DIST_TILE_SIZE, DIST_TILE_SIZE);
-            Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                tile_z(tile_y.data() + DIST_TILE_SIZE, DIST_TILE_SIZE);
-            Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                tile_vx(tile_z.data() + DIST_TILE_SIZE, DIST_TILE_SIZE);
-            Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                tile_vy(tile_vx.data() + DIST_TILE_SIZE, DIST_TILE_SIZE);
-            Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                tile_vz(tile_vy.data() + DIST_TILE_SIZE, DIST_TILE_SIZE);
-            Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                tile_m(tile_vz.data() + DIST_TILE_SIZE, DIST_TILE_SIZE);
+                tile(team.team_scratch(0), N * 7);
 
             double xi = 0, yi = 0, zi = 0;
             double vxi = 0, vyi = 0, vzi = 0;
@@ -1295,13 +1224,14 @@ static void compute_timestep_distributed(DistributedParticles& dp, int start, in
                 int t = team.team_rank();
                 if (t < tile_cnt) {
                     int idx = tile_st + t;
-                    tile_x(t) = px(idx);
-                    tile_y(t) = py(idx);
-                    tile_z(t) = pz(idx);
-                    tile_vx(t) = pvx(idx);
-                    tile_vy(t) = pvy(idx);
-                    tile_vz(t) = pvz(idx);
-                    tile_m(t) = pm(idx);
+                    int tb = t * 7;
+                    tile(tb)   = px(idx);
+                    tile(tb+1) = py(idx);
+                    tile(tb+2) = pz(idx);
+                    tile(tb+3) = pvx(idx);
+                    tile(tb+4) = pvy(idx);
+                    tile(tb+5) = pvz(idx);
+                    tile(tb+6) = pm(idx);
                 }
                 team.team_barrier();
 
@@ -1310,23 +1240,24 @@ static void compute_timestep_distributed(DistributedParticles& dp, int start, in
                         int j = tile_st + jt;
                         if (j == i) continue;
 
-                        double dx = tile_x(jt) - xi;
-                        double dy = tile_y(jt) - yi;
-                        double dz = tile_z(jt) - zi;
+                        int jb = jt * 7;
+                        double dx = tile(jb)   - xi;
+                        double dy = tile(jb+1) - yi;
+                        double dz = tile(jb+2) - zi;
                         double r2 = dx*dx + dy*dy + dz*dz;
 
-                        double dvx = tile_vx(jt) - vxi;
-                        double dvy = tile_vy(jt) - vyi;
-                        double dvz = tile_vz(jt) - vzi;
+                        double dvx = tile(jb+3) - vxi;
+                        double dvy = tile(jb+4) - vyi;
+                        double dvz = tile(jb+5) - vzi;
                         double v_sq = dvx*dvx + dvy*dvy + dvz*dvz;
 
-                        // Squared-space timestep: 1 sqrt/pair instead of 5
-                        // t_ff^2 = r^3 / (G*M), t_fb^2 = r^2 / v^2
-                        double r2_eps = r2 + EPS;
-                        double r_norm = Kokkos::sqrt(r2_eps);
-                        double mass_sum = mi + tile_m(jt);
-                        double t_ff_sq = r2_eps * r_norm / (G * mass_sum + EPS);
-                        double t_fb_sq = r2_eps / (v_sq + EPS);
+                        // Timestep using rsqrt: r^3 = r2s * r2s * inv_r
+                        double r2s = r2 + soft2;
+                        double inv_r = fast_rsqrt(r2s);
+                        double r3 = r2s * r2s * inv_r;
+                        double mass_sum = mi + tile(jb+6);
+                        double t_ff_sq = r3 / (G * mass_sum + EPS);
+                        double t_fb_sq = r2s / (v_sq + EPS);
 
                         double t_min_sq_pair = Kokkos::fmin(t_ff_sq, t_fb_sq);
                         t_min_sq = Kokkos::fmin(t_min_sq, t_min_sq_pair);
@@ -1491,8 +1422,8 @@ static void cpu_self_grad(CpuSubset& s, int start, int count,
             double day = ay0[jj] - ay0[ii];
             double daz = az0[jj] - az0[ii];
             double r2 = dx*dx + dy*dy + dz*dz + soft2;
-            double inv_r2 = 1.0 / r2;
             double inv_r = 1.0 / std::sqrt(r2);
+            double inv_r2 = inv_r * inv_r;
             double inv_r5 = inv_r2 * inv_r2 * inv_r;
             double r_dot_a = dx*dax + dy*day + dz*daz;
             double term_x = r2 * dax - 3.0 * r_dot_a * dx;
@@ -1600,8 +1531,8 @@ static void cpu_cross_acc_grad_kick(CpuSubset& s,
             double dx = s.x[j] - s.x[i], dy = s.y[j] - s.y[i], dz = s.z[j] - s.z[i];
             double dax = ax0_b[jj] - ax0_a[ii], day = ay0_b[jj] - ay0_a[ii], daz = az0_b[jj] - az0_a[ii];
             double r2 = dx*dx + dy*dy + dz*dz + soft2;
-            double inv_r2 = 1.0 / r2;
             double inv_r = 1.0 / std::sqrt(r2);
+            double inv_r2 = inv_r * inv_r;
             double inv_r5 = inv_r2 * inv_r2 * inv_r;
             double r_dot_a = dx*dax + dy*day + dz*daz;
             double term_x = r2 * dax - 3.0 * r_dot_a * dx;
