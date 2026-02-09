@@ -248,29 +248,26 @@ static int partition_by_pivot(Particles& p, int start, int count, double pivot) 
     auto perm = p.scratch_i;
     auto is_slow = p.scratch_i2;  // temporary: 1 if slow, 0 if fast
 
-    // Step 1: Mark each particle as slow (1) or fast (0)
-    Kokkos::parallel_for("mark_slow", count, KOKKOS_LAMBDA(int ii) {
-        is_slow(ii) = (dt_f(start + ii) >= pivot) ? 1 : 0;
-    });
-    Kokkos::fence();
-
-    // Step 2: Exclusive prefix sum to get destination indices for slow particles
-    // slow_prefix[i] = number of slow particles with index < i
+    // Fused mark + exclusive prefix sum in single kernel
+    // is_slow(ii) = 1 if slow, 0 if fast
+    // slow_prefix(ii) = number of slow particles with index < ii
     auto slow_prefix = p.scratch_i3;
-    Kokkos::parallel_scan("prefix_slow", count,
+    Kokkos::parallel_scan("mark_prefix_slow", count,
         KOKKOS_LAMBDA(int ii, int& partial_sum, bool is_final) {
-            if (is_final) slow_prefix(ii) = partial_sum;
-            partial_sum += is_slow(ii);
+            int val = (dt_f(start + ii) >= pivot) ? 1 : 0;
+            if (is_final) {
+                is_slow(ii) = val;
+                slow_prefix(ii) = partial_sum;
+            }
+            partial_sum += val;
         });
     Kokkos::fence();
 
-    // Get total slow count (last prefix + last is_slow value)
-    int slow_count = 0;
-    Kokkos::parallel_reduce("total_slow", 1,
-        KOKKOS_LAMBDA(int, int& sum) {
-            sum = slow_prefix(count - 1) + is_slow(count - 1);
-        }, slow_count);
-    Kokkos::fence();
+    // Get total slow count: deep_copy last element instead of launching a kernel
+    int last_prefix = 0, last_is_slow = 0;
+    Kokkos::deep_copy(last_prefix, Kokkos::subview(slow_prefix, count - 1));
+    Kokkos::deep_copy(last_is_slow, Kokkos::subview(is_slow, count - 1));
+    int slow_count = last_prefix + last_is_slow;
 
     if (slow_count == 0 || slow_count == count) {
         return slow_count;
@@ -1147,6 +1144,197 @@ static void cross_acceleration_distributed(DistributedParticles& dp,
     // its slice of fast independently, so the distributions don't match a combined range
     dp.allgather_accelerations_subset(slow_start, slow_count);
     dp.allgather_accelerations_subset(fast_start, fast_count);
+}
+
+// =============================================================================
+// Fused distributed cross-acceleration + kick
+// Computes cross-forces for my slice, kicks from registers, allgathers, then
+// kicks non-local particles. Saves 2 separate kick kernel launches.
+// =============================================================================
+static void cross_acceleration_kick_distributed(DistributedParticles& dp,
+                                                 int slow_start, int slow_count,
+                                                 int fast_start, int fast_count,
+                                                 double G, double soft2, double kick_dt) {
+    if (slow_count <= 0 || fast_count <= 0) return;
+
+    RawView px{dp.local.x.data()}, py{dp.local.y.data()}, pz{dp.local.z.data()};
+    RawView pvx{dp.local.vx.data()}, pvy{dp.local.vy.data()}, pvz{dp.local.vz.data()};
+    RawView pax{dp.local.ax.data()}, pay{dp.local.ay.data()}, paz{dp.local.az.data()};
+    RawView pm{dp.local.mass.data()};
+
+    using team_policy = Kokkos::TeamPolicy<>;
+    using member_type = team_policy::member_type;
+    using scratch_space = Kokkos::DefaultExecutionSpace::scratch_memory_space;
+
+    size_t scratch_size = TILE_SIZE * 4 * sizeof(double);
+    const double kdt = kick_dt;
+
+    // Slow particles: force from fast + fused kick
+    int slice_start, slice_count;
+    dp.get_force_slice(slow_start, slow_count, slice_start, slice_count);
+
+    if (slice_count > 0) {
+        int num_teams = (slice_count + TILE_SIZE - 1) / TILE_SIZE;
+        const int f_start = fast_start;
+        const int f_end = fast_start + fast_count;
+
+        Kokkos::parallel_for("cross_kick_slow_from_fast",
+            team_policy(num_teams, TILE_SIZE).set_scratch_size(0, Kokkos::PerTeam(scratch_size)),
+            KOKKOS_LAMBDA(const member_type& team) {
+                int ii = team.league_rank() * TILE_SIZE + team.team_rank();
+                int i = slice_start + ii;
+
+                Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
+                    tile(team.team_scratch(0), TILE_SIZE * 4);
+
+                double xi = 0, yi = 0, zi = 0;
+                if (ii < slice_count) {
+                    xi = px(i); yi = py(i); zi = pz(i);
+                }
+
+                double axi = 0, ayi = 0, azi = 0;
+
+                for (int tile_st = f_start; tile_st < f_end; tile_st += TILE_SIZE) {
+                    int tile_end = (tile_st + TILE_SIZE < f_end) ? tile_st + TILE_SIZE : f_end;
+                    int tile_cnt = tile_end - tile_st;
+
+                    int t = team.team_rank();
+                    if (t < tile_cnt) {
+                        int idx = tile_st + t;
+                        int base = t * 4;
+                        tile(base    ) = px(idx);
+                        tile(base + 1) = py(idx);
+                        tile(base + 2) = pz(idx);
+                        tile(base + 3) = pm(idx);
+                    }
+                    team.team_barrier();
+
+                    if (ii < slice_count) {
+                        for (int jt = 0; jt < tile_cnt; jt++) {
+                            int jb = jt * 4;
+                            double dx = tile(jb    ) - xi;
+                            double dy = tile(jb + 1) - yi;
+                            double dz = tile(jb + 2) - zi;
+
+                            double r2 = dx*dx + dy*dy + dz*dz + soft2;
+                            double inv_r = fast_rsqrt(r2);
+                            double inv_r3 = inv_r * inv_r * inv_r;
+                            double mj_inv_r3 = G * tile(jb + 3) * inv_r3;
+
+                            axi += mj_inv_r3 * dx;
+                            ayi += mj_inv_r3 * dy;
+                            azi += mj_inv_r3 * dz;
+                        }
+                    }
+                    team.team_barrier();
+                }
+
+                if (ii < slice_count) {
+                    pax(i) = axi;
+                    pay(i) = ayi;
+                    paz(i) = azi;
+                    pvx(i) += axi * kdt;
+                    pvy(i) += ayi * kdt;
+                    pvz(i) += azi * kdt;
+                }
+            });
+    }
+
+    // Fast particles: force from slow + fused kick
+    int slice_start_f, slice_count_f;
+    dp.get_force_slice(fast_start, fast_count, slice_start_f, slice_count_f);
+
+    if (slice_count_f > 0) {
+        int num_teams_f = (slice_count_f + TILE_SIZE - 1) / TILE_SIZE;
+        const int s_start = slow_start;
+        const int s_end = slow_start + slow_count;
+
+        Kokkos::parallel_for("cross_kick_fast_from_slow",
+            team_policy(num_teams_f, TILE_SIZE).set_scratch_size(0, Kokkos::PerTeam(scratch_size)),
+            KOKKOS_LAMBDA(const member_type& team) {
+                int ii = team.league_rank() * TILE_SIZE + team.team_rank();
+                int i = slice_start_f + ii;
+
+                Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
+                    tile(team.team_scratch(0), TILE_SIZE * 4);
+
+                double xi = 0, yi = 0, zi = 0;
+                if (ii < slice_count_f) {
+                    xi = px(i); yi = py(i); zi = pz(i);
+                }
+
+                double axi = 0, ayi = 0, azi = 0;
+
+                for (int tile_st = s_start; tile_st < s_end; tile_st += TILE_SIZE) {
+                    int tile_end = (tile_st + TILE_SIZE < s_end) ? tile_st + TILE_SIZE : s_end;
+                    int tile_cnt = tile_end - tile_st;
+
+                    int t = team.team_rank();
+                    if (t < tile_cnt) {
+                        int idx = tile_st + t;
+                        int tb = t * 4;
+                        tile(tb)   = px(idx);
+                        tile(tb+1) = py(idx);
+                        tile(tb+2) = pz(idx);
+                        tile(tb+3) = pm(idx);
+                    }
+                    team.team_barrier();
+
+                    if (ii < slice_count_f) {
+                        for (int jt = 0; jt < tile_cnt; jt++) {
+                            int jb = jt * 4;
+                            double dx = tile(jb)   - xi;
+                            double dy = tile(jb+1) - yi;
+                            double dz = tile(jb+2) - zi;
+
+                            double r2 = dx*dx + dy*dy + dz*dz + soft2;
+                            double inv_r = fast_rsqrt(r2);
+                            double inv_r3 = inv_r * inv_r * inv_r;
+                            double mj_inv_r3 = G * tile(jb+3) * inv_r3;
+
+                            axi += mj_inv_r3 * dx;
+                            ayi += mj_inv_r3 * dy;
+                            azi += mj_inv_r3 * dz;
+                        }
+                    }
+                    team.team_barrier();
+                }
+
+                if (ii < slice_count_f) {
+                    pax(i) = axi;
+                    pay(i) = ayi;
+                    paz(i) = azi;
+                    pvx(i) += axi * kdt;
+                    pvy(i) += ayi * kdt;
+                    pvz(i) += azi * kdt;
+                }
+            });
+    }
+    Kokkos::fence();
+
+    // Allgather then kick non-local particles
+    dp.allgather_accelerations_subset(slow_start, slow_count);
+    dp.allgather_accelerations_subset(fast_start, fast_count);
+
+    // Kick non-local slow particles
+    int ss1 = slice_start, sc1 = slice_count;
+    Kokkos::parallel_for("kick_cross_nl_slow", slow_count, KOKKOS_LAMBDA(int ii) {
+        int i = slow_start + ii;
+        if (i >= ss1 && i < ss1 + sc1) return;
+        pvx(i) += pax(i) * kdt;
+        pvy(i) += pay(i) * kdt;
+        pvz(i) += paz(i) * kdt;
+    });
+    // Kick non-local fast particles
+    int ss2 = slice_start_f, sc2 = slice_count_f;
+    Kokkos::parallel_for("kick_cross_nl_fast", fast_count, KOKKOS_LAMBDA(int ii) {
+        int i = fast_start + ii;
+        if (i >= ss2 && i < ss2 + sc2) return;
+        pvx(i) += pax(i) * kdt;
+        pvy(i) += pay(i) * kdt;
+        pvz(i) += paz(i) * kdt;
+    });
+    Kokkos::fence();
 }
 
 // =============================================================================
@@ -2278,14 +2466,10 @@ static void hhs_fsi_recursive_distributed(
     // ALGORITHM 4: HHS-FSI with slow (S) and fast (F) particles
     // ==========================================================================
 
-    // Step 1: Cross-kick S<->F (dt/6) - distributed force + allgather + kick
+    // Step 1: Cross-kick S<->F (dt/6) - fused distributed force + allgather + kick
     g_profiler.start();
-    cross_acceleration_distributed(dp, slow_start, slow_count, fast_start, fast_count, G, soft2);
+    cross_acceleration_kick_distributed(dp, slow_start, slow_count, fast_start, fast_count, G, soft2, pivot_dt * FSI_KICK);
     g_profiler.stop(StepProfiler::CROSS_FORCE, cross_pairs);
-    g_profiler.start();
-    kick_velocities(dp.local, slow_start, slow_count, pivot_dt * FSI_KICK);
-    kick_velocities(dp.local, fast_start, fast_count, pivot_dt * FSI_KICK);
-    g_profiler.stop(StepProfiler::DRIFT_KICK);
 
     // Step 2: FSI half-step on slow
     fsi_step_distributed(dp, slow_start, slow_count, G, soft2, pivot_dt * 0.5);
@@ -2325,14 +2509,10 @@ static void hhs_fsi_recursive_distributed(
     // Step 6: FSI half-step on slow
     fsi_step_distributed(dp, slow_start, slow_count, G, soft2, pivot_dt * 0.5);
 
-    // Step 7: Cross-kick S<->F (dt/6)
+    // Step 7: Cross-kick S<->F (dt/6) - fused distributed force + allgather + kick
     g_profiler.start();
-    cross_acceleration_distributed(dp, slow_start, slow_count, fast_start, fast_count, G, soft2);
+    cross_acceleration_kick_distributed(dp, slow_start, slow_count, fast_start, fast_count, G, soft2, pivot_dt * FSI_KICK);
     g_profiler.stop(StepProfiler::CROSS_FORCE, cross_pairs);
-    g_profiler.start();
-    kick_velocities(dp.local, slow_start, slow_count, pivot_dt * FSI_KICK);
-    kick_velocities(dp.local, fast_start, fast_count, pivot_dt * FSI_KICK);
-    g_profiler.stop(StepProfiler::DRIFT_KICK);
 }
 
 // Distributed HHS-FSI - main entry point

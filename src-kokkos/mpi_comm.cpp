@@ -198,6 +198,12 @@ void DistributedParticles::distribute_initial(Particles& global_particles) {
     mpi_acc_send_buf = Kokkos::View<double*>("mpi_acc_send", 3 * max_per_rank);
     mpi_acc_recv_buf = Kokkos::View<double*>("mpi_acc_recv", 3 * N_total);
 
+    // Pre-allocate count/displacement vectors to avoid heap allocs per allgather
+    mpi_counts.resize(n_ranks);
+    mpi_displs.resize(n_ranks);
+    mpi_packed_counts.resize(n_ranks);
+    mpi_packed_displs.resize(n_ranks);
+
     if (my_rank == 0) {
         std::printf("Replicated particles: %d total, rank 0 computes forces for [%d, %d)\n",
                     N_total, my_start, my_start + my_count);
@@ -265,22 +271,19 @@ void DistributedParticles::allgather_accelerations_subset(int start, int count) 
     int my_slice_start, my_slice_count;
     get_force_slice(start, count, my_slice_start, my_slice_count);
 
-    // Compute per-rank counts and displacements
-    std::vector<int> all_counts(n_ranks);
-    std::vector<int> displs(n_ranks);
+    // Compute per-rank counts and displacements using pre-allocated vectors
     int base = count / n_ranks;
     int remainder = count % n_ranks;
-    displs[0] = 0;
+    mpi_displs[0] = 0;
     for (int r = 0; r < n_ranks; r++) {
-        all_counts[r] = base + (r < remainder ? 1 : 0);
-        if (r > 0) displs[r] = displs[r-1] + all_counts[r-1];
+        mpi_counts[r] = base + (r < remainder ? 1 : 0);
+        if (r > 0) mpi_displs[r] = mpi_displs[r-1] + mpi_counts[r-1];
     }
 
     // Packed: 3 doubles (ax,ay,az) per particle in single MPI message
-    std::vector<int> packed_counts(n_ranks), packed_displs(n_ranks);
     for (int r = 0; r < n_ranks; r++) {
-        packed_counts[r] = 3 * all_counts[r];
-        packed_displs[r] = 3 * displs[r];
+        mpi_packed_counts[r] = 3 * mpi_counts[r];
+        mpi_packed_displs[r] = 3 * mpi_displs[r];
     }
 
     Kokkos::fence();
@@ -302,7 +305,7 @@ void DistributedParticles::allgather_accelerations_subset(int start, int count) 
     Kokkos::fence();
 
     MPI_Allgatherv(send.data(), 3 * my_slice_count, MPI_DOUBLE,
-                   recv.data(), packed_counts.data(), packed_displs.data(), MPI_DOUBLE,
+                   recv.data(), mpi_packed_counts.data(), mpi_packed_displs.data(), MPI_DOUBLE,
                    MPI_COMM_WORLD);
 
     int st = start;
@@ -333,7 +336,7 @@ void DistributedParticles::allgather_accelerations_subset(int start, int count) 
 
     std::vector<double> recv_buf(3 * count);
     MPI_Allgatherv(send_buf.data(), 3 * my_slice_count, MPI_DOUBLE,
-                   recv_buf.data(), packed_counts.data(), packed_displs.data(), MPI_DOUBLE,
+                   recv_buf.data(), mpi_packed_counts.data(), mpi_packed_displs.data(), MPI_DOUBLE,
                    MPI_COMM_WORLD);
 
     // Unpack and copy only the subset back to device
@@ -368,14 +371,13 @@ void DistributedParticles::allgather_timestep_subset(int start, int count) {
     int slice_start, slice_count;
     get_force_slice(start, count, slice_start, slice_count);
 
-    std::vector<int> all_counts(n_ranks);
-    std::vector<int> displs(n_ranks);
+    // Compute per-rank counts and displacements using pre-allocated vectors
     int base = count / n_ranks;
     int remainder = count % n_ranks;
-    displs[0] = 0;
+    mpi_displs[0] = 0;
     for (int r = 0; r < n_ranks; r++) {
-        all_counts[r] = base + (r < remainder ? 1 : 0);
-        if (r > 0) displs[r] = displs[r-1] + all_counts[r-1];
+        mpi_counts[r] = base + (r < remainder ? 1 : 0);
+        if (r > 0) mpi_displs[r] = mpi_displs[r-1] + mpi_counts[r-1];
     }
 
     Kokkos::fence();
@@ -385,7 +387,7 @@ void DistributedParticles::allgather_timestep_subset(int start, int count) {
     auto recv = Kokkos::subview(mpi_acc_recv_buf, Kokkos::make_pair(0, count));
 
     MPI_Allgatherv(local.dt_adapt.data() + slice_start, slice_count, MPI_DOUBLE,
-                   recv.data(), all_counts.data(), displs.data(), MPI_DOUBLE,
+                   recv.data(), mpi_counts.data(), mpi_displs.data(), MPI_DOUBLE,
                    MPI_COMM_WORLD);
 
     auto dt_f = local.dt_adapt;
@@ -405,7 +407,7 @@ void DistributedParticles::allgather_timestep_subset(int start, int count) {
 
     std::vector<double> recv_dt(count);
     MPI_Allgatherv(send_dt.data(), slice_count, MPI_DOUBLE,
-                   recv_dt.data(), all_counts.data(), displs.data(), MPI_DOUBLE,
+                   recv_dt.data(), mpi_counts.data(), mpi_displs.data(), MPI_DOUBLE,
                    MPI_COMM_WORLD);
 
     Kokkos::View<double*, Kokkos::HostSpace, Kokkos::MemoryUnmanaged> h_recv_dt(recv_dt.data(), count);

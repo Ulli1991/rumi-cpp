@@ -93,6 +93,13 @@ struct DistributedParticles {
     Kokkos::View<double*> mpi_acc_send_buf;  // size: 3 * max_per_rank
     Kokkos::View<double*> mpi_acc_recv_buf;  // size: 3 * N_total
 
+    // Pre-allocated per-rank count/displacement arrays for MPI_Allgatherv
+    // Avoids heap allocation on every allgather call
+    std::vector<int> mpi_counts;        // size: n_ranks
+    std::vector<int> mpi_displs;        // size: n_ranks
+    std::vector<int> mpi_packed_counts; // size: n_ranks (3x for packed ax/ay/az)
+    std::vector<int> mpi_packed_displs; // size: n_ranks
+
     // Initialize distributed particles from a global particle set
     // Only rank 0 should have the full particle set initially
     // After this, ALL ranks have ALL particles (replicated)
