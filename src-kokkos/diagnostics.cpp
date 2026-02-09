@@ -48,8 +48,8 @@ DiagnosticState compute_diagnostics(const Particles& p, double G, double soft2) 
                 double dx = px(j) - px(i);
                 double dy = py(j) - py(i);
                 double dz = pz(j) - pz(i);
-                double r = Kokkos::sqrt(dx*dx + dy*dy + dz*dz + soft2);
-                pe_i -= G * pm(i) * pm(j) / r;
+                double inv_r = fast_rsqrt(dx*dx + dy*dy + dz*dz + soft2);
+                pe_i -= G * pm(i) * pm(j) * inv_r;
             }
             lPE += pe_i;
         }, PE);
