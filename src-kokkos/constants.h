@@ -3,18 +3,17 @@
 #include <cmath>
 #include <Kokkos_Core.hpp>
 
-// CGS physical constants
-constexpr double G_CGS = 6.67e-8;           // cm³ g⁻¹ s⁻²
+// Code units: pc, M_sun, km/s  (Gadget-style: time unit = 1 pc / 1 km/s)
+// Length: 1 pc, Mass: 1 M_sun, Velocity: 1 km/s, Time: 1 pc/(1 km/s) ≈ 0.978 Myr
+constexpr double G_CODE = 4.302194e-3;               // G in pc³ M_sun⁻¹ TU⁻²
+constexpr double TIME_UNIT_MYR = 0.977792;           // 1 code TU in Myr (for config/display)
+constexpr double TIME_UNIT_YR  = 977792.0;           // 1 code TU in years
 
-// Unit conversions
-constexpr double LENGTH_UNIT = 1.495978707e13;      // 1 AU in cm
-constexpr double VELOCITY_UNIT = LENGTH_UNIT / 86400.0;  // 1 AU/day in cm/s
-constexpr double MASS_UNIT = 1.989e33;               // 1 M_sun in g
-constexpr double TIME_UNIT = 3.154e7;                // 1 year in seconds
-constexpr double PC_TO_CM = 3.08567758e18;           // 1 parsec in cm
-
-// Gravitational constant in pc³ M_sun⁻¹ Myr⁻²
-constexpr double G_PC_MSUN_MYR = 4.4983e-3;
+// Conversion factors
+constexpr double AU_TO_PC  = 4.84814e-6;             // 1 AU in pc (for outer planets init)
+constexpr double PC_TO_CM  = 3.08567758e18;          // 1 parsec in cm (for SSE interface)
+constexpr double MSUN_IN_G = 1.989e33;               // 1 M_sun in grams (for SSE interface)
+constexpr double G_CGS     = 6.67430e-8;             // G in cm³ g⁻¹ s⁻² (for SSE interface)
 
 // Numerical stability
 constexpr double EPS = 1e-30;

@@ -93,7 +93,7 @@ void compute_errors(const DiagnosticState& cur, const DiagnosticState& ini,
 
 void print_timebin_table(const Particles& p, const std::vector<double>& levels,
                          double dE, double dP, double dL,
-                         double t_yr, int step, bool is_cluster) {
+                         double t_myr, int step, bool is_cluster) {
     int nl = (int)levels.size();
 
     // Mirror level to host for counting
@@ -105,17 +105,17 @@ void print_timebin_table(const Particles& p, const std::vector<double>& levels,
             counts[h_level(i)]++;
     }
 
-    const char* p_label = is_cluster ? "|dP|/M [cm/s]" : "|dP/P|";
+    const char* p_label = is_cluster ? "|dP|/M [km/s]" : "|dP/P|";
 
     std::printf("  %-6s %14s %6s   %12s %14s %12s %14s %8s\n",
-                "Level", "dt [yr]", "count", "|dE/E|", p_label, "|dL/L|", "Time [yr]", "Step");
+                "Level", "dt [Myr]", "count", "|dE/E|", p_label, "|dL/L|", "Time [Myr]", "Step");
     std::printf("----------------------------------------------------------------------------------------------------\n");
 
     for (int l = 0; l < nl; l++) {
-        double dt_yr = levels[l] / TIME_UNIT;
-        std::printf("  L%-5d %14.6e %6d", l, dt_yr, counts[l]);
+        double dt_myr = levels[l] * TIME_UNIT_MYR;
+        std::printf("  L%-5d %14.6e %6d", l, dt_myr, counts[l]);
         if (l == 0 && dE >= 0.0) {
-            std::printf("   %12.6e %14.6e %12.6e %14.2f %8d", dE, dP, dL, t_yr, step);
+            std::printf("   %12.6e %14.6e %12.6e %14.6f %8d", dE, dP, dL, t_myr, step);
         }
         std::printf("\n");
     }
@@ -136,7 +136,7 @@ void print_final(const DiagnosticState& cur, const DiagnosticState& ini,
 
     std::printf("|dE/E0| = %.15e\n", dE);
     if (is_cluster) {
-        std::printf("|dP|/M  = %.15e cm/s\n", dP);
+        std::printf("|dP|/M  = %.15e km/s\n", dP);
     } else {
         std::printf("|dP/P0| = %.15e\n", dP);
     }
@@ -153,25 +153,25 @@ void print_final(const DiagnosticState& cur, const DiagnosticState& ini,
     auto h_orig = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.orig_index);
 
     if (p.N <= 10 && names != nullptr) {
-        std::printf("\nPositions (AU):\n");
+        std::printf("\nPositions (pc):\n");
         std::vector<int> cur_pos(p.N);
         for (int i = 0; i < p.N; i++) cur_pos[h_orig(i)] = i;
         for (int orig = 0; orig < p.N; orig++) {
             int i = cur_pos[orig];
-            double ppx = h_x(i) / LENGTH_UNIT;
-            double ppy = h_y(i) / LENGTH_UNIT;
-            double ppz = h_z(i) / LENGTH_UNIT;
+            double ppx = h_x(i);
+            double ppy = h_y(i);
+            double ppz = h_z(i);
             double r = std::sqrt(ppx*ppx + ppy*ppy + ppz*ppz);
-            std::printf("  %-10s: (%9.4f,%9.4f,%9.4f) r=%.4f\n",
+            std::printf("  %-10s: (%12.6e,%12.6e,%12.6e) r=%.6e\n",
                         names[orig], ppx, ppy, ppz, r);
         }
     } else if (p.N > 10) {
-        std::printf("\nPosition statistics (AU):\n");
+        std::printf("\nPosition statistics (pc):\n");
         double r_min = 1e30, r_max = 0, r_sum = 0;
         for (int i = 0; i < p.N; i++) {
-            double ppx = h_x(i) / LENGTH_UNIT;
-            double ppy = h_y(i) / LENGTH_UNIT;
-            double ppz = h_z(i) / LENGTH_UNIT;
+            double ppx = h_x(i);
+            double ppy = h_y(i);
+            double ppz = h_z(i);
             double r = std::sqrt(ppx*ppx + ppy*ppy + ppz*ppz);
             if (r < r_min) r_min = r;
             if (r > r_max) r_max = r;

@@ -39,14 +39,16 @@ void init_outer_planets(Particles& p) {
     auto h_vz = Kokkos::create_mirror_view(p.vz);
     auto h_mass = Kokkos::create_mirror_view(p.mass);
 
+    // Convert: positions AU→pc, velocities AU/day→km/s, masses already in M_sun
+    constexpr double AU_PER_DAY_TO_KMS = 149597870.7 / 86400.0;  // 1 AU/day ≈ 1731.457 km/s
     for (int i = 0; i < 5; i++) {
-        h_x(i)  = pos_au[i][0] * LENGTH_UNIT;
-        h_y(i)  = pos_au[i][1] * LENGTH_UNIT;
-        h_z(i)  = pos_au[i][2] * LENGTH_UNIT;
-        h_vx(i) = vel_aud[i][0] * VELOCITY_UNIT;
-        h_vy(i) = vel_aud[i][1] * VELOCITY_UNIT;
-        h_vz(i) = vel_aud[i][2] * VELOCITY_UNIT;
-        h_mass(i) = mass_msun[i] * MASS_UNIT;
+        h_x(i)  = pos_au[i][0] * AU_TO_PC;
+        h_y(i)  = pos_au[i][1] * AU_TO_PC;
+        h_z(i)  = pos_au[i][2] * AU_TO_PC;
+        h_vx(i) = vel_aud[i][0] * AU_PER_DAY_TO_KMS;
+        h_vy(i) = vel_aud[i][1] * AU_PER_DAY_TO_KMS;
+        h_vz(i) = vel_aud[i][2] * AU_PER_DAY_TO_KMS;
+        h_mass(i) = mass_msun[i];
     }
 
     Kokkos::deep_copy(p.x, h_x);
@@ -111,9 +113,9 @@ void init_plummer(Particles& p, int N, double M_total_msun, double r_half_pc, in
                   const std::string& mass_distribution, double age_gyr, double metallicity) {
     p.allocate(N);
 
-    double M_total = M_total_msun * MASS_UNIT;
+    double M_total = M_total_msun;            // M_sun = code mass unit
     double a_pc = r_half_pc / PLUMMER_SCALE_FACTOR;
-    double a = a_pc * PC_TO_CM;
+    double a = a_pc;                          // pc = code length unit
 
     std::mt19937_64 rng(seed);
     std::uniform_real_distribution<double> uni(0.0, 1.0);
@@ -159,8 +161,8 @@ void init_plummer(Particles& p, int N, double M_total_msun, double r_half_pc, in
         // M_total is determined by the IMF sampling + SSE, not prescribed
         M_total_msun = 0;
         for (int i = 0; i < N; i++) M_total_msun += masses[i];
-        M_total = M_total_msun * MASS_UNIT;
-        for (int i = 0; i < N; i++) h_mass(i) = masses[i] * MASS_UNIT;
+        M_total = M_total_msun;
+        for (int i = 0; i < N; i++) h_mass(i) = masses[i];
 
         double m_to = turnoff_mass(age_gyr, metallicity);
         std::printf("  Stellar population at %.1f Gyr (Z=%.4f, full SSE):\n", age_gyr, metallicity);
@@ -176,8 +178,9 @@ void init_plummer(Particles& p, int N, double M_total_msun, double r_half_pc, in
         std::printf("    Mass range: %.4f - %.4f M_sun\n", mn, mx);
     }
 
-    // Crossing time: t_cr = sqrt(R_h^3 / (G * M))
-    double t_cr_myr = std::sqrt(r_half_pc * r_half_pc * r_half_pc / (G_PC_MSUN_MYR * M_total_msun));
+    // Crossing time: t_cr = sqrt(R_h^3 / (G * M)) in code TU, then convert to Myr
+    double t_cr_code = std::sqrt(r_half_pc * r_half_pc * r_half_pc / (G_CODE * M_total_msun));
+    double t_cr_myr = t_cr_code * TIME_UNIT_MYR;
     std::printf("  Crossing time: %.3f Myr\n", t_cr_myr);
 
     // Sample positions and velocities
@@ -193,7 +196,7 @@ void init_plummer(Particles& p, int N, double M_total_msun, double r_half_pc, in
         h_y(i) = r * sin_theta * std::sin(phi);
         h_z(i) = r * cos_theta;
 
-        double v_escape = std::sqrt(2.0 * G_CGS * M_total / std::sqrt(r*r + a*a));
+        double v_escape = std::sqrt(2.0 * G_CODE * M_total / std::sqrt(r*r + a*a));
         while (true) {
             double q = uni(rng);
             double g_q = q * q * std::pow(1.0 - q * q, 3.5);

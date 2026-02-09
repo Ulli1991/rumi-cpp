@@ -123,11 +123,11 @@ int main(int argc, char** argv) {
 
         std::string test = test_override.empty() ? cfg.get_str("TEST_CASE", "outer_planets") : test_override;
         std::string integrator = cfg.get_str("INTEGRATOR", "hhs");
-        double t_final_yr   = cfg.get_double("TOTAL_TIME_YEARS", 2.5e8);
-        double dt_max_yr    = cfg.get_double("DT_MAX_YEARS", 1e4);
-        double dt_min_yr    = cfg.get_double("DT_MIN_YEARS", 100.0);
+        double t_final_myr  = cfg.get_double("TOTAL_TIME_MYR", 0.23);
+        double dt_max_myr   = cfg.get_double("DT_MAX_MYR", 1.6e-3);
+        double dt_min_myr   = cfg.get_double("DT_MIN_MYR", 1.0e-9);
         double eta          = cfg.get_double("ETA", 0.02);
-        double soft_au      = cfg.get_double("SOFTENING_AU", 206.265);
+        double soft_pc      = cfg.get_double("SOFTENING_PC", 1e-3);
         int print_interval  = cfg.get_int("PRINT_INTERVAL", 1000);
         int N_plummer       = cfg.get_int("PLUMMER_N", 1000);
         double M_total_msun = cfg.get_double("PLUMMER_M_TOTAL", 3.79e2);
@@ -157,12 +157,11 @@ int main(int argc, char** argv) {
         // Set force dispatch
         set_force_dispatch(use_n3l);
 
-        double G = G_CGS;
-        double soft_cm = soft_au * LENGTH_UNIT;
-        double soft2 = soft_cm * soft_cm;
-        double dt_max = dt_max_yr * TIME_UNIT;
-        double dt_min = dt_min_yr * TIME_UNIT;
-        double t_final = t_final_yr * TIME_UNIT;
+        double G = G_CODE;
+        double soft2 = soft_pc * soft_pc;
+        double dt_max = dt_max_myr / TIME_UNIT_MYR;   // Myr → code TU
+        double dt_min = dt_min_myr / TIME_UNIT_MYR;   // Myr → code TU
+        double t_final = t_final_myr / TIME_UNIT_MYR;  // Myr → code TU
 
         Particles p;
         DistributedParticles dp;  // For multi-GPU mode
@@ -216,10 +215,10 @@ int main(int argc, char** argv) {
                             n_ranks, dp.N_local);
             }
             std::fflush(stdout);
-            std::printf("G=%.4e  soft=%.4e cm  dt_max=%.4e yr  dt_min=%.4e yr  eta=%.4f\n",
-                        G, soft_cm, dt_max_yr, dt_min_yr, eta);
-            std::printf("t_final=%.4e yr  print_interval=%d  memory_tiling=%s  profiling=%s\n\n",
-                        t_final_yr, print_interval, use_memory_tiling ? "true" : "false",
+            std::printf("G=%.4e  soft=%.4e pc  dt_max=%.4e Myr  dt_min=%.4e Myr  eta=%.4f\n",
+                        G, soft_pc, dt_max_myr, dt_min_myr, eta);
+            std::printf("t_final=%.4e Myr  print_interval=%d  memory_tiling=%s  profiling=%s\n\n",
+                        t_final_myr, print_interval, use_memory_tiling ? "true" : "false",
                         profiling_enabled ? "true" : "false");
             std::fflush(stdout);
             if (profiling_enabled) {
@@ -269,7 +268,7 @@ int main(int argc, char** argv) {
                 if (h_dt(i) < mn) mn = h_dt(i);
                 if (h_dt(i) > mx) mx = h_dt(i);
             }
-            std::printf("Particle dt range: [%.4e, %.4e] yr\n\n", mn/TIME_UNIT, mx/TIME_UNIT);
+            std::printf("Particle dt range: [%.4e, %.4e] Myr\n\n", mn*TIME_UNIT_MYR, mx*TIME_UNIT_MYR);
         }
 
         auto diag0 = compute_diagnostics(work_p, G, soft2);
@@ -288,7 +287,7 @@ int main(int argc, char** argv) {
             double dE, dP, dL;
             compute_errors(diag, diag0, work_p, is_cluster, dE, dP, dL);
             if (my_rank == 0) {
-                print_timebin_table(work_p, levels, dE, dP, dL, t_now/TIME_UNIT, step_now, is_cluster);
+                print_timebin_table(work_p, levels, dE, dP, dL, t_now*TIME_UNIT_MYR, step_now, is_cluster);
             }
         };
 
@@ -342,8 +341,8 @@ int main(int argc, char** argv) {
                 g_profiler.step_count++;
 
                 if (my_rank == 0 && step <= 5) {
-                    std::printf("Step %d: %.3fs, dt=%.2e yr\n",
-                        step, step_wall, dt_max/TIME_UNIT);
+                    std::printf("Step %d: %.3fs, dt=%.2e Myr\n",
+                        step, step_wall, dt_max*TIME_UNIT_MYR);
                     std::fflush(stdout);
                 }
 
