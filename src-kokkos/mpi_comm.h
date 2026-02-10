@@ -106,6 +106,11 @@ struct DistributedParticles {
     std::vector<int> mpi_packed_counts; // size: n_ranks (3x for packed ax/ay/az)
     std::vector<int> mpi_packed_displs; // size: n_ranks
 
+    // Per-slot copies for non-blocking iallgather (MPI reads these asynchronously,
+    // so concurrent slots must not share the same arrays)
+    std::vector<int> mpi_packed_counts_slot[2];
+    std::vector<int> mpi_packed_displs_slot[2];
+
     // Initialize distributed particles from a global particle set
     // Only rank 0 should have the full particle set initially
     // After this, ALL ranks have ALL particles (replicated)

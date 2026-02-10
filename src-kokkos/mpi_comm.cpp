@@ -223,6 +223,11 @@ void DistributedParticles::distribute_initial(Particles& global_particles) {
     mpi_displs.resize(n_ranks);
     mpi_packed_counts.resize(n_ranks);
     mpi_packed_displs.resize(n_ranks);
+    // Per-slot copies for concurrent non-blocking iallgathers
+    for (int s = 0; s < 2; s++) {
+        mpi_packed_counts_slot[s].resize(n_ranks);
+        mpi_packed_displs_slot[s].resize(n_ranks);
+    }
 
     if (my_rank == 0) {
         std::printf("Replicated particles: %d total, rank 0 computes forces for [%d, %d)\n",
@@ -417,8 +422,16 @@ void DistributedParticles::iallgather_accelerations_subset(int start, int count,
     });
     Kokkos::fence();
 
+    // Copy counts/displs to per-slot arrays — MPI reads these asynchronously,
+    // so concurrent slots must not share the same underlying memory
+    for (int r = 0; r < n_ranks; r++) {
+        mpi_packed_counts_slot[slot][r] = mpi_packed_counts[r];
+        mpi_packed_displs_slot[slot][r] = mpi_packed_displs[r];
+    }
+
     MPI_Iallgatherv(send.data(), 3 * my_slice_count, MPI_DOUBLE,
-                     recv.data(), mpi_packed_counts.data(), mpi_packed_displs.data(), MPI_DOUBLE,
+                     recv.data(), mpi_packed_counts_slot[slot].data(),
+                     mpi_packed_displs_slot[slot].data(), MPI_DOUBLE,
                      MPI_COMM_WORLD, &mpi_reqs[slot]);
     // Returns immediately — no wait, no unpack
 #else
