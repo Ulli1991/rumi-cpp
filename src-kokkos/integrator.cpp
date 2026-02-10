@@ -12,9 +12,6 @@
 // Global profiler instance
 StepProfiler g_profiler;
 
-// HHS adaptive timestep skip option
-bool skip_second_timestep = false;
-
 // Direct N² threshold for skipping MPI distribution on small subsets
 int direct_n2_threshold = 0;
 
@@ -34,22 +31,6 @@ bool symmetric_timesteps = false;
 
 // TILE_SIZE defined in constants.h
 
-// Fused function pointer types (force + kick combined)
-using AccKickFn = void(*)(Particles&, int, int, double, double, double);
-using AccGradKickFn = void(*)(Particles&, int, int, double, double, double, double);
-using CrossAccGradKickFn = void(*)(Particles&, int, int, int, int, double, double, double, double);
-using CrossAccKickCacheFn = void(*)(Particles&, int, int, int, int, double, double, double);
-
-static AccKickFn fn_self_acc_kick = nullptr;
-static AccGradKickFn fn_self_acc_grad_kick = nullptr;
-static CrossAccGradKickFn fn_cross_acc_grad_kick = nullptr;
-static CrossAccKickCacheFn fn_cross_acc_kick_cache = nullptr;
-static CrossAccKickCacheFn fn_cross_acc_kick = nullptr;  // non-caching version
-
-// Fused self-acceleration + timestep (with symmetrization)
-using AccTimestepFn = void(*)(Particles&, int, int, double, double, double);
-static AccTimestepFn fn_self_acc_timestep = nullptr;
-
 // =============================================================================
 // Distributed force + timestep computation for between-step updates
 // Each rank computes for its slice [my_start, my_count) from ALL N particles
@@ -57,15 +38,11 @@ static AccTimestepFn fn_self_acc_timestep = nullptr;
 // Uses tiled GPU kernel with shared memory for efficiency
 // =============================================================================
 void compute_acceleration_and_timestep_distributed(DistributedParticles& dp,
-                                                 double G, double soft2, double eta,
-                                                 bool use_n3l) {
+                                                 double G, double soft2, double eta) {
 #ifdef USE_MPI
     if (MPIComm::size() == 1) {
         // Single rank: use optimized single-GPU version
-        if (use_n3l)
-            compute_acceleration_and_timestep<true>(dp.local, G, soft2, eta);
-        else
-            compute_acceleration_and_timestep<false>(dp.local, G, soft2, eta);
+        compute_acceleration_and_timestep(dp.local, G, soft2, eta);
         return;
     }
 
@@ -181,30 +158,10 @@ void compute_acceleration_and_timestep_distributed(DistributedParticles& dp,
     dp.allgather_accelerations();
     dp.allgather_timestep();
 #else
-    if (use_n3l)
-        compute_acceleration_and_timestep<true>(dp.local, G, soft2, eta);
-    else
-        compute_acceleration_and_timestep<false>(dp.local, G, soft2, eta);
+    compute_acceleration_and_timestep(dp.local, G, soft2, eta);
 #endif
 }
 
-void set_force_dispatch(bool use_n3l) {
-    if (use_n3l) {
-        fn_self_acc_kick = &self_acceleration_kick<true>;
-        fn_self_acc_grad_kick = &self_acceleration_and_gradient_kick<true>;
-        fn_cross_acc_grad_kick = &cross_acceleration_and_gradient_kick<true>;
-        fn_cross_acc_kick_cache = &cross_acceleration_kick_and_cache<true>;
-        fn_cross_acc_kick = &cross_acceleration_kick<true>;
-        fn_self_acc_timestep = &self_acceleration_and_timestep<true>;
-    } else {
-        fn_self_acc_kick = &self_acceleration_kick<false>;
-        fn_self_acc_grad_kick = &self_acceleration_and_gradient_kick<false>;
-        fn_cross_acc_grad_kick = &cross_acceleration_and_gradient_kick<false>;
-        fn_cross_acc_kick_cache = &cross_acceleration_kick_and_cache<false>;
-        fn_cross_acc_kick = &cross_acceleration_kick<false>;
-        fn_self_acc_timestep = &self_acceleration_and_timestep<false>;
-    }
-}
 
 // Helper: drift positions for [start, start+count)
 // Not static - also used by distributed FSI
@@ -244,7 +201,7 @@ void fsi_step(Particles& p, int start, int count,
         g_profiler.stop(StepProfiler::DRIFT_KICK);
     } else {
         g_profiler.start();
-        fn_self_acc_kick(p, start, count, G, soft2, dt * FSI_KICK);
+        self_acceleration_kick(p, start, count, G, soft2, dt * FSI_KICK);
         g_profiler.stop(StepProfiler::SELF_FORCE);
     }
 
@@ -255,7 +212,7 @@ void fsi_step(Particles& p, int start, int count,
 
     // U-tilde kick (2dt/3) - fused force + gradient + kick
     g_profiler.start();
-    fn_self_acc_grad_kick(p, start, count, G, soft2, dt, dt * FSI_MOD_KICK);
+    self_acceleration_and_gradient_kick(p, start, count, G, soft2, dt, dt * FSI_MOD_KICK);
     g_profiler.stop(StepProfiler::SELF_GRAD);
 
     // T drift (dt/2)
@@ -265,7 +222,7 @@ void fsi_step(Particles& p, int start, int count,
 
     // U kick (dt/6) - fused force + kick
     g_profiler.start();
-    fn_self_acc_kick(p, start, count, G, soft2, dt * FSI_KICK);
+    self_acceleration_kick(p, start, count, G, soft2, dt * FSI_KICK);
     g_profiler.stop(StepProfiler::SELF_FORCE);
 }
 
@@ -378,7 +335,7 @@ static int partition_by_pivot(Particles& p, int start, int count, double pivot) 
 // ==========================================================================
 static void hhs_fsi_step_dynamic_impl(Particles& p, int start, int count, double pivot_dt,
                           double G, double soft2, double dt_min,
-                          double eta, bool use_n3l, bool dt_valid) {
+                          double eta, bool dt_valid) {
     if (count == 0) return;
 
     // Compute adaptive timesteps for this subset (skip if reusing from first half-step)
@@ -386,12 +343,10 @@ static void hhs_fsi_step_dynamic_impl(Particles& p, int start, int count, double
     if (!dt_valid && count > 1) {
         g_profiler.start();
         if (symmetric_timesteps) {
-            fn_self_acc_timestep(p, start, count, G, soft2, eta);
+            self_acceleration_and_timestep(p, start, count, G, soft2, eta);
             forces_valid = true;
-        } else if (use_n3l) {
-            compute_timestep_subset<true>(p, start, count, G, soft2, eta);
         } else {
-            compute_timestep_subset<false>(p, start, count, G, soft2, eta);
+            compute_timestep_subset(p, start, count, G, soft2, eta);
         }
         g_profiler.stop(StepProfiler::ADAPTIVE_DT);
     }
@@ -413,24 +368,24 @@ static void hhs_fsi_step_dynamic_impl(Particles& p, int start, int count, double
     // HHS-FSI structure (Algorithm 4 / Eq. 40)
     // 1. Cross-Newton kick (dt/6)
     g_profiler.start();
-    fn_cross_acc_kick_cache(p, slow_start, slow_count, fast_start, fast_count, G, soft2, pivot_dt * FSI_KICK);
+    cross_acceleration_kick_and_cache(p, slow_start, slow_count, fast_start, fast_count, G, soft2, pivot_dt * FSI_KICK);
     g_profiler.stop(StepProfiler::CROSS_FORCE);
 
     // 2. FSI half-step on slow
     fsi_step(p, slow_start, slow_count, G, soft2, pivot_dt * 0.5);
 
     // 3. Recurse on fast (first half) with pivot/2 — always compute fresh timesteps
-    hhs_fsi_step_dynamic_impl(p, fast_start, fast_count, pivot_dt * 0.5, G, soft2, dt_min, eta, use_n3l, false);
+    hhs_fsi_step_dynamic_impl(p, fast_start, fast_count, pivot_dt * 0.5, G, soft2, dt_min, eta, false);
 
     // 4. Cross-gradient kick (2dt/3)
     g_profiler.start();
-    fn_cross_acc_grad_kick(p, slow_start, slow_count, fast_start, fast_count, G, soft2, pivot_dt, pivot_dt * FSI_MOD_KICK);
+    cross_acceleration_and_gradient_kick(p, slow_start, slow_count, fast_start, fast_count, G, soft2, pivot_dt, pivot_dt * FSI_MOD_KICK);
     g_profiler.stop(StepProfiler::CROSS_GRAD);
 
     // 5. Recurse on fast (second half)
     {
         double sub_pivot = pivot_dt * 0.5;
-        hhs_fsi_step_dynamic_impl(p, fast_start, fast_count, sub_pivot, G, soft2, dt_min, eta, use_n3l, skip_second_timestep);
+        hhs_fsi_step_dynamic_impl(p, fast_start, fast_count, sub_pivot, G, soft2, dt_min, eta, false);
     }
 
     // 6. FSI half-step on slow
@@ -438,14 +393,14 @@ static void hhs_fsi_step_dynamic_impl(Particles& p, int start, int count, double
 
     // 7. Cross-Newton kick (dt/6)
     g_profiler.start();
-    fn_cross_acc_kick_cache(p, slow_start, slow_count, fast_start, fast_count, G, soft2, pivot_dt * FSI_KICK);
+    cross_acceleration_kick_and_cache(p, slow_start, slow_count, fast_start, fast_count, G, soft2, pivot_dt * FSI_KICK);
     g_profiler.stop(StepProfiler::CROSS_FORCE);
 }
 
 void hhs_fsi_step_dynamic(Particles& p, int start, int count, double pivot_dt,
                           double G, double soft2, double dt_min,
-                          double eta, bool use_n3l) {
-    hhs_fsi_step_dynamic_impl(p, start, count, pivot_dt, G, soft2, dt_min, eta, use_n3l, false);
+                          double eta) {
+    hhs_fsi_step_dynamic_impl(p, start, count, pivot_dt, G, soft2, dt_min, eta, false);
 }
 
 // =============================================================================
@@ -3475,7 +3430,7 @@ static void cpu_hhs_recursive(CpuSubset& s, int start, int count,
     if (slow_count == 0) {
         double sub_pivot = pivot_dt * 0.5;
         cpu_hhs_recursive(s, start, count, sub_pivot, G, soft2, dt_min, eta, false);
-        cpu_hhs_recursive(s, start, count, sub_pivot, G, soft2, dt_min, eta, skip_second_timestep);
+        cpu_hhs_recursive(s, start, count, sub_pivot, G, soft2, dt_min, eta, false);
         return;
     }
 
@@ -3492,7 +3447,7 @@ static void cpu_hhs_recursive(CpuSubset& s, int start, int count,
     cpu_cross_acc_grad_kick(s, slow_start, slow_count, fast_start, fast_count, G, soft2, pivot_dt, pivot_dt * FSI_MOD_KICK);
 
     // Step 5: Recurse on fast (second half)
-    cpu_hhs_recursive(s, fast_start, fast_count, pivot_dt * 0.5, G, soft2, dt_min, eta, skip_second_timestep);
+    cpu_hhs_recursive(s, fast_start, fast_count, pivot_dt * 0.5, G, soft2, dt_min, eta, false);
 
     // Step 6: FSI half-step on slow
     cpu_fsi_step(s, slow_start, slow_count, G, soft2, pivot_dt * 0.5);
@@ -3523,7 +3478,7 @@ static void hhs_fsi_recursive_local(
     double pivot_dt,
     double G, double soft2,
     double dt_min, double eta,
-    bool use_n3l, bool dt_valid) {
+    bool dt_valid) {
 
     if (count == 0) return;
 
@@ -3545,12 +3500,10 @@ static void hhs_fsi_recursive_local(
     if (!dt_valid && count > 1) {
         g_profiler.start();
         if (symmetric_timesteps) {
-            fn_self_acc_timestep(p, start, count, G, soft2, eta);
+            self_acceleration_and_timestep(p, start, count, G, soft2, eta);
             forces_valid = true;
-        } else if (use_n3l) {
-            compute_timestep_subset<true>(p, start, count, G, soft2, eta);
         } else {
-            compute_timestep_subset<false>(p, start, count, G, soft2, eta);
+            compute_timestep_subset(p, start, count, G, soft2, eta);
         }
         g_profiler.stop(StepProfiler::ADAPTIVE_DT);
     }
@@ -3575,15 +3528,15 @@ static void hhs_fsi_recursive_local(
     if (slow_count == 0) {
         double sub_pivot = pivot_dt * 0.5;
         hhs_fsi_recursive_local(p, start, count, sub_pivot,
-                                G, soft2, dt_min, eta, use_n3l, false);
+                                G, soft2, dt_min, eta, false);
         hhs_fsi_recursive_local(p, start, count, sub_pivot,
-                                G, soft2, dt_min, eta, use_n3l, skip_second_timestep);
+                                G, soft2, dt_min, eta, false);
         return;
     }
 
     // Step 1: Cross-kick S<->F (dt/6) — no caching
     g_profiler.start();
-    fn_cross_acc_kick(p, slow_start, slow_count, fast_start, fast_count, G, soft2, pivot_dt * FSI_KICK);
+    cross_acceleration_kick(p, slow_start, slow_count, fast_start, fast_count, G, soft2, pivot_dt * FSI_KICK);
     g_profiler.stop(StepProfiler::CROSS_FORCE);
 
     // Step 2: FSI half-step on slow
@@ -3591,23 +3544,23 @@ static void hhs_fsi_recursive_local(
 
     // Step 3: Recurse on fast (first half)
     hhs_fsi_recursive_local(p, fast_start, fast_count, pivot_dt * 0.5,
-                            G, soft2, dt_min, eta, use_n3l, false);
+                            G, soft2, dt_min, eta, false);
 
     // Step 4: Cross-gradient kick (2dt/3)
     g_profiler.start();
-    fn_cross_acc_grad_kick(p, slow_start, slow_count, fast_start, fast_count, G, soft2, pivot_dt, pivot_dt * FSI_MOD_KICK);
+    cross_acceleration_and_gradient_kick(p, slow_start, slow_count, fast_start, fast_count, G, soft2, pivot_dt, pivot_dt * FSI_MOD_KICK);
     g_profiler.stop(StepProfiler::CROSS_GRAD);
 
     // Step 5: Recurse on fast (second half)
     hhs_fsi_recursive_local(p, fast_start, fast_count, pivot_dt * 0.5,
-                            G, soft2, dt_min, eta, use_n3l, skip_second_timestep);
+                            G, soft2, dt_min, eta, false);
 
     // Step 6: FSI half-step on slow
     fsi_step(p, slow_start, slow_count, G, soft2, pivot_dt * 0.5);
 
     // Step 7: Cross-kick S<->F (dt/6) — no caching
     g_profiler.start();
-    fn_cross_acc_kick(p, slow_start, slow_count, fast_start, fast_count, G, soft2, pivot_dt * FSI_KICK);
+    cross_acceleration_kick(p, slow_start, slow_count, fast_start, fast_count, G, soft2, pivot_dt * FSI_KICK);
     g_profiler.stop(StepProfiler::CROSS_FORCE);
 }
 
@@ -3625,20 +3578,18 @@ static void hhs_fsi_recursive_distributed(
     double pivot_dt,                // Current pivot timestep
     double G, double soft2,
     double dt_min, double eta,
-    bool use_n3l, bool dt_valid) {
+    bool dt_valid) {
 
     if (count == 0) return;
 
     // Below threshold: skip MPI, all ranks compute full N² locally
     if (direct_n2_threshold > 0 && count <= direct_n2_threshold) {
         hhs_fsi_recursive_local(dp.local, start, count, pivot_dt,
-                                G, soft2, dt_min, eta, use_n3l, dt_valid);
+                                G, soft2, dt_min, eta, dt_valid);
         // Re-sync packed views: local path modifies SoA directly without updating pos_packed
         dp.local.pack_pos_range(start, count);
         return;
     }
-
-    (void)use_n3l;  // All ranks run identical code, N3L handled in single-GPU path
 
     // Base case: at minimum timestep, use FSI on the subset
     if (pivot_dt * 0.5 < dt_min) {
@@ -3701,9 +3652,9 @@ static void hhs_fsi_recursive_distributed(
     if (slow_count == 0) {
         double sub_pivot = pivot_dt * 0.5;
         hhs_fsi_recursive_distributed(dp, start, count, sub_pivot,
-                                      G, soft2, dt_min, eta, false, false);
+                                      G, soft2, dt_min, eta, false);
         hhs_fsi_recursive_distributed(dp, start, count, sub_pivot,
-                                      G, soft2, dt_min, eta, false, skip_second_timestep);
+                                      G, soft2, dt_min, eta, false);
         return;
     }
 
@@ -3733,7 +3684,7 @@ static void hhs_fsi_recursive_distributed(
 
     // Step 3: Recurse on fast (first half)
     hhs_fsi_recursive_distributed(dp, fast_start, fast_count, pivot_dt * 0.5,
-                                  G, soft2, dt_min, eta, false, false);
+                                  G, soft2, dt_min, eta, false);
 
     // Step 4: Cross-force + gradient (ring) + kick (2dt/3)
     g_profiler.start();
@@ -3750,7 +3701,7 @@ static void hhs_fsi_recursive_distributed(
     {
         double sub_pivot = pivot_dt * 0.5;
         hhs_fsi_recursive_distributed(dp, fast_start, fast_count, sub_pivot,
-                                      G, soft2, dt_min, eta, false, skip_second_timestep);
+                                      G, soft2, dt_min, eta, false);
     }
 
     // Step 6: FSI half-step on slow
@@ -3778,7 +3729,7 @@ static void hhs_fsi_recursive_distributed(
 
     // Step 3: Recurse on fast (first half) — always compute fresh timesteps
     hhs_fsi_recursive_distributed(dp, fast_start, fast_count, pivot_dt * 0.5,
-                                  G, soft2, dt_min, eta, false, false);
+                                  G, soft2, dt_min, eta, false);
 
     // Step 4: Cross-kick S<->F with gradient (2dt/3)
     if (fuse_gradient) {
@@ -3805,7 +3756,7 @@ static void hhs_fsi_recursive_distributed(
     {
         double sub_pivot = pivot_dt * 0.5;
         hhs_fsi_recursive_distributed(dp, fast_start, fast_count, sub_pivot,
-                                      G, soft2, dt_min, eta, false, skip_second_timestep);
+                                      G, soft2, dt_min, eta, false);
     }
 
     // Step 6: FSI half-step on slow
@@ -3821,7 +3772,7 @@ static void hhs_fsi_recursive_distributed(
 // Distributed HHS-FSI - main entry point
 void hhs_fsi_step_distributed(DistributedParticles& dp, double pivot_dt,
                               double G, double soft2, double dt_min,
-                              double eta, bool use_n3l, int global_levels) {
+                              double eta, int global_levels) {
     if (dp.N_total == 0) return;
 
     (void)global_levels;  // Not used in new implementation
@@ -3834,7 +3785,7 @@ void hhs_fsi_step_distributed(DistributedParticles& dp, double pivot_dt,
 
     if (!is_distributed) {
         // Single rank: use standard HHS (uses efficient fused kernels)
-        hhs_fsi_step_dynamic(dp.local, 0, dp.N_total, pivot_dt, G, soft2, dt_min, eta, use_n3l);
+        hhs_fsi_step_dynamic(dp.local, 0, dp.N_total, pivot_dt, G, soft2, dt_min, eta);
         return;
     }
 
@@ -3843,7 +3794,7 @@ void hhs_fsi_step_distributed(DistributedParticles& dp, double pivot_dt,
     // Just run the recursive implementation - all ranks execute identical code
     // Only force computation is distributed (via Allgather after each)
     hhs_fsi_recursive_distributed(dp, 0, dp.N_total, pivot_dt,
-                                  G, soft2, dt_min, eta, use_n3l, false);
+                                  G, soft2, dt_min, eta, false);
 #endif
 }
 

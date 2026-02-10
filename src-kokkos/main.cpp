@@ -138,11 +138,8 @@ int main(int argc, char** argv) {
         double age_gyr      = cfg.get_double("PLUMMER_AGE_GYR", 1.0);
         double metallicity  = cfg.get_double("PLUMMER_METALLICITY", 0.02);
 
-        grad_n3l = (cfg.get_str("GRAD_N3L", "false") == "true");
         use_kahan = (cfg.get_str("USE_KAHAN", "false") == "true");
-        use_memory_tiling = (cfg.get_str("MEMORY_TILING", "true") == "true");
         bool profiling_enabled = (cfg.get_str("PROFILING", "true") == "true");
-        skip_second_timestep = (cfg.get_str("SKIP_SECOND_TIMESTEP", "false") == "true");
         direct_n2_threshold = std::stoi(cfg.get_str("DIRECT_N2_ON_DEEP_LEVELS", "0"));
         cpu_serial_threshold = std::stoi(cfg.get_str("DIRECT_CPU_N2_ON_VERY_DEEP_LEVELS", "0"));
         fuse_gradient = (cfg.get_str("FUSE_GRADIENT", "false") == "true");
@@ -150,16 +147,6 @@ int main(int argc, char** argv) {
         double domain_halfsize = cfg.get_double("DOMAIN_HALFSIZE_PC", 200.0);
         use_nonblocking_mpi = (cfg.get_str("MPI_NON_BLOCKING", "false") == "true");
         symmetric_timesteps = (cfg.get_str("SYMMETRIC_TIMESTEPS", "false") == "true");
-
-        // USE_N3L: default true on CPU-like backends, false on GPU
-        bool use_n3l_default = true;
-#if defined(KOKKOS_ENABLE_CUDA) || defined(KOKKOS_ENABLE_HIP) || defined(KOKKOS_ENABLE_SYCL)
-        use_n3l_default = false;
-#endif
-        bool use_n3l = (cfg.get_str("USE_N3L", use_n3l_default ? "true" : "false") == "true");
-
-        // Set force dispatch
-        set_force_dispatch(use_n3l);
 
         double G = G_CODE;
         double soft2 = soft_pc * soft_pc;
@@ -241,8 +228,8 @@ int main(int argc, char** argv) {
 
         const char* mode_str = (integrator == "hhs") ? "hhs" : "fsi";
         if (my_rank == 0) {
-            std::printf("=== Kokkos N-Body: %s, %s test, N=%d, N3L=%s ===\n",
-                        mode_str, test.c_str(), N_display, use_n3l ? "true" : "false");
+            std::printf("=== Kokkos N-Body: %s, %s test, N=%d ===\n",
+                        mode_str, test.c_str(), N_display);
             if (use_distributed) {
                 std::printf("    Distributed mode: %d ranks, %d local particles\n",
                             n_ranks, dp.N_local);
@@ -250,8 +237,8 @@ int main(int argc, char** argv) {
             std::fflush(stdout);
             std::printf("G=%.4e  soft=%.4e pc  dt_max=%.4e Myr  dt_min=%.4e Myr  eta=%.4f\n",
                         G, soft_pc, dt_max_myr, dt_min_myr, eta);
-            std::printf("t_final=%.4e Myr  print_interval=%d  memory_tiling=%s  profiling=%s\n",
-                        t_final_myr, print_interval, use_memory_tiling ? "true" : "false",
+            std::printf("t_final=%.4e Myr  print_interval=%d  profiling=%s\n",
+                        t_final_myr, print_interval,
                         profiling_enabled ? "true" : "false");
             if (use_integer_positions) {
                 std::printf("Integer positions: domain=%.1f pc, resolution=%.2e pc\n",
@@ -277,12 +264,9 @@ int main(int argc, char** argv) {
 
         if (use_distributed) {
             // Scatter-compute-gather: each rank computes its slice, then allgather
-            compute_acceleration_and_timestep_distributed(dp, G, soft2, eta, use_n3l);
+            compute_acceleration_and_timestep_distributed(dp, G, soft2, eta);
         } else {
-            if (use_n3l)
-                compute_acceleration_and_timestep<true>(work_p, G, soft2, eta);
-            else
-                compute_acceleration_and_timestep<false>(work_p, G, soft2, eta);
+            compute_acceleration_and_timestep(work_p, G, soft2, eta);
         }
 
         auto t1 = std::chrono::high_resolution_clock::now();
@@ -342,10 +326,7 @@ int main(int argc, char** argv) {
                 g_profiler.step_wall_total += step_wall;
                 g_profiler.step_count++;
                 if (step % print_interval == 0) {
-                    if (use_n3l)
-                        compute_acceleration_and_timestep<true>(work_p, G, soft2, eta);
-                    else
-                        compute_acceleration_and_timestep<false>(work_p, G, soft2, eta);
+                    compute_acceleration_and_timestep(work_p, G, soft2, eta);
                     assign_levels(work_p, levels);
                     work_p.partition_by_level();
                     print_progress(t, step);
@@ -365,9 +346,9 @@ int main(int argc, char** argv) {
                 auto step_t0 = std::chrono::high_resolution_clock::now();
 
                 if (use_distributed) {
-                    hhs_fsi_step_distributed(dp, dt_max, G, soft2, dt_min, eta, use_n3l, 2);
+                    hhs_fsi_step_distributed(dp, dt_max, G, soft2, dt_min, eta, 2);
                 } else {
-                    hhs_fsi_step_dynamic(p, 0, p.N, dt_max, G, soft2, dt_min, eta, use_n3l);
+                    hhs_fsi_step_dynamic(p, 0, p.N, dt_max, G, soft2, dt_min, eta);
                 }
 
                 t += dt_max;
@@ -387,12 +368,9 @@ int main(int argc, char** argv) {
                 if (step % print_interval == 0) {
                     // Recompute forces + timestep only for diagnostics
                     if (use_distributed) {
-                        compute_acceleration_and_timestep_distributed(dp, G, soft2, eta, use_n3l);
+                        compute_acceleration_and_timestep_distributed(dp, G, soft2, eta);
                     } else {
-                        if (use_n3l)
-                            compute_acceleration_and_timestep<true>(work_p, G, soft2, eta);
-                        else
-                            compute_acceleration_and_timestep<false>(work_p, G, soft2, eta);
+                        compute_acceleration_and_timestep(work_p, G, soft2, eta);
                     }
                     assign_levels(work_p, levels);
                     work_p.partition_by_level();
@@ -411,12 +389,9 @@ int main(int argc, char** argv) {
         // Final diagnostics: recompute forces + timestep if not already done
         if (step % print_interval != 0) {
             if (use_distributed) {
-                compute_acceleration_and_timestep_distributed(dp, G, soft2, eta, use_n3l);
+                compute_acceleration_and_timestep_distributed(dp, G, soft2, eta);
             } else {
-                if (use_n3l)
-                    compute_acceleration_and_timestep<true>(work_p, G, soft2, eta);
-                else
-                    compute_acceleration_and_timestep<false>(work_p, G, soft2, eta);
+                compute_acceleration_and_timestep(work_p, G, soft2, eta);
             }
             assign_levels(work_p, levels);
             work_p.partition_by_level();

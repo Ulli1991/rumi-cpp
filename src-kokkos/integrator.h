@@ -4,9 +4,6 @@
 #include <vector>
 #include <string>
 
-// HHS adaptive timestep skip option (set from config)
-extern bool skip_second_timestep;       // Skip timestep recomputation on 2nd HHS half-step
-
 // Direct N² threshold: below this particle count, skip MPI distribution
 // and compute forces locally on each rank (eliminates allgather overhead)
 extern int direct_n2_threshold;         // 0 = disabled (always distributed)
@@ -32,9 +29,6 @@ extern bool symmetric_timesteps;        // SYMMETRIC_TIMESTEPS config toggle
 // Forward declaration for distributed particles
 struct DistributedParticles;
 
-// Set force function pointers based on UseN3L flag
-void set_force_dispatch(bool use_n3l);
-
 // Single-level FSI step on [start, start+count)
 // forces_valid: if true, skip first force computation (accelerations already in ax/ay/az)
 void fsi_step(Particles& p, int start, int count,
@@ -45,7 +39,7 @@ void fsi_step(Particles& p, int start, int count,
 // Recomputes adaptive timesteps for the current subset at each level
 void hhs_fsi_step_dynamic(Particles& p, int start, int count, double pivot_dt,
                           double G, double soft2, double dt_min,
-                          double eta, bool use_n3l);
+                          double eta);
 
 // =============================================================================
 // Distributed (Multi-GPU) HHS Integration
@@ -64,7 +58,7 @@ void hhs_fsi_step_dynamic(Particles& p, int start, int count, double pivot_dt,
 // All ranks execute identical HHS recursion; only force computation is distributed
 void hhs_fsi_step_distributed(DistributedParticles& dp, double pivot_dt,
                               double G, double soft2, double dt_min,
-                              double eta, bool use_n3l, int global_levels = 2);
+                              double eta, int global_levels = 2);
 
 // Kick velocities using forces (for distributed case where force already computed)
 void kick_velocities(Particles& p, int start, int count, double dt);
@@ -75,5 +69,4 @@ void drift(Particles& p, int start, int count, double dt);
 // Distributed force + timestep computation for between-step updates
 // Each rank computes for its slice, then allgather accelerations and timesteps
 void compute_acceleration_and_timestep_distributed(DistributedParticles& dp,
-                                                 double G, double soft2, double eta,
-                                                 bool use_n3l = true);
+                                                 double G, double soft2, double eta);
