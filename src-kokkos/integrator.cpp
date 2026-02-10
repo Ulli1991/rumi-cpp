@@ -975,6 +975,744 @@ static void self_acceleration_gradient_kick_fused_distributed(
 }
 
 // =============================================================================
+// RING TOPOLOGY (j-partitioned) force functions
+// Each rank computes partial forces for ALL i-particles from its j-chunk,
+// then MPI_Allreduce(SUM) combines partial contributions across all ranks.
+// Replaces allgatherv-based i-partitioned approach.
+// =============================================================================
+#ifdef MPI_TOPOLOGY_RING
+
+// Self-force: ALL i-particles from this rank's j-chunk, then allreduce
+static void self_acceleration_ring(DistributedParticles& dp, int start, int count,
+                                    double G, double soft2) {
+    if (count <= 0) return;
+
+    // j-chunk for this rank (reuses same decomposition as i-slicing)
+    int j_start, j_count;
+    dp.get_force_slice(start, count, j_start, j_count);
+    const int j_end = j_start + j_count;
+
+    auto pos = dp.local.pos_packed;
+    RawView pax{dp.local.ax.data()}, pay{dp.local.ay.data()}, paz{dp.local.az.data()};
+
+    using team_policy = Kokkos::TeamPolicy<>;
+    using member_type = team_policy::member_type;
+    using scratch_space = Kokkos::DefaultExecutionSpace::scratch_memory_space;
+
+    size_t scratch_size = TILE_SIZE * 4 * sizeof(double);
+    int num_teams = (count + TILE_SIZE - 1) / TILE_SIZE;
+    const int ist = start;
+    const int icnt = count;
+    const int js = j_start;
+    const int je = j_end;
+
+    Kokkos::parallel_for("ring_self_acc",
+        team_policy(num_teams, TILE_SIZE).set_scratch_size(0, Kokkos::PerTeam(scratch_size)),
+        KOKKOS_LAMBDA(const member_type& team) {
+            int ii = team.league_rank() * TILE_SIZE + team.team_rank();
+            int i = ist + ii;
+
+            Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
+                tile(team.team_scratch(0), TILE_SIZE * 4);
+
+            double xi = 0, yi = 0, zi = 0;
+            if (ii < icnt) {
+                double mi_pad;
+                load4(&pos(i, 0), xi, yi, zi, mi_pad);
+            }
+
+            double axi = 0, ayi = 0, azi = 0;
+
+            for (int tile_st = js; tile_st < je; tile_st += TILE_SIZE) {
+                int tile_end = (tile_st + TILE_SIZE < je) ? tile_st + TILE_SIZE : je;
+                int tile_cnt = tile_end - tile_st;
+
+                int t = team.team_rank();
+                if (t < tile_cnt) {
+                    int idx = tile_st + t;
+                    int base = t * 4;
+                    load4(&pos(idx, 0), tile(base), tile(base+1), tile(base+2), tile(base+3));
+                }
+                team.team_barrier();
+
+                if (ii < icnt) {
+                    for (int jt = 0; jt < tile_cnt; jt++) {
+                        int j = tile_st + jt;
+                        if (j == i) continue;
+
+                        int jb = jt * 4;
+                        double dx = tile(jb) - xi;
+                        double dy = tile(jb+1) - yi;
+                        double dz = tile(jb+2) - zi;
+
+                        double r2 = dx*dx + dy*dy + dz*dz + soft2;
+                        double inv_r = fast_rsqrt(r2);
+                        double inv_r3 = inv_r * inv_r * inv_r;
+                        double mj_inv_r3 = G * tile(jb+3) * inv_r3;
+
+                        axi += mj_inv_r3 * dx;
+                        ayi += mj_inv_r3 * dy;
+                        azi += mj_inv_r3 * dz;
+                    }
+                }
+                team.team_barrier();
+            }
+
+            if (ii < icnt) {
+                pax(i) = axi;
+                pay(i) = ayi;
+                paz(i) = azi;
+            }
+        });
+    Kokkos::fence();
+
+    // Allreduce: sum partial forces across all ranks → complete forces everywhere
+    dp.allreduce_accelerations_subset(start, count);
+}
+
+// Self gradient correction: j-partitioned gradient after forces are allreduced.
+// Saves complete forces to scratch, computes partial gradient, allreduces, adds back.
+static void self_gradient_correction_ring(DistributedParticles& dp, int start, int count,
+                                           double G, double soft2, double grad_dt) {
+    if (count <= 0) return;
+
+    int j_start, j_count;
+    dp.get_force_slice(start, count, j_start, j_count);
+    const int j_end = j_start + j_count;
+
+    auto pos = dp.local.pos_packed;
+    RawView pax{dp.local.ax.data()}, pay{dp.local.ay.data()}, paz{dp.local.az.data()};
+
+    // Save complete forces to scratch (needed after gradient allreduce)
+    RawView sax{dp.local.scratch1.data()}, say{dp.local.scratch2.data()}, saz{dp.local.scratch3.data()};
+    Kokkos::parallel_for("ring_save_forces", count, KOKKOS_LAMBDA(int ii) {
+        int i = start + ii;
+        sax(i) = pax(i);
+        say(i) = pay(i);
+        saz(i) = paz(i);
+    });
+    Kokkos::fence();
+
+    const double coeff = G * grad_dt * grad_dt * GRAD_COEFF;
+
+    using team_policy = Kokkos::TeamPolicy<>;
+    using member_type = team_policy::member_type;
+    using scratch_space = Kokkos::DefaultExecutionSpace::scratch_memory_space;
+
+    size_t scratch_size = TILE_SIZE * 7 * sizeof(double);
+    int num_teams = (count + TILE_SIZE - 1) / TILE_SIZE;
+    const int ist = start;
+    const int icnt = count;
+    const int js = j_start;
+    const int je = j_end;
+
+    // Gradient kernel: compute partial correction from j-chunk, write to pax
+    Kokkos::parallel_for("ring_self_grad",
+        team_policy(num_teams, TILE_SIZE).set_scratch_size(0, Kokkos::PerTeam(scratch_size)),
+        KOKKOS_LAMBDA(const member_type& team) {
+            int ii = team.league_rank() * TILE_SIZE + team.team_rank();
+            int i = ist + ii;
+
+            Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
+                tile(team.team_scratch(0), TILE_SIZE * 7);
+
+            double xi = 0, yi = 0, zi = 0;
+            double axi = 0, ayi = 0, azi = 0;
+            if (ii < icnt) {
+                double mi_pad;
+                load4(&pos(i, 0), xi, yi, zi, mi_pad);
+                // Read complete forces from scratch
+                axi = sax(i); ayi = say(i); azi = saz(i);
+            }
+
+            double cx = 0, cy = 0, cz = 0;
+
+            for (int tile_st = js; tile_st < je; tile_st += TILE_SIZE) {
+                int tile_end = (tile_st + TILE_SIZE < je) ? tile_st + TILE_SIZE : je;
+                int tile_cnt = tile_end - tile_st;
+
+                int t = team.team_rank();
+                if (t < tile_cnt) {
+                    int idx = tile_st + t;
+                    int tb = t * 7;
+                    load4(&pos(idx, 0), tile(tb), tile(tb+1), tile(tb+2), tile(tb+3));
+                    // Read complete forces from scratch for j-particles
+                    tile(tb+4) = sax(idx);
+                    tile(tb+5) = say(idx);
+                    tile(tb+6) = saz(idx);
+                }
+                team.team_barrier();
+
+                if (ii < icnt) {
+                    for (int jt = 0; jt < tile_cnt; jt++) {
+                        int j = tile_st + jt;
+                        if (j == i) continue;
+
+                        int jb = jt * 7;
+                        double dx = tile(jb) - xi;
+                        double dy = tile(jb+1) - yi;
+                        double dz = tile(jb+2) - zi;
+
+                        double dax = tile(jb+4) - axi;
+                        double day = tile(jb+5) - ayi;
+                        double daz = tile(jb+6) - azi;
+
+                        double r2 = dx*dx + dy*dy + dz*dz + soft2;
+                        double inv_r = fast_rsqrt(r2);
+                        double inv_r2 = inv_r * inv_r;
+                        double inv_r5 = inv_r2 * inv_r2 * inv_r;
+
+                        double r_dot_a = dx*dax + dy*day + dz*daz;
+                        double f = coeff * tile(jb+3) * inv_r5;
+
+                        cx += f * (r2 * dax - 3.0 * r_dot_a * dx);
+                        cy += f * (r2 * day - 3.0 * r_dot_a * dy);
+                        cz += f * (r2 * daz - 3.0 * r_dot_a * dz);
+                    }
+                }
+                team.team_barrier();
+            }
+
+            // Write ONLY the partial gradient correction (not force + gradient)
+            if (ii < icnt) {
+                pax(i) = cx;
+                pay(i) = cy;
+                paz(i) = cz;
+            }
+        });
+    Kokkos::fence();
+
+    // Allreduce: sum partial gradient corrections
+    dp.allreduce_accelerations_subset(start, count);
+
+    // Add back saved forces: pax = force + gradient_correction
+    Kokkos::parallel_for("ring_add_forces", count, KOKKOS_LAMBDA(int ii) {
+        int i = start + ii;
+        pax(i) += sax(i);
+        pay(i) += say(i);
+        paz(i) += saz(i);
+    });
+    Kokkos::fence();
+}
+
+// Cross-force: ALL slow from fast-chunk + ALL fast from slow-chunk, then allreduce both
+static void cross_acceleration_ring(DistributedParticles& dp,
+                                     int slow_start, int slow_count,
+                                     int fast_start, int fast_count,
+                                     double G, double soft2) {
+    if (slow_count <= 0 || fast_count <= 0) return;
+
+    auto pos = dp.local.pos_packed;
+    RawView pax{dp.local.ax.data()}, pay{dp.local.ay.data()}, paz{dp.local.az.data()};
+
+    using team_policy = Kokkos::TeamPolicy<>;
+    using member_type = team_policy::member_type;
+    using scratch_space = Kokkos::DefaultExecutionSpace::scratch_memory_space;
+
+    size_t scratch_size = TILE_SIZE * 4 * sizeof(double);
+
+    // j-chunk of fast particles for slow-from-fast kernel
+    int j_fast_start, j_fast_count;
+    dp.get_force_slice(fast_start, fast_count, j_fast_start, j_fast_count);
+
+    // Slow particles: partial force from fast j-chunk
+    {
+        int num_teams = (slow_count + TILE_SIZE - 1) / TILE_SIZE;
+        const int ist = slow_start;
+        const int icnt = slow_count;
+        const int js = j_fast_start;
+        const int je = j_fast_start + j_fast_count;
+
+        Kokkos::parallel_for("ring_cross_slow_from_fast",
+            team_policy(num_teams, TILE_SIZE).set_scratch_size(0, Kokkos::PerTeam(scratch_size)),
+            KOKKOS_LAMBDA(const member_type& team) {
+                int ii = team.league_rank() * TILE_SIZE + team.team_rank();
+                int i = ist + ii;
+
+                Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
+                    tile(team.team_scratch(0), TILE_SIZE * 4);
+
+                double xi = 0, yi = 0, zi = 0;
+                if (ii < icnt) {
+                    double mi_pad;
+                    load4(&pos(i, 0), xi, yi, zi, mi_pad);
+                }
+
+                double axi = 0, ayi = 0, azi = 0;
+
+                for (int tile_st = js; tile_st < je; tile_st += TILE_SIZE) {
+                    int tile_end = (tile_st + TILE_SIZE < je) ? tile_st + TILE_SIZE : je;
+                    int tile_cnt = tile_end - tile_st;
+
+                    int t = team.team_rank();
+                    if (t < tile_cnt) {
+                        int idx = tile_st + t;
+                        int base = t * 4;
+                        load4(&pos(idx, 0), tile(base), tile(base+1), tile(base+2), tile(base+3));
+                    }
+                    team.team_barrier();
+
+                    if (ii < icnt) {
+                        for (int jt = 0; jt < tile_cnt; jt++) {
+                            int jb = jt * 4;
+                            double dx = tile(jb) - xi;
+                            double dy = tile(jb+1) - yi;
+                            double dz = tile(jb+2) - zi;
+
+                            double r2 = dx*dx + dy*dy + dz*dz + soft2;
+                            double inv_r = fast_rsqrt(r2);
+                            double inv_r3 = inv_r * inv_r * inv_r;
+                            double mj_inv_r3 = G * tile(jb+3) * inv_r3;
+
+                            axi += mj_inv_r3 * dx;
+                            ayi += mj_inv_r3 * dy;
+                            azi += mj_inv_r3 * dz;
+                        }
+                    }
+                    team.team_barrier();
+                }
+
+                if (ii < icnt) {
+                    pax(i) = axi;
+                    pay(i) = ayi;
+                    paz(i) = azi;
+                }
+            });
+    }
+
+    // j-chunk of slow particles for fast-from-slow kernel
+    int j_slow_start, j_slow_count;
+    dp.get_force_slice(slow_start, slow_count, j_slow_start, j_slow_count);
+
+    // Fast particles: partial force from slow j-chunk
+    {
+        int num_teams = (fast_count + TILE_SIZE - 1) / TILE_SIZE;
+        const int ist = fast_start;
+        const int icnt = fast_count;
+        const int js = j_slow_start;
+        const int je = j_slow_start + j_slow_count;
+
+        Kokkos::parallel_for("ring_cross_fast_from_slow",
+            team_policy(num_teams, TILE_SIZE).set_scratch_size(0, Kokkos::PerTeam(scratch_size)),
+            KOKKOS_LAMBDA(const member_type& team) {
+                int ii = team.league_rank() * TILE_SIZE + team.team_rank();
+                int i = ist + ii;
+
+                Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
+                    tile(team.team_scratch(0), TILE_SIZE * 4);
+
+                double xi = 0, yi = 0, zi = 0;
+                if (ii < icnt) {
+                    double mi_pad;
+                    load4(&pos(i, 0), xi, yi, zi, mi_pad);
+                }
+
+                double axi = 0, ayi = 0, azi = 0;
+
+                for (int tile_st = js; tile_st < je; tile_st += TILE_SIZE) {
+                    int tile_end = (tile_st + TILE_SIZE < je) ? tile_st + TILE_SIZE : je;
+                    int tile_cnt = tile_end - tile_st;
+
+                    int t = team.team_rank();
+                    if (t < tile_cnt) {
+                        int idx = tile_st + t;
+                        int tb = t * 4;
+                        load4(&pos(idx, 0), tile(tb), tile(tb+1), tile(tb+2), tile(tb+3));
+                    }
+                    team.team_barrier();
+
+                    if (ii < icnt) {
+                        for (int jt = 0; jt < tile_cnt; jt++) {
+                            int jb = jt * 4;
+                            double dx = tile(jb) - xi;
+                            double dy = tile(jb+1) - yi;
+                            double dz = tile(jb+2) - zi;
+
+                            double r2 = dx*dx + dy*dy + dz*dz + soft2;
+                            double inv_r = fast_rsqrt(r2);
+                            double inv_r3 = inv_r * inv_r * inv_r;
+                            double mj_inv_r3 = G * tile(jb+3) * inv_r3;
+
+                            axi += mj_inv_r3 * dx;
+                            ayi += mj_inv_r3 * dy;
+                            azi += mj_inv_r3 * dz;
+                        }
+                    }
+                    team.team_barrier();
+                }
+
+                if (ii < icnt) {
+                    pax(i) = axi;
+                    pay(i) = ayi;
+                    paz(i) = azi;
+                }
+            });
+    }
+    Kokkos::fence();
+
+    // Allreduce both slow and fast forces
+    dp.allreduce_accelerations_subset(slow_start, slow_count);
+    dp.allreduce_accelerations_subset(fast_start, fast_count);
+}
+
+// Cross-force + gradient correction (ring/j-partitioned)
+// Flow: cross-force → allreduce → save forces → gradient → allreduce → add back
+static void cross_acceleration_and_gradient_ring(DistributedParticles& dp,
+                                                  int slow_start, int slow_count,
+                                                  int fast_start, int fast_count,
+                                                  double G, double soft2, double dt) {
+    // Step 1: Compute cross-forces (j-partitioned) and allreduce
+    cross_acceleration_ring(dp, slow_start, slow_count, fast_start, fast_count, G, soft2);
+
+    // Now all ranks have complete cross-forces for slow and fast particles.
+    // Save complete forces to scratch for gradient computation.
+    auto pos = dp.local.pos_packed;
+    RawView pax{dp.local.ax.data()}, pay{dp.local.ay.data()}, paz{dp.local.az.data()};
+    RawView sax{dp.local.scratch1.data()}, say{dp.local.scratch2.data()}, saz{dp.local.scratch3.data()};
+    int total_start = slow_start;
+    int total_count = slow_count + fast_count;
+    Kokkos::parallel_for("ring_save_cross_forces", total_count, KOKKOS_LAMBDA(int ii) {
+        int i = total_start + ii;
+        sax(i) = pax(i);
+        say(i) = pay(i);
+        saz(i) = paz(i);
+    });
+    Kokkos::fence();
+
+    const double coeff = G * dt * dt * GRAD_COEFF;
+
+    using team_policy = Kokkos::TeamPolicy<>;
+    using member_type = team_policy::member_type;
+    using scratch_space = Kokkos::DefaultExecutionSpace::scratch_memory_space;
+
+    size_t scratch_size = TILE_SIZE * 7 * sizeof(double);
+
+    // Step 2: Gradient for slow particles from fast j-chunk
+    {
+        int j_fast_start, j_fast_count;
+        dp.get_force_slice(fast_start, fast_count, j_fast_start, j_fast_count);
+
+        int num_teams = (slow_count + TILE_SIZE - 1) / TILE_SIZE;
+        const int ist = slow_start;
+        const int icnt = slow_count;
+        const int js = j_fast_start;
+        const int je = j_fast_start + j_fast_count;
+
+        Kokkos::parallel_for("ring_cross_grad_slow",
+            team_policy(num_teams, TILE_SIZE).set_scratch_size(0, Kokkos::PerTeam(scratch_size)),
+            KOKKOS_LAMBDA(const member_type& team) {
+                int ii = team.league_rank() * TILE_SIZE + team.team_rank();
+                int i = ist + ii;
+
+                Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
+                    tile(team.team_scratch(0), TILE_SIZE * 7);
+
+                double xi = 0, yi = 0, zi = 0;
+                double axi = 0, ayi = 0, azi = 0;
+                if (ii < icnt) {
+                    double mi_pad;
+                    load4(&pos(i, 0), xi, yi, zi, mi_pad);
+                    axi = sax(i); ayi = say(i); azi = saz(i);
+                }
+
+                double cx = 0, cy = 0, cz = 0;
+
+                for (int tile_st = js; tile_st < je; tile_st += TILE_SIZE) {
+                    int tile_end = (tile_st + TILE_SIZE < je) ? tile_st + TILE_SIZE : je;
+                    int tile_cnt = tile_end - tile_st;
+
+                    int t = team.team_rank();
+                    if (t < tile_cnt) {
+                        int idx = tile_st + t;
+                        int tb = t * 7;
+                        load4(&pos(idx, 0), tile(tb), tile(tb+1), tile(tb+2), tile(tb+3));
+                        tile(tb+4) = sax(idx);
+                        tile(tb+5) = say(idx);
+                        tile(tb+6) = saz(idx);
+                    }
+                    team.team_barrier();
+
+                    if (ii < icnt) {
+                        for (int jt = 0; jt < tile_cnt; jt++) {
+                            int jb = jt * 7;
+                            double dx = tile(jb) - xi;
+                            double dy = tile(jb+1) - yi;
+                            double dz = tile(jb+2) - zi;
+
+                            double dax = tile(jb+4) - axi;
+                            double day = tile(jb+5) - ayi;
+                            double daz = tile(jb+6) - azi;
+
+                            double r2 = dx*dx + dy*dy + dz*dz + soft2;
+                            double inv_r = fast_rsqrt(r2);
+                            double inv_r2 = inv_r * inv_r;
+                            double inv_r5 = inv_r2 * inv_r2 * inv_r;
+
+                            double r_dot_a = dx*dax + dy*day + dz*daz;
+                            double f = coeff * tile(jb+3) * inv_r5;
+
+                            cx += f * (r2 * dax - 3.0 * r_dot_a * dx);
+                            cy += f * (r2 * day - 3.0 * r_dot_a * dy);
+                            cz += f * (r2 * daz - 3.0 * r_dot_a * dz);
+                        }
+                    }
+                    team.team_barrier();
+                }
+
+                if (ii < icnt) {
+                    pax(i) = cx;
+                    pay(i) = cy;
+                    paz(i) = cz;
+                }
+            });
+    }
+
+    // Step 3: Gradient for fast particles from slow j-chunk
+    {
+        int j_slow_start, j_slow_count;
+        dp.get_force_slice(slow_start, slow_count, j_slow_start, j_slow_count);
+
+        int num_teams = (fast_count + TILE_SIZE - 1) / TILE_SIZE;
+        const int ist = fast_start;
+        const int icnt = fast_count;
+        const int js = j_slow_start;
+        const int je = j_slow_start + j_slow_count;
+
+        Kokkos::parallel_for("ring_cross_grad_fast",
+            team_policy(num_teams, TILE_SIZE).set_scratch_size(0, Kokkos::PerTeam(scratch_size)),
+            KOKKOS_LAMBDA(const member_type& team) {
+                int ii = team.league_rank() * TILE_SIZE + team.team_rank();
+                int i = ist + ii;
+
+                Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
+                    tile(team.team_scratch(0), TILE_SIZE * 7);
+
+                double xi = 0, yi = 0, zi = 0;
+                double axi = 0, ayi = 0, azi = 0;
+                if (ii < icnt) {
+                    double mi_pad;
+                    load4(&pos(i, 0), xi, yi, zi, mi_pad);
+                    axi = sax(i); ayi = say(i); azi = saz(i);
+                }
+
+                double cx = 0, cy = 0, cz = 0;
+
+                for (int tile_st = js; tile_st < je; tile_st += TILE_SIZE) {
+                    int tile_end = (tile_st + TILE_SIZE < je) ? tile_st + TILE_SIZE : je;
+                    int tile_cnt = tile_end - tile_st;
+
+                    int t = team.team_rank();
+                    if (t < tile_cnt) {
+                        int idx = tile_st + t;
+                        int tb = t * 7;
+                        load4(&pos(idx, 0), tile(tb), tile(tb+1), tile(tb+2), tile(tb+3));
+                        tile(tb+4) = sax(idx);
+                        tile(tb+5) = say(idx);
+                        tile(tb+6) = saz(idx);
+                    }
+                    team.team_barrier();
+
+                    if (ii < icnt) {
+                        for (int jt = 0; jt < tile_cnt; jt++) {
+                            int jb = jt * 7;
+                            double dx = tile(jb) - xi;
+                            double dy = tile(jb+1) - yi;
+                            double dz = tile(jb+2) - zi;
+
+                            double dax = tile(jb+4) - axi;
+                            double day = tile(jb+5) - ayi;
+                            double daz = tile(jb+6) - azi;
+
+                            double r2 = dx*dx + dy*dy + dz*dz + soft2;
+                            double inv_r = fast_rsqrt(r2);
+                            double inv_r2 = inv_r * inv_r;
+                            double inv_r5 = inv_r2 * inv_r2 * inv_r;
+
+                            double r_dot_a = dx*dax + dy*day + dz*daz;
+                            double f = coeff * tile(jb+3) * inv_r5;
+
+                            cx += f * (r2 * dax - 3.0 * r_dot_a * dx);
+                            cy += f * (r2 * day - 3.0 * r_dot_a * dy);
+                            cz += f * (r2 * daz - 3.0 * r_dot_a * dz);
+                        }
+                    }
+                    team.team_barrier();
+                }
+
+                if (ii < icnt) {
+                    pax(i) = cx;
+                    pay(i) = cy;
+                    paz(i) = cz;
+                }
+            });
+    }
+    Kokkos::fence();
+
+    // Allreduce gradient corrections for both slow and fast
+    dp.allreduce_accelerations_subset(slow_start, slow_count);
+    dp.allreduce_accelerations_subset(fast_start, fast_count);
+
+    // Add back saved forces: ax = force + gradient_correction
+    Kokkos::parallel_for("ring_add_cross_forces", total_count, KOKKOS_LAMBDA(int ii) {
+        int i = total_start + ii;
+        pax(i) += sax(i);
+        pay(i) += say(i);
+        paz(i) += saz(i);
+    });
+    Kokkos::fence();
+}
+
+// Timestep: ALL i-particles from this rank's j-chunk, then allreduce(MIN)
+static void compute_timestep_ring(DistributedParticles& dp, int start, int count,
+                                   double G, double soft2, double eta) {
+    if (count <= 1) return;
+
+    int j_start, j_count;
+    dp.get_force_slice(start, count, j_start, j_count);
+    const int j_end = j_start + j_count;
+
+    auto pos = dp.local.pos_packed;
+    auto vel = dp.local.vel_packed;
+    RawView dt_f{dp.local.dt_adapt.data()};
+
+    using team_policy = Kokkos::TeamPolicy<>;
+    using member_type = team_policy::member_type;
+    using scratch_space = Kokkos::DefaultExecutionSpace::scratch_memory_space;
+
+    size_t scratch_size = TILE_SIZE * 7 * sizeof(double);
+    int num_teams = (count + TILE_SIZE - 1) / TILE_SIZE;
+    const int ist = start;
+    const int icnt = count;
+    const int js = j_start;
+    const int je = j_end;
+
+    Kokkos::parallel_for("ring_dt",
+        team_policy(num_teams, TILE_SIZE).set_scratch_size(0, Kokkos::PerTeam(scratch_size)),
+        KOKKOS_LAMBDA(const member_type& team) {
+            int ii = team.league_rank() * TILE_SIZE + team.team_rank();
+            int i = ist + ii;
+
+            Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
+                tile(team.team_scratch(0), TILE_SIZE * 7);
+
+            double xi = 0, yi = 0, zi = 0, mi = 0;
+            double vxi = 0, vyi = 0, vzi = 0;
+            if (ii < icnt) {
+                double vpad;
+                load4(&pos(i, 0), xi, yi, zi, mi);
+                load4(&vel(i, 0), vxi, vyi, vzi, vpad);
+            }
+
+            double t_min_sq = 1e60;
+
+            for (int tile_st = js; tile_st < je; tile_st += TILE_SIZE) {
+                int tile_end = (tile_st + TILE_SIZE < je) ? tile_st + TILE_SIZE : je;
+                int tile_cnt = tile_end - tile_st;
+
+                int t = team.team_rank();
+                if (t < tile_cnt) {
+                    int idx = tile_st + t;
+                    int tb = t * 7;
+                    double vpad;
+                    load4(&pos(idx, 0), tile(tb), tile(tb+1), tile(tb+2), tile(tb+3));
+                    load4(&vel(idx, 0), tile(tb+4), tile(tb+5), tile(tb+6), vpad);
+                }
+                team.team_barrier();
+
+                if (ii < icnt) {
+                    for (int jt = 0; jt < tile_cnt; jt++) {
+                        int j = tile_st + jt;
+                        if (j == i) continue;
+
+                        int jb = jt * 7;
+                        double dx = tile(jb) - xi;
+                        double dy = tile(jb+1) - yi;
+                        double dz = tile(jb+2) - zi;
+                        double r2 = dx*dx + dy*dy + dz*dz;
+
+                        double dvx = tile(jb+4) - vxi;
+                        double dvy = tile(jb+5) - vyi;
+                        double dvz = tile(jb+6) - vzi;
+                        double v_sq = dvx*dvx + dvy*dvy + dvz*dvz;
+
+                        double r2s = r2 + soft2;
+                        double inv_r = fast_rsqrt(r2s);
+                        double r3 = r2s * r2s * inv_r;
+                        double mass_sum = mi + tile(jb+3);
+                        double t_ff_sq = r3 / (G * mass_sum + EPS);
+                        double t_fb_sq = r2s / (v_sq + EPS);
+
+                        double t_min_sq_pair = Kokkos::fmin(t_ff_sq, t_fb_sq);
+                        t_min_sq = Kokkos::fmin(t_min_sq, t_min_sq_pair);
+                    }
+                }
+                team.team_barrier();
+            }
+
+            if (ii < icnt) {
+                dt_f(i) = Kokkos::sqrt(t_min_sq) * eta;
+            }
+        });
+    Kokkos::fence();
+
+    // Allreduce(MIN): each rank's partial min → global min
+    dp.allreduce_timestep_subset(start, count);
+}
+
+// Ring FSI step: force → kick → drift → force → gradient → kick → drift → force → kick
+static void fsi_step_ring(DistributedParticles& dp, int start, int count,
+                           double G, double soft2, double dt) {
+    if (count <= 0) return;
+
+    long long self_pairs = (long long)count * count;
+
+    dp.local.pack_pos_range(start, count);
+
+    // U kick (dt/6): force + allreduce + kick
+    g_profiler.start();
+    self_acceleration_ring(dp, start, count, G, soft2);
+    g_profiler.stop(StepProfiler::SELF_FORCE, self_pairs);
+    g_profiler.start();
+    kick_velocities(dp.local, start, count, dt * FSI_KICK);
+    g_profiler.stop(StepProfiler::DRIFT_KICK);
+
+    // T drift (dt/2)
+    g_profiler.start();
+    drift(dp.local, start, count, dt * FSI_DRIFT);
+    g_profiler.stop(StepProfiler::DRIFT_KICK);
+
+    dp.local.pack_pos_range(start, count);
+
+    // U-tilde kick (2dt/3) with gradient correction
+    g_profiler.start();
+    self_acceleration_ring(dp, start, count, G, soft2);
+    g_profiler.stop(StepProfiler::SELF_FORCE, self_pairs);
+    g_profiler.start();
+    self_gradient_correction_ring(dp, start, count, G, soft2, dt);
+    g_profiler.stop(StepProfiler::SELF_GRAD, self_pairs);
+    g_profiler.start();
+    kick_velocities(dp.local, start, count, dt * FSI_MOD_KICK);
+    g_profiler.stop(StepProfiler::DRIFT_KICK);
+
+    // T drift (dt/2)
+    g_profiler.start();
+    drift(dp.local, start, count, dt * FSI_DRIFT);
+    g_profiler.stop(StepProfiler::DRIFT_KICK);
+
+    dp.local.pack_pos_range(start, count);
+
+    // U kick (dt/6): force + allreduce + kick
+    g_profiler.start();
+    self_acceleration_ring(dp, start, count, G, soft2);
+    g_profiler.stop(StepProfiler::SELF_FORCE, self_pairs);
+    g_profiler.start();
+    kick_velocities(dp.local, start, count, dt * FSI_KICK);
+    g_profiler.stop(StepProfiler::DRIFT_KICK);
+}
+
+#endif // MPI_TOPOLOGY_RING
+
+// =============================================================================
 // Distributed FSI step using scatter-compute-gather
 // All ranks execute identical code; only force computation is distributed
 // Uses fused force+kick kernels to reduce kernel launches and memory traffic
@@ -2514,7 +3252,11 @@ static void hhs_fsi_recursive_distributed(
 
     // Base case: at minimum timestep, use FSI on the subset
     if (pivot_dt * 0.5 < dt_min) {
+#ifdef MPI_TOPOLOGY_RING
+        fsi_step_ring(dp, start, count, G, soft2, pivot_dt);
+#else
         fsi_step_distributed(dp, start, count, G, soft2, pivot_dt);
+#endif
         return;
     }
 
@@ -2524,7 +3266,11 @@ static void hhs_fsi_recursive_distributed(
         dp.local.pack_pos_range(start, count);
         dp.local.pack_vel_range(start, count);
         g_profiler.start();
+#ifdef MPI_TOPOLOGY_RING
+        compute_timestep_ring(dp, start, count, G, soft2, eta);
+#else
         compute_timestep_distributed(dp, start, count, G, soft2, eta);
+#endif
         g_profiler.stop(StepProfiler::ADAPTIVE_DT, (long long)count * count);
     }
 
@@ -2539,7 +3285,11 @@ static void hhs_fsi_recursive_distributed(
 
     // Base case: all particles are slow (no fast particles)
     if (fast_count == 0) {
+#ifdef MPI_TOPOLOGY_RING
+        fsi_step_ring(dp, start, count, G, soft2, pivot_dt);
+#else
         fsi_step_distributed(dp, start, count, G, soft2, pivot_dt);
+#endif
         return;
     }
 
@@ -2561,6 +3311,58 @@ static void hhs_fsi_recursive_distributed(
     // ==========================================================================
     // ALGORITHM 4: HHS-FSI with slow (S) and fast (F) particles
     // ==========================================================================
+
+#ifdef MPI_TOPOLOGY_RING
+    // --- Ring topology: j-partitioned force → allreduce → separate kick ---
+
+    // Step 1: Cross-kick S<->F (dt/6)
+    g_profiler.start();
+    cross_acceleration_ring(dp, slow_start, slow_count, fast_start, fast_count, G, soft2);
+    g_profiler.stop(StepProfiler::CROSS_FORCE, cross_pairs);
+    g_profiler.start();
+    kick_velocities(dp.local, slow_start, slow_count, pivot_dt * FSI_KICK);
+    kick_velocities(dp.local, fast_start, fast_count, pivot_dt * FSI_KICK);
+    g_profiler.stop(StepProfiler::DRIFT_KICK);
+
+    // Step 2: FSI half-step on slow
+    fsi_step_ring(dp, slow_start, slow_count, G, soft2, pivot_dt * 0.5);
+
+    // Step 3: Recurse on fast (first half)
+    hhs_fsi_recursive_distributed(dp, fast_start, fast_count, pivot_dt * 0.5,
+                                  G, soft2, dt_min, eta, false, false);
+
+    // Step 4: Cross-force + gradient (ring) + kick (2dt/3)
+    g_profiler.start();
+    cross_acceleration_and_gradient_ring(dp, slow_start, slow_count,
+                                          fast_start, fast_count,
+                                          G, soft2, pivot_dt);
+    g_profiler.stop(StepProfiler::CROSS_GRAD, cross_pairs * 2);
+    g_profiler.start();
+    kick_velocities(dp.local, slow_start, slow_count, pivot_dt * FSI_MOD_KICK);
+    kick_velocities(dp.local, fast_start, fast_count, pivot_dt * FSI_MOD_KICK);
+    g_profiler.stop(StepProfiler::DRIFT_KICK);
+
+    // Step 5: Recurse on fast (second half)
+    {
+        double sub_pivot = pivot_dt * 0.5;
+        hhs_fsi_recursive_distributed(dp, fast_start, fast_count, sub_pivot,
+                                      G, soft2, dt_min, eta, false, skip_second_timestep);
+    }
+
+    // Step 6: FSI half-step on slow
+    fsi_step_ring(dp, slow_start, slow_count, G, soft2, pivot_dt * 0.5);
+
+    // Step 7: Cross-kick S<->F (dt/6)
+    g_profiler.start();
+    cross_acceleration_ring(dp, slow_start, slow_count, fast_start, fast_count, G, soft2);
+    g_profiler.stop(StepProfiler::CROSS_FORCE, cross_pairs);
+    g_profiler.start();
+    kick_velocities(dp.local, slow_start, slow_count, pivot_dt * FSI_KICK);
+    kick_velocities(dp.local, fast_start, fast_count, pivot_dt * FSI_KICK);
+    g_profiler.stop(StepProfiler::DRIFT_KICK);
+
+#else
+    // --- Default: i-partitioned force → allgatherv → fused kick ---
 
     // Step 1: Cross-kick S<->F (dt/6) - fused distributed force + allgather + kick
     g_profiler.start();
@@ -2609,6 +3411,7 @@ static void hhs_fsi_recursive_distributed(
     g_profiler.start();
     cross_acceleration_kick_distributed(dp, slow_start, slow_count, fast_start, fast_count, G, soft2, pivot_dt * FSI_KICK);
     g_profiler.stop(StepProfiler::CROSS_FORCE, cross_pairs);
+#endif // MPI_TOPOLOGY_RING
 }
 
 // Distributed HHS-FSI - main entry point

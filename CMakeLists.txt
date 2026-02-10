@@ -4,6 +4,7 @@ project(nbody-kokkos LANGUAGES CXX)
 # Option to enable MPI
 option(USE_MPI "Enable MPI for multi-node support" OFF)
 option(USE_GPU_AWARE_MPI "Enable GPU-aware MPI (CUDA-aware/ROCm-aware)" OFF)
+option(MPI_TOPOLOGY_RING "Use ring/j-partitioned MPI topology (allreduce instead of allgatherv)" OFF)
 option(MIXED_PRECISION "FP32 rsqrt seed + FP64 Newton-Raphson (~1e-14 precision)" OFF)
 
 # Find Kokkos (set Kokkos_ROOT or CMAKE_PREFIX_PATH)
@@ -47,5 +48,11 @@ if(USE_MPI)
     if(USE_GPU_AWARE_MPI)
         target_compile_definitions(nbody-kokkos PRIVATE USE_GPU_AWARE_MPI=1)
         message(STATUS "GPU-aware MPI enabled - ensure your MPI supports CUDA/ROCm")
+    endif()
+
+    # Ring topology: j-partitioned force compute with MPI_Allreduce
+    if(MPI_TOPOLOGY_RING)
+        target_compile_definitions(nbody-kokkos PRIVATE MPI_TOPOLOGY_RING)
+        message(STATUS "MPI topology: RING (j-partitioned, allreduce)")
     endif()
 endif()

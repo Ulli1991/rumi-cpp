@@ -232,6 +232,11 @@ void DistributedParticles::distribute_initial(Particles& global_particles) {
     if (my_rank == 0) {
         std::printf("Replicated particles: %d total, rank 0 computes forces for [%d, %d)\n",
                     N_total, my_start, my_start + my_count);
+#ifdef MPI_TOPOLOGY_RING
+        std::printf("  MPI topology: RING (j-partitioned, allreduce)\n");
+#else
+        std::printf("  MPI topology: default (i-partitioned, allgatherv)\n");
+#endif
 #if EFFECTIVE_GPU_AWARE_MPI
         std::printf("  GPU-aware MPI: enabled (packed allgathers)\n");
 #else
@@ -564,3 +569,115 @@ void DistributedParticles::gather_to_root(Particles& global_particles) {
     // In replicated mode, all ranks have all particles
     global_particles = local;
 }
+
+#ifdef MPI_TOPOLOGY_RING
+
+void DistributedParticles::allreduce_accelerations_subset(int start, int count) {
+#ifdef USE_MPI
+    if (MPIComm::size() == 1 || count == 0) return;
+
+    Kokkos::fence();
+
+#if EFFECTIVE_GPU_AWARE_MPI
+    // GPU-aware: pack ax/ay/az into buffer, allreduce in-place, unpack
+    auto buf = mpi_acc_recv_buf;  // reuse recv buffer (size: 3 * N_total)
+    auto lax = local.ax; auto lay = local.ay; auto laz = local.az;
+    int st = start;
+
+    Kokkos::parallel_for("pack_allreduce", count, KOKKOS_LAMBDA(int ii) {
+        int i = st + ii;
+        buf(3*ii)   = lax(i);
+        buf(3*ii+1) = lay(i);
+        buf(3*ii+2) = laz(i);
+    });
+    Kokkos::fence();
+
+    MPI_Allreduce(MPI_IN_PLACE, buf.data(), 3 * count, MPI_DOUBLE,
+                  MPI_SUM, MPI_COMM_WORLD);
+
+    Kokkos::parallel_for("unpack_allreduce", count, KOKKOS_LAMBDA(int ii) {
+        int i = st + ii;
+        lax(i) = buf(3*ii);
+        lay(i) = buf(3*ii+1);
+        laz(i) = buf(3*ii+2);
+    });
+    Kokkos::fence();
+
+#else
+    // Host-staged: copy to host, allreduce, copy back
+    std::vector<double> buf(3 * count);
+    auto h_ax = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
+        Kokkos::subview(local.ax, Kokkos::make_pair(start, start + count)));
+    auto h_ay = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
+        Kokkos::subview(local.ay, Kokkos::make_pair(start, start + count)));
+    auto h_az = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
+        Kokkos::subview(local.az, Kokkos::make_pair(start, start + count)));
+
+    for (int i = 0; i < count; i++) {
+        buf[3*i]   = h_ax(i);
+        buf[3*i+1] = h_ay(i);
+        buf[3*i+2] = h_az(i);
+    }
+
+    MPI_Allreduce(MPI_IN_PLACE, buf.data(), 3 * count, MPI_DOUBLE,
+                  MPI_SUM, MPI_COMM_WORLD);
+
+    for (int i = 0; i < count; i++) {
+        h_ax(i) = buf[3*i];
+        h_ay(i) = buf[3*i+1];
+        h_az(i) = buf[3*i+2];
+    }
+
+    Kokkos::deep_copy(Kokkos::subview(local.ax, Kokkos::make_pair(start, start + count)), h_ax);
+    Kokkos::deep_copy(Kokkos::subview(local.ay, Kokkos::make_pair(start, start + count)), h_ay);
+    Kokkos::deep_copy(Kokkos::subview(local.az, Kokkos::make_pair(start, start + count)), h_az);
+#endif
+
+#endif // USE_MPI
+}
+
+void DistributedParticles::allreduce_timestep_subset(int start, int count) {
+#ifdef USE_MPI
+    if (MPIComm::size() == 1 || count == 0) return;
+
+    Kokkos::fence();
+
+#if EFFECTIVE_GPU_AWARE_MPI
+    // GPU-aware: allreduce dt_adapt in-place via a contiguous buffer
+    auto buf = Kokkos::subview(mpi_acc_recv_buf, Kokkos::make_pair(0, count));
+    auto dt_f = local.dt_adapt;
+    int st = start;
+
+    // Copy to contiguous buffer
+    Kokkos::parallel_for("pack_dt_allreduce", count, KOKKOS_LAMBDA(int ii) {
+        buf(ii) = dt_f(st + ii);
+    });
+    Kokkos::fence();
+
+    MPI_Allreduce(MPI_IN_PLACE, buf.data(), count, MPI_DOUBLE,
+                  MPI_MIN, MPI_COMM_WORLD);
+
+    Kokkos::parallel_for("unpack_dt_allreduce", count, KOKKOS_LAMBDA(int ii) {
+        dt_f(st + ii) = buf(ii);
+    });
+    Kokkos::fence();
+
+#else
+    // Host-staged
+    auto h_dt = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
+        Kokkos::subview(local.dt_adapt, Kokkos::make_pair(start, start + count)));
+
+    std::vector<double> buf(count);
+    for (int i = 0; i < count; i++) buf[i] = h_dt(i);
+
+    MPI_Allreduce(MPI_IN_PLACE, buf.data(), count, MPI_DOUBLE,
+                  MPI_MIN, MPI_COMM_WORLD);
+
+    for (int i = 0; i < count; i++) h_dt(i) = buf[i];
+    Kokkos::deep_copy(Kokkos::subview(local.dt_adapt, Kokkos::make_pair(start, start + count)), h_dt);
+#endif
+
+#endif // USE_MPI
+}
+
+#endif // MPI_TOPOLOGY_RING
