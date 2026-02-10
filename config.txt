@@ -25,6 +25,7 @@ DIRECT_CPU_N2_ON_VERY_DEEP_LEVELS = 500    # do full N^2 below this thrshold on 
 FUSE_GRADIENT = false                      # Fuse force+gradient into single N^2 pass using stale accelerations (saves ~30% gradient time, O(dt^3) accuracy trade-off)
 INTEGER_POSITIONS = false                  # Use int64 positions (exact drift, MPI-safe)
 DOMAIN_HALFSIZE_PC = 200                   # Integer position domain half-size in pc
+MPI_NON_BLOCKING = true                    # Use MPI_Iallgatherv for overlapped transfers
 
 # MIXED_PRECISION: compile-time flag, enable via cmake -DMIXED_PRECISION=ON
 # FP32 rsqrt seed + FP64 Newton-Raphson (~15-20% faster force kernels, ~1e-14 precision)

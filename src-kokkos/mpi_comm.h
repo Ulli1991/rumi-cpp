@@ -90,8 +90,14 @@ struct DistributedParticles {
 
     // Pre-allocated MPI communication buffers (packed [ax,ay,az] interleaved)
     // Avoids cudaMalloc/cudaFree per allgather call
-    Kokkos::View<double*> mpi_acc_send_buf;  // size: 3 * max_per_rank
-    Kokkos::View<double*> mpi_acc_recv_buf;  // size: 3 * N_total
+    Kokkos::View<double*> mpi_acc_send_buf;  // size: 3 * max_per_rank (slot 0)
+    Kokkos::View<double*> mpi_acc_recv_buf;  // size: 3 * N_total     (slot 0)
+    Kokkos::View<double*> mpi_acc_send_buf2; // size: 3 * max_per_rank (slot 1, for concurrent iallgather)
+    Kokkos::View<double*> mpi_acc_recv_buf2; // size: 3 * N_total     (slot 1, for concurrent iallgather)
+
+#ifdef USE_MPI
+    MPI_Request mpi_reqs[2] = {MPI_REQUEST_NULL, MPI_REQUEST_NULL};
+#endif
 
     // Pre-allocated per-rank count/displacement arrays for MPI_Allgatherv
     // Avoids heap allocation on every allgather call
@@ -113,6 +119,13 @@ struct DistributedParticles {
     // Allgather accelerations for a SUBSET of particles [start, start+count)
     // Packs ax/ay/az into a single MPI message (3x fewer MPI calls)
     void allgather_accelerations_subset(int start, int count);
+
+    // Non-blocking allgather: pack + MPI_Iallgatherv, returns immediately
+    // slot=0 uses primary buffers, slot=1 uses secondary buffers
+    void iallgather_accelerations_subset(int start, int count, int slot);
+
+    // Wait for iallgather to complete + unpack recv buffer into ax/ay/az
+    void wait_and_unpack_accelerations(int start, int count, int slot);
 
     // Allgather adaptive timesteps after distributed computation
     void allgather_timestep();

@@ -28,6 +28,8 @@ bool use_integer_positions = false;
 double int_pos_scale = 0.0;
 double int_pos_inv_scale = 0.0;
 
+bool use_nonblocking_mpi = false;
+
 // TILE_SIZE defined in constants.h
 
 // Fused function pointer types (force + kick combined)
@@ -546,7 +548,12 @@ static void self_acceleration_distributed(DistributedParticles& dp, int start, i
         });
     Kokkos::fence();
 
-    dp.allgather_accelerations_subset(start, count);
+    if (use_nonblocking_mpi) {
+        dp.iallgather_accelerations_subset(start, count, 0);
+        dp.wait_and_unpack_accelerations(start, count, 0);
+    } else {
+        dp.allgather_accelerations_subset(start, count);
+    }
 }
 
 // =============================================================================
@@ -646,7 +653,12 @@ static void self_acceleration_kick_distributed(DistributedParticles& dp, int sta
     Kokkos::fence();
 
     // Allgather forces so all ranks have consistent accelerations
-    dp.allgather_accelerations_subset(start, count);
+    if (use_nonblocking_mpi) {
+        dp.iallgather_accelerations_subset(start, count, 0);
+        dp.wait_and_unpack_accelerations(start, count, 0);
+    } else {
+        dp.allgather_accelerations_subset(start, count);
+    }
 
     // Kick non-local particles using allgathered accelerations
     int ss = slice_start, sc = slice_count;
@@ -776,7 +788,12 @@ static void self_gradient_correction_kick_distributed(DistributedParticles& dp, 
     Kokkos::fence();
 
     // Allgather corrected accelerations
-    dp.allgather_accelerations_subset(start, count);
+    if (use_nonblocking_mpi) {
+        dp.iallgather_accelerations_subset(start, count, 0);
+        dp.wait_and_unpack_accelerations(start, count, 0);
+    } else {
+        dp.allgather_accelerations_subset(start, count);
+    }
 
     // Kick non-local particles using allgathered corrected accelerations
     int ss = slice_start, sc = slice_count;
@@ -938,7 +955,12 @@ static void self_acceleration_gradient_kick_fused_distributed(
     Kokkos::fence();
 
     // Allgather combined accelerations
-    dp.allgather_accelerations_subset(start, count);
+    if (use_nonblocking_mpi) {
+        dp.iallgather_accelerations_subset(start, count, 0);
+        dp.wait_and_unpack_accelerations(start, count, 0);
+    } else {
+        dp.allgather_accelerations_subset(start, count);
+    }
 
     // Kick non-local particles using allgathered accelerations
     int ss = slice_start, sc = slice_count;
@@ -1165,8 +1187,15 @@ static void cross_acceleration_distributed(DistributedParticles& dp,
 
     // Must use separate allgathers: each rank computed its slice of slow and
     // its slice of fast independently, so the distributions don't match a combined range
-    dp.allgather_accelerations_subset(slow_start, slow_count);
-    dp.allgather_accelerations_subset(fast_start, fast_count);
+    if (use_nonblocking_mpi) {
+        dp.iallgather_accelerations_subset(slow_start, slow_count, 0);
+        dp.iallgather_accelerations_subset(fast_start, fast_count, 1);
+        dp.wait_and_unpack_accelerations(slow_start, slow_count, 0);
+        dp.wait_and_unpack_accelerations(fast_start, fast_count, 1);
+    } else {
+        dp.allgather_accelerations_subset(slow_start, slow_count);
+        dp.allgather_accelerations_subset(fast_start, fast_count);
+    }
 }
 
 // =============================================================================
@@ -1332,8 +1361,15 @@ static void cross_acceleration_kick_distributed(DistributedParticles& dp,
     Kokkos::fence();
 
     // Allgather then kick non-local particles
-    dp.allgather_accelerations_subset(slow_start, slow_count);
-    dp.allgather_accelerations_subset(fast_start, fast_count);
+    if (use_nonblocking_mpi) {
+        dp.iallgather_accelerations_subset(slow_start, slow_count, 0);
+        dp.iallgather_accelerations_subset(fast_start, fast_count, 1);
+        dp.wait_and_unpack_accelerations(slow_start, slow_count, 0);
+        dp.wait_and_unpack_accelerations(fast_start, fast_count, 1);
+    } else {
+        dp.allgather_accelerations_subset(slow_start, slow_count);
+        dp.allgather_accelerations_subset(fast_start, fast_count);
+    }
 
     // Kick non-local slow particles
     int ss1 = slice_start, sc1 = slice_count;
@@ -1587,8 +1623,15 @@ static void cross_acceleration_and_gradient_fused_distributed(
     }
     Kokkos::fence();
 
-    dp.allgather_accelerations_subset(slow_start, slow_count);
-    dp.allgather_accelerations_subset(fast_start, fast_count);
+    if (use_nonblocking_mpi) {
+        dp.iallgather_accelerations_subset(slow_start, slow_count, 0);
+        dp.iallgather_accelerations_subset(fast_start, fast_count, 1);
+        dp.wait_and_unpack_accelerations(slow_start, slow_count, 0);
+        dp.wait_and_unpack_accelerations(fast_start, fast_count, 1);
+    } else {
+        dp.allgather_accelerations_subset(slow_start, slow_count);
+        dp.allgather_accelerations_subset(fast_start, fast_count);
+    }
 }
 
 // Cross-acceleration with gradient correction - tiled GPU kernel
@@ -1772,8 +1815,15 @@ static void cross_acceleration_and_gradient_distributed(DistributedParticles& dp
     Kokkos::fence();
 
     // Must use separate allgathers: force slices were computed independently
-    dp.allgather_accelerations_subset(slow_start, slow_count);
-    dp.allgather_accelerations_subset(fast_start, fast_count);
+    if (use_nonblocking_mpi) {
+        dp.iallgather_accelerations_subset(slow_start, slow_count, 0);
+        dp.iallgather_accelerations_subset(fast_start, fast_count, 1);
+        dp.wait_and_unpack_accelerations(slow_start, slow_count, 0);
+        dp.wait_and_unpack_accelerations(fast_start, fast_count, 1);
+    } else {
+        dp.allgather_accelerations_subset(slow_start, slow_count);
+        dp.allgather_accelerations_subset(fast_start, fast_count);
+    }
 }
 
 // Distributed adaptive timestep computation - tiled GPU kernel

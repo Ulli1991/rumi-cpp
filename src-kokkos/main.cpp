@@ -148,6 +148,7 @@ int main(int argc, char** argv) {
         fuse_gradient = (cfg.get_str("FUSE_GRADIENT", "false") == "true");
         use_integer_positions = (cfg.get_str("INTEGER_POSITIONS", "false") == "true");
         double domain_halfsize = cfg.get_double("DOMAIN_HALFSIZE_PC", 200.0);
+        use_nonblocking_mpi = (cfg.get_str("MPI_NON_BLOCKING", "false") == "true");
 
         // USE_N3L: default true on CPU-like backends, false on GPU
         bool use_n3l_default = true;
