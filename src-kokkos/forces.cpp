@@ -1003,19 +1003,22 @@ void self_acceleration_and_timestep(Particles& p, int start, int count,
                 double t_ff_sq = r3 / (G * mass_sum + EPS);
                 double t_fb_sq = r2s / (v_sq + EPS);
 
-                double t_ff = t_ff_sq * fast_rsqrt(t_ff_sq + EPS);
-                double t_fb = t_fb_sq * fast_rsqrt(t_fb_sq + EPS);
+                double t_min_sq_pair = Kokkos::fmin(t_ff_sq, t_fb_sq);
+                if (t_min_sq_pair <= 100.0 * t_min_i * t_min_i) {
+                    double t_ff = t_ff_sq * fast_rsqrt(t_ff_sq + EPS);
+                    double t_fb = t_fb_sq * fast_rsqrt(t_fb_sq + EPS);
 
-                double r_dot_v = dx*dvx + dy*dvy + dz*dvz;
-                double inv_r2 = inv_r * inv_r;
+                    double r_dot_v = dx*dvx + dy*dvy + dz*dvz;
+                    double inv_r2 = inv_r * inv_r;
 
-                double d_ff = 1.5 * r_dot_v * inv_r2 * t_ff;
-                double d_fb = r_dot_v * inv_r2 * (1.0 + G * mass_sum * inv_r / (v_sq + EPS)) * t_fb;
+                    double d_ff = 1.5 * r_dot_v * inv_r2 * t_ff;
+                    double d_fb = r_dot_v * inv_r2 * (1.0 + G * mass_sum * inv_r / (v_sq + EPS)) * t_fb;
 
-                double t_sym_ff = harmonic_sym_factor(d_ff) * t_ff;
-                double t_sym_fb = harmonic_sym_factor(d_fb) * t_fb;
+                    double t_sym_ff = harmonic_sym_factor(d_ff) * t_ff;
+                    double t_sym_fb = harmonic_sym_factor(d_fb) * t_fb;
 
-                t_min_i = Kokkos::fmin(t_min_i, Kokkos::fmin(t_sym_ff, t_sym_fb));
+                    t_min_i = Kokkos::fmin(t_min_i, Kokkos::fmin(t_sym_ff, t_sym_fb));
+                }
             }
             pax(i) = axi; pay(i) = ayi; paz(i) = azi;
             dt_f(i) = t_min_i * eta;  // already actual timescales, no sqrt needed
