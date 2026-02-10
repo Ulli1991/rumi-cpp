@@ -30,6 +30,8 @@ double int_pos_inv_scale = 0.0;
 
 bool use_nonblocking_mpi = false;
 
+bool symmetric_timesteps = false;
+
 // TILE_SIZE defined in constants.h
 
 // Fused function pointer types (force + kick combined)
@@ -43,6 +45,10 @@ static AccGradKickFn fn_self_acc_grad_kick = nullptr;
 static CrossAccGradKickFn fn_cross_acc_grad_kick = nullptr;
 static CrossAccKickCacheFn fn_cross_acc_kick_cache = nullptr;
 static CrossAccKickCacheFn fn_cross_acc_kick = nullptr;  // non-caching version
+
+// Fused self-acceleration + timestep (with symmetrization)
+using AccTimestepFn = void(*)(Particles&, int, int, double, double, double);
+static AccTimestepFn fn_self_acc_timestep = nullptr;
 
 // =============================================================================
 // Distributed force + timestep computation for between-step updates
@@ -189,12 +195,14 @@ void set_force_dispatch(bool use_n3l) {
         fn_cross_acc_grad_kick = &cross_acceleration_and_gradient_kick<true>;
         fn_cross_acc_kick_cache = &cross_acceleration_kick_and_cache<true>;
         fn_cross_acc_kick = &cross_acceleration_kick<true>;
+        fn_self_acc_timestep = &self_acceleration_and_timestep<true>;
     } else {
         fn_self_acc_kick = &self_acceleration_kick<false>;
         fn_self_acc_grad_kick = &self_acceleration_and_gradient_kick<false>;
         fn_cross_acc_grad_kick = &cross_acceleration_and_gradient_kick<false>;
         fn_cross_acc_kick_cache = &cross_acceleration_kick_and_cache<false>;
         fn_cross_acc_kick = &cross_acceleration_kick<false>;
+        fn_self_acc_timestep = &self_acceleration_and_timestep<false>;
     }
 }
 
@@ -228,11 +236,17 @@ void drift(Particles& p, int start, int count, double dt) {
 }
 
 void fsi_step(Particles& p, int start, int count,
-              double G, double soft2, double dt) {
-    // U kick (dt/6) - fused force + kick
-    g_profiler.start();
-    fn_self_acc_kick(p, start, count, G, soft2, dt * FSI_KICK);
-    g_profiler.stop(StepProfiler::SELF_FORCE);
+              double G, double soft2, double dt, bool forces_valid) {
+    // U kick (dt/6) - fused force + kick, or just kick if forces already valid
+    if (forces_valid) {
+        g_profiler.start();
+        kick_velocities(p, start, count, dt * FSI_KICK);
+        g_profiler.stop(StepProfiler::DRIFT_KICK);
+    } else {
+        g_profiler.start();
+        fn_self_acc_kick(p, start, count, G, soft2, dt * FSI_KICK);
+        g_profiler.stop(StepProfiler::SELF_FORCE);
+    }
 
     // T drift (dt/2)
     g_profiler.start();
@@ -368,12 +382,17 @@ static void hhs_fsi_step_dynamic_impl(Particles& p, int start, int count, double
     if (count == 0) return;
 
     // Compute adaptive timesteps for this subset (skip if reusing from first half-step)
+    bool forces_valid = false;
     if (!dt_valid && count > 1) {
         g_profiler.start();
-        if (use_n3l)
+        if (symmetric_timesteps) {
+            fn_self_acc_timestep(p, start, count, G, soft2, eta);
+            forces_valid = true;
+        } else if (use_n3l) {
             compute_timestep_subset<true>(p, start, count, G, soft2, eta);
-        else
+        } else {
             compute_timestep_subset<false>(p, start, count, G, soft2, eta);
+        }
         g_profiler.stop(StepProfiler::ADAPTIVE_DT);
     }
 
@@ -387,7 +406,7 @@ static void hhs_fsi_step_dynamic_impl(Particles& p, int start, int count, double
 
     // Base case: no fast particles or at minimum timestep
     if (fast_count == 0 || pivot_dt * 0.5 < dt_min) {
-        fsi_step(p, start, count, G, soft2, pivot_dt);
+        fsi_step(p, start, count, G, soft2, pivot_dt, forces_valid);
         return;
     }
 
@@ -554,6 +573,137 @@ static void self_acceleration_distributed(DistributedParticles& dp, int start, i
     } else {
         dp.allgather_accelerations_subset(start, count);
     }
+}
+
+// =============================================================================
+// Fused distributed force + symmetrized timestep: computes forces AND timesteps
+// with harmonic symmetrization in a single N² pass. Forces are stored for
+// reuse in the first FSI kick (avoids redundant N² computation).
+// =============================================================================
+static void self_acceleration_and_timestep_distributed(DistributedParticles& dp, int start, int count,
+                                                        double G, double soft2, double eta) {
+    if (count <= 1) return;
+
+    int slice_start, slice_count;
+    dp.get_force_slice(start, count, slice_start, slice_count);
+    if (slice_count == 0) {
+        dp.allgather_accelerations_subset(start, count);
+        dp.allgather_timestep_subset(start, count);
+        return;
+    }
+
+    auto pos = dp.local.pos_packed;
+    auto vel = dp.local.vel_packed;
+    RawView pax{dp.local.ax.data()}, pay{dp.local.ay.data()}, paz{dp.local.az.data()};
+    RawView dt_f{dp.local.dt_adapt.data()};
+
+    const int j_start = start;
+    const int j_end = start + count;
+
+    using team_policy = Kokkos::TeamPolicy<>;
+    using member_type = team_policy::member_type;
+    using scratch_space = Kokkos::DefaultExecutionSpace::scratch_memory_space;
+
+    size_t scratch_size = TILE_SIZE * 7 * sizeof(double);
+    int num_teams = (slice_count + TILE_SIZE - 1) / TILE_SIZE;
+
+    Kokkos::parallel_for("dist_self_acc_dt_sym",
+        team_policy(num_teams, TILE_SIZE).set_scratch_size(0, Kokkos::PerTeam(scratch_size)),
+        KOKKOS_LAMBDA(const member_type& team) {
+            int ii = team.league_rank() * TILE_SIZE + team.team_rank();
+            int i = slice_start + ii;
+
+            Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
+                tile(team.team_scratch(0), TILE_SIZE * 7);
+
+            double xi = 0, yi = 0, zi = 0, mi = 0;
+            double vxi = 0, vyi = 0, vzi = 0;
+            if (ii < slice_count) {
+                double vpad;
+                load4(&pos(i, 0), xi, yi, zi, mi);
+                load4(&vel(i, 0), vxi, vyi, vzi, vpad);
+            }
+
+            double axi = 0, ayi = 0, azi = 0;
+            double t_min_i = 1e30;
+
+            for (int tile_start = j_start; tile_start < j_end; tile_start += TILE_SIZE) {
+                int tile_end = (tile_start + TILE_SIZE < j_end) ? tile_start + TILE_SIZE : j_end;
+                int tile_count = tile_end - tile_start;
+
+                int t = team.team_rank();
+                if (t < tile_count) {
+                    int idx = tile_start + t;
+                    int base = t * 7;
+                    double vpad;
+                    load4(&pos(idx, 0), tile(base), tile(base+1), tile(base+2), tile(base+3));
+                    load4(&vel(idx, 0), tile(base+4), tile(base+5), tile(base+6), vpad);
+                }
+                team.team_barrier();
+
+                if (ii < slice_count) {
+                    for (int jt = 0; jt < tile_count; jt++) {
+                        int j = tile_start + jt;
+                        if (j == i) continue;
+
+                        int jb = jt * 7;
+                        double dx = tile(jb    ) - xi;
+                        double dy = tile(jb + 1) - yi;
+                        double dz = tile(jb + 2) - zi;
+                        double mj = tile(jb + 3);
+                        double r2 = dx*dx + dy*dy + dz*dz;
+                        double r2s = r2 + soft2;
+                        double inv_r = fast_rsqrt(r2s);
+                        double inv_r3 = inv_r * inv_r * inv_r;
+
+                        // Force accumulation (reuses inv_r)
+                        double mj_inv_r3 = G * mj * inv_r3;
+                        axi += mj_inv_r3 * dx;
+                        ayi += mj_inv_r3 * dy;
+                        azi += mj_inv_r3 * dz;
+
+                        // Timestep with symmetrization
+                        double dvx = tile(jb + 4) - vxi;
+                        double dvy = tile(jb + 5) - vyi;
+                        double dvz = tile(jb + 6) - vzi;
+                        double v_sq = dvx*dvx + dvy*dvy + dvz*dvz;
+                        double mass_sum = mi + mj;
+
+                        double r3 = r2s * r2s * inv_r;
+                        double t_ff_sq = r3 / (G * mass_sum + EPS);
+                        double t_fb_sq = r2s / (v_sq + EPS);
+
+                        // Symmetrize: need actual timescales (nonlinear formula)
+                        double t_ff = t_ff_sq * fast_rsqrt(t_ff_sq + EPS);
+                        double t_fb = t_fb_sq * fast_rsqrt(t_fb_sq + EPS);
+
+                        double r_dot_v = dx*dvx + dy*dvy + dz*dvz;
+                        double inv_r2 = inv_r * inv_r;
+
+                        double d_ff = 1.5 * r_dot_v * inv_r2 * t_ff;
+                        double d_fb = r_dot_v * inv_r2 * (1.0 + G * mass_sum * inv_r / (v_sq + EPS)) * t_fb;
+
+                        double t_sym_ff = harmonic_sym_factor(d_ff) * t_ff;
+                        double t_sym_fb = harmonic_sym_factor(d_fb) * t_fb;
+
+                        t_min_i = Kokkos::fmin(t_min_i, Kokkos::fmin(t_sym_ff, t_sym_fb));
+                    }
+                }
+                team.team_barrier();
+            }
+
+            if (ii < slice_count) {
+                pax(i) = axi;
+                pay(i) = ayi;
+                paz(i) = azi;
+                dt_f(i) = t_min_i * eta;  // no sqrt — already actual timescales
+            }
+        });
+    Kokkos::fence();
+
+    // Allgather accelerations and timesteps
+    dp.allgather_accelerations_subset(start, count);
+    dp.allgather_timestep_subset(start, count);
 }
 
 // =============================================================================
@@ -1562,6 +1712,130 @@ static void cross_acceleration_and_gradient_ring(DistributedParticles& dp,
     Kokkos::fence();
 }
 
+// Fused force + symmetrized timestep (ring): ALL i from this rank's j-chunk
+// Then allreduce(SUM) for forces, allreduce(MIN) for timesteps
+static void self_acceleration_and_timestep_ring(DistributedParticles& dp, int start, int count,
+                                                  double G, double soft2, double eta) {
+    if (count <= 1) return;
+
+    int j_start, j_count;
+    dp.get_force_slice(start, count, j_start, j_count);
+    const int j_end = j_start + j_count;
+
+    auto pos = dp.local.pos_packed;
+    auto vel = dp.local.vel_packed;
+    RawView pax{dp.local.ax.data()}, pay{dp.local.ay.data()}, paz{dp.local.az.data()};
+    RawView dt_f{dp.local.dt_adapt.data()};
+
+    using team_policy = Kokkos::TeamPolicy<>;
+    using member_type = team_policy::member_type;
+    using scratch_space = Kokkos::DefaultExecutionSpace::scratch_memory_space;
+
+    size_t scratch_size = TILE_SIZE * 7 * sizeof(double);
+    int num_teams = (count + TILE_SIZE - 1) / TILE_SIZE;
+    const int ist = start;
+    const int icnt = count;
+    const int js = j_start;
+    const int je = j_end;
+
+    Kokkos::parallel_for("ring_self_acc_dt_sym",
+        team_policy(num_teams, TILE_SIZE).set_scratch_size(0, Kokkos::PerTeam(scratch_size)),
+        KOKKOS_LAMBDA(const member_type& team) {
+            int ii = team.league_rank() * TILE_SIZE + team.team_rank();
+            int i = ist + ii;
+
+            Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
+                tile(team.team_scratch(0), TILE_SIZE * 7);
+
+            double xi = 0, yi = 0, zi = 0, mi = 0;
+            double vxi = 0, vyi = 0, vzi = 0;
+            if (ii < icnt) {
+                double vpad;
+                load4(&pos(i, 0), xi, yi, zi, mi);
+                load4(&vel(i, 0), vxi, vyi, vzi, vpad);
+            }
+
+            double axi = 0, ayi = 0, azi = 0;
+            double t_min_i = 1e30;
+
+            for (int tile_st = js; tile_st < je; tile_st += TILE_SIZE) {
+                int tile_end = (tile_st + TILE_SIZE < je) ? tile_st + TILE_SIZE : je;
+                int tile_cnt = tile_end - tile_st;
+
+                int t = team.team_rank();
+                if (t < tile_cnt) {
+                    int idx = tile_st + t;
+                    int tb = t * 7;
+                    double vpad;
+                    load4(&pos(idx, 0), tile(tb), tile(tb+1), tile(tb+2), tile(tb+3));
+                    load4(&vel(idx, 0), tile(tb+4), tile(tb+5), tile(tb+6), vpad);
+                }
+                team.team_barrier();
+
+                if (ii < icnt) {
+                    for (int jt = 0; jt < tile_cnt; jt++) {
+                        int j = tile_st + jt;
+                        if (j == i) continue;
+
+                        int jb = jt * 7;
+                        double dx = tile(jb    ) - xi;
+                        double dy = tile(jb + 1) - yi;
+                        double dz = tile(jb + 2) - zi;
+                        double mj = tile(jb + 3);
+                        double r2 = dx*dx + dy*dy + dz*dz;
+                        double r2s = r2 + soft2;
+                        double inv_r = fast_rsqrt(r2s);
+                        double inv_r3 = inv_r * inv_r * inv_r;
+
+                        // Force accumulation
+                        double mj_inv_r3 = G * mj * inv_r3;
+                        axi += mj_inv_r3 * dx;
+                        ayi += mj_inv_r3 * dy;
+                        azi += mj_inv_r3 * dz;
+
+                        // Timestep with symmetrization
+                        double dvx = tile(jb + 4) - vxi;
+                        double dvy = tile(jb + 5) - vyi;
+                        double dvz = tile(jb + 6) - vzi;
+                        double v_sq = dvx*dvx + dvy*dvy + dvz*dvz;
+                        double mass_sum = mi + mj;
+
+                        double r3 = r2s * r2s * inv_r;
+                        double t_ff_sq = r3 / (G * mass_sum + EPS);
+                        double t_fb_sq = r2s / (v_sq + EPS);
+
+                        double t_ff = t_ff_sq * fast_rsqrt(t_ff_sq + EPS);
+                        double t_fb = t_fb_sq * fast_rsqrt(t_fb_sq + EPS);
+
+                        double r_dot_v = dx*dvx + dy*dvy + dz*dvz;
+                        double inv_r2 = inv_r * inv_r;
+
+                        double d_ff = 1.5 * r_dot_v * inv_r2 * t_ff;
+                        double d_fb = r_dot_v * inv_r2 * (1.0 + G * mass_sum * inv_r / (v_sq + EPS)) * t_fb;
+
+                        double t_sym_ff = harmonic_sym_factor(d_ff) * t_ff;
+                        double t_sym_fb = harmonic_sym_factor(d_fb) * t_fb;
+
+                        t_min_i = Kokkos::fmin(t_min_i, Kokkos::fmin(t_sym_ff, t_sym_fb));
+                    }
+                }
+                team.team_barrier();
+            }
+
+            if (ii < icnt) {
+                pax(i) = axi;
+                pay(i) = ayi;
+                paz(i) = azi;
+                dt_f(i) = t_min_i * eta;
+            }
+        });
+    Kokkos::fence();
+
+    // Allreduce: sum partial forces, min partial timesteps
+    dp.allreduce_accelerations_subset(start, count);
+    dp.allreduce_timestep_subset(start, count);
+}
+
 // Timestep: ALL i-particles from this rank's j-chunk, then allreduce(MIN)
 static void compute_timestep_ring(DistributedParticles& dp, int start, int count,
                                    double G, double soft2, double eta) {
@@ -1661,20 +1935,27 @@ static void compute_timestep_ring(DistributedParticles& dp, int start, int count
 
 // Ring FSI step: force → kick → drift → force → gradient → kick → drift → force → kick
 static void fsi_step_ring(DistributedParticles& dp, int start, int count,
-                           double G, double soft2, double dt) {
+                           double G, double soft2, double dt,
+                           bool forces_valid = false) {
     if (count <= 0) return;
 
     long long self_pairs = (long long)count * count;
 
     dp.local.pack_pos_range(start, count);
 
-    // U kick (dt/6): force + allreduce + kick
-    g_profiler.start();
-    self_acceleration_ring(dp, start, count, G, soft2);
-    g_profiler.stop(StepProfiler::SELF_FORCE, self_pairs);
-    g_profiler.start();
-    kick_velocities(dp.local, start, count, dt * FSI_KICK);
-    g_profiler.stop(StepProfiler::DRIFT_KICK);
+    // U kick (dt/6): force + allreduce + kick, or just kick if forces already valid
+    if (forces_valid) {
+        g_profiler.start();
+        kick_velocities(dp.local, start, count, dt * FSI_KICK);
+        g_profiler.stop(StepProfiler::DRIFT_KICK);
+    } else {
+        g_profiler.start();
+        self_acceleration_ring(dp, start, count, G, soft2);
+        g_profiler.stop(StepProfiler::SELF_FORCE, self_pairs);
+        g_profiler.start();
+        kick_velocities(dp.local, start, count, dt * FSI_KICK);
+        g_profiler.stop(StepProfiler::DRIFT_KICK);
+    }
 
     // T drift (dt/2)
     g_profiler.start();
@@ -1718,7 +1999,8 @@ static void fsi_step_ring(DistributedParticles& dp, int start, int count,
 // Uses fused force+kick kernels to reduce kernel launches and memory traffic
 // =============================================================================
 static void fsi_step_distributed(DistributedParticles& dp, int start, int count,
-                                 double G, double soft2, double dt) {
+                                 double G, double soft2, double dt,
+                                 bool forces_valid = false) {
     if (count <= 0) return;
 
     long long self_pairs = (long long)count * count;
@@ -1726,10 +2008,16 @@ static void fsi_step_distributed(DistributedParticles& dp, int start, int count,
     // Sync packed positions for vectorized kernel loads
     dp.local.pack_pos_range(start, count);
 
-    // U kick (dt/6) - fused distributed force + kick
-    g_profiler.start();
-    self_acceleration_kick_distributed(dp, start, count, G, soft2, dt * FSI_KICK);
-    g_profiler.stop(StepProfiler::SELF_FORCE, self_pairs);
+    // U kick (dt/6) - fused distributed force + kick, or just kick if forces already valid
+    if (forces_valid) {
+        g_profiler.start();
+        kick_velocities(dp.local, start, count, dt * FSI_KICK);
+        g_profiler.stop(StepProfiler::DRIFT_KICK);
+    } else {
+        g_profiler.start();
+        self_acceleration_kick_distributed(dp, start, count, G, soft2, dt * FSI_KICK);
+        g_profiler.stop(StepProfiler::SELF_FORCE, self_pairs);
+    }
 
     // T drift (dt/2) - all ranks drift identically
     g_profiler.start();
@@ -2988,6 +3276,16 @@ static void cpu_drift(CpuSubset& s, int start, int count, double dt) {
     }
 }
 
+// CPU kick using pre-computed accelerations
+static void cpu_kick(CpuSubset& s, int start, int count, double kick_dt) {
+    const int end = start + count;
+    for (int i = start; i < end; i++) {
+        s.vx[i] += s.ax[i] * kick_dt;
+        s.vy[i] += s.ay[i] * kick_dt;
+        s.vz[i] += s.az[i] * kick_dt;
+    }
+}
+
 // CPU timestep computation (N3L: upper triangle, squared-space)
 static void cpu_compute_timestep(CpuSubset& s, int start, int count,
                                  double G, double soft2, double eta) {
@@ -3015,6 +3313,70 @@ static void cpu_compute_timestep(CpuSubset& s, int start, int count,
     }
     for (int i = start; i < end; i++) {
         s.dt_adapt[i] = std::sqrt(s.dt_adapt[i]) * eta;
+    }
+}
+
+// CPU fused force + symmetrized timestep (N3L: upper triangle)
+static void cpu_compute_force_and_timestep(CpuSubset& s, int start, int count,
+                                            double G, double soft2, double eta) {
+    const int end = start + count;
+    for (int i = start; i < end; i++) {
+        s.ax[i] = 0; s.ay[i] = 0; s.az[i] = 0;
+        s.dt_adapt[i] = 1e30;
+    }
+    for (int i = start; i < end; i++) {
+        for (int j = i + 1; j < end; j++) {
+            double dx = s.x[j] - s.x[i];
+            double dy = s.y[j] - s.y[i];
+            double dz = s.z[j] - s.z[i];
+            double r2 = dx*dx + dy*dy + dz*dz;
+            double r2s = r2 + soft2;
+            double inv_r = 1.0 / std::sqrt(r2s);
+            double inv_r3 = inv_r * inv_r * inv_r;
+
+            // Force (N3L)
+            double fj = G * s.mass[j] * inv_r3;
+            double fi = G * s.mass[i] * inv_r3;
+            s.ax[i] += fj * dx; s.ay[i] += fj * dy; s.az[i] += fj * dz;
+            s.ax[j] -= fi * dx; s.ay[j] -= fi * dy; s.az[j] -= fi * dz;
+
+            // Symmetrized timestep
+            double dvx = s.vx[j] - s.vx[i];
+            double dvy = s.vy[j] - s.vy[i];
+            double dvz = s.vz[j] - s.vz[i];
+            double v_sq = dvx*dvx + dvy*dvy + dvz*dvz;
+            double mass_sum = s.mass[i] + s.mass[j];
+
+            double r3 = r2s * r2s * inv_r;
+            double t_ff_sq = r3 / (G * mass_sum + EPS);
+            double t_fb_sq = r2s / (v_sq + EPS);
+
+            double t_ff = std::sqrt(t_ff_sq);
+            double t_fb = std::sqrt(t_fb_sq);
+
+            double r_dot_v = dx*dvx + dy*dvy + dz*dvz;
+            double inv_r2 = inv_r * inv_r;
+
+            double d_ff = 1.5 * r_dot_v * inv_r2 * t_ff;
+            double d_fb = r_dot_v * inv_r2 * (1.0 + G * mass_sum * inv_r / (v_sq + EPS)) * t_fb;
+
+            // harmonic_sym_factor is device function, replicate logic for host
+            auto host_sym = [](double d) -> double {
+                double d2 = d * d;
+                if (d2 < 1e-8) return 1.0;
+                return (d + std::sqrt(1.0 + d2) - 1.0) / d;
+            };
+
+            double t_sym_ff = host_sym(d_ff) * t_ff;
+            double t_sym_fb = host_sym(d_fb) * t_fb;
+            double t_pair = std::min(t_sym_ff, t_sym_fb);
+
+            s.dt_adapt[i] = std::min(s.dt_adapt[i], t_pair);
+            s.dt_adapt[j] = std::min(s.dt_adapt[j], t_pair);
+        }
+    }
+    for (int i = start; i < end; i++) {
+        s.dt_adapt[i] *= eta;  // already actual timescales, no sqrt needed
     }
 }
 
@@ -3057,8 +3419,13 @@ static int cpu_partition_by_pivot(CpuSubset& s, int start, int count, double piv
 
 // CPU FSI step
 static void cpu_fsi_step(CpuSubset& s, int start, int count,
-                         double G, double soft2, double dt) {
-    cpu_self_acc_kick(s, start, count, G, soft2, dt * FSI_KICK);
+                         double G, double soft2, double dt,
+                         bool forces_valid = false) {
+    if (forces_valid) {
+        cpu_kick(s, start, count, dt * FSI_KICK);
+    } else {
+        cpu_self_acc_kick(s, start, count, G, soft2, dt * FSI_KICK);
+    }
     cpu_drift(s, start, count, dt * FSI_DRIFT);
     cpu_self_acc_grad_kick(s, start, count, G, soft2, dt, dt * FSI_MOD_KICK);
     cpu_drift(s, start, count, dt * FSI_DRIFT);
@@ -3076,8 +3443,14 @@ static void cpu_hhs_recursive(CpuSubset& s, int start, int count,
         return;
     }
 
+    bool forces_valid = false;
     if (!dt_valid && count > 1) {
-        cpu_compute_timestep(s, start, count, G, soft2, eta);
+        if (symmetric_timesteps) {
+            cpu_compute_force_and_timestep(s, start, count, G, soft2, eta);
+            forces_valid = true;
+        } else {
+            cpu_compute_timestep(s, start, count, G, soft2, eta);
+        }
     }
 
     int slow_count = cpu_partition_by_pivot(s, start, count, pivot_dt);
@@ -3086,10 +3459,11 @@ static void cpu_hhs_recursive(CpuSubset& s, int start, int count,
     int fast_count = count - slow_count;
 
     if (fast_count == 0) {
-        cpu_fsi_step(s, start, count, G, soft2, pivot_dt);
+        cpu_fsi_step(s, start, count, G, soft2, pivot_dt, forces_valid);
         return;
     }
 
+    // Forces discarded: partition reordered particles
     if (slow_count == 0) {
         double sub_pivot = pivot_dt * 0.5;
         cpu_hhs_recursive(s, start, count, sub_pivot, G, soft2, dt_min, eta, false);
@@ -3158,12 +3532,18 @@ static void hhs_fsi_recursive_local(
     }
 
     // Compute adaptive timesteps for this subset
+    // When symmetric_timesteps, fuse force+timestep and reuse forces
+    bool forces_valid = false;
     if (!dt_valid && count > 1) {
         g_profiler.start();
-        if (use_n3l)
+        if (symmetric_timesteps) {
+            fn_self_acc_timestep(p, start, count, G, soft2, eta);
+            forces_valid = true;
+        } else if (use_n3l) {
             compute_timestep_subset<true>(p, start, count, G, soft2, eta);
-        else
+        } else {
             compute_timestep_subset<false>(p, start, count, G, soft2, eta);
+        }
         g_profiler.stop(StepProfiler::ADAPTIVE_DT);
     }
 
@@ -3176,12 +3556,14 @@ static void hhs_fsi_recursive_local(
     int fast_count = count - slow_count;
 
     // Base case: all particles are slow
+    // Reuse fused forces for first FSI kick
     if (fast_count == 0) {
-        fsi_step(p, start, count, G, soft2, pivot_dt);
+        fsi_step(p, start, count, G, soft2, pivot_dt, forces_valid);
         return;
     }
 
     // Base case: all particles are fast
+    // Forces discarded: partition reordered particles, invalidating ax/ay/az correspondence
     if (slow_count == 0) {
         double sub_pivot = pivot_dt * 0.5;
         hhs_fsi_recursive_local(p, start, count, sub_pivot,
@@ -3261,16 +3643,28 @@ static void hhs_fsi_recursive_distributed(
     }
 
     // Compute adaptive timesteps for this subset (skip if reusing from first half-step)
+    // When symmetric_timesteps is enabled, fuse force+timestep in one N² pass
+    // and reuse the forces for the first FSI kick
+    bool forces_valid = false;
     if (!dt_valid && count > 1) {
         // Sync packed pos+vel for vectorized timestep kernel
         dp.local.pack_pos_range(start, count);
         dp.local.pack_vel_range(start, count);
         g_profiler.start();
+        if (symmetric_timesteps) {
 #ifdef MPI_TOPOLOGY_RING
-        compute_timestep_ring(dp, start, count, G, soft2, eta);
+            self_acceleration_and_timestep_ring(dp, start, count, G, soft2, eta);
 #else
-        compute_timestep_distributed(dp, start, count, G, soft2, eta);
+            self_acceleration_and_timestep_distributed(dp, start, count, G, soft2, eta);
 #endif
+            forces_valid = true;
+        } else {
+#ifdef MPI_TOPOLOGY_RING
+            compute_timestep_ring(dp, start, count, G, soft2, eta);
+#else
+            compute_timestep_distributed(dp, start, count, G, soft2, eta);
+#endif
+        }
         g_profiler.stop(StepProfiler::ADAPTIVE_DT, (long long)count * count);
     }
 
@@ -3284,16 +3678,18 @@ static void hhs_fsi_recursive_distributed(
     int fast_count = count - slow_count;
 
     // Base case: all particles are slow (no fast particles)
+    // Reuse fused forces for first FSI kick (saves one N² pass)
     if (fast_count == 0) {
 #ifdef MPI_TOPOLOGY_RING
-        fsi_step_ring(dp, start, count, G, soft2, pivot_dt);
+        fsi_step_ring(dp, start, count, G, soft2, pivot_dt, forces_valid);
 #else
-        fsi_step_distributed(dp, start, count, G, soft2, pivot_dt);
+        fsi_step_distributed(dp, start, count, G, soft2, pivot_dt, forces_valid);
 #endif
         return;
     }
 
     // Base case: all particles are fast (no slow particles)
+    // Forces discarded: partition reordered particles, invalidating ax/ay/az correspondence
     if (slow_count == 0) {
         double sub_pivot = pivot_dt * 0.5;
         hhs_fsi_recursive_distributed(dp, start, count, sub_pivot,

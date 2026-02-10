@@ -25,6 +25,10 @@ extern double int_pos_inv_scale;        // 1.0 / scale (for drift)
 
 extern bool use_nonblocking_mpi;        // MPI_NON_BLOCKING config toggle
 
+extern bool symmetric_timesteps;        // SYMMETRIC_TIMESTEPS config toggle
+                                        // When true: fused force+timestep with harmonic symmetrization
+                                        // When false: separate timestep kernel, no symmetrization
+
 // Forward declaration for distributed particles
 struct DistributedParticles;
 
@@ -32,8 +36,9 @@ struct DistributedParticles;
 void set_force_dispatch(bool use_n3l);
 
 // Single-level FSI step on [start, start+count)
+// forces_valid: if true, skip first force computation (accelerations already in ax/ay/az)
 void fsi_step(Particles& p, int start, int count,
-              double G, double soft2, double dt);
+              double G, double soft2, double dt, bool forces_valid = false);
 
 // HHS-FSI recursive step with dynamic pivot-based partitioning (per paper's Algorithm 4)
 // Partitions particles [start, start+count) into slow (dt >= pivot) and fast (dt < pivot)

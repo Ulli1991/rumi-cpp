@@ -53,6 +53,11 @@ template <bool UseN3L>
 void compute_timestep_subset(Particles& p, int start, int count,
                           double G, double soft2, double eta);
 
+// Fused self-force + symmetrized timestep (no kick, stores forces for reuse)
+template <bool UseN3L>
+void self_acceleration_and_timestep(Particles& p, int start, int count,
+                                     double G, double soft2, double eta);
+
 // ==========================================================================
 // Fused force + kick functions (reduce kernel launches)
 // ==========================================================================

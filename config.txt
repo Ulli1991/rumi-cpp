@@ -11,21 +11,22 @@ INTEGRATOR = hhs
 # =============================================================================
 # Simulation parameters
 # =============================================================================
-TOTAL_TIME_MYR = 0.23                      # ~1 crossing time for M=3.91e5, r_half=3.5 pc
-DT_MAX_MYR = 1.6e-3                       # ≈ 1600 yr
-DT_MIN_MYR = 1.0e-9                       # ≈ 1e-3 yr
+TOTAL_TIME_MYR = 0.23                      	# ~1 crossing time for M=3.91e5, r_half=3.5 pc
+DT_MAX_MYR = 1.6e-3                       	# ≈ 1600 yr
+DT_MIN_MYR = 1.0e-9                       	# ≈ 1e-3 yr
 ETA = 0.2
-SOFTENING_PC = 1e-3                        # Softening length in pc (= 206 AU)
-GRAD_N3L = false                           # N3L gradient correction (halves work, slightly less momentum conservation)
-USE_N3L = false                            # Newton's 3rd law optimization (default: true on CPU, false on GPU)
-MEMORY_TILING = true                       # Shared memory tiling for force computation (GPU optimization)
-SKIP_SECOND_TIMESTEP = false               # Skip timestep recomputation on 2nd HHS half-step recursion (its fast, formally incorrect but in practive very low DeltaE)
-DIRECT_N2_ON_DEEP_LEVELS = 50000           # do full N^2 below this thrshold without MPI to help with MPI comms overhead (many particles on intermediate hirarchies)
-DIRECT_CPU_N2_ON_VERY_DEEP_LEVELS = 500    # do full N^2 below this thrshold on the CPU to avoid kernel launch overhead (few particles on very deep hirarchies)
-FUSE_GRADIENT = false                      # Fuse force+gradient into single N^2 pass using stale accelerations (saves ~30% gradient time, O(dt^3) accuracy trade-off)
-INTEGER_POSITIONS = false                  # Use int64 positions (exact drift, MPI-safe)
-DOMAIN_HALFSIZE_PC = 200                   # Integer position domain half-size in pc
-MPI_NON_BLOCKING = true                    # Use MPI_Iallgatherv for overlapped transfers
+SOFTENING_PC = 1e-3                        	# Softening length in pc (= 206 AU)
+GRAD_N3L = false                           	# N3L gradient correction (halves work, slightly less momentum conservation)
+USE_N3L = false                            	# Newton's 3rd law optimization (default: true on CPU, false on GPU)
+MEMORY_TILING = true                       	# Shared memory tiling for force computation (GPU optimization)
+SKIP_SECOND_TIMESTEP = false               	# Skip timestep recomputation on 2nd HHS half-step recursion (its fast, formally incorrect but in practive very low DeltaE)
+DIRECT_N2_ON_DEEP_LEVELS = 50000           	# do full N^2 below this thrshold without MPI to help with MPI comms overhead (many particles on intermediate hirarchies)
+DIRECT_CPU_N2_ON_VERY_DEEP_LEVELS = 500    	# do full N^2 below this thrshold on the CPU to avoid kernel launch overhead (few particles on very deep hirarchies)
+FUSE_GRADIENT = false                      	# Fuse force+gradient into single N^2 pass using stale accelerations (saves ~30% gradient time, O(dt^3) accuracy trade-off)
+INTEGER_POSITIONS = false                  	# Use int64 positions (exact drift, MPI-safe)
+DOMAIN_HALFSIZE_PC = 200                   	# Integer position domain half-size in pc
+MPI_NON_BLOCKING = true                    	# Use MPI_Iallgatherv for overlapped transfers
+SYMMETRIC_TIMESTEPS = true                	# Fuse force+timestep with harmonic symmetrization (FROST paper Eq. 23)
 
 # MIXED_PRECISION: compile-time flag, enable via cmake -DMIXED_PRECISION=ON
 # FP32 rsqrt seed + FP64 Newton-Raphson (~15-20% faster force kernels, ~1e-14 precision)
@@ -34,15 +35,15 @@ MPI_NON_BLOCKING = true                    # Use MPI_Iallgatherv for overlapped 
 # Plummer cluster parameters (only used if TEST_CASE = plummer)
 # =============================================================================
 PLUMMER_N = 1000000
-PLUMMER_M_TOTAL = 3.91e5            # Total mass in solar masses
-PLUMMER_R_HALF = 3.5                # Half-mass radius in parsecs
+PLUMMER_M_TOTAL = 3.91e5            		# Total mass in solar masses
+PLUMMER_R_HALF = 3.5                		# Half-mass radius in parsecs
 PLUMMER_SEED = 42
-PLUMMER_MASS_DIST = kroupa_evolved  # equal, kroupa, or kroupa_evolved
-PLUMMER_AGE_GYR = 1.0               # Cluster age in Gyr (for kroupa_evolved)
-PLUMMER_METALLICITY = 0.02          # Stellar metallicity Z (solar)
+PLUMMER_MASS_DIST = kroupa_evolved  		# equal, kroupa, or kroupa_evolved
+PLUMMER_AGE_GYR = 1.0               		# Cluster age in Gyr (for kroupa_evolved)
+PLUMMER_METALLICITY = 0.02          		# Stellar metallicity Z (solar)
 
 # =============================================================================
 # Output
 # =============================================================================
 PRINT_INTERVAL = 1
-PROFILING = true                    # Print performance breakdown at each print interval
+PROFILING = true                    		# Print performance breakdown at each print interval

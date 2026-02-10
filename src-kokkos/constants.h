@@ -75,5 +75,16 @@ struct RawView {
 // Tile size for shared memory tiling in all N^2 GPU kernels
 constexpr int TILE_SIZE = 128;
 
+// Harmonic symmetrization factor for timestep (FROST paper Eq. 23)
+// f(d) = (d + sqrt(1 + d²) - 1) / d  for |d| > eps, else 1.0
+// Uses fast_rsqrt instead of sqrt: sqrt(x) = x * rsqrt(x)
+KOKKOS_INLINE_FUNCTION double harmonic_sym_factor(double d) {
+    double d2 = d * d;
+    if (d2 < 1e-8) return 1.0;
+    double s = 1.0 + d2;
+    double sqrt_s = s * fast_rsqrt(s);
+    return (d + sqrt_s - 1.0) / d;
+}
+
 // Plummer sphere
 constexpr double PLUMMER_SCALE_FACTOR = 1.305;

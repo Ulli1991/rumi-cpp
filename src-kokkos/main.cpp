@@ -149,6 +149,7 @@ int main(int argc, char** argv) {
         use_integer_positions = (cfg.get_str("INTEGER_POSITIONS", "false") == "true");
         double domain_halfsize = cfg.get_double("DOMAIN_HALFSIZE_PC", 200.0);
         use_nonblocking_mpi = (cfg.get_str("MPI_NON_BLOCKING", "false") == "true");
+        symmetric_timesteps = (cfg.get_str("SYMMETRIC_TIMESTEPS", "false") == "true");
 
         // USE_N3L: default true on CPU-like backends, false on GPU
         bool use_n3l_default = true;

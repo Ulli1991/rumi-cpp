@@ -884,6 +884,147 @@ void self_acceleration_kick(Particles& p, int start, int count,
 }
 
 // ==========================================================================
+// Fused self_acceleration + symmetrized timestep (no kick)
+// Computes forces AND timesteps with harmonic symmetrization in one N² pass.
+// Forces stored in ax/ay/az for reuse by the first FSI kick.
+// ==========================================================================
+template <bool UseN3L>
+void self_acceleration_and_timestep(Particles& p, int start, int count,
+                                     double G, double soft2, double eta) {
+    RawView px{p.x.data()}, py{p.y.data()}, pz{p.z.data()};
+    RawView pvx{p.vx.data()}, pvy{p.vy.data()}, pvz{p.vz.data()};
+    RawView pax{p.ax.data()}, pay{p.ay.data()}, paz{p.az.data()};
+    RawView m{p.mass.data()};
+    RawView dt_f{p.dt_adapt.data()};
+    const int end = start + count;
+
+    if constexpr (UseN3L) {
+        // N3L: zero first, then upper triangle with atomics
+        Kokkos::parallel_for("zero_acc_dt_sym", count, KOKKOS_LAMBDA(int ii) {
+            int i = start + ii;
+            pax(i) = 0; pay(i) = 0; paz(i) = 0;
+            dt_f(i) = 1e30;
+        });
+        Kokkos::fence();
+
+        Kokkos::parallel_for("self_acc_dt_sym_n3l", count, KOKKOS_LAMBDA(int ii) {
+            int i = start + ii;
+            double axi = 0, ayi = 0, azi = 0;
+            double t_min_i = 1e30;
+            double xi = px(i), yi = py(i), zi = pz(i), mi_val = m(i);
+            double vxi = pvx(i), vyi = pvy(i), vzi = pvz(i);
+
+            for (int j = i + 1; j < end; j++) {
+                double dx = px(j) - xi;
+                double dy = py(j) - yi;
+                double dz = pz(j) - zi;
+                double r2 = dx*dx + dy*dy + dz*dz;
+                double r2s = r2 + soft2;
+                double inv_r = fast_rsqrt(r2s);
+                double inv_r3 = inv_r * inv_r * inv_r;
+
+                double fj = G * m(j) * inv_r3;
+                double fi = G * mi_val * inv_r3;
+                axi += fj * dx; ayi += fj * dy; azi += fj * dz;
+                Kokkos::atomic_add(&pax(j), -fi * dx);
+                Kokkos::atomic_add(&pay(j), -fi * dy);
+                Kokkos::atomic_add(&paz(j), -fi * dz);
+
+                // Symmetrized timestep
+                double dvx = pvx(j) - vxi;
+                double dvy = pvy(j) - vyi;
+                double dvz = pvz(j) - vzi;
+                double v_sq = dvx*dvx + dvy*dvy + dvz*dvz;
+                double mass_sum = mi_val + m(j);
+
+                double r3 = r2s * r2s * inv_r;
+                double t_ff_sq = r3 / (G * mass_sum + EPS);
+                double t_fb_sq = r2s / (v_sq + EPS);
+
+                double t_ff = t_ff_sq * fast_rsqrt(t_ff_sq + EPS);
+                double t_fb = t_fb_sq * fast_rsqrt(t_fb_sq + EPS);
+
+                double r_dot_v = dx*dvx + dy*dvy + dz*dvz;
+                double inv_r2 = inv_r * inv_r;
+
+                double d_ff = 1.5 * r_dot_v * inv_r2 * t_ff;
+                double d_fb = r_dot_v * inv_r2 * (1.0 + G * mass_sum * inv_r / (v_sq + EPS)) * t_fb;
+
+                double t_sym_ff = harmonic_sym_factor(d_ff) * t_ff;
+                double t_sym_fb = harmonic_sym_factor(d_fb) * t_fb;
+
+                double t_pair = Kokkos::fmin(t_sym_ff, t_sym_fb);
+                t_min_i = Kokkos::fmin(t_min_i, t_pair);
+                Kokkos::atomic_min(&dt_f(j), t_pair);
+            }
+            Kokkos::atomic_add(&pax(i), axi);
+            Kokkos::atomic_add(&pay(i), ayi);
+            Kokkos::atomic_add(&paz(i), azi);
+            Kokkos::atomic_min(&dt_f(i), t_min_i);
+        });
+        Kokkos::fence();
+
+        // Apply eta
+        Kokkos::parallel_for("apply_eta_sym", count, KOKKOS_LAMBDA(int ii) {
+            int i = start + ii;
+            dt_f(i) *= eta;  // already actual timescales, no sqrt needed
+        });
+        Kokkos::fence();
+    } else {
+        // Non-N3L: full N² per particle, no atomics needed
+        Kokkos::parallel_for("self_acc_dt_sym_full", count, KOKKOS_LAMBDA(int ii) {
+            int i = start + ii;
+            double axi = 0, ayi = 0, azi = 0;
+            double t_min_i = 1e30;
+            double xi = px(i), yi = py(i), zi = pz(i), mi_val = m(i);
+            double vxi = pvx(i), vyi = pvy(i), vzi = pvz(i);
+
+            for (int j = start; j < end; j++) {
+                if (i == j) continue;
+                double dx = px(j) - xi;
+                double dy = py(j) - yi;
+                double dz = pz(j) - zi;
+                double r2 = dx*dx + dy*dy + dz*dz;
+                double r2s = r2 + soft2;
+                double inv_r = fast_rsqrt(r2s);
+                double inv_r3 = inv_r * inv_r * inv_r;
+
+                double fj = G * m(j) * inv_r3;
+                axi += fj * dx; ayi += fj * dy; azi += fj * dz;
+
+                // Symmetrized timestep
+                double dvx = pvx(j) - vxi;
+                double dvy = pvy(j) - vyi;
+                double dvz = pvz(j) - vzi;
+                double v_sq = dvx*dvx + dvy*dvy + dvz*dvz;
+                double mass_sum = mi_val + m(j);
+
+                double r3 = r2s * r2s * inv_r;
+                double t_ff_sq = r3 / (G * mass_sum + EPS);
+                double t_fb_sq = r2s / (v_sq + EPS);
+
+                double t_ff = t_ff_sq * fast_rsqrt(t_ff_sq + EPS);
+                double t_fb = t_fb_sq * fast_rsqrt(t_fb_sq + EPS);
+
+                double r_dot_v = dx*dvx + dy*dvy + dz*dvz;
+                double inv_r2 = inv_r * inv_r;
+
+                double d_ff = 1.5 * r_dot_v * inv_r2 * t_ff;
+                double d_fb = r_dot_v * inv_r2 * (1.0 + G * mass_sum * inv_r / (v_sq + EPS)) * t_fb;
+
+                double t_sym_ff = harmonic_sym_factor(d_ff) * t_ff;
+                double t_sym_fb = harmonic_sym_factor(d_fb) * t_fb;
+
+                t_min_i = Kokkos::fmin(t_min_i, Kokkos::fmin(t_sym_ff, t_sym_fb));
+            }
+            pax(i) = axi; pay(i) = ayi; paz(i) = azi;
+            dt_f(i) = t_min_i * eta;  // already actual timescales, no sqrt needed
+        });
+        Kokkos::fence();
+    }
+}
+
+// ==========================================================================
 // Fused self_acceleration_and_gradient + kick
 // ==========================================================================
 template <bool UseN3L>
@@ -1541,3 +1682,5 @@ template void cross_acceleration_and_gradient_kick<true>(Particles&, int, int, i
 template void cross_acceleration_and_gradient_kick<false>(Particles&, int, int, int, int, double, double, double, double);
 template void cross_acceleration_kick_and_cache<true>(Particles&, int, int, int, int, double, double, double);
 template void cross_acceleration_kick_and_cache<false>(Particles&, int, int, int, int, double, double, double);
+template void self_acceleration_and_timestep<true>(Particles&, int, int, double, double, double);
+template void self_acceleration_and_timestep<false>(Particles&, int, int, double, double, double);
