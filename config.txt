@@ -12,9 +12,9 @@ INTEGRATOR = hhs
 # Simulation parameters
 # =============================================================================
 TOTAL_TIME_MYR = 0.23                      	# ~1 crossing time for M=3.91e5, r_half=3.5 pc
-DT_MAX_MYR = 1.6e-3                       	# ≈ 1600 yr
+DT_MAX_MYR = 1.0e-3                       	# ≈ 1600 yr
 DT_MIN_MYR = 1.0e-9                       	# ≈ 1e-3 yr
-ETA = 0.2
+ETA = 0.2					# Integrator accuracy eta
 SOFTENING_PC = 1e-3                        	# Softening length in pc (= 206 AU)
 DIRECT_N2_ON_DEEP_LEVELS = 50000           	# do full N^2 below this thrshold without MPI to help with MPI comms overhead (many particles on intermediate hirarchies)
 DIRECT_CPU_N2_ON_VERY_DEEP_LEVELS = 500    	# do full N^2 below this thrshold on the CPU to avoid kernel launch overhead (few particles on very deep hirarchies)

@@ -138,7 +138,6 @@ int main(int argc, char** argv) {
         double age_gyr      = cfg.get_double("PLUMMER_AGE_GYR", 1.0);
         double metallicity  = cfg.get_double("PLUMMER_METALLICITY", 0.02);
 
-        use_kahan = (cfg.get_str("USE_KAHAN", "false") == "true");
         bool profiling_enabled = (cfg.get_str("PROFILING", "true") == "true");
         direct_n2_threshold = std::stoi(cfg.get_str("DIRECT_N2_ON_DEEP_LEVELS", "0"));
         cpu_serial_threshold = std::stoi(cfg.get_str("DIRECT_CPU_N2_ON_VERY_DEEP_LEVELS", "0"));
