@@ -764,30 +764,40 @@ void self_acceleration_and_timestep(Particles& p, int start, int count,
                         double fj = G * mj * inv_r3;
                         axi += fj * dx; ayi += fj * dy; azi += fj * dz;
 
-                        // Symmetrized timestep — only approaching pairs
+                        // Symmetrized timestep — branchless, precomputed reciprocals
                         double dvx = tile(jb+4) - vxi;
                         double dvy = tile(jb+5) - vyi;
                         double dvz = tile(jb+6) - vzi;
+                        double v_sq = dvx*dvx + dvy*dvy + dvz*dvz;
+                        double mass_sum = mi_val + mj;
+                        double inv_Gm = 1.0 / (G * mass_sum + EPS);
+                        double inv_vsq = 1.0 / (v_sq + EPS);
+
+                        double r3 = r2s * r2s * inv_r;
+                        double t_ff_sq = r3 * inv_Gm;
+                        double t_fb_sq = r2s * inv_vsq;
+                        double t_ff = t_ff_sq * fast_rsqrt(t_ff_sq + EPS);
+                        double t_fb = t_fb_sq * fast_rsqrt(t_fb_sq + EPS);
+
+                        double inv_r2 = inv_r * inv_r;
                         double r_dot_v = dx*dvx + dy*dvy + dz*dvz;
-                        if (r_dot_v < 0.0) {
-                            double v_sq = dvx*dvx + dvy*dvy + dvz*dvz;
-                            double mass_sum = mi_val + mj;
-                            double r3 = r2s * r2s * inv_r;
-                            double t_ff_sq = r3 / (G * mass_sum + EPS);
-                            double t_fb_sq = r2s / (v_sq + EPS);
-                            double t_ff = t_ff_sq * fast_rsqrt(t_ff_sq + EPS);
-                            double t_fb = t_fb_sq * fast_rsqrt(t_fb_sq + EPS);
 
-                            double inv_r2 = inv_r * inv_r;
+                        // d*t products via c*t² (avoids computing d explicitly)
+                        double c_ff = 1.5 * r_dot_v * inv_r2;
+                        double c_fb = r_dot_v * inv_r2 * (1.0 + G * mass_sum * inv_r * inv_vsq);
 
-                            double d_ff = 1.5 * r_dot_v * inv_r2 * t_ff;
-                            double d_fb = r_dot_v * inv_r2 * (1.0 + G * mass_sum * inv_r / (v_sq + EPS)) * t_fb;
+                        // Rationalized form: t_sym = t + c*t²/(sqrt(1 + c²*t²) + 1)
+                        double ct_ff = c_ff * t_ff_sq;
+                        double s_ff = 1.0 + c_ff * ct_ff;
+                        double u_ff = s_ff * fast_rsqrt(s_ff);
+                        double t_sym_ff = t_ff + ct_ff / (u_ff + 1.0);
 
-                            double t_sym_ff = harmonic_sym_factor(d_ff) * t_ff;
-                            double t_sym_fb = harmonic_sym_factor(d_fb) * t_fb;
+                        double ct_fb = c_fb * t_fb_sq;
+                        double s_fb = 1.0 + c_fb * ct_fb;
+                        double u_fb = s_fb * fast_rsqrt(s_fb);
+                        double t_sym_fb = t_fb + ct_fb / (u_fb + 1.0);
 
-                            t_min_i = Kokkos::fmin(t_min_i, Kokkos::fmin(t_sym_ff, t_sym_fb));
-                        }
+                        t_min_i = Kokkos::fmin(t_min_i, Kokkos::fmin(t_sym_ff, t_sym_fb));
                     }
                 }
                 team.team_barrier();
