@@ -764,23 +764,20 @@ void self_acceleration_and_timestep(Particles& p, int start, int count,
                         double fj = G * mj * inv_r3;
                         axi += fj * dx; ayi += fj * dy; azi += fj * dz;
 
-                        // Symmetrized timestep
+                        // Symmetrized timestep — only approaching pairs
                         double dvx = tile(jb+4) - vxi;
                         double dvy = tile(jb+5) - vyi;
                         double dvz = tile(jb+6) - vzi;
-                        double v_sq = dvx*dvx + dvy*dvy + dvz*dvz;
-                        double mass_sum = mi_val + mj;
-
-                        double r3 = r2s * r2s * inv_r;
-                        double t_ff_sq = r3 / (G * mass_sum + EPS);
-                        double t_fb_sq = r2s / (v_sq + EPS);
-
-                        double t_min_sq_pair = Kokkos::fmin(t_ff_sq, t_fb_sq);
-                        if (t_min_sq_pair <= 100.0 * t_min_i * t_min_i) {
+                        double r_dot_v = dx*dvx + dy*dvy + dz*dvz;
+                        if (r_dot_v < 0.0) {
+                            double v_sq = dvx*dvx + dvy*dvy + dvz*dvz;
+                            double mass_sum = mi_val + mj;
+                            double r3 = r2s * r2s * inv_r;
+                            double t_ff_sq = r3 / (G * mass_sum + EPS);
+                            double t_fb_sq = r2s / (v_sq + EPS);
                             double t_ff = t_ff_sq * fast_rsqrt(t_ff_sq + EPS);
                             double t_fb = t_fb_sq * fast_rsqrt(t_fb_sq + EPS);
 
-                            double r_dot_v = dx*dvx + dy*dvy + dz*dvz;
                             double inv_r2 = inv_r * inv_r;
 
                             double d_ff = 1.5 * r_dot_v * inv_r2 * t_ff;

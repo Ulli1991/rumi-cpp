@@ -617,26 +617,20 @@ static void self_acceleration_and_timestep_distributed(DistributedParticles& dp,
                         ayi += mj_inv_r3 * dy;
                         azi += mj_inv_r3 * dz;
 
-                        // Timestep with symmetrization
+                        // Symmetrized timestep — only approaching pairs
                         double dvx = tile(jb + 4) - vxi;
                         double dvy = tile(jb + 5) - vyi;
                         double dvz = tile(jb + 6) - vzi;
-                        double v_sq = dvx*dvx + dvy*dvy + dvz*dvz;
-                        double mass_sum = mi + mj;
-
-                        double r3 = r2s * r2s * inv_r;
-                        double t_ff_sq = r3 / (G * mass_sum + EPS);
-                        double t_fb_sq = r2s / (v_sq + EPS);
-
-                        // Early-exit: skip expensive symmetrization if pair can't beat minimum
-                        // Factor 100 in t² space = factor 10 in t space; sym factor > 0.1 for |d|<10
-                        double t_min_sq_pair = Kokkos::fmin(t_ff_sq, t_fb_sq);
-                        if (t_min_sq_pair <= 100.0 * t_min_i * t_min_i) {
-                            // Symmetrize: need actual timescales (nonlinear formula)
+                        double r_dot_v = dx*dvx + dy*dvy + dz*dvz;
+                        if (r_dot_v < 0.0) {
+                            double v_sq = dvx*dvx + dvy*dvy + dvz*dvz;
+                            double mass_sum = mi + mj;
+                            double r3 = r2s * r2s * inv_r;
+                            double t_ff_sq = r3 / (G * mass_sum + EPS);
+                            double t_fb_sq = r2s / (v_sq + EPS);
                             double t_ff = t_ff_sq * fast_rsqrt(t_ff_sq + EPS);
                             double t_fb = t_fb_sq * fast_rsqrt(t_fb_sq + EPS);
 
-                            double r_dot_v = dx*dvx + dy*dvy + dz*dvz;
                             double inv_r2 = inv_r * inv_r;
 
                             double d_ff = 1.5 * r_dot_v * inv_r2 * t_ff;
@@ -656,7 +650,7 @@ static void self_acceleration_and_timestep_distributed(DistributedParticles& dp,
                 pax(i) = axi;
                 pay(i) = ayi;
                 paz(i) = azi;
-                dt_f(i) = t_min_i * eta;  // no sqrt — already actual timescales
+                dt_f(i) = t_min_i * eta;
             }
         });
     Kokkos::fence();
@@ -1753,32 +1747,29 @@ static void self_acceleration_and_timestep_ring(DistributedParticles& dp, int st
                         ayi += mj_inv_r3 * dy;
                         azi += mj_inv_r3 * dz;
 
-                        // Timestep with symmetrization
+                        // Symmetrized timestep — only approaching pairs
                         double dvx = tile(jb + 4) - vxi;
                         double dvy = tile(jb + 5) - vyi;
                         double dvz = tile(jb + 6) - vzi;
-                        double v_sq = dvx*dvx + dvy*dvy + dvz*dvz;
-                        double mass_sum = mi + mj;
-
-                        double r3 = r2s * r2s * inv_r;
-                        double t_ff_sq = r3 / (G * mass_sum + EPS);
-                        double t_fb_sq = r2s / (v_sq + EPS);
-
-                        double t_min_sq_pair = Kokkos::fmin(t_ff_sq, t_fb_sq);
-                        if (t_min_sq_pair <= 100.0 * t_min_i * t_min_i) {
-                        double t_ff = t_ff_sq * fast_rsqrt(t_ff_sq + EPS);
-                        double t_fb = t_fb_sq * fast_rsqrt(t_fb_sq + EPS);
-
                         double r_dot_v = dx*dvx + dy*dvy + dz*dvz;
-                        double inv_r2 = inv_r * inv_r;
+                        if (r_dot_v < 0.0) {
+                            double v_sq = dvx*dvx + dvy*dvy + dvz*dvz;
+                            double mass_sum = mi + mj;
+                            double r3 = r2s * r2s * inv_r;
+                            double t_ff_sq = r3 / (G * mass_sum + EPS);
+                            double t_fb_sq = r2s / (v_sq + EPS);
+                            double t_ff = t_ff_sq * fast_rsqrt(t_ff_sq + EPS);
+                            double t_fb = t_fb_sq * fast_rsqrt(t_fb_sq + EPS);
 
-                        double d_ff = 1.5 * r_dot_v * inv_r2 * t_ff;
-                        double d_fb = r_dot_v * inv_r2 * (1.0 + G * mass_sum * inv_r / (v_sq + EPS)) * t_fb;
+                            double inv_r2 = inv_r * inv_r;
 
-                        double t_sym_ff = harmonic_sym_factor(d_ff) * t_ff;
-                        double t_sym_fb = harmonic_sym_factor(d_fb) * t_fb;
+                            double d_ff = 1.5 * r_dot_v * inv_r2 * t_ff;
+                            double d_fb = r_dot_v * inv_r2 * (1.0 + G * mass_sum * inv_r / (v_sq + EPS)) * t_fb;
 
-                        t_min_i = Kokkos::fmin(t_min_i, Kokkos::fmin(t_sym_ff, t_sym_fb));
+                            double t_sym_ff = harmonic_sym_factor(d_ff) * t_ff;
+                            double t_sym_fb = harmonic_sym_factor(d_fb) * t_fb;
+
+                            t_min_i = Kokkos::fmin(t_min_i, Kokkos::fmin(t_sym_ff, t_sym_fb));
                         }
                     }
                 }
