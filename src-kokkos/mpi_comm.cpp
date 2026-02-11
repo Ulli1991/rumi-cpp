@@ -1,4 +1,5 @@
 #include "mpi_comm.h"
+#include "profiling.h"
 #include <cstdio>
 #include <algorithm>
 #include <numeric>
@@ -334,9 +335,11 @@ void DistributedParticles::allgather_accelerations_subset(int start, int count) 
     });
     Kokkos::fence();
 
+    g_profiler.mpi_start();
     MPI_Allgatherv(send.data(), 3 * my_slice_count, MPI_DOUBLE,
                    recv.data(), mpi_packed_counts.data(), mpi_packed_displs.data(), MPI_DOUBLE,
                    MPI_COMM_WORLD);
+    g_profiler.mpi_stop();
 
     int st = start;
     Kokkos::parallel_for("unpack_acc", count, KOKKOS_LAMBDA(int ii) {
@@ -365,9 +368,11 @@ void DistributedParticles::allgather_accelerations_subset(int start, int count) 
     }
 
     std::vector<double> recv_buf(3 * count);
+    g_profiler.mpi_start();
     MPI_Allgatherv(send_buf.data(), 3 * my_slice_count, MPI_DOUBLE,
                    recv_buf.data(), mpi_packed_counts.data(), mpi_packed_displs.data(), MPI_DOUBLE,
                    MPI_COMM_WORLD);
+    g_profiler.mpi_stop();
 
     // Unpack and copy only the subset back to device
     std::vector<double> recv_ax(count), recv_ay(count), recv_az(count);
@@ -534,9 +539,11 @@ void DistributedParticles::allgather_timestep_subset(int start, int count) {
     // GPU-aware: use device pointers directly, reuse recv buffer
     auto recv = Kokkos::subview(mpi_acc_recv_buf, Kokkos::make_pair(0, count));
 
+    g_profiler.mpi_start();
     MPI_Allgatherv(local.dt_adapt.data() + slice_start, slice_count, MPI_DOUBLE,
                    recv.data(), mpi_counts.data(), mpi_displs.data(), MPI_DOUBLE,
                    MPI_COMM_WORLD);
+    g_profiler.mpi_stop();
 
     auto dt_f = local.dt_adapt;
     int st = start;
@@ -554,9 +561,11 @@ void DistributedParticles::allgather_timestep_subset(int start, int count) {
     for (int i = 0; i < slice_count; i++) send_dt[i] = h_dt(i);
 
     std::vector<double> recv_dt(count);
+    g_profiler.mpi_start();
     MPI_Allgatherv(send_dt.data(), slice_count, MPI_DOUBLE,
                    recv_dt.data(), mpi_counts.data(), mpi_displs.data(), MPI_DOUBLE,
                    MPI_COMM_WORLD);
+    g_profiler.mpi_stop();
 
     Kokkos::View<double*, Kokkos::HostSpace, Kokkos::MemoryUnmanaged> h_recv_dt(recv_dt.data(), count);
     Kokkos::deep_copy(Kokkos::subview(local.dt_adapt, Kokkos::make_pair(start, start + count)), h_recv_dt);
@@ -592,8 +601,10 @@ void DistributedParticles::allreduce_accelerations_subset(int start, int count) 
     });
     Kokkos::fence();
 
+    g_profiler.mpi_start();
     MPI_Allreduce(MPI_IN_PLACE, buf.data(), 3 * count, MPI_DOUBLE,
                   MPI_SUM, MPI_COMM_WORLD);
+    g_profiler.mpi_stop();
 
     Kokkos::parallel_for("unpack_allreduce", count, KOKKOS_LAMBDA(int ii) {
         int i = st + ii;
@@ -619,8 +630,10 @@ void DistributedParticles::allreduce_accelerations_subset(int start, int count) 
         buf[3*i+2] = h_az(i);
     }
 
+    g_profiler.mpi_start();
     MPI_Allreduce(MPI_IN_PLACE, buf.data(), 3 * count, MPI_DOUBLE,
                   MPI_SUM, MPI_COMM_WORLD);
+    g_profiler.mpi_stop();
 
     for (int i = 0; i < count; i++) {
         h_ax(i) = buf[3*i];
@@ -654,8 +667,10 @@ void DistributedParticles::allreduce_timestep_subset(int start, int count) {
     });
     Kokkos::fence();
 
+    g_profiler.mpi_start();
     MPI_Allreduce(MPI_IN_PLACE, buf.data(), count, MPI_DOUBLE,
                   MPI_MIN, MPI_COMM_WORLD);
+    g_profiler.mpi_stop();
 
     Kokkos::parallel_for("unpack_dt_allreduce", count, KOKKOS_LAMBDA(int ii) {
         dt_f(st + ii) = buf(ii);
@@ -670,8 +685,10 @@ void DistributedParticles::allreduce_timestep_subset(int start, int count) {
     std::vector<double> buf(count);
     for (int i = 0; i < count; i++) buf[i] = h_dt(i);
 
+    g_profiler.mpi_start();
     MPI_Allreduce(MPI_IN_PLACE, buf.data(), count, MPI_DOUBLE,
                   MPI_MIN, MPI_COMM_WORLD);
+    g_profiler.mpi_stop();
 
     for (int i = 0; i < count; i++) h_dt(i) = buf[i];
     Kokkos::deep_copy(Kokkos::subview(local.dt_adapt, Kokkos::make_pair(start, start + count)), h_dt);

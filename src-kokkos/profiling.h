@@ -34,25 +34,33 @@ struct StepProfiler {
     }
 
     double elapsed[NUM_TIMERS];
+    double elapsed_mpi[NUM_TIMERS];   // MPI time within each component
     int counts[NUM_TIMERS];
+    int counts_mpi[NUM_TIMERS];
     long long pairs[NUM_TIMERS];
     double step_wall_total;
     int step_count;
 
+    Timer active_component;  // which component is currently being timed
     std::chrono::high_resolution_clock::time_point t_start;
+    std::chrono::high_resolution_clock::time_point t_mpi;
 
     StepProfiler() { reset(); }
 
     void reset() {
         std::memset(elapsed, 0, sizeof(elapsed));
+        std::memset(elapsed_mpi, 0, sizeof(elapsed_mpi));
         std::memset(counts, 0, sizeof(counts));
+        std::memset(counts_mpi, 0, sizeof(counts_mpi));
         std::memset(pairs, 0, sizeof(pairs));
         step_wall_total = 0.0;
         step_count = 0;
+        active_component = NUM_TIMERS;
     }
 
-    void start() {
+    void start(Timer ctx = NUM_TIMERS) {
         t_start = std::chrono::high_resolution_clock::now();
+        active_component = ctx;
     }
 
     void stop(Timer t, long long n_pairs = 0) {
@@ -60,6 +68,21 @@ struct StepProfiler {
         elapsed[t] += std::chrono::duration<double>(t_end - t_start).count();
         counts[t]++;
         pairs[t] += n_pairs;
+        active_component = NUM_TIMERS;
+    }
+
+    // MPI sub-timing: called from inside MPI communication functions
+    // Accumulates into elapsed_mpi[active_component] if a component is active
+    void mpi_start() {
+        t_mpi = std::chrono::high_resolution_clock::now();
+    }
+
+    void mpi_stop() {
+        auto t_end = std::chrono::high_resolution_clock::now();
+        if (active_component < NUM_TIMERS) {
+            elapsed_mpi[active_component] += std::chrono::duration<double>(t_end - t_mpi).count();
+            counts_mpi[active_component]++;
+        }
     }
 
     void print_report(int /*N*/, int n_ranks) const {
@@ -72,15 +95,24 @@ struct StepProfiler {
         std::printf("\n--- Performance (%d steps, %d ranks) ", step_count, n_ranks);
         for (int i = 0; i < 46; i++) std::printf("-");
         std::printf("\n");
-        std::printf("  %-24s %10s %8s %10s %8s\n",
-                    "Component", "Time [s]", "Calls", "Avg [ms]", "% Total");
+        std::printf("  %-24s %10s %8s %10s %8s %10s %10s\n",
+                    "Component", "Time [s]", "Calls", "Avg [ms]", "% Total",
+                    "Gpairs", "Gp/s/rank");
 
         for (int i = 0; i < NUM_TIMERS; i++) {
             if (counts[i] == 0) continue;
             double avg_ms = (elapsed[i] / counts[i]) * 1000.0;
             double pct = (step_wall_total > 0.0) ? 100.0 * elapsed[i] / step_wall_total : 0.0;
-            std::printf("  %-24s %10.3f %8d %10.3f %7.1f%%\n",
-                        timer_name(i), elapsed[i], counts[i], avg_ms, pct);
+            if (pairs[i] > 0) {
+                double gpairs = pairs[i] / 1.0e9;
+                double gp_per_s_per_rank = (gpairs / n_ranks) / elapsed[i];
+                std::printf("  %-24s %10.3f %8d %10.3f %7.1f%% %10.1f %10.1f\n",
+                            timer_name(i), elapsed[i], counts[i], avg_ms, pct,
+                            gpairs, gp_per_s_per_rank);
+            } else {
+                std::printf("  %-24s %10.3f %8d %10.3f %7.1f%%\n",
+                            timer_name(i), elapsed[i], counts[i], avg_ms, pct);
+            }
         }
 
         // Other
@@ -113,6 +145,31 @@ struct StepProfiler {
                         "%.1f Gpairs/s/rank\n",
                         gpairs, gpairs_per_rank, gpairs_per_sec_per_rank);
         }
+
+        // MPI breakdown per component
+        double mpi_total = 0;
+        int mpi_total_calls = 0;
+        bool has_mpi = false;
+        for (int i = 0; i < NUM_TIMERS; i++) {
+            if (counts_mpi[i] > 0) { has_mpi = true; mpi_total += elapsed_mpi[i]; mpi_total_calls += counts_mpi[i]; }
+        }
+        if (has_mpi) {
+            std::printf("\n  --- MPI breakdown (included in timers above) ");
+            for (int i = 0; i < 23; i++) std::printf("-");
+            std::printf("\n");
+            for (int i = 0; i < NUM_TIMERS; i++) {
+                if (counts_mpi[i] == 0) continue;
+                double avg_ms = (elapsed_mpi[i] / counts_mpi[i]) * 1000.0;
+                double compute = elapsed[i] - elapsed_mpi[i];
+                std::printf("  %-24s %10.3f %8d %10.3f   (compute: %.3f s, MPI: %.3f s)\n",
+                            timer_name(i), elapsed_mpi[i], counts_mpi[i], avg_ms,
+                            compute, elapsed_mpi[i]);
+            }
+            double pct_mpi = (step_wall_total > 0.0) ? 100.0 * mpi_total / step_wall_total : 0.0;
+            std::printf("  %-24s %10.3f %8d %10s %7.1f%%\n",
+                        "Total MPI", mpi_total, mpi_total_calls, "-", pct_mpi);
+        }
+
         std::fflush(stdout);
     }
 

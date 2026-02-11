@@ -733,7 +733,8 @@ void self_acceleration_and_timestep(Particles& p, int start, int count,
                 vxi = pvx(i); vyi = pvy(i); vzi = pvz(i);
             }
             double axi = 0, ayi = 0, azi = 0;
-            double t_min_i = 1e30;
+            double t_min_sq_i = 1e60;  // unsymmetrized base (squared-space, ALL pairs)
+            double t_min_sym_i = 1e30; // symmetrized (linear-space, approaching pairs only)
 
             for (int tile_start = start; tile_start < end; tile_start += TILE_SIZE) {
                 int tile_count = ((tile_start + TILE_SIZE) < end) ? TILE_SIZE : (end - tile_start);
@@ -764,47 +765,48 @@ void self_acceleration_and_timestep(Particles& p, int start, int count,
                         double fj = G * mj * inv_r3;
                         axi += fj * dx; ayi += fj * dy; azi += fj * dz;
 
-                        // Symmetrized timestep — branchless, precomputed reciprocals
+                        // Base timescale for ALL pairs (squared-space, cheap)
                         double dvx = tile(jb+4) - vxi;
                         double dvy = tile(jb+5) - vyi;
                         double dvz = tile(jb+6) - vzi;
                         double v_sq = dvx*dvx + dvy*dvy + dvz*dvz;
                         double mass_sum = mi_val + mj;
-                        double inv_Gm = 1.0 / (G * mass_sum + EPS);
-                        double inv_vsq = 1.0 / (v_sq + EPS);
-
                         double r3 = r2s * r2s * inv_r;
-                        double t_ff_sq = r3 * inv_Gm;
-                        double t_fb_sq = r2s * inv_vsq;
-                        double t_ff = t_ff_sq * fast_rsqrt(t_ff_sq + EPS);
-                        double t_fb = t_fb_sq * fast_rsqrt(t_fb_sq + EPS);
+                        double t_ff_sq = r3 / (G * mass_sum + EPS);
+                        double t_fb_sq = r2s / (v_sq + EPS);
+                        t_min_sq_i = Kokkos::fmin(t_min_sq_i, Kokkos::fmin(t_ff_sq, t_fb_sq));
 
-                        double inv_r2 = inv_r * inv_r;
+                        // Symmetrized timestep — approaching pairs only
                         double r_dot_v = dx*dvx + dy*dvy + dz*dvz;
+                        if (r_dot_v < 0.0) {
+                            double inv_vsq = 1.0 / (v_sq + EPS);
+                            double t_ff = t_ff_sq * fast_rsqrt(t_ff_sq + EPS);
+                            double t_fb = t_fb_sq * fast_rsqrt(t_fb_sq + EPS);
 
-                        // d*t products via c*t² (avoids computing d explicitly)
-                        double c_ff = 1.5 * r_dot_v * inv_r2;
-                        double c_fb = r_dot_v * inv_r2 * (1.0 + G * mass_sum * inv_r * inv_vsq);
+                            double inv_r2 = inv_r * inv_r;
+                            double c_ff = 1.5 * r_dot_v * inv_r2;
+                            double c_fb = r_dot_v * inv_r2 * (1.0 + G * mass_sum * inv_r * inv_vsq);
 
-                        // Rationalized form: t_sym = t + c*t²/(sqrt(1 + c²*t²) + 1)
-                        double ct_ff = c_ff * t_ff_sq;
-                        double s_ff = 1.0 + c_ff * ct_ff;
-                        double u_ff = s_ff * fast_rsqrt(s_ff);
-                        double t_sym_ff = t_ff + ct_ff / (u_ff + 1.0);
+                            double ct_ff = c_ff * t_ff_sq;
+                            double s_ff = 1.0 + c_ff * ct_ff;
+                            double u_ff = s_ff * fast_rsqrt(s_ff);
+                            double t_sym_ff = t_ff + ct_ff / (u_ff + 1.0);
 
-                        double ct_fb = c_fb * t_fb_sq;
-                        double s_fb = 1.0 + c_fb * ct_fb;
-                        double u_fb = s_fb * fast_rsqrt(s_fb);
-                        double t_sym_fb = t_fb + ct_fb / (u_fb + 1.0);
+                            double ct_fb = c_fb * t_fb_sq;
+                            double s_fb = 1.0 + c_fb * ct_fb;
+                            double u_fb = s_fb * fast_rsqrt(s_fb);
+                            double t_sym_fb = t_fb + ct_fb / (u_fb + 1.0);
 
-                        t_min_i = Kokkos::fmin(t_min_i, Kokkos::fmin(t_sym_ff, t_sym_fb));
+                            t_min_sym_i = Kokkos::fmin(t_min_sym_i, Kokkos::fmin(t_sym_ff, t_sym_fb));
+                        }
                     }
                 }
                 team.team_barrier();
             }
             if (ii < count) {
                 pax(i) = axi; pay(i) = ayi; paz(i) = azi;
-                dt_f(i) = t_min_i * eta;
+                double t_base = Kokkos::sqrt(t_min_sq_i);
+                dt_f(i) = Kokkos::fmin(t_base, t_min_sym_i) * eta;
             }
         });
     Kokkos::fence();

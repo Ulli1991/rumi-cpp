@@ -348,7 +348,7 @@ static void hhs_fsi_step_dynamic_impl(Particles& p, int start, int count, double
         } else {
             compute_timestep_subset(p, start, count, G, soft2, eta);
         }
-        g_profiler.stop(StepProfiler::ADAPTIVE_DT);
+        g_profiler.stop(StepProfiler::ADAPTIVE_DT, (long long)count * count);
     }
 
     // Partition into slow (dt >= pivot) and fast (dt < pivot)
@@ -580,7 +580,8 @@ static void self_acceleration_and_timestep_distributed(DistributedParticles& dp,
             }
 
             double axi = 0, ayi = 0, azi = 0;
-            double t_min_i = 1e30;
+            double t_min_sq_i = 1e60;  // unsymmetrized base (squared-space, ALL pairs)
+            double t_min_sym_i = 1e30; // symmetrized (linear-space, approaching pairs only)
 
             for (int tile_start = j_start; tile_start < j_end; tile_start += TILE_SIZE) {
                 int tile_end = (tile_start + TILE_SIZE < j_end) ? tile_start + TILE_SIZE : j_end;
@@ -617,38 +618,40 @@ static void self_acceleration_and_timestep_distributed(DistributedParticles& dp,
                         ayi += mj_inv_r3 * dy;
                         azi += mj_inv_r3 * dz;
 
-                        // Symmetrized timestep — branchless, precomputed reciprocals
+                        // Base timescale for ALL pairs (squared-space, cheap)
                         double dvx = tile(jb + 4) - vxi;
                         double dvy = tile(jb + 5) - vyi;
                         double dvz = tile(jb + 6) - vzi;
                         double v_sq = dvx*dvx + dvy*dvy + dvz*dvz;
                         double mass_sum = mi + mj;
-                        double inv_Gm = 1.0 / (G * mass_sum + EPS);
-                        double inv_vsq = 1.0 / (v_sq + EPS);
-
                         double r3 = r2s * r2s * inv_r;
-                        double t_ff_sq = r3 * inv_Gm;
-                        double t_fb_sq = r2s * inv_vsq;
-                        double t_ff = t_ff_sq * fast_rsqrt(t_ff_sq + EPS);
-                        double t_fb = t_fb_sq * fast_rsqrt(t_fb_sq + EPS);
+                        double t_ff_sq = r3 / (G * mass_sum + EPS);
+                        double t_fb_sq = r2s / (v_sq + EPS);
+                        t_min_sq_i = Kokkos::fmin(t_min_sq_i, Kokkos::fmin(t_ff_sq, t_fb_sq));
 
-                        double inv_r2 = inv_r * inv_r;
+                        // Symmetrized timestep — approaching pairs only
                         double r_dot_v = dx*dvx + dy*dvy + dz*dvz;
+                        if (r_dot_v < 0.0) {
+                            double inv_vsq = 1.0 / (v_sq + EPS);
+                            double t_ff = t_ff_sq * fast_rsqrt(t_ff_sq + EPS);
+                            double t_fb = t_fb_sq * fast_rsqrt(t_fb_sq + EPS);
 
-                        double c_ff = 1.5 * r_dot_v * inv_r2;
-                        double c_fb = r_dot_v * inv_r2 * (1.0 + G * mass_sum * inv_r * inv_vsq);
+                            double inv_r2 = inv_r * inv_r;
+                            double c_ff = 1.5 * r_dot_v * inv_r2;
+                            double c_fb = r_dot_v * inv_r2 * (1.0 + G * mass_sum * inv_r * inv_vsq);
 
-                        double ct_ff = c_ff * t_ff_sq;
-                        double s_ff = 1.0 + c_ff * ct_ff;
-                        double u_ff = s_ff * fast_rsqrt(s_ff);
-                        double t_sym_ff = t_ff + ct_ff / (u_ff + 1.0);
+                            double ct_ff = c_ff * t_ff_sq;
+                            double s_ff = 1.0 + c_ff * ct_ff;
+                            double u_ff = s_ff * fast_rsqrt(s_ff);
+                            double t_sym_ff = t_ff + ct_ff / (u_ff + 1.0);
 
-                        double ct_fb = c_fb * t_fb_sq;
-                        double s_fb = 1.0 + c_fb * ct_fb;
-                        double u_fb = s_fb * fast_rsqrt(s_fb);
-                        double t_sym_fb = t_fb + ct_fb / (u_fb + 1.0);
+                            double ct_fb = c_fb * t_fb_sq;
+                            double s_fb = 1.0 + c_fb * ct_fb;
+                            double u_fb = s_fb * fast_rsqrt(s_fb);
+                            double t_sym_fb = t_fb + ct_fb / (u_fb + 1.0);
 
-                        t_min_i = Kokkos::fmin(t_min_i, Kokkos::fmin(t_sym_ff, t_sym_fb));
+                            t_min_sym_i = Kokkos::fmin(t_min_sym_i, Kokkos::fmin(t_sym_ff, t_sym_fb));
+                        }
                     }
                 }
                 team.team_barrier();
@@ -658,7 +661,8 @@ static void self_acceleration_and_timestep_distributed(DistributedParticles& dp,
                 pax(i) = axi;
                 pay(i) = ayi;
                 paz(i) = azi;
-                dt_f(i) = t_min_i * eta;
+                double t_base = Kokkos::sqrt(t_min_sq_i);
+                dt_f(i) = Kokkos::fmin(t_base, t_min_sym_i) * eta;
             }
         });
     Kokkos::fence();
@@ -1718,7 +1722,8 @@ static void self_acceleration_and_timestep_ring(DistributedParticles& dp, int st
             }
 
             double axi = 0, ayi = 0, azi = 0;
-            double t_min_i = 1e30;
+            double t_min_sq_i = 1e60;  // unsymmetrized base (squared-space, ALL pairs)
+            double t_min_sym_i = 1e30; // symmetrized (linear-space, approaching pairs only)
 
             for (int tile_st = js; tile_st < je; tile_st += TILE_SIZE) {
                 int tile_end = (tile_st + TILE_SIZE < je) ? tile_st + TILE_SIZE : je;
@@ -1755,38 +1760,40 @@ static void self_acceleration_and_timestep_ring(DistributedParticles& dp, int st
                         ayi += mj_inv_r3 * dy;
                         azi += mj_inv_r3 * dz;
 
-                        // Symmetrized timestep — branchless, precomputed reciprocals
+                        // Base timescale for ALL pairs (squared-space, cheap)
                         double dvx = tile(jb + 4) - vxi;
                         double dvy = tile(jb + 5) - vyi;
                         double dvz = tile(jb + 6) - vzi;
                         double v_sq = dvx*dvx + dvy*dvy + dvz*dvz;
                         double mass_sum = mi + mj;
-                        double inv_Gm = 1.0 / (G * mass_sum + EPS);
-                        double inv_vsq = 1.0 / (v_sq + EPS);
-
                         double r3 = r2s * r2s * inv_r;
-                        double t_ff_sq = r3 * inv_Gm;
-                        double t_fb_sq = r2s * inv_vsq;
-                        double t_ff = t_ff_sq * fast_rsqrt(t_ff_sq + EPS);
-                        double t_fb = t_fb_sq * fast_rsqrt(t_fb_sq + EPS);
+                        double t_ff_sq = r3 / (G * mass_sum + EPS);
+                        double t_fb_sq = r2s / (v_sq + EPS);
+                        t_min_sq_i = Kokkos::fmin(t_min_sq_i, Kokkos::fmin(t_ff_sq, t_fb_sq));
 
-                        double inv_r2 = inv_r * inv_r;
+                        // Symmetrized timestep — approaching pairs only
                         double r_dot_v = dx*dvx + dy*dvy + dz*dvz;
+                        if (r_dot_v < 0.0) {
+                            double inv_vsq = 1.0 / (v_sq + EPS);
+                            double t_ff = t_ff_sq * fast_rsqrt(t_ff_sq + EPS);
+                            double t_fb = t_fb_sq * fast_rsqrt(t_fb_sq + EPS);
 
-                        double c_ff = 1.5 * r_dot_v * inv_r2;
-                        double c_fb = r_dot_v * inv_r2 * (1.0 + G * mass_sum * inv_r * inv_vsq);
+                            double inv_r2 = inv_r * inv_r;
+                            double c_ff = 1.5 * r_dot_v * inv_r2;
+                            double c_fb = r_dot_v * inv_r2 * (1.0 + G * mass_sum * inv_r * inv_vsq);
 
-                        double ct_ff = c_ff * t_ff_sq;
-                        double s_ff = 1.0 + c_ff * ct_ff;
-                        double u_ff = s_ff * fast_rsqrt(s_ff);
-                        double t_sym_ff = t_ff + ct_ff / (u_ff + 1.0);
+                            double ct_ff = c_ff * t_ff_sq;
+                            double s_ff = 1.0 + c_ff * ct_ff;
+                            double u_ff = s_ff * fast_rsqrt(s_ff);
+                            double t_sym_ff = t_ff + ct_ff / (u_ff + 1.0);
 
-                        double ct_fb = c_fb * t_fb_sq;
-                        double s_fb = 1.0 + c_fb * ct_fb;
-                        double u_fb = s_fb * fast_rsqrt(s_fb);
-                        double t_sym_fb = t_fb + ct_fb / (u_fb + 1.0);
+                            double ct_fb = c_fb * t_fb_sq;
+                            double s_fb = 1.0 + c_fb * ct_fb;
+                            double u_fb = s_fb * fast_rsqrt(s_fb);
+                            double t_sym_fb = t_fb + ct_fb / (u_fb + 1.0);
 
-                        t_min_i = Kokkos::fmin(t_min_i, Kokkos::fmin(t_sym_ff, t_sym_fb));
+                            t_min_sym_i = Kokkos::fmin(t_min_sym_i, Kokkos::fmin(t_sym_ff, t_sym_fb));
+                        }
                     }
                 }
                 team.team_barrier();
@@ -1796,7 +1803,8 @@ static void self_acceleration_and_timestep_ring(DistributedParticles& dp, int st
                 pax(i) = axi;
                 pay(i) = ayi;
                 paz(i) = azi;
-                dt_f(i) = t_min_i * eta;
+                double t_base = Kokkos::sqrt(t_min_sq_i);
+                dt_f(i) = Kokkos::fmin(t_base, t_min_sym_i) * eta;
             }
         });
     Kokkos::fence();
@@ -1919,7 +1927,7 @@ static void fsi_step_ring(DistributedParticles& dp, int start, int count,
         kick_velocities(dp.local, start, count, dt * FSI_KICK);
         g_profiler.stop(StepProfiler::DRIFT_KICK);
     } else {
-        g_profiler.start();
+        g_profiler.start(StepProfiler::SELF_FORCE);
         self_acceleration_ring(dp, start, count, G, soft2);
         g_profiler.stop(StepProfiler::SELF_FORCE, self_pairs);
         g_profiler.start();
@@ -1935,10 +1943,10 @@ static void fsi_step_ring(DistributedParticles& dp, int start, int count,
     dp.local.pack_pos_range(start, count);
 
     // U-tilde kick (2dt/3) with gradient correction
-    g_profiler.start();
+    g_profiler.start(StepProfiler::SELF_FORCE);
     self_acceleration_ring(dp, start, count, G, soft2);
     g_profiler.stop(StepProfiler::SELF_FORCE, self_pairs);
-    g_profiler.start();
+    g_profiler.start(StepProfiler::SELF_GRAD);
     self_gradient_correction_ring(dp, start, count, G, soft2, dt);
     g_profiler.stop(StepProfiler::SELF_GRAD, self_pairs);
     g_profiler.start();
@@ -1953,7 +1961,7 @@ static void fsi_step_ring(DistributedParticles& dp, int start, int count,
     dp.local.pack_pos_range(start, count);
 
     // U kick (dt/6): force + allreduce + kick
-    g_profiler.start();
+    g_profiler.start(StepProfiler::SELF_FORCE);
     self_acceleration_ring(dp, start, count, G, soft2);
     g_profiler.stop(StepProfiler::SELF_FORCE, self_pairs);
     g_profiler.start();
@@ -1984,7 +1992,7 @@ static void fsi_step_distributed(DistributedParticles& dp, int start, int count,
         kick_velocities(dp.local, start, count, dt * FSI_KICK);
         g_profiler.stop(StepProfiler::DRIFT_KICK);
     } else {
-        g_profiler.start();
+        g_profiler.start(StepProfiler::SELF_FORCE);
         self_acceleration_kick_distributed(dp, start, count, G, soft2, dt * FSI_KICK);
         g_profiler.stop(StepProfiler::SELF_FORCE, self_pairs);
     }
@@ -2000,15 +2008,15 @@ static void fsi_step_distributed(DistributedParticles& dp, int start, int count,
     // U-tilde kick (2dt/3) with gradient correction
     if (fuse_gradient) {
         // Fused: single N² pass computes force + gradient (using stale a) + kick
-        g_profiler.start();
+        g_profiler.start(StepProfiler::SELF_GRAD);
         self_acceleration_gradient_kick_fused_distributed(dp, start, count, G, soft2, dt, dt * FSI_MOD_KICK);
         g_profiler.stop(StepProfiler::SELF_GRAD, self_pairs);
     } else {
         // Separate: force → allgather → gradient + kick
-        g_profiler.start();
+        g_profiler.start(StepProfiler::SELF_FORCE);
         self_acceleration_distributed(dp, start, count, G, soft2);
         g_profiler.stop(StepProfiler::SELF_FORCE, self_pairs);
-        g_profiler.start();
+        g_profiler.start(StepProfiler::SELF_GRAD);
         self_gradient_correction_kick_distributed(dp, start, count, G, soft2, dt, dt * FSI_MOD_KICK);
         g_profiler.stop(StepProfiler::SELF_GRAD, self_pairs);
     }
@@ -2022,7 +2030,7 @@ static void fsi_step_distributed(DistributedParticles& dp, int start, int count,
     dp.local.pack_pos_range(start, count);
 
     // U kick (dt/6) - fused distributed force + kick
-    g_profiler.start();
+    g_profiler.start(StepProfiler::SELF_FORCE);
     self_acceleration_kick_distributed(dp, start, count, G, soft2, dt * FSI_KICK);
     g_profiler.stop(StepProfiler::SELF_FORCE, self_pairs);
 }
@@ -3512,7 +3520,7 @@ static void hhs_fsi_recursive_local(
         } else {
             compute_timestep_subset(p, start, count, G, soft2, eta);
         }
-        g_profiler.stop(StepProfiler::ADAPTIVE_DT);
+        g_profiler.stop(StepProfiler::ADAPTIVE_DT, (long long)count * count);
     }
 
     // Partition into slow (dt >= pivot) and fast (dt < pivot)
@@ -3616,7 +3624,7 @@ static void hhs_fsi_recursive_distributed(
         // Sync packed pos+vel for vectorized timestep kernel
         dp.local.pack_pos_range(start, count);
         dp.local.pack_vel_range(start, count);
-        g_profiler.start();
+        g_profiler.start(StepProfiler::ADAPTIVE_DT);
         if (symmetric_timesteps) {
 #ifdef MPI_TOPOLOGY_RING
             self_acceleration_and_timestep_ring(dp, start, count, G, soft2, eta);
@@ -3678,7 +3686,7 @@ static void hhs_fsi_recursive_distributed(
     // --- Ring topology: j-partitioned force → allreduce → separate kick ---
 
     // Step 1: Cross-kick S<->F (dt/6)
-    g_profiler.start();
+    g_profiler.start(StepProfiler::CROSS_FORCE);
     cross_acceleration_ring(dp, slow_start, slow_count, fast_start, fast_count, G, soft2);
     g_profiler.stop(StepProfiler::CROSS_FORCE, cross_pairs);
     g_profiler.start();
@@ -3694,7 +3702,7 @@ static void hhs_fsi_recursive_distributed(
                                   G, soft2, dt_min, eta, false);
 
     // Step 4: Cross-force + gradient (ring) + kick (2dt/3)
-    g_profiler.start();
+    g_profiler.start(StepProfiler::CROSS_GRAD);
     cross_acceleration_and_gradient_ring(dp, slow_start, slow_count,
                                           fast_start, fast_count,
                                           G, soft2, pivot_dt);
@@ -3715,7 +3723,7 @@ static void hhs_fsi_recursive_distributed(
     fsi_step_ring(dp, slow_start, slow_count, G, soft2, pivot_dt * 0.5);
 
     // Step 7: Cross-kick S<->F (dt/6)
-    g_profiler.start();
+    g_profiler.start(StepProfiler::CROSS_FORCE);
     cross_acceleration_ring(dp, slow_start, slow_count, fast_start, fast_count, G, soft2);
     g_profiler.stop(StepProfiler::CROSS_FORCE, cross_pairs);
     g_profiler.start();
@@ -3727,7 +3735,7 @@ static void hhs_fsi_recursive_distributed(
     // --- Default: i-partitioned force → allgatherv → fused kick ---
 
     // Step 1: Cross-kick S<->F (dt/6) - fused distributed force + allgather + kick
-    g_profiler.start();
+    g_profiler.start(StepProfiler::CROSS_FORCE);
     cross_acceleration_kick_distributed(dp, slow_start, slow_count, fast_start, fast_count, G, soft2, pivot_dt * FSI_KICK);
     g_profiler.stop(StepProfiler::CROSS_FORCE, cross_pairs);
 
@@ -3741,14 +3749,14 @@ static void hhs_fsi_recursive_distributed(
     // Step 4: Cross-kick S<->F with gradient (2dt/3)
     if (fuse_gradient) {
         // Fused: single N² pass per direction computes force + gradient (stale a)
-        g_profiler.start();
+        g_profiler.start(StepProfiler::CROSS_GRAD);
         cross_acceleration_and_gradient_fused_distributed(dp, slow_start, slow_count,
                                                           fast_start, fast_count,
                                                           G, soft2, pivot_dt);
         g_profiler.stop(StepProfiler::CROSS_GRAD, cross_pairs);
     } else {
         // Separate: force → allgather → gradient
-        g_profiler.start();
+        g_profiler.start(StepProfiler::CROSS_GRAD);
         cross_acceleration_and_gradient_distributed(dp, slow_start, slow_count,
                                                     fast_start, fast_count,
                                                     G, soft2, pivot_dt);
@@ -3770,7 +3778,7 @@ static void hhs_fsi_recursive_distributed(
     fsi_step_distributed(dp, slow_start, slow_count, G, soft2, pivot_dt * 0.5);
 
     // Step 7: Cross-kick S<->F (dt/6) - fused distributed force + allgather + kick
-    g_profiler.start();
+    g_profiler.start(StepProfiler::CROSS_FORCE);
     cross_acceleration_kick_distributed(dp, slow_start, slow_count, fast_start, fast_count, G, soft2, pivot_dt * FSI_KICK);
     g_profiler.stop(StepProfiler::CROSS_FORCE, cross_pairs);
 #endif // MPI_TOPOLOGY_RING
