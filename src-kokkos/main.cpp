@@ -141,7 +141,6 @@ int main(int argc, char** argv) {
         bool profiling_enabled = (cfg.get_str("PROFILING", "true") == "true");
         direct_n2_threshold = std::stoi(cfg.get_str("DIRECT_N2_ON_DEEP_LEVELS", "0"));
         cpu_serial_threshold = std::stoi(cfg.get_str("DIRECT_CPU_N2_ON_VERY_DEEP_LEVELS", "0"));
-        fuse_gradient = (cfg.get_str("FUSE_GRADIENT", "false") == "true");
         use_integer_positions = (cfg.get_str("INTEGER_POSITIONS", "false") == "true");
         double domain_halfsize = cfg.get_double("DOMAIN_HALFSIZE_PC", 200.0);
         use_nonblocking_mpi = (cfg.get_str("MPI_NON_BLOCKING", "false") == "true");
