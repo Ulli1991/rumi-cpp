@@ -17,6 +17,7 @@ struct StepProfiler {
         CROSS_GRAD,
         PARTITION,
         DRIFT_KICK,
+        TREE_MAINT,
         NUM_TIMERS
     };
 
@@ -28,7 +29,8 @@ struct StepProfiler {
             "N-body force (cross)",
             "Gradient (cross)",
             "Partition",
-            "Drift/Kick"
+            "Drift/Kick",
+            "Tree maintenance"
         };
         return names[i];
     }
