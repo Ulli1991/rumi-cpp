@@ -16,7 +16,7 @@ DT_MAX_MYR = 1.0e-3                       	# ≈ 1600 yr
 DT_MIN_MYR = 1.0e-9                       	# ≈ 1e-3 yr
 ETA = 0.2					# Integrator accuracy eta
 SOFTENING_PC = 1e-3                        	# Softening length in pc (= 206 AU)
-DIRECT_N2_ON_DEEP_LEVELS = 50000           	# do full N^2 below this thrshold without MPI to help with MPI comms overhead (many particles on intermediate hirarchies)
+DIRECT_N2_ON_DEEP_LEVELS = 10000           	# do full N^2 below this thrshold without MPI to help with MPI comms overhead (many particles on intermediate hirarchies)
 DIRECT_CPU_N2_ON_VERY_DEEP_LEVELS = 500    	# do full N^2 below this thrshold on the CPU to avoid kernel launch overhead (few particles on very deep hirarchies)
 FUSE_GRADIENT = false                      	# Fuse force+gradient into single N^2 pass using stale accelerations (saves ~30% gradient time, O(dt^3) accuracy trade-off)
 INTEGER_POSITIONS = false                  	# Use int64 positions (exact drift, MPI-safe)
@@ -26,7 +26,7 @@ SYMMETRIC_TIMESTEPS = true                	# Fuse force+timestep with harmonic s
 
 # Barnes-Hut tree: O(N log N) force via monopole approximation
 USE_TREE = true                           	# Enable tree for self-forces
-TREE_THRESHOLD = 100000                   	# Use tree above this count, N² below
+TREE_THRESHOLD = 50000 	                   	# Use tree above this count, N² below
 TREE_THETA = 0.5                          	# Opening angle (smaller = more accurate, slower)
 TREE_N_LEAF = 32                          	# Max particles per leaf cell
 TREE_N_GROUP = 64                         	# Particles per traversal group
