@@ -579,8 +579,7 @@ void DistributedParticles::gather_to_root(Particles& global_particles) {
     global_particles = local;
 }
 
-#ifdef MPI_TOPOLOGY_RING
-
+// Allreduce used by ring topology and tree-distributed force computation
 void DistributedParticles::allreduce_accelerations_subset(int start, int count) {
 #ifdef USE_MPI
     if (MPIComm::size() == 1 || count == 0) return;
@@ -697,4 +696,4 @@ void DistributedParticles::allreduce_timestep_subset(int start, int count) {
 #endif // USE_MPI
 }
 
-#endif // MPI_TOPOLOGY_RING
+// end allreduce functions

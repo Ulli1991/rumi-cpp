@@ -146,11 +146,10 @@ struct DistributedParticles {
     // is responsible for in distributed force computation
     void get_force_slice(int start, int count, int& slice_start, int& slice_count) const;
 
-#ifdef MPI_TOPOLOGY_RING
     // =========================================================================
-    // Ring topology (j-partitioned): MPI_Allreduce replaces MPI_Allgatherv
-    // Each rank computes partial forces for ALL i-particles from its j-chunk,
-    // then allreduce(SUM) combines partial contributions across ranks.
+    // Allreduce for ring topology and tree-distributed force computation
+    // Ring: partial forces from j-chunks → allreduce(SUM)
+    // Tree: each rank processes a subset of tree groups → allreduce(SUM)
     // =========================================================================
 
     // Allreduce accelerations in-place for particles [start, start+count)
@@ -160,7 +159,6 @@ struct DistributedParticles {
     // Allreduce timesteps in-place for particles [start, start+count)
     // Uses MPI_Allreduce(MPI_IN_PLACE, MPI_MIN) since timestep = min over j-interactions
     void allreduce_timestep_subset(int start, int count);
-#endif
 };
 
 // =============================================================================

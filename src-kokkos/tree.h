@@ -88,15 +88,19 @@ struct Octree {
 
 // Compute tree self-acceleration for particles [start, start+count)
 // Results written to p.ax, p.ay, p.az
+// group_offset/num_groups: process a subset of groups (for MPI distribution)
+//   -1 for num_groups means process all groups
 void tree_self_acceleration(Particles& p, const Octree& tree,
-                            int start, int count, double G, double soft2);
+                            int start, int count, double G, double soft2,
+                            int group_offset = 0, int num_groups = -1);
 
 // Fused tree self-acceleration + adaptive timestep
 // Computes forces AND pairwise timesteps during tree traversal
 // Results written to p.ax, p.ay, p.az and p.dt_adapt
 void tree_self_acceleration_and_timestep(Particles& p, const Octree& tree,
                                           int start, int count,
-                                          double G, double soft2, double eta);
+                                          double G, double soft2, double eta,
+                                          int group_offset = 0, int num_groups = -1);
 
 // Cross-force via tree: force on i-particles (grouped by i_tree) from j_tree
 // i_tree provides spatial groups for i-particles; j_tree is walked for forces
@@ -110,7 +114,8 @@ void tree_cross_acceleration(Particles& p,
 // Uses tree.cell_accel for monopole, per-particle accel for P2P
 // Results ADDED to p.ax, p.ay, p.az
 void tree_self_gradient_correction(Particles& p, const Octree& tree,
-                                    double G, double soft2, double dt);
+                                    double G, double soft2, double dt,
+                                    int group_offset = 0, int num_groups = -1);
 
 // Cross-gradient correction: jerk on i-particles from j_tree
 // i_tree provides groups, j_tree provides tree structure + cell_accel

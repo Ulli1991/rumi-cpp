@@ -15,10 +15,11 @@
 // ==========================================================================
 
 void tree_self_acceleration(Particles& p, const Octree& tree,
-                            int start, int count, double G, double soft2) {
+                            int start, int count, double G, double soft2,
+                            int group_offset, int num_groups_param) {
     if (count <= 0 || tree.n_cells == 0) return;
 
-    const int n_groups = tree.n_groups;
+    const int n_groups = (num_groups_param >= 0) ? num_groups_param : tree.n_groups;
 
     // Device Views from tree
     auto cell_com = tree.cell_com;
@@ -48,11 +49,12 @@ void tree_self_acceleration(Particles& p, const Octree& tree,
     size_t particle_cache_bytes = TREE_GROUP_SIZE * 4 * sizeof(double);
     size_t total_scratch = stack_bytes + particle_cache_bytes;
 
+    const int g_offset = group_offset;
     Kokkos::parallel_for("tree_traversal",
         team_policy(n_groups, TREE_GROUP_SIZE)
             .set_scratch_size(0, Kokkos::PerTeam(total_scratch)),
         KOKKOS_LAMBDA(const member_type& team) {
-            int gid = team.league_rank();
+            int gid = g_offset + team.league_rank();
             int tid = team.team_rank();
             int team_size = team.team_size();
 
@@ -204,10 +206,11 @@ void tree_self_acceleration(Particles& p, const Octree& tree,
 // ==========================================================================
 void tree_self_acceleration_and_timestep(Particles& p, const Octree& tree,
                                           int start, int count,
-                                          double G, double soft2, double eta) {
+                                          double G, double soft2, double eta,
+                                          int group_offset, int num_groups_param) {
     if (count <= 0 || tree.n_cells == 0) return;
 
-    const int n_groups = tree.n_groups;
+    const int n_groups = (num_groups_param >= 0) ? num_groups_param : tree.n_groups;
 
     auto cell_com = tree.cell_com;
     auto cell_vel_v = tree.cell_vel;
@@ -235,11 +238,12 @@ void tree_self_acceleration_and_timestep(Particles& p, const Octree& tree,
     size_t stack_bytes = TREE_STACK_SIZE * sizeof(int);
     size_t total_scratch = stack_bytes;
 
+    const int g_offset = group_offset;
     Kokkos::parallel_for("tree_traversal_dt",
         team_policy(n_groups, TREE_GROUP_SIZE)
             .set_scratch_size(0, Kokkos::PerTeam(total_scratch)),
         KOKKOS_LAMBDA(const member_type& team) {
-            int gid = team.league_rank();
+            int gid = g_offset + team.league_rank();
             int tid = team.team_rank();
 
             Kokkos::View<int*, scratch_space, Kokkos::MemoryUnmanaged>
@@ -593,10 +597,11 @@ void tree_cross_acceleration(Particles& p,
 // Monopole: a_j = cell CoM acceleration, P2P: a_j from per-particle data
 // ==========================================================================
 void tree_self_gradient_correction(Particles& p, const Octree& tree,
-                                    double G, double soft2, double dt) {
+                                    double G, double soft2, double dt,
+                                    int group_offset, int num_groups_param) {
     if (tree.n_particles <= 0 || tree.n_cells == 0) return;
 
-    const int n_groups = tree.n_groups;
+    const int n_groups = (num_groups_param >= 0) ? num_groups_param : tree.n_groups;
     const double coeff = G * dt * dt * GRAD_COEFF;
 
     auto cell_com = tree.cell_com;
@@ -621,11 +626,12 @@ void tree_self_gradient_correction(Particles& p, const Octree& tree,
 
     size_t stack_bytes = TREE_STACK_SIZE * sizeof(int);
 
+    const int g_offset = group_offset;
     Kokkos::parallel_for("tree_self_grad",
         team_policy(n_groups, TREE_GROUP_SIZE)
             .set_scratch_size(0, Kokkos::PerTeam(stack_bytes)),
         KOKKOS_LAMBDA(const member_type& team) {
-            int gid = team.league_rank();
+            int gid = g_offset + team.league_rank();
             int tid = team.team_rank();
 
             Kokkos::View<int*, scratch_space, Kokkos::MemoryUnmanaged>

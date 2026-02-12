@@ -139,8 +139,8 @@ int main(int argc, char** argv) {
         double metallicity  = cfg.get_double("PLUMMER_METALLICITY", 0.02);
 
         bool profiling_enabled = (cfg.get_str("PROFILING", "true") == "true");
-        direct_n2_threshold = std::stoi(cfg.get_str("DIRECT_N2_ON_DEEP_LEVELS", "0"));
-        cpu_serial_threshold = std::stoi(cfg.get_str("DIRECT_CPU_N2_ON_VERY_DEEP_LEVELS", "0"));
+        serial_n2_gpu = std::stoi(cfg.get_str("SERIAL_N2_GPU", "0"));
+        serial_n2_cpu = std::stoi(cfg.get_str("SERIAL_N2_CPU", "0"));
         use_integer_positions = (cfg.get_str("INTEGER_POSITIONS", "false") == "true");
         double domain_halfsize = cfg.get_double("DOMAIN_HALFSIZE_PC", 200.0);
         use_nonblocking_mpi = (cfg.get_str("MPI_NON_BLOCKING", "false") == "true");
