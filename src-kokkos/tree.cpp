@@ -288,7 +288,23 @@ void Octree::build(Particles& p, int start, int count, double theta_param) {
     Kokkos::deep_copy(sorted_indices, h_sorted_idx);
     Kokkos::deep_copy(sorted_pos, h_sorted_pos);
 
-    // 6. Build traversal groups
+    // 6. Store permanent particle IDs in sorted order (for rebuild after partition)
+    sorted_orig_ids = Kokkos::View<int*>("sorted_orig_ids", count);
+    sorted_subset_flag = Kokkos::View<int*>("sorted_subset_flag", count);
+    {
+        auto si_v = sorted_indices;
+        auto soid = sorted_orig_ids;
+        auto porig = p.orig_index;
+        Kokkos::parallel_for("store_orig_ids", count, KOKKOS_LAMBDA(int j) {
+            soid(j) = porig(si_v(j));
+        });
+    }
+
+    // 7. Allocate dual monopole Views
+    cell_com_slow = Kokkos::View<double*[4], Kokkos::LayoutRight>("cell_com_slow", n_cells);
+    cell_com_fast = Kokkos::View<double*[4], Kokkos::LayoutRight>("cell_com_fast", n_cells);
+
+    // 8. Build traversal groups
     make_groups();
 }
 
@@ -424,10 +440,285 @@ void Octree::compute_cell_accelerations(Particles& p) {
     Kokkos::deep_copy(cell_accel, h_ca);
 }
 
+// ==========================================================================
+// Rebuild sorted_indices after particle reordering (e.g. partition_by_pivot)
+// Uses permanent IDs (sorted_orig_ids) + reverse map to find current indices.
+// O(N) GPU kernels.
+// ==========================================================================
+void Octree::rebuild_sorted_indices(Particles& p) {
+    if (n_particles <= 0) return;
+
+    // Build reverse map: permanent_id -> current_particle_index
+    int N = p.N;
+    static Kokkos::View<int*> reverse_map("reverse_map", 0);
+    if ((int)reverse_map.extent(0) < N)
+        reverse_map = Kokkos::View<int*>("reverse_map", N);
+
+    auto orig = p.orig_index;
+    auto rmap = reverse_map;
+    Kokkos::parallel_for("build_reverse_map", N, KOKKOS_LAMBDA(int i) {
+        rmap(orig(i)) = i;
+    });
+
+    // Rebuild sorted_indices from permanent IDs
+    auto si = sorted_indices;
+    auto soid = sorted_orig_ids;
+    int n = n_particles;
+    Kokkos::parallel_for("rebuild_sorted_idx", n, KOKKOS_LAMBDA(int j) {
+        si(j) = rmap(soid(j));
+    });
+}
+
+// ==========================================================================
+// Full update after partition: rebuild indices, refresh positions,
+// mark slow/fast flags, recompute dual monopoles.
+// Call once per HHS level after partition_by_pivot.
+// ==========================================================================
+void Octree::update_subsets(Particles& p, int slow_start, int slow_count) {
+    if (n_particles <= 0) return;
+
+    // 1. Fix sorted_indices after particle reordering
+    rebuild_sorted_indices(p);
+
+    // 2. Refresh positions from updated sorted_indices
+    refresh_positions(p);
+
+    // 3. Mark slow/fast flags per sorted particle
+    auto si = sorted_indices;
+    auto flag = sorted_subset_flag;
+    int n = n_particles;
+    int ss = slow_start, sc = slow_count;
+    Kokkos::parallel_for("mark_subsets", n, KOKKOS_LAMBDA(int j) {
+        int idx = si(j);
+        flag(j) = (idx >= ss && idx < ss + sc) ? 0 : 1;  // 0=slow, 1=fast
+    });
+    Kokkos::fence();
+
+    // 4. Recompute dual monopoles (including velocities)
+    recompute_dual_monopoles(p);
+}
+
+// ==========================================================================
+// Recompute dual monopoles (cell_com_slow/fast, cell_vel_slow/fast) from
+// sorted_pos, sorted_subset_flag, and particle velocities. Bottom-up on host.
+// ==========================================================================
+void Octree::recompute_dual_monopoles(Particles& p) {
+    if (n_cells <= 0 || n_particles <= 0) return;
+
+    // Copy needed data to host
+    auto h_sp = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
+        Kokkos::subview(sorted_pos, Kokkos::make_pair(0, n_particles), Kokkos::ALL));
+    auto h_flag = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
+        Kokkos::subview(sorted_subset_flag, Kokkos::make_pair(0, n_particles)));
+    auto h_si = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
+        Kokkos::subview(sorted_indices, Kokkos::make_pair(0, n_particles)));
+    auto h_children = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
+        Kokkos::subview(cell_children, Kokkos::make_pair(0, n_cells), Kokkos::ALL));
+    auto h_is_leaf = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
+        Kokkos::subview(cell_is_leaf, Kokkos::make_pair(0, n_cells)));
+    auto h_pbeg = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
+        Kokkos::subview(cell_pbeg, Kokkos::make_pair(0, n_cells)));
+    auto h_pend = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
+        Kokkos::subview(cell_pend, Kokkos::make_pair(0, n_cells)));
+
+    // Copy velocities for mass-weighted velocity computation
+    auto h_vx = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vx);
+    auto h_vy = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vy);
+    auto h_vz = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vz);
+
+    // Allocate dual monopoles if needed
+    if ((int)cell_com_slow.extent(0) < n_cells) {
+        cell_com_slow = Kokkos::View<double*[4], Kokkos::LayoutRight>("cell_com_slow", n_cells);
+        cell_com_fast = Kokkos::View<double*[4], Kokkos::LayoutRight>("cell_com_fast", n_cells);
+    }
+    if ((int)cell_vel_slow.extent(0) < n_cells) {
+        cell_vel_slow = Kokkos::View<double*[3], Kokkos::LayoutRight>("cell_vel_slow", n_cells);
+        cell_vel_fast = Kokkos::View<double*[3], Kokkos::LayoutRight>("cell_vel_fast", n_cells);
+    }
+
+    auto h_com_slow = Kokkos::create_mirror_view(
+        Kokkos::subview(cell_com_slow, Kokkos::make_pair(0, n_cells), Kokkos::ALL));
+    auto h_com_fast = Kokkos::create_mirror_view(
+        Kokkos::subview(cell_com_fast, Kokkos::make_pair(0, n_cells), Kokkos::ALL));
+    auto h_vel_slow = Kokkos::create_mirror_view(
+        Kokkos::subview(cell_vel_slow, Kokkos::make_pair(0, n_cells), Kokkos::ALL));
+    auto h_vel_fast = Kokkos::create_mirror_view(
+        Kokkos::subview(cell_vel_fast, Kokkos::make_pair(0, n_cells), Kokkos::ALL));
+
+    // Bottom-up: highest index first (children always have higher index than parent)
+    for (int c = n_cells - 1; c >= 0; c--) {
+        double sm_s = 0, sx_s = 0, sy_s = 0, sz_s = 0;
+        double sm_f = 0, sx_f = 0, sy_f = 0, sz_f = 0;
+        double svx_s = 0, svy_s = 0, svz_s = 0;
+        double svx_f = 0, svy_f = 0, svz_f = 0;
+
+        if (h_is_leaf(c)) {
+            // Leaf: accumulate from particles
+            for (int i = h_pbeg(c); i < h_pend(c); i++) {
+                double m = h_sp(i, 3);
+                double x = h_sp(i, 0), y = h_sp(i, 1), z = h_sp(i, 2);
+                int orig = h_si(i);
+                double vx = h_vx(orig), vy = h_vy(orig), vz = h_vz(orig);
+                if (h_flag(i) == 0) {  // slow
+                    sm_s += m; sx_s += m * x; sy_s += m * y; sz_s += m * z;
+                    svx_s += m * vx; svy_s += m * vy; svz_s += m * vz;
+                } else {  // fast
+                    sm_f += m; sx_f += m * x; sy_f += m * y; sz_f += m * z;
+                    svx_f += m * vx; svy_f += m * vy; svz_f += m * vz;
+                }
+            }
+        } else {
+            // Internal: sum children
+            for (int ch = 0; ch < 8; ch++) {
+                int child = h_children(c, ch);
+                if (child < 0) continue;
+                double cms = h_com_slow(child, 3);
+                sm_s += cms;
+                sx_s += cms * h_com_slow(child, 0);
+                sy_s += cms * h_com_slow(child, 1);
+                sz_s += cms * h_com_slow(child, 2);
+                svx_s += cms * h_vel_slow(child, 0);
+                svy_s += cms * h_vel_slow(child, 1);
+                svz_s += cms * h_vel_slow(child, 2);
+                double cmf = h_com_fast(child, 3);
+                sm_f += cmf;
+                sx_f += cmf * h_com_fast(child, 0);
+                sy_f += cmf * h_com_fast(child, 1);
+                sz_f += cmf * h_com_fast(child, 2);
+                svx_f += cmf * h_vel_fast(child, 0);
+                svy_f += cmf * h_vel_fast(child, 1);
+                svz_f += cmf * h_vel_fast(child, 2);
+            }
+        }
+
+        // Store slow monopole
+        if (sm_s > 0) {
+            double inv = 1.0 / sm_s;
+            h_com_slow(c, 0) = sx_s * inv;
+            h_com_slow(c, 1) = sy_s * inv;
+            h_com_slow(c, 2) = sz_s * inv;
+            h_vel_slow(c, 0) = svx_s * inv;
+            h_vel_slow(c, 1) = svy_s * inv;
+            h_vel_slow(c, 2) = svz_s * inv;
+        } else {
+            h_com_slow(c, 0) = h_com_slow(c, 1) = h_com_slow(c, 2) = 0;
+            h_vel_slow(c, 0) = h_vel_slow(c, 1) = h_vel_slow(c, 2) = 0;
+        }
+        h_com_slow(c, 3) = sm_s;
+
+        // Store fast monopole
+        if (sm_f > 0) {
+            double inv = 1.0 / sm_f;
+            h_com_fast(c, 0) = sx_f * inv;
+            h_com_fast(c, 1) = sy_f * inv;
+            h_com_fast(c, 2) = sz_f * inv;
+            h_vel_fast(c, 0) = svx_f * inv;
+            h_vel_fast(c, 1) = svy_f * inv;
+            h_vel_fast(c, 2) = svz_f * inv;
+        } else {
+            h_com_fast(c, 0) = h_com_fast(c, 1) = h_com_fast(c, 2) = 0;
+            h_vel_fast(c, 0) = h_vel_fast(c, 1) = h_vel_fast(c, 2) = 0;
+        }
+        h_com_fast(c, 3) = sm_f;
+    }
+
+    Kokkos::deep_copy(Kokkos::subview(cell_com_slow, Kokkos::make_pair(0, n_cells), Kokkos::ALL), h_com_slow);
+    Kokkos::deep_copy(Kokkos::subview(cell_com_fast, Kokkos::make_pair(0, n_cells), Kokkos::ALL), h_com_fast);
+    Kokkos::deep_copy(Kokkos::subview(cell_vel_slow, Kokkos::make_pair(0, n_cells), Kokkos::ALL), h_vel_slow);
+    Kokkos::deep_copy(Kokkos::subview(cell_vel_fast, Kokkos::make_pair(0, n_cells), Kokkos::ALL), h_vel_fast);
+}
+
+// ==========================================================================
+// Compute dual cell accelerations (slow/fast) bottom-up from particle data.
+// Uses sorted_subset_flag to split accelerations into slow/fast.
+// Call after cross-force computation (p.ax/ay/az contain cross-forces).
+// ==========================================================================
+void Octree::compute_dual_cell_accelerations(Particles& p) {
+    if (n_cells <= 0 || n_particles <= 0) return;
+
+    auto h_ax = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.ax);
+    auto h_ay = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.ay);
+    auto h_az = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.az);
+    auto h_mass = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.mass);
+    auto h_si = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
+        Kokkos::subview(sorted_indices, Kokkos::make_pair(0, n_particles)));
+    auto h_flag = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
+        Kokkos::subview(sorted_subset_flag, Kokkos::make_pair(0, n_particles)));
+    auto h_children = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
+        Kokkos::subview(cell_children, Kokkos::make_pair(0, n_cells), Kokkos::ALL));
+    auto h_is_leaf = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
+        Kokkos::subview(cell_is_leaf, Kokkos::make_pair(0, n_cells)));
+    auto h_pbeg = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
+        Kokkos::subview(cell_pbeg, Kokkos::make_pair(0, n_cells)));
+    auto h_pend = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
+        Kokkos::subview(cell_pend, Kokkos::make_pair(0, n_cells)));
+
+    // Read dual monopole masses for weighting internal cells
+    auto h_com_slow = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
+        Kokkos::subview(cell_com_slow, Kokkos::make_pair(0, n_cells), Kokkos::ALL));
+    auto h_com_fast = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
+        Kokkos::subview(cell_com_fast, Kokkos::make_pair(0, n_cells), Kokkos::ALL));
+
+    if ((int)cell_accel_slow.extent(0) < n_cells) {
+        cell_accel_slow = Kokkos::View<double*[3], Kokkos::LayoutRight>("cell_accel_slow", n_cells);
+        cell_accel_fast = Kokkos::View<double*[3], Kokkos::LayoutRight>("cell_accel_fast", n_cells);
+    }
+    auto h_ca_slow = Kokkos::create_mirror_view(
+        Kokkos::subview(cell_accel_slow, Kokkos::make_pair(0, n_cells), Kokkos::ALL));
+    auto h_ca_fast = Kokkos::create_mirror_view(
+        Kokkos::subview(cell_accel_fast, Kokkos::make_pair(0, n_cells), Kokkos::ALL));
+
+    for (int c = n_cells - 1; c >= 0; c--) {
+        double ms = h_com_slow(c, 3), mf = h_com_fast(c, 3);
+
+        if (h_is_leaf(c)) {
+            double max_s = 0, may_s = 0, maz_s = 0;
+            double max_f = 0, may_f = 0, maz_f = 0;
+            for (int i = h_pbeg(c); i < h_pend(c); i++) {
+                int orig = h_si(i);
+                double m = h_mass(orig);
+                if (h_flag(i) == 0) {
+                    max_s += m * h_ax(orig); may_s += m * h_ay(orig); maz_s += m * h_az(orig);
+                } else {
+                    max_f += m * h_ax(orig); may_f += m * h_ay(orig); maz_f += m * h_az(orig);
+                }
+            }
+            if (ms > 0) { double inv = 1.0/ms; h_ca_slow(c,0) = max_s*inv; h_ca_slow(c,1) = may_s*inv; h_ca_slow(c,2) = maz_s*inv; }
+            else { h_ca_slow(c,0) = h_ca_slow(c,1) = h_ca_slow(c,2) = 0; }
+            if (mf > 0) { double inv = 1.0/mf; h_ca_fast(c,0) = max_f*inv; h_ca_fast(c,1) = may_f*inv; h_ca_fast(c,2) = maz_f*inv; }
+            else { h_ca_fast(c,0) = h_ca_fast(c,1) = h_ca_fast(c,2) = 0; }
+        } else {
+            double max_s = 0, may_s = 0, maz_s = 0;
+            double max_f = 0, may_f = 0, maz_f = 0;
+            for (int ch = 0; ch < 8; ch++) {
+                int child = h_children(c, ch);
+                if (child < 0) continue;
+                double cm_s = h_com_slow(child, 3);
+                max_s += cm_s * h_ca_slow(child, 0); may_s += cm_s * h_ca_slow(child, 1); maz_s += cm_s * h_ca_slow(child, 2);
+                double cm_f = h_com_fast(child, 3);
+                max_f += cm_f * h_ca_fast(child, 0); may_f += cm_f * h_ca_fast(child, 1); maz_f += cm_f * h_ca_fast(child, 2);
+            }
+            if (ms > 0) { double inv = 1.0/ms; h_ca_slow(c,0) = max_s*inv; h_ca_slow(c,1) = may_s*inv; h_ca_slow(c,2) = maz_s*inv; }
+            else { h_ca_slow(c,0) = h_ca_slow(c,1) = h_ca_slow(c,2) = 0; }
+            if (mf > 0) { double inv = 1.0/mf; h_ca_fast(c,0) = max_f*inv; h_ca_fast(c,1) = may_f*inv; h_ca_fast(c,2) = maz_f*inv; }
+            else { h_ca_fast(c,0) = h_ca_fast(c,1) = h_ca_fast(c,2) = 0; }
+        }
+    }
+
+    Kokkos::deep_copy(Kokkos::subview(cell_accel_slow, Kokkos::make_pair(0, n_cells), Kokkos::ALL), h_ca_slow);
+    Kokkos::deep_copy(Kokkos::subview(cell_accel_fast, Kokkos::make_pair(0, n_cells), Kokkos::ALL), h_ca_fast);
+}
+
 void Octree::deallocate() {
     cell_com = {};
     cell_vel = {};
     cell_accel = {};
+    cell_com_slow = {};
+    cell_com_fast = {};
+    cell_vel_slow = {};
+    cell_vel_fast = {};
+    cell_accel_slow = {};
+    cell_accel_fast = {};
     cell_size_sq_theta = {};
     cell_children = {};
     cell_pbeg = {};
@@ -435,6 +726,8 @@ void Octree::deallocate() {
     cell_is_leaf = {};
     sorted_indices = {};
     sorted_pos = {};
+    sorted_orig_ids = {};
+    sorted_subset_flag = {};
     group_start = {};
     group_count = {};
     group_center = {};

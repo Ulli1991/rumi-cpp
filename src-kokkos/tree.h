@@ -46,6 +46,24 @@ struct Octree {
     Kokkos::View<int*>  sorted_indices;  // sorted position -> original particle index
     Kokkos::View<double*[4], Kokkos::LayoutRight> sorted_pos;  // {x, y, z, mass}
 
+    // Permanent particle IDs in sorted order (survives particle reordering by partition_by_pivot)
+    Kokkos::View<int*>  sorted_orig_ids;  // sorted position -> permanent particle ID (orig_index)
+
+    // Per-sorted-particle subset flag: 0=slow, 1=fast (set by update_subsets)
+    Kokkos::View<int*>  sorted_subset_flag;
+
+    // Dual monopoles for slow/fast subsets (recomputed at each HHS level)
+    Kokkos::View<double*[4], Kokkos::LayoutRight> cell_com_slow;  // {cx, cy, cz, mass} slow only
+    Kokkos::View<double*[4], Kokkos::LayoutRight> cell_com_fast;  // {cx, cy, cz, mass} fast only
+
+    // Dual cell velocities for slow/fast subsets (for fused timestep)
+    Kokkos::View<double*[3], Kokkos::LayoutRight> cell_vel_slow;
+    Kokkos::View<double*[3], Kokkos::LayoutRight> cell_vel_fast;
+
+    // Dual cell accelerations for gradient correction
+    Kokkos::View<double*[3], Kokkos::LayoutRight> cell_accel_slow;
+    Kokkos::View<double*[3], Kokkos::LayoutRight> cell_accel_fast;
+
     // Group data for tree traversal (groups of spatially nearby particles)
     Kokkos::View<int*> group_start;     // start index in sorted array
     Kokkos::View<int*> group_count;     // particle count per group
@@ -81,6 +99,23 @@ struct Octree {
 
     // Create traversal groups from sorted particles
     void make_groups();
+
+    // Rebuild sorted_indices after particle reordering (e.g. partition_by_pivot).
+    // Uses sorted_orig_ids + reverse map to find current particle index. O(N) GPU.
+    void rebuild_sorted_indices(Particles& p);
+
+    // Full update after partition: rebuild indices, refresh positions, mark subsets,
+    // recompute dual monopoles. Call once per HHS level after partition_by_pivot.
+    void update_subsets(Particles& p, int slow_start, int slow_count);
+
+    // Recompute dual monopoles (cell_com_slow/fast, cell_vel_slow/fast) from sorted_pos + flags.
+    // Bottom-up on host. Call after refresh_positions + mark_subsets.
+    // Takes Particles& for velocity access via sorted_indices.
+    void recompute_dual_monopoles(Particles& p);
+
+    // Compute dual cell accelerations (cell_accel_slow, cell_accel_fast) bottom-up.
+    // Call after cross-force computation (p.ax/ay/az contain cross-forces).
+    void compute_dual_cell_accelerations(Particles& p);
 
     // Deallocate all Views
     void deallocate();
@@ -124,6 +159,42 @@ void tree_cross_gradient_correction(Particles& p,
                                      const Octree& i_tree,
                                      const Octree& j_tree,
                                      double G, double soft2, double dt);
+
+// Global-tree cross-force: force on target_subset particles from source_subset
+// Uses dual monopoles (cell_com_slow/fast) and sorted_subset_flag for P2P filtering.
+// source_flag: 0=slow sources, 1=fast sources
+// Results OVERWRITE p.ax, p.ay, p.az for target particles only.
+void tree_global_cross_acceleration(Particles& p, const Octree& tree,
+                                     int source_flag, double G, double soft2);
+
+// Global-tree cross-gradient correction using dual monopoles + cell accelerations.
+// source_flag: 0=slow sources (uses cell_com_slow, cell_accel_slow), 1=fast sources
+// Results ADDED to p.ax, p.ay, p.az for target particles.
+void tree_global_cross_gradient_correction(Particles& p, const Octree& tree,
+                                            int source_flag,
+                                            double G, double soft2, double dt);
+
+// Global-tree self-force: force on subset particles from same subset.
+// Uses dual monopoles (cell_com_slow/fast) and sorted_subset_flag for P2P filtering.
+// subset_flag: 0=slow subset, 1=fast subset (targets AND sources are same subset)
+// Results OVERWRITE p.ax, p.ay, p.az for subset particles only.
+void tree_global_self_acceleration(Particles& p, const Octree& tree,
+                                    int subset_flag, double G, double soft2);
+
+// Global-tree self-gradient correction using dual monopoles + cell accelerations.
+// subset_flag: 0=slow subset, 1=fast subset
+// Results ADDED to p.ax, p.ay, p.az for subset particles.
+void tree_global_self_gradient_correction(Particles& p, const Octree& tree,
+                                           int subset_flag,
+                                           double G, double soft2, double dt);
+
+// Global-tree fused self-force + timestep for a subset.
+// Uses dual monopoles and subset velocities for timestep criterion.
+// subset_flag: 0=slow, 1=fast
+// Results OVERWRITE p.ax, p.ay, p.az and p.dt_adapt for subset particles.
+void tree_global_self_acceleration_and_timestep(Particles& p, const Octree& tree,
+                                                 int subset_flag,
+                                                 double G, double soft2, double eta);
 
 // Post-hoc momentum correction: subtracts net force / total mass
 // to enforce exact linear momentum conservation (tree forces are not
