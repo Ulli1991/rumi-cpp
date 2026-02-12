@@ -378,66 +378,82 @@ void Octree::refresh_positions(Particles& p) {
 }
 
 // ==========================================================================
-// Compute cell center-of-mass accelerations (bottom-up on host)
-// Children always have higher indices than parents (DFS emplace_back order)
-// so reverse iteration gives bottom-up ordering.
+// Compute cell center-of-mass accelerations on GPU.
+// Each cell independently reduces over its particle range [pbeg, pend).
+// TeamPolicy: one team per cell, threads cooperatively reduce particles.
+// No bottom-up dependency — every cell is independent.
 // ==========================================================================
 void Octree::compute_cell_accelerations(Particles& p) {
     if (n_cells <= 0 || n_particles <= 0) return;
 
-    auto h_ax = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.ax);
-    auto h_ay = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.ay);
-    auto h_az = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.az);
-    auto h_mass = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.mass);
-    auto h_si = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), sorted_indices);
-    auto h_children = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), cell_children);
-    auto h_is_leaf = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), cell_is_leaf);
-    auto h_pbeg = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), cell_pbeg);
-    auto h_pend = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), cell_pend);
-    auto h_com = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), cell_com);
-
     if ((int)cell_accel.extent(0) != n_cells)
         cell_accel = Kokkos::View<double*[3], Kokkos::LayoutRight>("cell_accel", n_cells);
-    auto h_ca = Kokkos::create_mirror_view(cell_accel);
 
-    // Bottom-up: highest index first
-    for (int c = n_cells - 1; c >= 0; c--) {
-        double cell_m = h_com(c, 3);
-        if (cell_m <= 0) {
-            h_ca(c, 0) = h_ca(c, 1) = h_ca(c, 2) = 0;
-            continue;
-        }
-        double inv_m = 1.0 / cell_m;
+    auto ax = p.ax;
+    auto ay = p.ay;
+    auto az = p.az;
+    auto mass = p.mass;
+    auto si = sorted_indices;
+    auto pbeg_v = cell_pbeg;
+    auto pend_v = cell_pend;
+    auto com = cell_com;
+    auto ca = cell_accel;
+    int nc = n_cells;
 
-        if (h_is_leaf(c)) {
-            double max = 0, may = 0, maz = 0;
-            for (int i = h_pbeg(c); i < h_pend(c); i++) {
-                int orig = h_si(i);
-                double m = h_mass(orig);
-                max += m * h_ax(orig);
-                may += m * h_ay(orig);
-                maz += m * h_az(orig);
+    constexpr int TEAM_SZ = 32;
+    // Scratch: 3 doubles per thread for partial sums (sax, say, saz)
+    size_t scratch_bytes = 3 * TEAM_SZ * sizeof(double);
+
+    using team_policy = Kokkos::TeamPolicy<>;
+    using team_member = team_policy::member_type;
+    using scratch_t = Kokkos::View<double*, Kokkos::DefaultExecutionSpace::scratch_memory_space,
+                                    Kokkos::MemoryUnmanaged>;
+
+    Kokkos::parallel_for("cell_accel_gpu",
+        team_policy(nc, TEAM_SZ).set_scratch_size(0, Kokkos::PerTeam(scratch_bytes)),
+        KOKKOS_LAMBDA(const team_member& team) {
+            int c = team.league_rank();
+            int tid = team.team_rank();
+            int tsz = team.team_size();
+            scratch_t scratch(team.team_scratch(0), 3 * tsz);
+
+            double cell_m = com(c, 3);
+            int b = pbeg_v(c), e = pend_v(c);
+
+            // Team-stride accumulation
+            double lax = 0, lay = 0, laz = 0;
+            for (int i = b + tid; i < e; i += tsz) {
+                int orig = si(i);
+                double m = mass(orig);
+                lax += m * ax(orig);
+                lay += m * ay(orig);
+                laz += m * az(orig);
             }
-            h_ca(c, 0) = max * inv_m;
-            h_ca(c, 1) = may * inv_m;
-            h_ca(c, 2) = maz * inv_m;
-        } else {
-            double max = 0, may = 0, maz = 0;
-            for (int ch = 0; ch < 8; ch++) {
-                int child = h_children(c, ch);
-                if (child < 0) continue;
-                double cm = h_com(child, 3);
-                max += cm * h_ca(child, 0);
-                may += cm * h_ca(child, 1);
-                maz += cm * h_ca(child, 2);
-            }
-            h_ca(c, 0) = max * inv_m;
-            h_ca(c, 1) = may * inv_m;
-            h_ca(c, 2) = maz * inv_m;
-        }
-    }
 
-    Kokkos::deep_copy(cell_accel, h_ca);
+            // Write partials to scratch
+            scratch(tid)          = lax;
+            scratch(tid + tsz)    = lay;
+            scratch(tid + 2*tsz)  = laz;
+            team.team_barrier();
+
+            // Thread 0 reduces and writes result
+            if (tid == 0) {
+                double sax = 0, say = 0, saz = 0;
+                for (int t = 0; t < tsz; t++) {
+                    sax += scratch(t);
+                    say += scratch(t + tsz);
+                    saz += scratch(t + 2*tsz);
+                }
+                if (cell_m > 0) {
+                    double inv = 1.0 / cell_m;
+                    ca(c, 0) = sax * inv;
+                    ca(c, 1) = say * inv;
+                    ca(c, 2) = saz * inv;
+                } else {
+                    ca(c, 0) = ca(c, 1) = ca(c, 2) = 0;
+                }
+            }
+        });
 }
 
 // ==========================================================================
@@ -499,32 +515,13 @@ void Octree::update_subsets(Particles& p, int slow_start, int slow_count) {
 }
 
 // ==========================================================================
-// Recompute dual monopoles (cell_com_slow/fast, cell_vel_slow/fast) from
-// sorted_pos, sorted_subset_flag, and particle velocities. Bottom-up on host.
+// Recompute dual monopoles (cell_com_slow/fast, cell_vel_slow/fast) on GPU.
+// Each cell independently reduces over its particle range [pbeg, pend).
+// TeamPolicy: one team per cell, threads cooperatively reduce particles.
+// No bottom-up dependency — every cell is independent.
 // ==========================================================================
 void Octree::recompute_dual_monopoles(Particles& p) {
     if (n_cells <= 0 || n_particles <= 0) return;
-
-    // Copy needed data to host
-    auto h_sp = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
-        Kokkos::subview(sorted_pos, Kokkos::make_pair(0, n_particles), Kokkos::ALL));
-    auto h_flag = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
-        Kokkos::subview(sorted_subset_flag, Kokkos::make_pair(0, n_particles)));
-    auto h_si = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
-        Kokkos::subview(sorted_indices, Kokkos::make_pair(0, n_particles)));
-    auto h_children = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
-        Kokkos::subview(cell_children, Kokkos::make_pair(0, n_cells), Kokkos::ALL));
-    auto h_is_leaf = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
-        Kokkos::subview(cell_is_leaf, Kokkos::make_pair(0, n_cells)));
-    auto h_pbeg = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
-        Kokkos::subview(cell_pbeg, Kokkos::make_pair(0, n_cells)));
-    auto h_pend = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
-        Kokkos::subview(cell_pend, Kokkos::make_pair(0, n_cells)));
-
-    // Copy velocities for mass-weighted velocity computation
-    auto h_vx = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vx);
-    auto h_vy = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vy);
-    auto h_vz = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vz);
 
     // Allocate dual monopoles if needed
     if ((int)cell_com_slow.extent(0) < n_cells) {
@@ -536,177 +533,209 @@ void Octree::recompute_dual_monopoles(Particles& p) {
         cell_vel_fast = Kokkos::View<double*[3], Kokkos::LayoutRight>("cell_vel_fast", n_cells);
     }
 
-    auto h_com_slow = Kokkos::create_mirror_view(
-        Kokkos::subview(cell_com_slow, Kokkos::make_pair(0, n_cells), Kokkos::ALL));
-    auto h_com_fast = Kokkos::create_mirror_view(
-        Kokkos::subview(cell_com_fast, Kokkos::make_pair(0, n_cells), Kokkos::ALL));
-    auto h_vel_slow = Kokkos::create_mirror_view(
-        Kokkos::subview(cell_vel_slow, Kokkos::make_pair(0, n_cells), Kokkos::ALL));
-    auto h_vel_fast = Kokkos::create_mirror_view(
-        Kokkos::subview(cell_vel_fast, Kokkos::make_pair(0, n_cells), Kokkos::ALL));
+    auto sp = sorted_pos;
+    auto flg = sorted_subset_flag;
+    auto si = sorted_indices;
+    auto pvx = p.vx;
+    auto pvy = p.vy;
+    auto pvz = p.vz;
+    auto pbeg_v = cell_pbeg;
+    auto pend_v = cell_pend;
+    auto com_s = cell_com_slow;
+    auto com_f = cell_com_fast;
+    auto vel_s = cell_vel_slow;
+    auto vel_f = cell_vel_fast;
+    int nc = n_cells;
 
-    // Bottom-up: highest index first (children always have higher index than parent)
-    for (int c = n_cells - 1; c >= 0; c--) {
-        double sm_s = 0, sx_s = 0, sy_s = 0, sz_s = 0;
-        double sm_f = 0, sx_f = 0, sy_f = 0, sz_f = 0;
-        double svx_s = 0, svy_s = 0, svz_s = 0;
-        double svx_f = 0, svy_f = 0, svz_f = 0;
+    constexpr int TEAM_SZ = 32;
+    // Scratch: 14 doubles per thread (7 slow + 7 fast: m,x,y,z,vx,vy,vz each)
+    size_t scratch_bytes = 14 * TEAM_SZ * sizeof(double);
 
-        if (h_is_leaf(c)) {
-            // Leaf: accumulate from particles
-            for (int i = h_pbeg(c); i < h_pend(c); i++) {
-                double m = h_sp(i, 3);
-                double x = h_sp(i, 0), y = h_sp(i, 1), z = h_sp(i, 2);
-                int orig = h_si(i);
-                double vx = h_vx(orig), vy = h_vy(orig), vz = h_vz(orig);
-                if (h_flag(i) == 0) {  // slow
-                    sm_s += m; sx_s += m * x; sy_s += m * y; sz_s += m * z;
-                    svx_s += m * vx; svy_s += m * vy; svz_s += m * vz;
+    using team_policy = Kokkos::TeamPolicy<>;
+    using team_member = team_policy::member_type;
+    using scratch_t = Kokkos::View<double*, Kokkos::DefaultExecutionSpace::scratch_memory_space,
+                                    Kokkos::MemoryUnmanaged>;
+
+    Kokkos::parallel_for("dual_mono_gpu",
+        team_policy(nc, TEAM_SZ).set_scratch_size(0, Kokkos::PerTeam(scratch_bytes)),
+        KOKKOS_LAMBDA(const team_member& team) {
+            int c = team.league_rank();
+            int tid = team.team_rank();
+            int tsz = team.team_size();
+            scratch_t scratch(team.team_scratch(0), 14 * tsz);
+
+            int b = pbeg_v(c), e = pend_v(c);
+
+            // Team-stride accumulation of 14 values
+            double lsm_s = 0, lsx_s = 0, lsy_s = 0, lsz_s = 0;
+            double lsm_f = 0, lsx_f = 0, lsy_f = 0, lsz_f = 0;
+            double lsvx_s = 0, lsvy_s = 0, lsvz_s = 0;
+            double lsvx_f = 0, lsvy_f = 0, lsvz_f = 0;
+
+            for (int i = b + tid; i < e; i += tsz) {
+                double m = sp(i, 3);
+                double x = sp(i, 0), y = sp(i, 1), z = sp(i, 2);
+                int orig = si(i);
+                double vx = pvx(orig), vy = pvy(orig), vz = pvz(orig);
+                if (flg(i) == 0) {  // slow
+                    lsm_s += m; lsx_s += m * x; lsy_s += m * y; lsz_s += m * z;
+                    lsvx_s += m * vx; lsvy_s += m * vy; lsvz_s += m * vz;
                 } else {  // fast
-                    sm_f += m; sx_f += m * x; sy_f += m * y; sz_f += m * z;
-                    svx_f += m * vx; svy_f += m * vy; svz_f += m * vz;
+                    lsm_f += m; lsx_f += m * x; lsy_f += m * y; lsz_f += m * z;
+                    lsvx_f += m * vx; lsvy_f += m * vy; lsvz_f += m * vz;
                 }
             }
-        } else {
-            // Internal: sum children
-            for (int ch = 0; ch < 8; ch++) {
-                int child = h_children(c, ch);
-                if (child < 0) continue;
-                double cms = h_com_slow(child, 3);
-                sm_s += cms;
-                sx_s += cms * h_com_slow(child, 0);
-                sy_s += cms * h_com_slow(child, 1);
-                sz_s += cms * h_com_slow(child, 2);
-                svx_s += cms * h_vel_slow(child, 0);
-                svy_s += cms * h_vel_slow(child, 1);
-                svz_s += cms * h_vel_slow(child, 2);
-                double cmf = h_com_fast(child, 3);
-                sm_f += cmf;
-                sx_f += cmf * h_com_fast(child, 0);
-                sy_f += cmf * h_com_fast(child, 1);
-                sz_f += cmf * h_com_fast(child, 2);
-                svx_f += cmf * h_vel_fast(child, 0);
-                svy_f += cmf * h_vel_fast(child, 1);
-                svz_f += cmf * h_vel_fast(child, 2);
+
+            // Write partials to scratch (14 values per thread)
+            scratch(tid)            = lsm_s;
+            scratch(tid + tsz)      = lsx_s;
+            scratch(tid + 2*tsz)    = lsy_s;
+            scratch(tid + 3*tsz)    = lsz_s;
+            scratch(tid + 4*tsz)    = lsvx_s;
+            scratch(tid + 5*tsz)    = lsvy_s;
+            scratch(tid + 6*tsz)    = lsvz_s;
+            scratch(tid + 7*tsz)    = lsm_f;
+            scratch(tid + 8*tsz)    = lsx_f;
+            scratch(tid + 9*tsz)    = lsy_f;
+            scratch(tid + 10*tsz)   = lsz_f;
+            scratch(tid + 11*tsz)   = lsvx_f;
+            scratch(tid + 12*tsz)   = lsvy_f;
+            scratch(tid + 13*tsz)   = lsvz_f;
+            team.team_barrier();
+
+            // Thread 0 reduces across team and writes result
+            if (tid == 0) {
+                double sm_s = 0, sx_s = 0, sy_s = 0, sz_s = 0;
+                double sm_f = 0, sx_f = 0, sy_f = 0, sz_f = 0;
+                double svx_s = 0, svy_s = 0, svz_s = 0;
+                double svx_f = 0, svy_f = 0, svz_f = 0;
+                for (int t = 0; t < tsz; t++) {
+                    sm_s  += scratch(t);
+                    sx_s  += scratch(t + tsz);
+                    sy_s  += scratch(t + 2*tsz);
+                    sz_s  += scratch(t + 3*tsz);
+                    svx_s += scratch(t + 4*tsz);
+                    svy_s += scratch(t + 5*tsz);
+                    svz_s += scratch(t + 6*tsz);
+                    sm_f  += scratch(t + 7*tsz);
+                    sx_f  += scratch(t + 8*tsz);
+                    sy_f  += scratch(t + 9*tsz);
+                    sz_f  += scratch(t + 10*tsz);
+                    svx_f += scratch(t + 11*tsz);
+                    svy_f += scratch(t + 12*tsz);
+                    svz_f += scratch(t + 13*tsz);
+                }
+                if (sm_s > 0) {
+                    double inv = 1.0 / sm_s;
+                    com_s(c, 0) = sx_s * inv; com_s(c, 1) = sy_s * inv; com_s(c, 2) = sz_s * inv;
+                    vel_s(c, 0) = svx_s * inv; vel_s(c, 1) = svy_s * inv; vel_s(c, 2) = svz_s * inv;
+                } else {
+                    com_s(c, 0) = com_s(c, 1) = com_s(c, 2) = 0;
+                    vel_s(c, 0) = vel_s(c, 1) = vel_s(c, 2) = 0;
+                }
+                com_s(c, 3) = sm_s;
+                if (sm_f > 0) {
+                    double inv = 1.0 / sm_f;
+                    com_f(c, 0) = sx_f * inv; com_f(c, 1) = sy_f * inv; com_f(c, 2) = sz_f * inv;
+                    vel_f(c, 0) = svx_f * inv; vel_f(c, 1) = svy_f * inv; vel_f(c, 2) = svz_f * inv;
+                } else {
+                    com_f(c, 0) = com_f(c, 1) = com_f(c, 2) = 0;
+                    vel_f(c, 0) = vel_f(c, 1) = vel_f(c, 2) = 0;
+                }
+                com_f(c, 3) = sm_f;
             }
-        }
-
-        // Store slow monopole
-        if (sm_s > 0) {
-            double inv = 1.0 / sm_s;
-            h_com_slow(c, 0) = sx_s * inv;
-            h_com_slow(c, 1) = sy_s * inv;
-            h_com_slow(c, 2) = sz_s * inv;
-            h_vel_slow(c, 0) = svx_s * inv;
-            h_vel_slow(c, 1) = svy_s * inv;
-            h_vel_slow(c, 2) = svz_s * inv;
-        } else {
-            h_com_slow(c, 0) = h_com_slow(c, 1) = h_com_slow(c, 2) = 0;
-            h_vel_slow(c, 0) = h_vel_slow(c, 1) = h_vel_slow(c, 2) = 0;
-        }
-        h_com_slow(c, 3) = sm_s;
-
-        // Store fast monopole
-        if (sm_f > 0) {
-            double inv = 1.0 / sm_f;
-            h_com_fast(c, 0) = sx_f * inv;
-            h_com_fast(c, 1) = sy_f * inv;
-            h_com_fast(c, 2) = sz_f * inv;
-            h_vel_fast(c, 0) = svx_f * inv;
-            h_vel_fast(c, 1) = svy_f * inv;
-            h_vel_fast(c, 2) = svz_f * inv;
-        } else {
-            h_com_fast(c, 0) = h_com_fast(c, 1) = h_com_fast(c, 2) = 0;
-            h_vel_fast(c, 0) = h_vel_fast(c, 1) = h_vel_fast(c, 2) = 0;
-        }
-        h_com_fast(c, 3) = sm_f;
-    }
-
-    Kokkos::deep_copy(Kokkos::subview(cell_com_slow, Kokkos::make_pair(0, n_cells), Kokkos::ALL), h_com_slow);
-    Kokkos::deep_copy(Kokkos::subview(cell_com_fast, Kokkos::make_pair(0, n_cells), Kokkos::ALL), h_com_fast);
-    Kokkos::deep_copy(Kokkos::subview(cell_vel_slow, Kokkos::make_pair(0, n_cells), Kokkos::ALL), h_vel_slow);
-    Kokkos::deep_copy(Kokkos::subview(cell_vel_fast, Kokkos::make_pair(0, n_cells), Kokkos::ALL), h_vel_fast);
+        });
 }
 
 // ==========================================================================
-// Compute dual cell accelerations (slow/fast) bottom-up from particle data.
-// Uses sorted_subset_flag to split accelerations into slow/fast.
-// Call after cross-force computation (p.ax/ay/az contain cross-forces).
+// Compute dual cell accelerations (slow/fast) on GPU.
+// Each cell independently reduces over its particle range [pbeg, pend).
+// TeamPolicy: one team per cell, threads cooperatively reduce particles.
+// No bottom-up dependency — every cell is independent.
 // ==========================================================================
 void Octree::compute_dual_cell_accelerations(Particles& p) {
     if (n_cells <= 0 || n_particles <= 0) return;
-
-    auto h_ax = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.ax);
-    auto h_ay = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.ay);
-    auto h_az = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.az);
-    auto h_mass = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.mass);
-    auto h_si = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
-        Kokkos::subview(sorted_indices, Kokkos::make_pair(0, n_particles)));
-    auto h_flag = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
-        Kokkos::subview(sorted_subset_flag, Kokkos::make_pair(0, n_particles)));
-    auto h_children = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
-        Kokkos::subview(cell_children, Kokkos::make_pair(0, n_cells), Kokkos::ALL));
-    auto h_is_leaf = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
-        Kokkos::subview(cell_is_leaf, Kokkos::make_pair(0, n_cells)));
-    auto h_pbeg = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
-        Kokkos::subview(cell_pbeg, Kokkos::make_pair(0, n_cells)));
-    auto h_pend = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
-        Kokkos::subview(cell_pend, Kokkos::make_pair(0, n_cells)));
-
-    // Read dual monopole masses for weighting internal cells
-    auto h_com_slow = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
-        Kokkos::subview(cell_com_slow, Kokkos::make_pair(0, n_cells), Kokkos::ALL));
-    auto h_com_fast = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
-        Kokkos::subview(cell_com_fast, Kokkos::make_pair(0, n_cells), Kokkos::ALL));
 
     if ((int)cell_accel_slow.extent(0) < n_cells) {
         cell_accel_slow = Kokkos::View<double*[3], Kokkos::LayoutRight>("cell_accel_slow", n_cells);
         cell_accel_fast = Kokkos::View<double*[3], Kokkos::LayoutRight>("cell_accel_fast", n_cells);
     }
-    auto h_ca_slow = Kokkos::create_mirror_view(
-        Kokkos::subview(cell_accel_slow, Kokkos::make_pair(0, n_cells), Kokkos::ALL));
-    auto h_ca_fast = Kokkos::create_mirror_view(
-        Kokkos::subview(cell_accel_fast, Kokkos::make_pair(0, n_cells), Kokkos::ALL));
 
-    for (int c = n_cells - 1; c >= 0; c--) {
-        double ms = h_com_slow(c, 3), mf = h_com_fast(c, 3);
+    auto ax = p.ax;
+    auto ay = p.ay;
+    auto az = p.az;
+    auto mass = p.mass;
+    auto si = sorted_indices;
+    auto flg = sorted_subset_flag;
+    auto pbeg_v = cell_pbeg;
+    auto pend_v = cell_pend;
+    auto com_s = cell_com_slow;
+    auto com_f = cell_com_fast;
+    auto ca_s = cell_accel_slow;
+    auto ca_f = cell_accel_fast;
+    int nc = n_cells;
 
-        if (h_is_leaf(c)) {
-            double max_s = 0, may_s = 0, maz_s = 0;
-            double max_f = 0, may_f = 0, maz_f = 0;
-            for (int i = h_pbeg(c); i < h_pend(c); i++) {
-                int orig = h_si(i);
-                double m = h_mass(orig);
-                if (h_flag(i) == 0) {
-                    max_s += m * h_ax(orig); may_s += m * h_ay(orig); maz_s += m * h_az(orig);
+    constexpr int TEAM_SZ = 32;
+    // Scratch: 6 doubles per thread (3 slow + 3 fast: ax,ay,az each)
+    size_t scratch_bytes = 6 * TEAM_SZ * sizeof(double);
+
+    using team_policy = Kokkos::TeamPolicy<>;
+    using team_member = team_policy::member_type;
+    using scratch_t = Kokkos::View<double*, Kokkos::DefaultExecutionSpace::scratch_memory_space,
+                                    Kokkos::MemoryUnmanaged>;
+
+    Kokkos::parallel_for("dual_accel_gpu",
+        team_policy(nc, TEAM_SZ).set_scratch_size(0, Kokkos::PerTeam(scratch_bytes)),
+        KOKKOS_LAMBDA(const team_member& team) {
+            int c = team.league_rank();
+            int tid = team.team_rank();
+            int tsz = team.team_size();
+            scratch_t scratch(team.team_scratch(0), 6 * tsz);
+
+            int b = pbeg_v(c), e = pend_v(c);
+            double ms = com_s(c, 3), mf = com_f(c, 3);
+
+            // Team-stride accumulation of 6 values
+            double lax_s = 0, lay_s = 0, laz_s = 0;
+            double lax_f = 0, lay_f = 0, laz_f = 0;
+
+            for (int i = b + tid; i < e; i += tsz) {
+                int orig = si(i);
+                double m = mass(orig);
+                if (flg(i) == 0) {
+                    lax_s += m * ax(orig); lay_s += m * ay(orig); laz_s += m * az(orig);
                 } else {
-                    max_f += m * h_ax(orig); may_f += m * h_ay(orig); maz_f += m * h_az(orig);
+                    lax_f += m * ax(orig); lay_f += m * ay(orig); laz_f += m * az(orig);
                 }
             }
-            if (ms > 0) { double inv = 1.0/ms; h_ca_slow(c,0) = max_s*inv; h_ca_slow(c,1) = may_s*inv; h_ca_slow(c,2) = maz_s*inv; }
-            else { h_ca_slow(c,0) = h_ca_slow(c,1) = h_ca_slow(c,2) = 0; }
-            if (mf > 0) { double inv = 1.0/mf; h_ca_fast(c,0) = max_f*inv; h_ca_fast(c,1) = may_f*inv; h_ca_fast(c,2) = maz_f*inv; }
-            else { h_ca_fast(c,0) = h_ca_fast(c,1) = h_ca_fast(c,2) = 0; }
-        } else {
-            double max_s = 0, may_s = 0, maz_s = 0;
-            double max_f = 0, may_f = 0, maz_f = 0;
-            for (int ch = 0; ch < 8; ch++) {
-                int child = h_children(c, ch);
-                if (child < 0) continue;
-                double cm_s = h_com_slow(child, 3);
-                max_s += cm_s * h_ca_slow(child, 0); may_s += cm_s * h_ca_slow(child, 1); maz_s += cm_s * h_ca_slow(child, 2);
-                double cm_f = h_com_fast(child, 3);
-                max_f += cm_f * h_ca_fast(child, 0); may_f += cm_f * h_ca_fast(child, 1); maz_f += cm_f * h_ca_fast(child, 2);
-            }
-            if (ms > 0) { double inv = 1.0/ms; h_ca_slow(c,0) = max_s*inv; h_ca_slow(c,1) = may_s*inv; h_ca_slow(c,2) = maz_s*inv; }
-            else { h_ca_slow(c,0) = h_ca_slow(c,1) = h_ca_slow(c,2) = 0; }
-            if (mf > 0) { double inv = 1.0/mf; h_ca_fast(c,0) = max_f*inv; h_ca_fast(c,1) = may_f*inv; h_ca_fast(c,2) = maz_f*inv; }
-            else { h_ca_fast(c,0) = h_ca_fast(c,1) = h_ca_fast(c,2) = 0; }
-        }
-    }
 
-    Kokkos::deep_copy(Kokkos::subview(cell_accel_slow, Kokkos::make_pair(0, n_cells), Kokkos::ALL), h_ca_slow);
-    Kokkos::deep_copy(Kokkos::subview(cell_accel_fast, Kokkos::make_pair(0, n_cells), Kokkos::ALL), h_ca_fast);
+            // Write partials to scratch
+            scratch(tid)          = lax_s;
+            scratch(tid + tsz)    = lay_s;
+            scratch(tid + 2*tsz)  = laz_s;
+            scratch(tid + 3*tsz)  = lax_f;
+            scratch(tid + 4*tsz)  = lay_f;
+            scratch(tid + 5*tsz)  = laz_f;
+            team.team_barrier();
+
+            // Thread 0 reduces across team and writes result
+            if (tid == 0) {
+                double sax_s = 0, say_s = 0, saz_s = 0;
+                double sax_f = 0, say_f = 0, saz_f = 0;
+                for (int t = 0; t < tsz; t++) {
+                    sax_s += scratch(t);
+                    say_s += scratch(t + tsz);
+                    saz_s += scratch(t + 2*tsz);
+                    sax_f += scratch(t + 3*tsz);
+                    say_f += scratch(t + 4*tsz);
+                    saz_f += scratch(t + 5*tsz);
+                }
+                if (ms > 0) { double inv = 1.0/ms; ca_s(c,0) = sax_s*inv; ca_s(c,1) = say_s*inv; ca_s(c,2) = saz_s*inv; }
+                else { ca_s(c,0) = ca_s(c,1) = ca_s(c,2) = 0; }
+                if (mf > 0) { double inv = 1.0/mf; ca_f(c,0) = sax_f*inv; ca_f(c,1) = say_f*inv; ca_f(c,2) = saz_f*inv; }
+                else { ca_f(c,0) = ca_f(c,1) = ca_f(c,2) = 0; }
+            }
+        });
 }
 
 void Octree::deallocate() {
