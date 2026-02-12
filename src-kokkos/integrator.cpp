@@ -4,6 +4,7 @@
 #include "constants.h"
 #include "mpi_comm.h"
 #include "profiling.h"
+#include "tree.h"
 #include <Kokkos_Core.hpp>
 #include <vector>
 #include <cfloat>
@@ -28,6 +29,16 @@ double int_pos_inv_scale = 0.0;
 bool use_nonblocking_mpi = false;
 
 bool symmetric_timesteps = false;
+
+// Barnes-Hut tree configuration
+bool use_tree = false;
+int tree_threshold = 10000;
+double tree_theta = 0.5;
+int tree_n_leaf = 32;
+int tree_n_group = 64;
+
+// Global tree instance (rebuilt each top-level step)
+static Octree g_octree;
 
 // TILE_SIZE defined in constants.h
 
@@ -194,8 +205,23 @@ void drift(Particles& p, int start, int count, double dt) {
 
 void fsi_step(Particles& p, int start, int count,
               double G, double soft2, double dt, bool forces_valid) {
-    // U kick (dt/6) - fused force + kick, or just kick if forces already valid
+    bool tree_mode = (use_tree && count >= tree_threshold);
+    bool tree_built = false;
+
+    // U kick (dt/6)
     if (forces_valid) {
+        g_profiler.start();
+        kick_velocities(p, start, count, dt * FSI_KICK);
+        g_profiler.stop(StepProfiler::DRIFT_KICK);
+    } else if (tree_mode) {
+        g_profiler.start();
+        g_octree.n_leaf = tree_n_leaf;
+        g_octree.n_group = tree_n_group;
+        g_octree.build(p, start, count, tree_theta);
+        tree_self_acceleration(p, g_octree, start, count, G, soft2);
+        tree_momentum_correction(p, start, count);
+        tree_built = true;
+        g_profiler.stop(StepProfiler::SELF_FORCE);
         g_profiler.start();
         kick_velocities(p, start, count, dt * FSI_KICK);
         g_profiler.stop(StepProfiler::DRIFT_KICK);
@@ -210,20 +236,49 @@ void fsi_step(Particles& p, int start, int count,
     drift(p, start, count, dt * FSI_DRIFT);
     g_profiler.stop(StepProfiler::DRIFT_KICK);
 
-    // U-tilde kick (2dt/3) - fused force + gradient + kick
-    g_profiler.start();
-    self_acceleration_and_gradient_kick(p, start, count, G, soft2, dt, dt * FSI_MOD_KICK);
-    g_profiler.stop(StepProfiler::SELF_GRAD);
+    // U-tilde kick (2dt/3)
+    if (tree_mode) {
+        g_profiler.start();
+        if (!tree_built) {
+            g_octree.n_leaf = tree_n_leaf;
+            g_octree.n_group = tree_n_group;
+            g_octree.build(p, start, count, tree_theta);
+            tree_built = true;
+        } else {
+            g_octree.refresh_positions(p);
+        }
+        tree_self_acceleration(p, g_octree, start, count, G, soft2);
+        tree_momentum_correction(p, start, count);
+        g_profiler.stop(StepProfiler::SELF_FORCE);
+        g_profiler.start();
+        kick_velocities(p, start, count, dt * FSI_MOD_KICK);
+        g_profiler.stop(StepProfiler::DRIFT_KICK);
+    } else {
+        g_profiler.start();
+        self_acceleration_and_gradient_kick(p, start, count, G, soft2, dt, dt * FSI_MOD_KICK);
+        g_profiler.stop(StepProfiler::SELF_GRAD);
+    }
 
     // T drift (dt/2)
     g_profiler.start();
     drift(p, start, count, dt * FSI_DRIFT);
     g_profiler.stop(StepProfiler::DRIFT_KICK);
 
-    // U kick (dt/6) - fused force + kick
-    g_profiler.start();
-    self_acceleration_kick(p, start, count, G, soft2, dt * FSI_KICK);
-    g_profiler.stop(StepProfiler::SELF_FORCE);
+    // U kick (dt/6)
+    if (tree_mode) {
+        g_profiler.start();
+        g_octree.refresh_positions(p);
+        tree_self_acceleration(p, g_octree, start, count, G, soft2);
+        tree_momentum_correction(p, start, count);
+        g_profiler.stop(StepProfiler::SELF_FORCE);
+        g_profiler.start();
+        kick_velocities(p, start, count, dt * FSI_KICK);
+        g_profiler.stop(StepProfiler::DRIFT_KICK);
+    } else {
+        g_profiler.start();
+        self_acceleration_kick(p, start, count, G, soft2, dt * FSI_KICK);
+        g_profiler.stop(StepProfiler::SELF_FORCE);
+    }
 }
 
 // ==========================================================================
@@ -1967,26 +2022,48 @@ static void fsi_step_ring(DistributedParticles& dp, int start, int count,
 // Distributed FSI step using scatter-compute-gather
 // All ranks execute identical code; only force computation is distributed
 // Uses fused force+kick kernels to reduce kernel launches and memory traffic
+//
+// tree_prebuilt: if true, g_octree is already built for [start, count) —
+//   skip first tree build (reuse from timestep computation or previous call)
 // =============================================================================
 static void fsi_step_distributed(DistributedParticles& dp, int start, int count,
                                  double G, double soft2, double dt,
-                                 bool forces_valid = false) {
+                                 bool forces_valid = false,
+                                 bool tree_prebuilt = false) {
     if (count <= 0) return;
 
+    bool tree_mode = use_tree && count >= tree_threshold;
     long long self_pairs = (long long)count * count;
 
     // Sync packed positions for vectorized kernel loads
     dp.local.pack_pos_range(start, count);
 
-    // U kick (dt/6) - fused distributed force + kick, or just kick if forces already valid
+    // U kick (dt/6) - force then kick (separate, matching FROST)
     if (forces_valid) {
+        g_profiler.start();
+        kick_velocities(dp.local, start, count, dt * FSI_KICK);
+        g_profiler.stop(StepProfiler::DRIFT_KICK);
+    } else if (tree_mode) {
+        g_profiler.start();
+        if (!tree_prebuilt) {
+            g_octree.n_leaf = tree_n_leaf;
+            g_octree.n_group = tree_n_group;
+            g_octree.build(dp.local, start, count, tree_theta);
+            tree_prebuilt = true;
+        }
+        tree_self_acceleration(dp.local, g_octree, start, count, G, soft2);
+        tree_momentum_correction(dp.local, start, count);
+        g_profiler.stop(StepProfiler::SELF_FORCE, self_pairs);
         g_profiler.start();
         kick_velocities(dp.local, start, count, dt * FSI_KICK);
         g_profiler.stop(StepProfiler::DRIFT_KICK);
     } else {
         g_profiler.start();
-        self_acceleration_kick_distributed(dp, start, count, G, soft2, dt * FSI_KICK);
+        self_acceleration_distributed(dp, start, count, G, soft2);
         g_profiler.stop(StepProfiler::SELF_FORCE, self_pairs);
+        g_profiler.start();
+        kick_velocities(dp.local, start, count, dt * FSI_KICK);
+        g_profiler.stop(StepProfiler::DRIFT_KICK);
     }
 
     // T drift (dt/2) - all ranks drift identically
@@ -1998,7 +2075,25 @@ static void fsi_step_distributed(DistributedParticles& dp, int start, int count,
     dp.local.pack_pos_range(start, count);
 
     // U-tilde kick (2dt/3) with gradient correction
-    if (fuse_gradient) {
+    if (tree_mode) {
+        // Tree mode: no gradient correction, just force + kick
+        // Refresh positions (O(N)) instead of rebuilding tree (O(N log N))
+        g_profiler.start();
+        if (!tree_prebuilt) {
+            g_octree.n_leaf = tree_n_leaf;
+            g_octree.n_group = tree_n_group;
+            g_octree.build(dp.local, start, count, tree_theta);
+            tree_prebuilt = true;
+        } else {
+            g_octree.refresh_positions(dp.local);
+        }
+        tree_self_acceleration(dp.local, g_octree, start, count, G, soft2);
+        tree_momentum_correction(dp.local, start, count);
+        g_profiler.stop(StepProfiler::SELF_FORCE, self_pairs);
+        g_profiler.start();
+        kick_velocities(dp.local, start, count, dt * FSI_MOD_KICK);
+        g_profiler.stop(StepProfiler::DRIFT_KICK);
+    } else if (fuse_gradient) {
         // Fused: single N² pass computes force + gradient (using stale a) + kick
         g_profiler.start();
         self_acceleration_gradient_kick_fused_distributed(dp, start, count, G, soft2, dt, dt * FSI_MOD_KICK);
@@ -2021,10 +2116,24 @@ static void fsi_step_distributed(DistributedParticles& dp, int start, int count,
     // Re-sync packed positions after drift
     dp.local.pack_pos_range(start, count);
 
-    // U kick (dt/6) - fused distributed force + kick
-    g_profiler.start();
-    self_acceleration_kick_distributed(dp, start, count, G, soft2, dt * FSI_KICK);
-    g_profiler.stop(StepProfiler::SELF_FORCE, self_pairs);
+    // U kick (dt/6) - force then kick
+    if (tree_mode) {
+        g_profiler.start();
+        g_octree.refresh_positions(dp.local);
+        tree_self_acceleration(dp.local, g_octree, start, count, G, soft2);
+        tree_momentum_correction(dp.local, start, count);
+        g_profiler.stop(StepProfiler::SELF_FORCE, self_pairs);
+        g_profiler.start();
+        kick_velocities(dp.local, start, count, dt * FSI_KICK);
+        g_profiler.stop(StepProfiler::DRIFT_KICK);
+    } else {
+        g_profiler.start();
+        self_acceleration_distributed(dp, start, count, G, soft2);
+        g_profiler.stop(StepProfiler::SELF_FORCE, self_pairs);
+        g_profiler.start();
+        kick_velocities(dp.local, start, count, dt * FSI_KICK);
+        g_profiler.stop(StepProfiler::DRIFT_KICK);
+    }
 }
 
 // =============================================================================
@@ -2869,7 +2978,7 @@ static void compute_timestep_distributed(DistributedParticles& dp, int start, in
                 load4(&vel(i, 0), vxi, vyi, vzi, vpad);
             }
 
-            double t_min_sq = 1e60;
+            double t_min_i = 1e30;
 
             for (int tile_st = j_start; tile_st < j_end; tile_st += TILE_SIZE) {
                 int tile_end = (tile_st + TILE_SIZE < j_end) ? tile_st + TILE_SIZE : j_end;
@@ -2901,23 +3010,44 @@ static void compute_timestep_distributed(DistributedParticles& dp, int start, in
                         double dvz = tile(jb+6) - vzi;
                         double v_sq = dvx*dvx + dvy*dvy + dvz*dvz;
 
-                        // Timestep using rsqrt: r^3 = r2s * r2s * inv_r
+                        // Symmetrized timestep — branchless, precomputed reciprocals
                         double r2s = r2 + soft2;
                         double inv_r = fast_rsqrt(r2s);
-                        double r3 = r2s * r2s * inv_r;
-                        double mass_sum = mi + tile(jb+3);
-                        double t_ff_sq = r3 / (G * mass_sum + EPS);
-                        double t_fb_sq = r2s / (v_sq + EPS);
+                        double mj = tile(jb+3);
+                        double mass_sum = mi + mj;
+                        double inv_Gm = 1.0 / (G * mass_sum + EPS);
+                        double inv_vsq = 1.0 / (v_sq + EPS);
 
-                        double t_min_sq_pair = Kokkos::fmin(t_ff_sq, t_fb_sq);
-                        t_min_sq = Kokkos::fmin(t_min_sq, t_min_sq_pair);
+                        double r3 = r2s * r2s * inv_r;
+                        double t_ff_sq = r3 * inv_Gm;
+                        double t_fb_sq = r2s * inv_vsq;
+                        double t_ff = t_ff_sq * fast_rsqrt(t_ff_sq + EPS);
+                        double t_fb = t_fb_sq * fast_rsqrt(t_fb_sq + EPS);
+
+                        double inv_r2 = inv_r * inv_r;
+                        double r_dot_v = dx*dvx + dy*dvy + dz*dvz;
+
+                        double c_ff = 1.5 * r_dot_v * inv_r2;
+                        double c_fb = r_dot_v * inv_r2 * (1.0 + G * mass_sum * inv_r * inv_vsq);
+
+                        double ct_ff = c_ff * t_ff_sq;
+                        double s_ff = 1.0 + c_ff * ct_ff;
+                        double u_ff = s_ff * fast_rsqrt(s_ff);
+                        double t_sym_ff = t_ff + ct_ff / (u_ff + 1.0);
+
+                        double ct_fb = c_fb * t_fb_sq;
+                        double s_fb = 1.0 + c_fb * ct_fb;
+                        double u_fb = s_fb * fast_rsqrt(s_fb);
+                        double t_sym_fb = t_fb + ct_fb / (u_fb + 1.0);
+
+                        t_min_i = Kokkos::fmin(t_min_i, Kokkos::fmin(t_sym_ff, t_sym_fb));
                     }
                 }
                 team.team_barrier();
             }
 
             if (ii < slice_count) {
-                dt_f(i) = Kokkos::sqrt(t_min_sq) * eta;
+                dt_f(i) = t_min_i * eta;
             }
         });
     Kokkos::fence();
@@ -3612,24 +3742,35 @@ static void hhs_fsi_recursive_distributed(
     // When symmetric_timesteps is enabled, fuse force+timestep in one N² pass
     // and reuse the forces for the first FSI kick
     bool forces_valid = false;
+    bool tree_built_for_subset = false;  // true when g_octree covers [start, count)
     if (!dt_valid && count > 1) {
-        // Sync packed pos+vel for vectorized timestep kernel
-        dp.local.pack_pos_range(start, count);
-        dp.local.pack_vel_range(start, count);
         g_profiler.start();
-        if (symmetric_timesteps) {
-#ifdef MPI_TOPOLOGY_RING
-            self_acceleration_and_timestep_ring(dp, start, count, G, soft2, eta);
-#else
-            self_acceleration_and_timestep_distributed(dp, start, count, G, soft2, eta);
-#endif
-            forces_valid = true;
+        if (use_tree && count >= tree_threshold) {
+            // Tree-based fused force+timestep: O(N log N) replaces N² timestep
+            g_octree.n_leaf = tree_n_leaf;
+            g_octree.n_group = tree_n_group;
+            g_octree.build(dp.local, start, count, tree_theta);
+            tree_self_acceleration_and_timestep(dp.local, g_octree, start, count, G, soft2, eta);
+            tree_momentum_correction(dp.local, start, count);
+            forces_valid = true;  // forces computed during tree traversal
+            tree_built_for_subset = true;
         } else {
+            // Sync packed pos+vel for vectorized timestep kernel
+            dp.local.pack_pos_range(start, count);
+            dp.local.pack_vel_range(start, count);
+            if (symmetric_timesteps) {
 #ifdef MPI_TOPOLOGY_RING
-            compute_timestep_ring(dp, start, count, G, soft2, eta);
+                self_acceleration_and_timestep_ring(dp, start, count, G, soft2, eta);
 #else
-            compute_timestep_distributed(dp, start, count, G, soft2, eta);
+                compute_timestep_distributed(dp, start, count, G, soft2, eta);
 #endif
+            } else {
+#ifdef MPI_TOPOLOGY_RING
+                compute_timestep_ring(dp, start, count, G, soft2, eta);
+#else
+                compute_timestep_distributed(dp, start, count, G, soft2, eta);
+#endif
+            }
         }
         g_profiler.stop(StepProfiler::ADAPTIVE_DT, (long long)count * count);
     }
@@ -3645,11 +3786,13 @@ static void hhs_fsi_recursive_distributed(
 
     // Base case: all particles are slow (no fast particles)
     // Reuse fused forces for first FSI kick (saves one N² pass)
+    // When tree was built for timestep, partition is a no-op (all slow) so tree is still valid
     if (fast_count == 0) {
 #ifdef MPI_TOPOLOGY_RING
         fsi_step_ring(dp, start, count, G, soft2, pivot_dt, forces_valid);
 #else
-        fsi_step_distributed(dp, start, count, G, soft2, pivot_dt, forces_valid);
+        fsi_step_distributed(dp, start, count, G, soft2, pivot_dt,
+                             forces_valid, tree_built_for_subset);
 #endif
         return;
     }
@@ -3724,12 +3867,17 @@ static void hhs_fsi_recursive_distributed(
     g_profiler.stop(StepProfiler::DRIFT_KICK);
 
 #else
-    // --- Default: i-partitioned force → allgatherv → fused kick ---
+    // --- Default: i-partitioned force → allgatherv → separate kick ---
 
-    // Step 1: Cross-kick S<->F (dt/6) - fused distributed force + allgather + kick
+    // Step 1: Cross-force S<->F then kick (dt/6)
+    dp.local.pack_pos_range(slow_start, slow_count + fast_count);
     g_profiler.start();
-    cross_acceleration_kick_distributed(dp, slow_start, slow_count, fast_start, fast_count, G, soft2, pivot_dt * FSI_KICK);
+    cross_acceleration_distributed(dp, slow_start, slow_count, fast_start, fast_count, G, soft2);
     g_profiler.stop(StepProfiler::CROSS_FORCE, cross_pairs);
+    g_profiler.start();
+    kick_velocities(dp.local, slow_start, slow_count, pivot_dt * FSI_KICK);
+    kick_velocities(dp.local, fast_start, fast_count, pivot_dt * FSI_KICK);
+    g_profiler.stop(StepProfiler::DRIFT_KICK);
 
     // Step 2: FSI half-step on slow
     fsi_step_distributed(dp, slow_start, slow_count, G, soft2, pivot_dt * 0.5);
@@ -3769,10 +3917,15 @@ static void hhs_fsi_recursive_distributed(
     // Step 6: FSI half-step on slow
     fsi_step_distributed(dp, slow_start, slow_count, G, soft2, pivot_dt * 0.5);
 
-    // Step 7: Cross-kick S<->F (dt/6) - fused distributed force + allgather + kick
+    // Step 7: Cross-force S<->F then kick (dt/6)
+    dp.local.pack_pos_range(slow_start, slow_count + fast_count);
     g_profiler.start();
-    cross_acceleration_kick_distributed(dp, slow_start, slow_count, fast_start, fast_count, G, soft2, pivot_dt * FSI_KICK);
+    cross_acceleration_distributed(dp, slow_start, slow_count, fast_start, fast_count, G, soft2);
     g_profiler.stop(StepProfiler::CROSS_FORCE, cross_pairs);
+    g_profiler.start();
+    kick_velocities(dp.local, slow_start, slow_count, pivot_dt * FSI_KICK);
+    kick_velocities(dp.local, fast_start, fast_count, pivot_dt * FSI_KICK);
+    g_profiler.stop(StepProfiler::DRIFT_KICK);
 #endif // MPI_TOPOLOGY_RING
 }
 

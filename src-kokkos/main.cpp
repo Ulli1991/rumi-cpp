@@ -147,6 +147,13 @@ int main(int argc, char** argv) {
         use_nonblocking_mpi = (cfg.get_str("MPI_NON_BLOCKING", "false") == "true");
         symmetric_timesteps = (cfg.get_str("SYMMETRIC_TIMESTEPS", "false") == "true");
 
+        // Barnes-Hut tree configuration
+        use_tree = (cfg.get_str("USE_TREE", "false") == "true");
+        tree_threshold = cfg.get_int("TREE_THRESHOLD", 10000);
+        tree_theta = cfg.get_double("TREE_THETA", 0.5);
+        tree_n_leaf = cfg.get_int("TREE_N_LEAF", 32);
+        tree_n_group = cfg.get_int("TREE_N_GROUP", 64);
+
         double G = G_CODE;
         double soft2 = soft_pc * soft_pc;
         double dt_max = dt_max_myr / TIME_UNIT_MYR;   // Myr → code TU
@@ -242,6 +249,10 @@ int main(int argc, char** argv) {
             if (use_integer_positions) {
                 std::printf("Integer positions: domain=%.1f pc, resolution=%.2e pc\n",
                             domain_halfsize, int_pos_scale);
+            }
+            if (use_tree) {
+                std::printf("Barnes-Hut tree: theta=%.2f, n_leaf=%d, n_group=%d, threshold=%d\n",
+                            tree_theta, tree_n_leaf, tree_n_group, tree_threshold);
             }
             std::printf("\n");
             std::fflush(stdout);

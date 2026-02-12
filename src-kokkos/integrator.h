@@ -26,6 +26,13 @@ extern bool symmetric_timesteps;        // SYMMETRIC_TIMESTEPS config toggle
                                         // When true: fused force+timestep with harmonic symmetrization
                                         // When false: separate timestep kernel, no symmetrization
 
+// Barnes-Hut tree configuration
+extern bool use_tree;                   // USE_TREE config toggle
+extern int tree_threshold;              // Particle count above which tree is used (default: 10000)
+extern double tree_theta;               // Opening angle (default: 0.5)
+extern int tree_n_leaf;                 // Max particles per leaf (default: 32)
+extern int tree_n_group;                // Particles per traversal group (default: 64)
+
 // Forward declaration for distributed particles
 struct DistributedParticles;
 

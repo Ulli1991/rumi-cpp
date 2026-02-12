@@ -73,7 +73,7 @@ struct RawView {
 };
 
 // Tile size for shared memory tiling in all N^2 GPU kernels
-constexpr int TILE_SIZE = 128;
+constexpr int TILE_SIZE = 256;
 
 // Harmonic symmetrization factor for timestep (FROST paper Eq. 23)
 // f(d) = (d + sqrt(1 + d²) - 1) / d  for |d| > eps, else 1.0
