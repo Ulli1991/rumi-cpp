@@ -1,0 +1,354 @@
+#include "tree.h"
+#include "constants.h"
+#include "integrator.h"
+#include <Kokkos_Core.hpp>
+#include <Kokkos_Sort.hpp>
+#include <algorithm>
+#include <vector>
+#include <cstdio>
+
+// ==========================================================================
+// Morton key computation (3D interleaving of integer coordinates)
+// ==========================================================================
+
+static inline uint64_t spread_bits_21(uint64_t x) {
+    x &= 0x1fffff;
+    x = (x | (x << 32)) & 0x1f00000000ffff;
+    x = (x | (x << 16)) & 0x1f0000ff0000ff;
+    x = (x | (x << 8))  & 0x100f00f00f00f00f;
+    x = (x | (x << 4))  & 0x10c30c30c30c30c3;
+    x = (x | (x << 2))  & 0x1249249249249249;
+    return x;
+}
+
+static inline uint64_t morton_key_3d(uint64_t ix, uint64_t iy, uint64_t iz) {
+    return spread_bits_21(ix) | (spread_bits_21(iy) << 1) | (spread_bits_21(iz) << 2);
+}
+
+// ==========================================================================
+// Host-side octree construction
+// ==========================================================================
+
+struct HostCell {
+    double cx, cy, cz;
+    double mass;
+    double half_width;
+    int children[8];
+    int pbeg, pend;
+    bool is_leaf;
+};
+
+// Recursive octree build on sorted particles
+// sx/sy/sz/sm/si are mutable arrays reordered in-place by octant
+static void build_octree_recursive(
+    std::vector<HostCell>& cells,
+    int cell_idx,
+    double* sx, double* sy, double* sz, double* sm, int* si,
+    int pbeg, int pend,
+    double ox, double oy, double oz, double half,
+    int n_leaf_max, int depth)
+{
+    HostCell& cell = cells[cell_idx];
+    cell.pbeg = pbeg;
+    cell.pend = pend;
+    cell.half_width = half;
+
+    int count = pend - pbeg;
+
+    // Compute center of mass
+    double totm = 0, comx = 0, comy = 0, comz = 0;
+    for (int i = pbeg; i < pend; i++) {
+        totm += sm[i];
+        comx += sm[i] * sx[i];
+        comy += sm[i] * sy[i];
+        comz += sm[i] * sz[i];
+    }
+    if (totm > 0) {
+        double inv_m = 1.0 / totm;
+        cell.cx = comx * inv_m;
+        cell.cy = comy * inv_m;
+        cell.cz = comz * inv_m;
+    } else {
+        cell.cx = ox; cell.cy = oy; cell.cz = oz;
+    }
+    cell.mass = totm;
+
+    if (count <= n_leaf_max || depth >= TREE_MAX_DEPTH) {
+        cell.is_leaf = true;
+        for (int c = 0; c < 8; c++) cell.children[c] = -1;
+        return;
+    }
+
+    cell.is_leaf = false;
+
+    // Count particles per octant
+    int octant_count[8] = {};
+    std::vector<int> octant_id(count);
+    for (int i = pbeg; i < pend; i++) {
+        int oct = 0;
+        if (sx[i] >= ox) oct |= 1;
+        if (sy[i] >= oy) oct |= 2;
+        if (sz[i] >= oz) oct |= 4;
+        octant_id[i - pbeg] = oct;
+        octant_count[oct]++;
+    }
+
+    int octant_offset[8];
+    octant_offset[0] = pbeg;
+    for (int c = 1; c < 8; c++)
+        octant_offset[c] = octant_offset[c - 1] + octant_count[c - 1];
+
+    // Reorder all 5 arrays (x,y,z,m,idx) into octant order
+    int n = count;
+    std::vector<double> tx(n), ty(n), tz(n), tm(n);
+    std::vector<int> ti(n);
+    int fill[8];
+    for (int c = 0; c < 8; c++) fill[c] = octant_offset[c];
+
+    for (int i = pbeg; i < pend; i++) {
+        int oct = octant_id[i - pbeg];
+        int dst = fill[oct]++;
+        int k = dst - pbeg;
+        tx[k] = sx[i]; ty[k] = sy[i]; tz[k] = sz[i];
+        tm[k] = sm[i]; ti[k] = si[i];
+    }
+    for (int i = 0; i < n; i++) {
+        sx[pbeg + i] = tx[i]; sy[pbeg + i] = ty[i]; sz[pbeg + i] = tz[i];
+        sm[pbeg + i] = tm[i]; si[pbeg + i] = ti[i];
+    }
+
+    // Create children
+    double qh = half * 0.5;
+    for (int c = 0; c < 8; c++) {
+        int cb = octant_offset[c];
+        int ce = cb + octant_count[c];
+        if (octant_count[c] == 0) {
+            cells[cell_idx].children[c] = -1;
+            continue;
+        }
+        int child_idx = (int)cells.size();
+        cells.emplace_back();
+        cells[cell_idx].children[c] = child_idx;
+
+        double cox = ox + ((c & 1) ? qh : -qh);
+        double coy = oy + (((c >> 1) & 1) ? qh : -qh);
+        double coz = oz + (((c >> 2) & 1) ? qh : -qh);
+
+        build_octree_recursive(cells, child_idx, sx, sy, sz, sm, si,
+                               cb, ce, cox, coy, coz, qh, n_leaf_max, depth + 1);
+    }
+}
+
+// ==========================================================================
+// Octree::build
+// ==========================================================================
+void Octree::build(Particles& p, int start, int count, double theta_param) {
+    if (count <= 0) return;
+
+    theta = theta_param;
+    n_particles = count;
+    double inv_theta_sq = 1.0 / (theta * theta);
+
+    // 1. Copy positions + masses to host
+    auto h_x = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.x);
+    auto h_y = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.y);
+    auto h_z = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.z);
+    auto h_m = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.mass);
+
+    // 2. Compute bounding box
+    double xmin = h_x(start), xmax = h_x(start);
+    double ymin = h_y(start), ymax = h_y(start);
+    double zmin = h_z(start), zmax = h_z(start);
+    for (int i = start + 1; i < start + count; i++) {
+        xmin = std::min(xmin, h_x(i)); xmax = std::max(xmax, h_x(i));
+        ymin = std::min(ymin, h_y(i)); ymax = std::max(ymax, h_y(i));
+        zmin = std::min(zmin, h_z(i)); zmax = std::max(zmax, h_z(i));
+    }
+    box_cx = 0.5 * (xmin + xmax);
+    box_cy = 0.5 * (ymin + ymax);
+    box_cz = 0.5 * (zmin + zmax);
+    box_half = 0.5 * std::max({xmax - xmin, ymax - ymin, zmax - zmin});
+    box_half *= 1.001;
+
+    // 3. Compute Morton keys and sort
+    double inv_range = (1 << 21) / (2.0 * box_half);
+    std::vector<uint64_t> keys(count);
+    std::vector<int> perm(count);
+
+    for (int i = 0; i < count; i++) {
+        int pi = start + i;
+        uint64_t ix = (uint64_t)((h_x(pi) - (box_cx - box_half)) * inv_range);
+        uint64_t iy = (uint64_t)((h_y(pi) - (box_cy - box_half)) * inv_range);
+        uint64_t iz = (uint64_t)((h_z(pi) - (box_cz - box_half)) * inv_range);
+        ix = std::min(ix, (uint64_t)((1 << 21) - 1));
+        iy = std::min(iy, (uint64_t)((1 << 21) - 1));
+        iz = std::min(iz, (uint64_t)((1 << 21) - 1));
+        keys[i] = morton_key_3d(ix, iy, iz);
+        perm[i] = i;
+    }
+
+    std::sort(perm.begin(), perm.end(), [&](int a, int b) {
+        return keys[a] < keys[b];
+    });
+
+    // Build sorted arrays on host (including original index tracking)
+    std::vector<double> sx(count), sy(count), sz(count), sm(count);
+    std::vector<int> si(count);
+    for (int i = 0; i < count; i++) {
+        int orig = perm[i];
+        sx[i] = h_x(start + orig);
+        sy[i] = h_y(start + orig);
+        sz[i] = h_z(start + orig);
+        sm[i] = h_m(start + orig);
+        si[i] = start + orig;  // original particle index
+    }
+
+    // 4. Build octree on host (reorders sx/sy/sz/sm/si by octant)
+    std::vector<HostCell> cells;
+    cells.reserve(count / std::max(n_leaf, 1) * 2 + 100);
+    cells.emplace_back();
+    build_octree_recursive(cells, 0, sx.data(), sy.data(), sz.data(), sm.data(), si.data(),
+                           0, count, box_cx, box_cy, box_cz, box_half,
+                           n_leaf, 0);
+
+    n_cells = (int)cells.size();
+
+    // 5. Upload to device
+    cell_com = Kokkos::View<double*[4], Kokkos::LayoutRight>("cell_com", n_cells);
+    cell_size_sq_theta = Kokkos::View<double*>("cell_size_sq_theta", n_cells);
+    cell_children = Kokkos::View<int*[8], Kokkos::LayoutRight>("cell_children", n_cells);
+    cell_pbeg = Kokkos::View<int*>("cell_pbeg", n_cells);
+    cell_pend = Kokkos::View<int*>("cell_pend", n_cells);
+    cell_is_leaf = Kokkos::View<int*>("cell_is_leaf", n_cells);
+    sorted_indices = Kokkos::View<int*>("sorted_indices", count);
+    sorted_pos = Kokkos::View<double*[4], Kokkos::LayoutRight>("sorted_pos", count);
+
+    auto h_cell_com = Kokkos::create_mirror_view(cell_com);
+    auto h_cell_size = Kokkos::create_mirror_view(cell_size_sq_theta);
+    auto h_cell_children = Kokkos::create_mirror_view(cell_children);
+    auto h_cell_pbeg = Kokkos::create_mirror_view(cell_pbeg);
+    auto h_cell_pend = Kokkos::create_mirror_view(cell_pend);
+    auto h_cell_is_leaf = Kokkos::create_mirror_view(cell_is_leaf);
+
+    for (int c = 0; c < n_cells; c++) {
+        h_cell_com(c, 0) = cells[c].cx;
+        h_cell_com(c, 1) = cells[c].cy;
+        h_cell_com(c, 2) = cells[c].cz;
+        h_cell_com(c, 3) = cells[c].mass;
+        h_cell_size(c) = cells[c].half_width * cells[c].half_width * inv_theta_sq;
+        for (int ch = 0; ch < 8; ch++)
+            h_cell_children(c, ch) = cells[c].children[ch];
+        h_cell_pbeg(c) = cells[c].pbeg;
+        h_cell_pend(c) = cells[c].pend;
+        h_cell_is_leaf(c) = cells[c].is_leaf ? 1 : 0;
+    }
+
+    auto h_sorted_idx = Kokkos::create_mirror_view(sorted_indices);
+    auto h_sorted_pos = Kokkos::create_mirror_view(sorted_pos);
+    for (int i = 0; i < count; i++) {
+        h_sorted_idx(i) = si[i];
+        h_sorted_pos(i, 0) = sx[i];
+        h_sorted_pos(i, 1) = sy[i];
+        h_sorted_pos(i, 2) = sz[i];
+        h_sorted_pos(i, 3) = sm[i];
+    }
+
+    Kokkos::deep_copy(cell_com, h_cell_com);
+    Kokkos::deep_copy(cell_size_sq_theta, h_cell_size);
+    Kokkos::deep_copy(cell_children, h_cell_children);
+    Kokkos::deep_copy(cell_pbeg, h_cell_pbeg);
+    Kokkos::deep_copy(cell_pend, h_cell_pend);
+    Kokkos::deep_copy(cell_is_leaf, h_cell_is_leaf);
+    Kokkos::deep_copy(sorted_indices, h_sorted_idx);
+    Kokkos::deep_copy(sorted_pos, h_sorted_pos);
+
+    // 6. Build traversal groups
+    make_groups();
+}
+
+// ==========================================================================
+// Make traversal groups from sorted particles
+// ==========================================================================
+void Octree::make_groups() {
+    n_groups = (n_particles + n_group - 1) / n_group;
+
+    group_start = Kokkos::View<int*>("group_start", n_groups);
+    group_count = Kokkos::View<int*>("group_count", n_groups);
+    group_center = Kokkos::View<double*[3]>("group_center", n_groups);
+    group_size = Kokkos::View<double*[3]>("group_size", n_groups);
+
+    auto h_gs = Kokkos::create_mirror_view(group_start);
+    auto h_gc = Kokkos::create_mirror_view(group_count);
+    auto h_gcen = Kokkos::create_mirror_view(group_center);
+    auto h_gsz = Kokkos::create_mirror_view(group_size);
+
+    auto h_sp = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), sorted_pos);
+
+    for (int g = 0; g < n_groups; g++) {
+        int gs = g * n_group;
+        int ge = std::min(gs + n_group, n_particles);
+        int gc = ge - gs;
+
+        h_gs(g) = gs;
+        h_gc(g) = gc;
+
+        double xmin = h_sp(gs, 0), xmax = h_sp(gs, 0);
+        double ymin = h_sp(gs, 1), ymax = h_sp(gs, 1);
+        double zmin = h_sp(gs, 2), zmax = h_sp(gs, 2);
+        for (int i = gs + 1; i < ge; i++) {
+            xmin = std::min(xmin, h_sp(i, 0)); xmax = std::max(xmax, h_sp(i, 0));
+            ymin = std::min(ymin, h_sp(i, 1)); ymax = std::max(ymax, h_sp(i, 1));
+            zmin = std::min(zmin, h_sp(i, 2)); zmax = std::max(zmax, h_sp(i, 2));
+        }
+
+        h_gcen(g, 0) = 0.5 * (xmin + xmax);
+        h_gcen(g, 1) = 0.5 * (ymin + ymax);
+        h_gcen(g, 2) = 0.5 * (zmin + zmax);
+        h_gsz(g, 0) = 0.5 * (xmax - xmin);
+        h_gsz(g, 1) = 0.5 * (ymax - ymin);
+        h_gsz(g, 2) = 0.5 * (zmax - zmin);
+    }
+
+    Kokkos::deep_copy(group_start, h_gs);
+    Kokkos::deep_copy(group_count, h_gc);
+    Kokkos::deep_copy(group_center, h_gcen);
+    Kokkos::deep_copy(group_size, h_gsz);
+}
+
+// ==========================================================================
+// O(N) position refresh from live particle data
+// Updates sorted_pos without rebuilding tree structure
+// ==========================================================================
+void Octree::refresh_positions(Particles& p) {
+    if (n_particles <= 0) return;
+    auto si = sorted_indices;
+    auto sp = sorted_pos;
+    auto px = p.x;
+    auto py = p.y;
+    auto pz = p.z;
+    Kokkos::parallel_for("tree_refresh_pos", n_particles, KOKKOS_LAMBDA(int i) {
+        int orig = si(i);
+        sp(i, 0) = px(orig);
+        sp(i, 1) = py(orig);
+        sp(i, 2) = pz(orig);
+        // mass (sp(i,3)) unchanged
+    });
+}
+
+void Octree::deallocate() {
+    cell_com = {};
+    cell_size_sq_theta = {};
+    cell_children = {};
+    cell_pbeg = {};
+    cell_pend = {};
+    cell_is_leaf = {};
+    sorted_indices = {};
+    sorted_pos = {};
+    group_start = {};
+    group_count = {};
+    group_center = {};
+    group_size = {};
+    n_cells = 0;
+    n_groups = 0;
+    n_particles = 0;
+}
