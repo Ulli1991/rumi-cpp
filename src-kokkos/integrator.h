@@ -4,13 +4,13 @@
 #include <vector>
 #include <string>
 
-// Direct N² threshold: below this particle count, skip MPI distribution
-// and compute forces locally on each rank (eliminates allgather overhead)
-extern int direct_n2_threshold;         // 0 = disabled (always distributed)
+// Serial N² GPU threshold: below this particle count, skip MPI distribution
+// and compute full N² forces locally on each rank (no tree, no MPI)
+extern int serial_n2_gpu;              // 0 = disabled (always distributed)
 
-// CPU serial threshold: below this particle count, use CPU serial loops
-// instead of GPU kernels (eliminates kernel launch overhead for tiny subsets)
-extern int cpu_serial_threshold;        // 0 = disabled (always GPU)
+// Serial N² CPU threshold: below this particle count, use CPU serial loops
+// for full N² instead of GPU kernels (eliminates kernel launch overhead)
+extern int serial_n2_cpu;              // 0 = disabled (always GPU)
 
 extern bool use_integer_positions;      // INTEGER_POSITIONS config toggle
 extern double int_pos_scale;            // physical_pos = int_pos * scale
@@ -35,7 +35,8 @@ struct DistributedParticles;
 // Single-level FSI step on [start, start+count)
 // forces_valid: if true, skip first force computation (accelerations already in ax/ay/az)
 void fsi_step(Particles& p, int start, int count,
-              double G, double soft2, double dt, bool forces_valid = false);
+              double G, double soft2, double dt, bool forces_valid = false,
+              bool force_direct_n2 = false);
 
 // HHS-FSI recursive step with dynamic pivot-based partitioning (per paper's Algorithm 4)
 // Partitions particles [start, start+count) into slow (dt >= pivot) and fast (dt < pivot)

@@ -13,11 +13,11 @@
 // Global profiler instance
 StepProfiler g_profiler;
 
-// Direct N² threshold for skipping MPI distribution on small subsets
-int direct_n2_threshold = 0;
+// Serial N² GPU threshold: skip MPI, compute full N² locally (no tree)
+int serial_n2_gpu = 0;
 
-// CPU serial threshold for avoiding GPU kernel launch overhead on tiny subsets
-int cpu_serial_threshold = 0;
+// Serial N² CPU threshold: use CPU serial loops for full N²
+int serial_n2_cpu = 0;
 
 // Fused force+gradient: use stale accelerations to compute gradient in same N² pass as force
 
@@ -203,8 +203,9 @@ void drift(Particles& p, int start, int count, double dt) {
 }
 
 void fsi_step(Particles& p, int start, int count,
-              double G, double soft2, double dt, bool forces_valid) {
-    bool tree_mode = (use_tree && count >= tree_threshold);
+              double G, double soft2, double dt, bool forces_valid,
+              bool force_direct_n2) {
+    bool tree_mode = !force_direct_n2 && (use_tree && count >= tree_threshold);
     bool tree_built = false;
 
     // U kick (dt/6)
@@ -1572,6 +1573,34 @@ static void fsi_step_ring(DistributedParticles& dp, int start, int count,
 #endif // MPI_TOPOLOGY_RING
 
 // =============================================================================
+// Tree MPI distribution helpers: divide tree groups across MPI ranks
+// Each rank computes forces for its subset of groups, then allreduce(SUM)
+// =============================================================================
+static void get_tree_group_range(const Octree& tree, int& g_offset, int& g_count) {
+    int rank = MPIComm::rank();
+    int size = MPIComm::size();
+    int total_groups = tree.n_groups;
+    g_offset = rank * total_groups / size;
+    int g_end = (rank + 1) * total_groups / size;
+    g_count = g_end - g_offset;
+}
+
+static void zero_accelerations(Particles& p, int start, int count) {
+    auto ax = p.ax; auto ay = p.ay; auto az = p.az;
+    Kokkos::parallel_for("zero_acc", count, KOKKOS_LAMBDA(int ii) {
+        int i = start + ii;
+        ax(i) = 0.0; ay(i) = 0.0; az(i) = 0.0;
+    });
+}
+
+static void init_timesteps_max(Particles& p, int start, int count) {
+    auto dt_f = p.dt_adapt;
+    Kokkos::parallel_for("init_dt_max", count, KOKKOS_LAMBDA(int ii) {
+        dt_f(start + ii) = 1e30;
+    });
+}
+
+// =============================================================================
 // Distributed FSI step using scatter-compute-gather
 // All ranks execute identical code; only force computation is distributed
 // Uses fused force+kick kernels to reduce kernel launches and memory traffic
@@ -1604,7 +1633,11 @@ static void fsi_step_distributed(DistributedParticles& dp, int start, int count,
             g_octree.build(dp.local, start, count, tree_theta);
             tree_prebuilt = true;
         }
-        tree_self_acceleration(dp.local, g_octree, start, count, G, soft2);
+        int my_g_off, my_g_cnt;
+        get_tree_group_range(g_octree, my_g_off, my_g_cnt);
+        zero_accelerations(dp.local, start, count);
+        tree_self_acceleration(dp.local, g_octree, start, count, G, soft2, my_g_off, my_g_cnt);
+        dp.allreduce_accelerations_subset(start, count);
         tree_momentum_correction(dp.local, start, count);
         g_profiler.stop(StepProfiler::SELF_FORCE, self_pairs);
         g_profiler.start();
@@ -1640,10 +1673,15 @@ static void fsi_step_distributed(DistributedParticles& dp, int start, int count,
         } else {
             g_octree.refresh_positions(dp.local);
         }
-        tree_self_acceleration(dp.local, g_octree, start, count, G, soft2);
+        int my_g_off, my_g_cnt;
+        get_tree_group_range(g_octree, my_g_off, my_g_cnt);
+        zero_accelerations(dp.local, start, count);
+        tree_self_acceleration(dp.local, g_octree, start, count, G, soft2, my_g_off, my_g_cnt);
+        dp.allreduce_accelerations_subset(start, count);
         tree_momentum_correction(dp.local, start, count);
         g_profiler.stop(StepProfiler::SELF_FORCE, self_pairs);
-        // Gradient correction via tree: compute cell accelerations bottom-up, then jerk
+        // Gradient correction via tree: all ranks compute (not distributed)
+        // Forces must be correct (allreduced) before gradient computation
         g_profiler.start();
         g_octree.compute_cell_accelerations(dp.local);
         tree_self_gradient_correction(dp.local, g_octree, G, soft2, dt);
@@ -1677,7 +1715,11 @@ static void fsi_step_distributed(DistributedParticles& dp, int start, int count,
     if (tree_mode) {
         g_profiler.start();
         g_octree.refresh_positions(dp.local);
-        tree_self_acceleration(dp.local, g_octree, start, count, G, soft2);
+        int my_g_off, my_g_cnt;
+        get_tree_group_range(g_octree, my_g_off, my_g_cnt);
+        zero_accelerations(dp.local, start, count);
+        tree_self_acceleration(dp.local, g_octree, start, count, G, soft2, my_g_off, my_g_cnt);
+        dp.allreduce_accelerations_subset(start, count);
         tree_momentum_correction(dp.local, start, count);
         g_profiler.stop(StepProfiler::SELF_FORCE, self_pairs);
         g_profiler.start();
@@ -2741,19 +2783,18 @@ static void hhs_fsi_recursive_local(
     if (count == 0) return;
 
     // CPU serial path for very small subsets
-    if (cpu_serial_threshold > 0 && count <= cpu_serial_threshold) {
+    if (serial_n2_cpu > 0 && count <= serial_n2_cpu) {
         hhs_fsi_recursive_cpu(p, start, count, pivot_dt, G, soft2, dt_min, eta, dt_valid);
         return;
     }
 
-    // Base case: at minimum timestep, use FSI on the subset
+    // Base case: at minimum timestep, use FSI on the subset (force N² — no tree in serial path)
     if (pivot_dt * 0.5 < dt_min) {
-        fsi_step(p, start, count, G, soft2, pivot_dt);
+        fsi_step(p, start, count, G, soft2, pivot_dt, false, /*force_direct_n2=*/true);
         return;
     }
 
-    // Compute adaptive timesteps for this subset
-    // When symmetric_timesteps, fuse force+timestep and reuse forces
+    // Compute adaptive timesteps for this subset (always direct N² in serial path)
     bool forces_valid = false;
     if (!dt_valid && count > 1) {
         g_profiler.start();
@@ -2777,7 +2818,7 @@ static void hhs_fsi_recursive_local(
     // Base case: all particles are slow
     // Reuse fused forces for first FSI kick
     if (fast_count == 0) {
-        fsi_step(p, start, count, G, soft2, pivot_dt, forces_valid);
+        fsi_step(p, start, count, G, soft2, pivot_dt, forces_valid, /*force_direct_n2=*/true);
         return;
     }
 
@@ -2797,8 +2838,8 @@ static void hhs_fsi_recursive_local(
     cross_acceleration_kick(p, slow_start, slow_count, fast_start, fast_count, G, soft2, pivot_dt * FSI_KICK);
     g_profiler.stop(StepProfiler::CROSS_FORCE);
 
-    // Step 2: FSI half-step on slow
-    fsi_step(p, slow_start, slow_count, G, soft2, pivot_dt * 0.5);
+    // Step 2: FSI half-step on slow (force N² — no tree in serial path)
+    fsi_step(p, slow_start, slow_count, G, soft2, pivot_dt * 0.5, false, /*force_direct_n2=*/true);
 
     // Step 3: Recurse on fast (first half)
     hhs_fsi_recursive_local(p, fast_start, fast_count, pivot_dt * 0.5,
@@ -2813,8 +2854,8 @@ static void hhs_fsi_recursive_local(
     hhs_fsi_recursive_local(p, fast_start, fast_count, pivot_dt * 0.5,
                             G, soft2, dt_min, eta, false);
 
-    // Step 6: FSI half-step on slow
-    fsi_step(p, slow_start, slow_count, G, soft2, pivot_dt * 0.5);
+    // Step 6: FSI half-step on slow (force N² — no tree in serial path)
+    fsi_step(p, slow_start, slow_count, G, soft2, pivot_dt * 0.5, false, /*force_direct_n2=*/true);
 
     // Step 7: Cross-kick S<->F (dt/6) — no caching
     g_profiler.start();
@@ -2841,7 +2882,7 @@ static void hhs_fsi_recursive_distributed(
     if (count == 0) return;
 
     // Below threshold: skip MPI, all ranks compute full N² locally
-    if (direct_n2_threshold > 0 && count <= direct_n2_threshold) {
+    if (serial_n2_gpu > 0 && count <= serial_n2_gpu) {
         hhs_fsi_recursive_local(dp.local, start, count, pivot_dt,
                                 G, soft2, dt_min, eta, dt_valid);
         // Re-sync packed views: local path modifies SoA directly without updating pos_packed
@@ -2868,10 +2909,17 @@ static void hhs_fsi_recursive_distributed(
         g_profiler.start();
         if (use_tree && count >= tree_threshold) {
             // Tree-based fused force+timestep: O(N log N) replaces N² timestep
+            // Distributed across MPI ranks by tree groups, then allreduce
             g_octree.n_leaf = tree_n_leaf;
             g_octree.n_group = tree_n_group;
             g_octree.build(dp.local, start, count, tree_theta);
-            tree_self_acceleration_and_timestep(dp.local, g_octree, start, count, G, soft2, eta);
+            int my_g_off, my_g_cnt;
+            get_tree_group_range(g_octree, my_g_off, my_g_cnt);
+            zero_accelerations(dp.local, start, count);
+            init_timesteps_max(dp.local, start, count);
+            tree_self_acceleration_and_timestep(dp.local, g_octree, start, count, G, soft2, eta, my_g_off, my_g_cnt);
+            dp.allreduce_accelerations_subset(start, count);
+            dp.allreduce_timestep_subset(start, count);
             tree_momentum_correction(dp.local, start, count);
             forces_valid = true;  // forces computed during tree traversal
             tree_built_for_subset = true;
