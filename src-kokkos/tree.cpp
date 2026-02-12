@@ -361,9 +361,73 @@ void Octree::refresh_positions(Particles& p) {
     });
 }
 
+// ==========================================================================
+// Compute cell center-of-mass accelerations (bottom-up on host)
+// Children always have higher indices than parents (DFS emplace_back order)
+// so reverse iteration gives bottom-up ordering.
+// ==========================================================================
+void Octree::compute_cell_accelerations(Particles& p) {
+    if (n_cells <= 0 || n_particles <= 0) return;
+
+    auto h_ax = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.ax);
+    auto h_ay = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.ay);
+    auto h_az = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.az);
+    auto h_mass = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.mass);
+    auto h_si = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), sorted_indices);
+    auto h_children = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), cell_children);
+    auto h_is_leaf = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), cell_is_leaf);
+    auto h_pbeg = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), cell_pbeg);
+    auto h_pend = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), cell_pend);
+    auto h_com = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), cell_com);
+
+    if ((int)cell_accel.extent(0) != n_cells)
+        cell_accel = Kokkos::View<double*[3], Kokkos::LayoutRight>("cell_accel", n_cells);
+    auto h_ca = Kokkos::create_mirror_view(cell_accel);
+
+    // Bottom-up: highest index first
+    for (int c = n_cells - 1; c >= 0; c--) {
+        double cell_m = h_com(c, 3);
+        if (cell_m <= 0) {
+            h_ca(c, 0) = h_ca(c, 1) = h_ca(c, 2) = 0;
+            continue;
+        }
+        double inv_m = 1.0 / cell_m;
+
+        if (h_is_leaf(c)) {
+            double max = 0, may = 0, maz = 0;
+            for (int i = h_pbeg(c); i < h_pend(c); i++) {
+                int orig = h_si(i);
+                double m = h_mass(orig);
+                max += m * h_ax(orig);
+                may += m * h_ay(orig);
+                maz += m * h_az(orig);
+            }
+            h_ca(c, 0) = max * inv_m;
+            h_ca(c, 1) = may * inv_m;
+            h_ca(c, 2) = maz * inv_m;
+        } else {
+            double max = 0, may = 0, maz = 0;
+            for (int ch = 0; ch < 8; ch++) {
+                int child = h_children(c, ch);
+                if (child < 0) continue;
+                double cm = h_com(child, 3);
+                max += cm * h_ca(child, 0);
+                may += cm * h_ca(child, 1);
+                maz += cm * h_ca(child, 2);
+            }
+            h_ca(c, 0) = max * inv_m;
+            h_ca(c, 1) = may * inv_m;
+            h_ca(c, 2) = maz * inv_m;
+        }
+    }
+
+    Kokkos::deep_copy(cell_accel, h_ca);
+}
+
 void Octree::deallocate() {
     cell_com = {};
     cell_vel = {};
+    cell_accel = {};
     cell_size_sq_theta = {};
     cell_children = {};
     cell_pbeg = {};

@@ -23,6 +23,10 @@ struct Octree {
     // cell_vel(i, 0..2) = {vx, vy, vz} — center-of-mass velocity
     Kokkos::View<double*[3], Kokkos::LayoutRight> cell_vel;
 
+    // cell_accel(i, 0..2) = {ax, ay, az} — center-of-mass acceleration
+    // Computed bottom-up after forces are evaluated (not during build)
+    Kokkos::View<double*[3], Kokkos::LayoutRight> cell_accel;
+
     // cell_size_sq_theta(i) = cell_half_width² / theta² (pre-computed for MAC)
     Kokkos::View<double*> cell_size_sq_theta;
 
@@ -69,6 +73,12 @@ struct Octree {
     // Use after drift operations to avoid full tree rebuild.
     void refresh_positions(Particles& p);
 
+    // Compute cell center-of-mass accelerations bottom-up from particle data.
+    // Call AFTER force computation (p.ax/ay/az must be valid).
+    // Leaf cells: mass-weighted average of particle accelerations.
+    // Internal cells: mass-weighted average of child cell accelerations.
+    void compute_cell_accelerations(Particles& p);
+
     // Create traversal groups from sorted particles
     void make_groups();
 
@@ -87,6 +97,28 @@ void tree_self_acceleration(Particles& p, const Octree& tree,
 void tree_self_acceleration_and_timestep(Particles& p, const Octree& tree,
                                           int start, int count,
                                           double G, double soft2, double eta);
+
+// Cross-force via tree: force on i-particles (grouped by i_tree) from j_tree
+// i_tree provides spatial groups for i-particles; j_tree is walked for forces
+// Results OVERWRITE p.ax, p.ay, p.az for i-particles
+void tree_cross_acceleration(Particles& p,
+                             const Octree& i_tree,
+                             const Octree& j_tree,
+                             double G, double soft2);
+
+// Self-gradient correction via tree traversal (Dehnen jerk formula)
+// Uses tree.cell_accel for monopole, per-particle accel for P2P
+// Results ADDED to p.ax, p.ay, p.az
+void tree_self_gradient_correction(Particles& p, const Octree& tree,
+                                    double G, double soft2, double dt);
+
+// Cross-gradient correction: jerk on i-particles from j_tree
+// i_tree provides groups, j_tree provides tree structure + cell_accel
+// Results ADDED to p.ax, p.ay, p.az for i-particles
+void tree_cross_gradient_correction(Particles& p,
+                                     const Octree& i_tree,
+                                     const Octree& j_tree,
+                                     double G, double soft2, double dt);
 
 // Post-hoc momentum correction: subtracts net force / total mass
 // to enforce exact linear momentum conservation (tree forces are not

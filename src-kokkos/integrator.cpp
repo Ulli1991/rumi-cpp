@@ -1629,7 +1629,7 @@ static void fsi_step_distributed(DistributedParticles& dp, int start, int count,
 
     // U-tilde kick (2dt/3) with gradient correction
     if (tree_mode) {
-        // Tree mode: no gradient correction, just force + kick
+        // Tree mode: force + gradient correction + kick
         // Refresh positions (O(N)) instead of rebuilding tree (O(N log N))
         g_profiler.start();
         if (!tree_prebuilt) {
@@ -1643,6 +1643,12 @@ static void fsi_step_distributed(DistributedParticles& dp, int start, int count,
         tree_self_acceleration(dp.local, g_octree, start, count, G, soft2);
         tree_momentum_correction(dp.local, start, count);
         g_profiler.stop(StepProfiler::SELF_FORCE, self_pairs);
+        // Gradient correction via tree: compute cell accelerations bottom-up, then jerk
+        g_profiler.start();
+        g_octree.compute_cell_accelerations(dp.local);
+        tree_self_gradient_correction(dp.local, g_octree, G, soft2, dt);
+        tree_momentum_correction(dp.local, start, count);
+        g_profiler.stop(StepProfiler::SELF_GRAD, self_pairs);
         g_profiler.start();
         kick_velocities(dp.local, start, count, dt * FSI_MOD_KICK);
         g_profiler.stop(StepProfiler::DRIFT_KICK);
