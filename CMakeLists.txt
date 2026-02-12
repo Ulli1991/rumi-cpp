@@ -26,6 +26,8 @@ add_executable(nbody-kokkos
     ${SRC_DIR}/initial_conditions.cpp
     ${SRC_DIR}/diagnostics.cpp
     ${SRC_DIR}/mpi_comm.cpp
+    ${SRC_DIR}/tree.cpp
+    ${SRC_DIR}/tree_forces.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/initial_conditions/sse.cpp
 )
 
