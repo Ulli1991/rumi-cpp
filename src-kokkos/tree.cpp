@@ -32,6 +32,7 @@ static inline uint64_t morton_key_3d(uint64_t ix, uint64_t iy, uint64_t iz) {
 struct HostCell {
     double cx, cy, cz;
     double mass;
+    double cvx, cvy, cvz;  // center-of-mass velocity
     double half_width;
     int children[8];
     int pbeg, pend;
@@ -39,11 +40,12 @@ struct HostCell {
 };
 
 // Recursive octree build on sorted particles
-// sx/sy/sz/sm/si are mutable arrays reordered in-place by octant
+// sx/sy/sz/sm/svx/svy/svz/si are mutable arrays reordered in-place by octant
 static void build_octree_recursive(
     std::vector<HostCell>& cells,
     int cell_idx,
-    double* sx, double* sy, double* sz, double* sm, int* si,
+    double* sx, double* sy, double* sz, double* sm,
+    double* svx, double* svy, double* svz, int* si,
     int pbeg, int pend,
     double ox, double oy, double oz, double half,
     int n_leaf_max, int depth)
@@ -55,21 +57,29 @@ static void build_octree_recursive(
 
     int count = pend - pbeg;
 
-    // Compute center of mass
+    // Compute center of mass and center-of-mass velocity
     double totm = 0, comx = 0, comy = 0, comz = 0;
+    double comvx = 0, comvy = 0, comvz = 0;
     for (int i = pbeg; i < pend; i++) {
         totm += sm[i];
         comx += sm[i] * sx[i];
         comy += sm[i] * sy[i];
         comz += sm[i] * sz[i];
+        comvx += sm[i] * svx[i];
+        comvy += sm[i] * svy[i];
+        comvz += sm[i] * svz[i];
     }
     if (totm > 0) {
         double inv_m = 1.0 / totm;
         cell.cx = comx * inv_m;
         cell.cy = comy * inv_m;
         cell.cz = comz * inv_m;
+        cell.cvx = comvx * inv_m;
+        cell.cvy = comvy * inv_m;
+        cell.cvz = comvz * inv_m;
     } else {
         cell.cx = ox; cell.cy = oy; cell.cz = oz;
+        cell.cvx = 0; cell.cvy = 0; cell.cvz = 0;
     }
     cell.mass = totm;
 
@@ -98,9 +108,9 @@ static void build_octree_recursive(
     for (int c = 1; c < 8; c++)
         octant_offset[c] = octant_offset[c - 1] + octant_count[c - 1];
 
-    // Reorder all 5 arrays (x,y,z,m,idx) into octant order
+    // Reorder all 8 arrays (x,y,z,m,vx,vy,vz,idx) into octant order
     int n = count;
-    std::vector<double> tx(n), ty(n), tz(n), tm(n);
+    std::vector<double> tx(n), ty(n), tz(n), tm(n), tvx(n), tvy(n), tvz(n);
     std::vector<int> ti(n);
     int fill[8];
     for (int c = 0; c < 8; c++) fill[c] = octant_offset[c];
@@ -111,10 +121,12 @@ static void build_octree_recursive(
         int k = dst - pbeg;
         tx[k] = sx[i]; ty[k] = sy[i]; tz[k] = sz[i];
         tm[k] = sm[i]; ti[k] = si[i];
+        tvx[k] = svx[i]; tvy[k] = svy[i]; tvz[k] = svz[i];
     }
     for (int i = 0; i < n; i++) {
         sx[pbeg + i] = tx[i]; sy[pbeg + i] = ty[i]; sz[pbeg + i] = tz[i];
         sm[pbeg + i] = tm[i]; si[pbeg + i] = ti[i];
+        svx[pbeg + i] = tvx[i]; svy[pbeg + i] = tvy[i]; svz[pbeg + i] = tvz[i];
     }
 
     // Create children
@@ -134,7 +146,7 @@ static void build_octree_recursive(
         double coy = oy + (((c >> 1) & 1) ? qh : -qh);
         double coz = oz + (((c >> 2) & 1) ? qh : -qh);
 
-        build_octree_recursive(cells, child_idx, sx, sy, sz, sm, si,
+        build_octree_recursive(cells, child_idx, sx, sy, sz, sm, svx, svy, svz, si,
                                cb, ce, cox, coy, coz, qh, n_leaf_max, depth + 1);
     }
 }
@@ -149,11 +161,14 @@ void Octree::build(Particles& p, int start, int count, double theta_param) {
     n_particles = count;
     double inv_theta_sq = 1.0 / (theta * theta);
 
-    // 1. Copy positions + masses to host
+    // 1. Copy positions + masses + velocities to host
     auto h_x = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.x);
     auto h_y = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.y);
     auto h_z = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.z);
     auto h_m = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.mass);
+    auto h_vx = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vx);
+    auto h_vy = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vy);
+    auto h_vz = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vz);
 
     // 2. Compute bounding box
     double xmin = h_x(start), xmax = h_x(start);
@@ -193,6 +208,7 @@ void Octree::build(Particles& p, int start, int count, double theta_param) {
 
     // Build sorted arrays on host (including original index tracking)
     std::vector<double> sx(count), sy(count), sz(count), sm(count);
+    std::vector<double> svx(count), svy(count), svz(count);
     std::vector<int> si(count);
     for (int i = 0; i < count; i++) {
         int orig = perm[i];
@@ -200,14 +216,18 @@ void Octree::build(Particles& p, int start, int count, double theta_param) {
         sy[i] = h_y(start + orig);
         sz[i] = h_z(start + orig);
         sm[i] = h_m(start + orig);
+        svx[i] = h_vx(start + orig);
+        svy[i] = h_vy(start + orig);
+        svz[i] = h_vz(start + orig);
         si[i] = start + orig;  // original particle index
     }
 
-    // 4. Build octree on host (reorders sx/sy/sz/sm/si by octant)
+    // 4. Build octree on host (reorders sx/sy/sz/sm/svx/svy/svz/si by octant)
     std::vector<HostCell> cells;
     cells.reserve(count / std::max(n_leaf, 1) * 2 + 100);
     cells.emplace_back();
-    build_octree_recursive(cells, 0, sx.data(), sy.data(), sz.data(), sm.data(), si.data(),
+    build_octree_recursive(cells, 0, sx.data(), sy.data(), sz.data(), sm.data(),
+                           svx.data(), svy.data(), svz.data(), si.data(),
                            0, count, box_cx, box_cy, box_cz, box_half,
                            n_leaf, 0);
 
@@ -215,6 +235,7 @@ void Octree::build(Particles& p, int start, int count, double theta_param) {
 
     // 5. Upload to device
     cell_com = Kokkos::View<double*[4], Kokkos::LayoutRight>("cell_com", n_cells);
+    cell_vel = Kokkos::View<double*[3], Kokkos::LayoutRight>("cell_vel", n_cells);
     cell_size_sq_theta = Kokkos::View<double*>("cell_size_sq_theta", n_cells);
     cell_children = Kokkos::View<int*[8], Kokkos::LayoutRight>("cell_children", n_cells);
     cell_pbeg = Kokkos::View<int*>("cell_pbeg", n_cells);
@@ -224,6 +245,7 @@ void Octree::build(Particles& p, int start, int count, double theta_param) {
     sorted_pos = Kokkos::View<double*[4], Kokkos::LayoutRight>("sorted_pos", count);
 
     auto h_cell_com = Kokkos::create_mirror_view(cell_com);
+    auto h_cell_vel = Kokkos::create_mirror_view(cell_vel);
     auto h_cell_size = Kokkos::create_mirror_view(cell_size_sq_theta);
     auto h_cell_children = Kokkos::create_mirror_view(cell_children);
     auto h_cell_pbeg = Kokkos::create_mirror_view(cell_pbeg);
@@ -235,6 +257,9 @@ void Octree::build(Particles& p, int start, int count, double theta_param) {
         h_cell_com(c, 1) = cells[c].cy;
         h_cell_com(c, 2) = cells[c].cz;
         h_cell_com(c, 3) = cells[c].mass;
+        h_cell_vel(c, 0) = cells[c].cvx;
+        h_cell_vel(c, 1) = cells[c].cvy;
+        h_cell_vel(c, 2) = cells[c].cvz;
         h_cell_size(c) = cells[c].half_width * cells[c].half_width * inv_theta_sq;
         for (int ch = 0; ch < 8; ch++)
             h_cell_children(c, ch) = cells[c].children[ch];
@@ -254,6 +279,7 @@ void Octree::build(Particles& p, int start, int count, double theta_param) {
     }
 
     Kokkos::deep_copy(cell_com, h_cell_com);
+    Kokkos::deep_copy(cell_vel, h_cell_vel);
     Kokkos::deep_copy(cell_size_sq_theta, h_cell_size);
     Kokkos::deep_copy(cell_children, h_cell_children);
     Kokkos::deep_copy(cell_pbeg, h_cell_pbeg);
@@ -337,6 +363,7 @@ void Octree::refresh_positions(Particles& p) {
 
 void Octree::deallocate() {
     cell_com = {};
+    cell_vel = {};
     cell_size_sq_theta = {};
     cell_children = {};
     cell_pbeg = {};

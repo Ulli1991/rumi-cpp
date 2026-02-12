@@ -20,6 +20,9 @@ struct Octree {
     // cell_com(i, 0..3) = {cx, cy, cz, mass} — center of mass + total mass
     Kokkos::View<double*[4], Kokkos::LayoutRight> cell_com;
 
+    // cell_vel(i, 0..2) = {vx, vy, vz} — center-of-mass velocity
+    Kokkos::View<double*[3], Kokkos::LayoutRight> cell_vel;
+
     // cell_size_sq_theta(i) = cell_half_width² / theta² (pre-computed for MAC)
     Kokkos::View<double*> cell_size_sq_theta;
 

@@ -210,6 +210,7 @@ void tree_self_acceleration_and_timestep(Particles& p, const Octree& tree,
     const int n_groups = tree.n_groups;
 
     auto cell_com = tree.cell_com;
+    auto cell_vel_v = tree.cell_vel;
     auto cell_size_sq_theta = tree.cell_size_sq_theta;
     auto cell_children = tree.cell_children;
     auto cell_pbeg = tree.cell_pbeg;
@@ -310,11 +311,39 @@ void tree_self_acceleration_and_timestep(Particles& p, const Octree& tree,
                         ayi += f * dy;
                         azi += f * dz;
 
-                        // Monopole timestep: free-fall only (conservative)
+                        // Symmetrized monopole timestep (FROST Eq. 23)
+                        double dvx = cell_vel_v(node, 0) - vxi;
+                        double dvy = cell_vel_v(node, 1) - vyi;
+                        double dvz = cell_vel_v(node, 2) - vzi;
+                        double v_sq = dvx*dvx + dvy*dvy + dvz*dvz;
                         double mass_sum = mi + cmass;
+                        double inv_Gm = 1.0 / (G * mass_sum + EPS);
+                        double inv_vsq = 1.0 / (v_sq + EPS);
+
                         double r3 = r2 * r2 * inv_r;
-                        double t_ff_sq = r3 / (G * mass_sum + EPS);
-                        t_min_sq = Kokkos::fmin(t_min_sq, t_ff_sq);
+                        double t_ff_sq = r3 * inv_Gm;
+                        double t_fb_sq = r2 * inv_vsq;
+                        double t_ff = t_ff_sq * fast_rsqrt(t_ff_sq + EPS);
+                        double t_fb = t_fb_sq * fast_rsqrt(t_fb_sq + EPS);
+
+                        double inv_r2 = inv_r * inv_r;
+                        double r_dot_v = dx*dvx + dy*dvy + dz*dvz;
+
+                        double c_ff = 1.5 * r_dot_v * inv_r2;
+                        double c_fb = r_dot_v * inv_r2 * (1.0 + G * mass_sum * inv_r * inv_vsq);
+
+                        double ct_ff = c_ff * t_ff_sq;
+                        double s_ff = 1.0 + c_ff * ct_ff;
+                        double u_ff = s_ff * fast_rsqrt(s_ff);
+                        double t_sym_ff = t_ff + ct_ff / (u_ff + 1.0);
+
+                        double ct_fb = c_fb * t_fb_sq;
+                        double s_fb = 1.0 + c_fb * ct_fb;
+                        double u_fb = s_fb * fast_rsqrt(s_fb);
+                        double t_sym_fb = t_fb + ct_fb / (u_fb + 1.0);
+
+                        t_min_sq = Kokkos::fmin(t_min_sq,
+                                   Kokkos::fmin(t_sym_ff * t_sym_ff, t_sym_fb * t_sym_fb));
                     }
                 } else if (is_leaf) {
                     int lpbeg = cell_pbeg(node);
@@ -335,18 +364,41 @@ void tree_self_acceleration_and_timestep(Particles& p, const Octree& tree,
                             ayi += f * dy;
                             azi += f * dz;
 
-                            // Exact pairwise timestep: free-fall + fly-by
+                            // Symmetrized pairwise timestep (FROST Eq. 23)
                             int j_orig = sorted_indices(j);
                             double dvx = pvx(j_orig) - vxi;
                             double dvy = pvy(j_orig) - vyi;
                             double dvz = pvz(j_orig) - vzi;
                             double v_sq = dvx*dvx + dvy*dvy + dvz*dvz;
                             double mass_sum = mi + mj;
+                            double inv_Gm = 1.0 / (G * mass_sum + EPS);
+                            double inv_vsq = 1.0 / (v_sq + EPS);
+
                             double r3 = r2 * r2 * inv_r;
-                            double t_ff_sq = r3 / (G * mass_sum + EPS);
-                            double t_fb_sq = r2 / (v_sq + EPS);
+                            double t_ff_sq = r3 * inv_Gm;
+                            double t_fb_sq = r2 * inv_vsq;
+                            double t_ff = t_ff_sq * fast_rsqrt(t_ff_sq + EPS);
+                            double t_fb = t_fb_sq * fast_rsqrt(t_fb_sq + EPS);
+
+                            double inv_r2 = inv_r * inv_r;
+                            double r_dot_v = dx*dvx + dy*dvy + dz*dvz;
+
+                            double c_ff = 1.5 * r_dot_v * inv_r2;
+                            double c_fb = r_dot_v * inv_r2 * (1.0 + G * mass_sum * inv_r * inv_vsq);
+
+                            // Rationalized form: t_sym = t + c*t²/(sqrt(1 + c²*t²) + 1)
+                            double ct_ff = c_ff * t_ff_sq;
+                            double s_ff = 1.0 + c_ff * ct_ff;
+                            double u_ff = s_ff * fast_rsqrt(s_ff);
+                            double t_sym_ff = t_ff + ct_ff / (u_ff + 1.0);
+
+                            double ct_fb = c_fb * t_fb_sq;
+                            double s_fb = 1.0 + c_fb * ct_fb;
+                            double u_fb = s_fb * fast_rsqrt(s_fb);
+                            double t_sym_fb = t_fb + ct_fb / (u_fb + 1.0);
+
                             t_min_sq = Kokkos::fmin(t_min_sq,
-                                       Kokkos::fmin(t_ff_sq, t_fb_sq));
+                                       Kokkos::fmin(t_sym_ff * t_sym_ff, t_sym_fb * t_sym_fb));
                         }
                     }
                 } else {
