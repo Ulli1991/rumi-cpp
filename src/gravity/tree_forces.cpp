@@ -1976,3 +1976,595 @@ void tree_momentum_correction(Particles& p, int start, int count) {
         az_v(i) -= cz;
     });
 }
+
+// ==========================================================================
+// GADGET-4 cross-force decomposition: F_all traversal functions.
+// Compute forces from ALL particles using total cell_com monopoles.
+// Targets: particles with sflag != 2 (both slow and fast at current level).
+// P2P: all sorted particles (no flag filter), only self-skip.
+// ==========================================================================
+
+// Force from ALL particles on active subset (sflag != 2).
+void tree_all_forces_on_subset(Particles& p, const Octree& tree,
+                                double G, double soft2) {
+    if (tree.n_particles <= 0 || tree.n_cells == 0) return;
+
+    const int n_groups = tree.n_groups;
+
+    auto cell_com_src = tree.cell_com;  // TOTAL monopoles (not slow/fast)
+    auto cell_size_sq_theta = tree.cell_size_sq_theta;
+    auto cell_children = tree.cell_children;
+    auto cell_pbeg = tree.cell_pbeg;
+    auto cell_pend = tree.cell_pend;
+    auto cell_is_leaf = tree.cell_is_leaf;
+    auto sorted_pos = tree.sorted_pos;
+    auto sorted_indices = tree.sorted_indices;
+    auto sflag = tree.sorted_subset_flag;
+    auto grp_start = tree.group_start;
+    auto grp_count = tree.group_count;
+    auto grp_center = tree.group_center;
+    auto grp_size = tree.group_size;
+
+    RawView pax{p.ax.data()}, pay{p.ay.data()}, paz{p.az.data()};
+
+    using team_policy = Kokkos::TeamPolicy<>;
+    using member_type = team_policy::member_type;
+    using scratch_space = Kokkos::DefaultExecutionSpace::scratch_memory_space;
+
+    size_t stack_bytes = TREE_STACK_SIZE * sizeof(int);
+
+    Kokkos::parallel_for("tree_all_forces",
+        team_policy(n_groups, TREE_GROUP_SIZE)
+            .set_scratch_size(0, Kokkos::PerTeam(stack_bytes)),
+        KOKKOS_LAMBDA(const member_type& team) {
+            int gid = team.league_rank();
+            int tid = team.team_rank();
+
+            Kokkos::View<int*, scratch_space, Kokkos::MemoryUnmanaged>
+                stack(team.team_scratch(0), TREE_STACK_SIZE);
+
+            int g_start = grp_start(gid);
+            int g_count_val = grp_count(gid);
+            double gcx = grp_center(gid, 0);
+            double gcy = grp_center(gid, 1);
+            double gcz = grp_center(gid, 2);
+            double gsx = grp_size(gid, 0);
+            double gsy = grp_size(gid, 1);
+            double gsz = grp_size(gid, 2);
+
+            int my_sorted_idx = g_start + tid;
+            double xi = 0, yi = 0, zi = 0;
+            int my_orig_idx = -1;
+            bool is_target = false;
+            if (tid < g_count_val) {
+                double mi_unused;
+                load4(&sorted_pos(my_sorted_idx, 0), xi, yi, zi, mi_unused);
+                my_orig_idx = sorted_indices(my_sorted_idx);
+                is_target = (sflag(my_sorted_idx) != 2);  // active = slow or fast
+            }
+
+            double axi = 0, ayi = 0, azi = 0;
+
+            if (tid == 0) stack(0) = 0;
+            int stack_top = 1;
+            team.team_barrier();
+
+            while (stack_top > 0) {
+                int node;
+                if (tid == 0) {
+                    node = stack(stack_top - 1);
+                    stack_top--;
+                    stack(TREE_STACK_SIZE - 1) = node;
+                }
+                team.team_barrier();
+                node = stack(TREE_STACK_SIZE - 1);
+                int current_stack_top = stack_top;
+
+                double ccx, ccy, ccz, cmass;
+                load4(&cell_com_src(node, 0), ccx, ccy, ccz, cmass);
+
+                if (cmass <= 0.0) {
+                    team.team_barrier();
+                    if (tid == 0) stack(TREE_STACK_SIZE - 2) = current_stack_top;
+                    team.team_barrier();
+                    stack_top = stack(TREE_STACK_SIZE - 2);
+                    continue;
+                }
+
+                double size_sq_th = cell_size_sq_theta(node);
+                int is_leaf = cell_is_leaf(node);
+
+                double drx = Kokkos::fabs(gcx - ccx) - gsx;
+                double dry = Kokkos::fabs(gcy - ccy) - gsy;
+                double drz = Kokkos::fabs(gcz - ccz) - gsz;
+                drx = Kokkos::fmax(drx, 0.0);
+                dry = Kokkos::fmax(dry, 0.0);
+                drz = Kokkos::fmax(drz, 0.0);
+                double dist_sq = drx * drx + dry * dry + drz * drz;
+                bool accept = (size_sq_th < dist_sq) && (dist_sq > 0.0);
+
+                if (accept) {
+                    if (is_target) {
+                        double dx = ccx - xi;
+                        double dy = ccy - yi;
+                        double dz = ccz - zi;
+                        double r2 = dx * dx + dy * dy + dz * dz + soft2;
+                        double inv_r = fast_rsqrt(r2);
+                        double inv_r3 = inv_r * inv_r * inv_r;
+                        double f = G * cmass * inv_r3;
+                        axi += f * dx;
+                        ayi += f * dy;
+                        azi += f * dz;
+                    }
+                } else if (is_leaf) {
+                    if (is_target) {
+                        int lpbeg = cell_pbeg(node);
+                        int lpend = cell_pend(node);
+                        for (int j = lpbeg; j < lpend; j++) {
+                            // No flag filter — ALL particles are sources
+                            if (j == my_sorted_idx) continue;  // self-skip only
+                            double pjx, pjy, pjz, mj;
+                            load4(&sorted_pos(j, 0), pjx, pjy, pjz, mj);
+                            double dx = pjx - xi;
+                            double dy = pjy - yi;
+                            double dz = pjz - zi;
+                            double r2 = dx * dx + dy * dy + dz * dz + soft2;
+                            double inv_r = fast_rsqrt(r2);
+                            double inv_r3 = inv_r * inv_r * inv_r;
+                            double f = G * mj * inv_r3;
+                            axi += f * dx;
+                            ayi += f * dy;
+                            azi += f * dz;
+                        }
+                    }
+                } else {
+                    if (tid == 0) {
+                        stack_top = current_stack_top;
+                        for (int c = 0; c < 8; c++) {
+                            int child = cell_children(node, c);
+                            if (child >= 0 && stack_top < TREE_STACK_SIZE - 1) {
+                                stack(stack_top++) = child;
+                            }
+                        }
+                    }
+                }
+
+                team.team_barrier();
+                if (tid == 0) stack(TREE_STACK_SIZE - 2) = stack_top;
+                team.team_barrier();
+                stack_top = stack(TREE_STACK_SIZE - 2);
+            }
+
+            if (is_target) {
+                pax(my_orig_idx) = axi;
+                pay(my_orig_idx) = ayi;
+                paz(my_orig_idx) = azi;
+            }
+        });
+}
+
+// Gradient correction from ALL particles on active subset (sflag != 2).
+// Uses cell_com + cell_accel (total). Results ADDED to p.ax, p.ay, p.az.
+void tree_all_gradient_on_subset(Particles& p, const Octree& tree,
+                                  double G, double soft2, double dt) {
+    if (tree.n_particles <= 0 || tree.n_cells == 0) return;
+
+    const int n_groups = tree.n_groups;
+    const double coeff = G * dt * dt * GRAD_COEFF;
+
+    auto cell_com_src = tree.cell_com;          // TOTAL monopoles
+    auto cell_accel_src = tree.cell_accel;      // TOTAL cell accelerations
+    auto cell_size_sq_theta = tree.cell_size_sq_theta;
+    auto cell_children = tree.cell_children;
+    auto cell_pbeg = tree.cell_pbeg;
+    auto cell_pend = tree.cell_pend;
+    auto cell_is_leaf = tree.cell_is_leaf;
+    auto sorted_pos = tree.sorted_pos;
+    auto sorted_indices = tree.sorted_indices;
+    auto sflag = tree.sorted_subset_flag;
+    auto grp_start = tree.group_start;
+    auto grp_count = tree.group_count;
+    auto grp_center = tree.group_center;
+    auto grp_size = tree.group_size;
+
+    RawView pax{p.ax.data()}, pay{p.ay.data()}, paz{p.az.data()};
+
+    using team_policy = Kokkos::TeamPolicy<>;
+    using member_type = team_policy::member_type;
+    using scratch_space = Kokkos::DefaultExecutionSpace::scratch_memory_space;
+
+    size_t stack_bytes = TREE_STACK_SIZE * sizeof(int);
+
+    Kokkos::parallel_for("tree_all_grad",
+        team_policy(n_groups, TREE_GROUP_SIZE)
+            .set_scratch_size(0, Kokkos::PerTeam(stack_bytes)),
+        KOKKOS_LAMBDA(const member_type& team) {
+            int gid = team.league_rank();
+            int tid = team.team_rank();
+
+            Kokkos::View<int*, scratch_space, Kokkos::MemoryUnmanaged>
+                stack(team.team_scratch(0), TREE_STACK_SIZE);
+
+            int g_start = grp_start(gid);
+            int g_count_val = grp_count(gid);
+            double gcx = grp_center(gid, 0);
+            double gcy = grp_center(gid, 1);
+            double gcz = grp_center(gid, 2);
+            double gsx = grp_size(gid, 0);
+            double gsy = grp_size(gid, 1);
+            double gsz = grp_size(gid, 2);
+
+            int my_sorted_idx = g_start + tid;
+            double xi = 0, yi = 0, zi = 0;
+            double axi = 0, ayi = 0, azi = 0;
+            int my_orig_idx = -1;
+            bool is_target = false;
+            if (tid < g_count_val) {
+                double mi_unused;
+                load4(&sorted_pos(my_sorted_idx, 0), xi, yi, zi, mi_unused);
+                my_orig_idx = sorted_indices(my_sorted_idx);
+                is_target = (sflag(my_sorted_idx) != 2);
+                if (is_target) {
+                    axi = pax(my_orig_idx);
+                    ayi = pay(my_orig_idx);
+                    azi = paz(my_orig_idx);
+                }
+            }
+
+            double cx = 0, cy = 0, cz = 0;
+
+            if (tid == 0) stack(0) = 0;
+            int stack_top = 1;
+            team.team_barrier();
+
+            while (stack_top > 0) {
+                int node;
+                if (tid == 0) {
+                    node = stack(stack_top - 1);
+                    stack_top--;
+                    stack(TREE_STACK_SIZE - 1) = node;
+                }
+                team.team_barrier();
+                node = stack(TREE_STACK_SIZE - 1);
+                int current_stack_top = stack_top;
+
+                double ccx, ccy, ccz, cmass;
+                load4(&cell_com_src(node, 0), ccx, ccy, ccz, cmass);
+
+                if (cmass <= 0.0) {
+                    team.team_barrier();
+                    if (tid == 0) stack(TREE_STACK_SIZE - 2) = current_stack_top;
+                    team.team_barrier();
+                    stack_top = stack(TREE_STACK_SIZE - 2);
+                    continue;
+                }
+
+                double size_sq_th = cell_size_sq_theta(node);
+                int is_leaf = cell_is_leaf(node);
+
+                double drx = Kokkos::fabs(gcx - ccx) - gsx;
+                double dry = Kokkos::fabs(gcy - ccy) - gsy;
+                double drz = Kokkos::fabs(gcz - ccz) - gsz;
+                drx = Kokkos::fmax(drx, 0.0);
+                dry = Kokkos::fmax(dry, 0.0);
+                drz = Kokkos::fmax(drz, 0.0);
+                double dist_sq = drx * drx + dry * dry + drz * drz;
+                bool accept = (size_sq_th < dist_sq) && (dist_sq > 0.0);
+
+                if (accept) {
+                    if (is_target) {
+                        double dx = ccx - xi;
+                        double dy = ccy - yi;
+                        double dz = ccz - zi;
+                        double dax = cell_accel_src(node, 0) - axi;
+                        double day = cell_accel_src(node, 1) - ayi;
+                        double daz = cell_accel_src(node, 2) - azi;
+
+                        double r2 = dx * dx + dy * dy + dz * dz + soft2;
+                        double inv_r = fast_rsqrt(r2);
+                        double inv_r2 = inv_r * inv_r;
+                        double inv_r5 = inv_r2 * inv_r2 * inv_r;
+
+                        double r_dot_a = dx * dax + dy * day + dz * daz;
+                        double f = coeff * cmass * inv_r5;
+
+                        cx += f * (r2 * dax - 3.0 * r_dot_a * dx);
+                        cy += f * (r2 * day - 3.0 * r_dot_a * dy);
+                        cz += f * (r2 * daz - 3.0 * r_dot_a * dz);
+                    }
+                } else if (is_leaf) {
+                    if (is_target) {
+                        int lpbeg = cell_pbeg(node);
+                        int lpend = cell_pend(node);
+                        for (int j = lpbeg; j < lpend; j++) {
+                            // No flag filter — ALL particles are sources
+                            if (j == my_sorted_idx) continue;  // self-skip only
+                            double pjx, pjy, pjz, mj;
+                            load4(&sorted_pos(j, 0), pjx, pjy, pjz, mj);
+                            int j_orig = sorted_indices(j);
+
+                            double dx = pjx - xi;
+                            double dy = pjy - yi;
+                            double dz = pjz - zi;
+                            double dax = pax(j_orig) - axi;
+                            double day = pay(j_orig) - ayi;
+                            double daz = paz(j_orig) - azi;
+
+                            double r2 = dx * dx + dy * dy + dz * dz + soft2;
+                            double inv_r = fast_rsqrt(r2);
+                            double inv_r2 = inv_r * inv_r;
+                            double inv_r5 = inv_r2 * inv_r2 * inv_r;
+
+                            double r_dot_a = dx * dax + dy * day + dz * daz;
+                            double f = coeff * mj * inv_r5;
+
+                            cx += f * (r2 * dax - 3.0 * r_dot_a * dx);
+                            cy += f * (r2 * day - 3.0 * r_dot_a * dy);
+                            cz += f * (r2 * daz - 3.0 * r_dot_a * dz);
+                        }
+                    }
+                } else {
+                    if (tid == 0) {
+                        stack_top = current_stack_top;
+                        for (int c = 0; c < 8; c++) {
+                            int child = cell_children(node, c);
+                            if (child >= 0 && stack_top < TREE_STACK_SIZE - 1) {
+                                stack(stack_top++) = child;
+                            }
+                        }
+                    }
+                }
+
+                team.team_barrier();
+                if (tid == 0) stack(TREE_STACK_SIZE - 2) = stack_top;
+                team.team_barrier();
+                stack_top = stack(TREE_STACK_SIZE - 2);
+            }
+
+            if (is_target) {
+                pax(my_orig_idx) += cx;
+                pay(my_orig_idx) += cy;
+                paz(my_orig_idx) += cz;
+            }
+        });
+}
+
+// Fused force + timestep from ALL particles on active subset (sflag != 2).
+// Uses cell_com + cell_vel (total). Results OVERWRITE p.ax, p.ay, p.az, p.dt_adapt.
+void tree_all_forces_and_timestep_on_subset(Particles& p, const Octree& tree,
+                                             double G, double soft2, double eta) {
+    if (tree.n_particles <= 0 || tree.n_cells == 0) return;
+
+    const int n_groups = tree.n_groups;
+
+    auto cell_com_src = tree.cell_com;      // TOTAL monopoles
+    auto cell_vel_src = tree.cell_vel;      // TOTAL cell velocities
+    auto cell_size_sq_theta = tree.cell_size_sq_theta;
+    auto cell_children = tree.cell_children;
+    auto cell_pbeg = tree.cell_pbeg;
+    auto cell_pend = tree.cell_pend;
+    auto cell_is_leaf = tree.cell_is_leaf;
+    auto sorted_pos = tree.sorted_pos;
+    auto sorted_indices = tree.sorted_indices;
+    auto sflag = tree.sorted_subset_flag;
+    auto grp_start = tree.group_start;
+    auto grp_count = tree.group_count;
+    auto grp_center = tree.group_center;
+    auto grp_size = tree.group_size;
+
+    RawView pax{p.ax.data()}, pay{p.ay.data()}, paz{p.az.data()};
+    RawView dt_f{p.dt_adapt.data()};
+    RawView pvx{p.vx.data()}, pvy{p.vy.data()}, pvz{p.vz.data()};
+    RawView pm{p.mass.data()};
+
+    using team_policy = Kokkos::TeamPolicy<>;
+    using member_type = team_policy::member_type;
+    using scratch_space = Kokkos::DefaultExecutionSpace::scratch_memory_space;
+
+    size_t stack_bytes = TREE_STACK_SIZE * sizeof(int);
+
+    Kokkos::parallel_for("tree_all_forces_dt",
+        team_policy(n_groups, TREE_GROUP_SIZE)
+            .set_scratch_size(0, Kokkos::PerTeam(stack_bytes)),
+        KOKKOS_LAMBDA(const member_type& team) {
+            int gid = team.league_rank();
+            int tid = team.team_rank();
+
+            Kokkos::View<int*, scratch_space, Kokkos::MemoryUnmanaged>
+                stack(team.team_scratch(0), TREE_STACK_SIZE);
+
+            int g_start = grp_start(gid);
+            int g_count_val = grp_count(gid);
+            double gcx = grp_center(gid, 0);
+            double gcy = grp_center(gid, 1);
+            double gcz = grp_center(gid, 2);
+            double gsx = grp_size(gid, 0);
+            double gsy = grp_size(gid, 1);
+            double gsz = grp_size(gid, 2);
+
+            int my_sorted_idx = g_start + tid;
+            double xi = 0, yi = 0, zi = 0, mi = 0;
+            double vxi = 0, vyi = 0, vzi = 0;
+            int my_orig_idx = -1;
+            bool is_target = false;
+            if (tid < g_count_val) {
+                load4(&sorted_pos(my_sorted_idx, 0), xi, yi, zi, mi);
+                my_orig_idx = sorted_indices(my_sorted_idx);
+                is_target = (sflag(my_sorted_idx) != 2);
+                if (is_target) {
+                    vxi = pvx(my_orig_idx);
+                    vyi = pvy(my_orig_idx);
+                    vzi = pvz(my_orig_idx);
+                }
+            }
+
+            double axi = 0, ayi = 0, azi = 0;
+            double t_min_sq = 1e60;
+
+            if (tid == 0) stack(0) = 0;
+            int stack_top = 1;
+            team.team_barrier();
+
+            while (stack_top > 0) {
+                int node;
+                if (tid == 0) {
+                    node = stack(stack_top - 1);
+                    stack_top--;
+                    stack(TREE_STACK_SIZE - 1) = node;
+                }
+                team.team_barrier();
+                node = stack(TREE_STACK_SIZE - 1);
+                int current_stack_top = stack_top;
+
+                double ccx, ccy, ccz, cmass;
+                load4(&cell_com_src(node, 0), ccx, ccy, ccz, cmass);
+
+                if (cmass <= 0.0) {
+                    team.team_barrier();
+                    if (tid == 0) stack(TREE_STACK_SIZE - 2) = current_stack_top;
+                    team.team_barrier();
+                    stack_top = stack(TREE_STACK_SIZE - 2);
+                    continue;
+                }
+
+                double size_sq_th = cell_size_sq_theta(node);
+                int is_leaf = cell_is_leaf(node);
+
+                double drx = Kokkos::fabs(gcx - ccx) - gsx;
+                double dry = Kokkos::fabs(gcy - ccy) - gsy;
+                double drz = Kokkos::fabs(gcz - ccz) - gsz;
+                drx = Kokkos::fmax(drx, 0.0);
+                dry = Kokkos::fmax(dry, 0.0);
+                drz = Kokkos::fmax(drz, 0.0);
+                double dist_sq = drx * drx + dry * dry + drz * drz;
+                bool accept = (size_sq_th < dist_sq) && (dist_sq > 0.0);
+
+                if (accept) {
+                    if (is_target) {
+                        double dx = ccx - xi;
+                        double dy = ccy - yi;
+                        double dz = ccz - zi;
+                        double r2 = dx * dx + dy * dy + dz * dz + soft2;
+                        double inv_r = fast_rsqrt(r2);
+                        double inv_r3 = inv_r * inv_r * inv_r;
+                        double f = G * cmass * inv_r3;
+                        axi += f * dx;
+                        ayi += f * dy;
+                        azi += f * dz;
+
+                        // Symmetrized monopole timestep
+                        double dvx = cell_vel_src(node, 0) - vxi;
+                        double dvy = cell_vel_src(node, 1) - vyi;
+                        double dvz = cell_vel_src(node, 2) - vzi;
+                        double v_sq = dvx*dvx + dvy*dvy + dvz*dvz;
+                        double mass_sum = mi + cmass;
+                        double inv_Gm = 1.0 / (G * mass_sum + EPS);
+                        double inv_vsq = 1.0 / (v_sq + EPS);
+
+                        double r3 = r2 * r2 * inv_r;
+                        double t_ff_sq = r3 * inv_Gm;
+                        double t_fb_sq = r2 * inv_vsq;
+                        double t_ff = t_ff_sq * fast_rsqrt(t_ff_sq + EPS);
+                        double t_fb = t_fb_sq * fast_rsqrt(t_fb_sq + EPS);
+
+                        double inv_r2 = inv_r * inv_r;
+                        double r_dot_v = dx*dvx + dy*dvy + dz*dvz;
+
+                        double c_ff = 1.5 * r_dot_v * inv_r2;
+                        double c_fb = r_dot_v * inv_r2 * (1.0 + G * mass_sum * inv_r * inv_vsq);
+
+                        double ct_ff = c_ff * t_ff_sq;
+                        double s_ff = 1.0 + c_ff * ct_ff;
+                        double u_ff = s_ff * fast_rsqrt(s_ff);
+                        double t_sym_ff = t_ff + ct_ff / (u_ff + 1.0);
+
+                        double ct_fb = c_fb * t_fb_sq;
+                        double s_fb = 1.0 + c_fb * ct_fb;
+                        double u_fb = s_fb * fast_rsqrt(s_fb);
+                        double t_sym_fb = t_fb + ct_fb / (u_fb + 1.0);
+
+                        t_min_sq = Kokkos::fmin(t_min_sq,
+                                   Kokkos::fmin(t_sym_ff * t_sym_ff, t_sym_fb * t_sym_fb));
+                    }
+                } else if (is_leaf) {
+                    if (is_target) {
+                        int lpbeg = cell_pbeg(node);
+                        int lpend = cell_pend(node);
+                        for (int j = lpbeg; j < lpend; j++) {
+                            // No flag filter — ALL particles are sources
+                            if (j == my_sorted_idx) continue;
+                            double pjx, pjy, pjz, mj;
+                            load4(&sorted_pos(j, 0), pjx, pjy, pjz, mj);
+                            double dx = pjx - xi;
+                            double dy = pjy - yi;
+                            double dz = pjz - zi;
+                            double r2 = dx * dx + dy * dy + dz * dz + soft2;
+                            double inv_r = fast_rsqrt(r2);
+                            double inv_r3 = inv_r * inv_r * inv_r;
+                            double f = G * mj * inv_r3;
+                            axi += f * dx;
+                            ayi += f * dy;
+                            azi += f * dz;
+
+                            // Symmetrized pairwise timestep
+                            int j_orig = sorted_indices(j);
+                            double dvx = pvx(j_orig) - vxi;
+                            double dvy = pvy(j_orig) - vyi;
+                            double dvz = pvz(j_orig) - vzi;
+                            double v_sq = dvx*dvx + dvy*dvy + dvz*dvz;
+                            double mass_sum = mi + mj;
+                            double inv_Gm = 1.0 / (G * mass_sum + EPS);
+                            double inv_vsq = 1.0 / (v_sq + EPS);
+
+                            double r3 = r2 * r2 * inv_r;
+                            double t_ff_sq = r3 * inv_Gm;
+                            double t_fb_sq = r2 * inv_vsq;
+                            double t_ff = t_ff_sq * fast_rsqrt(t_ff_sq + EPS);
+                            double t_fb = t_fb_sq * fast_rsqrt(t_fb_sq + EPS);
+
+                            double inv_r2 = inv_r * inv_r;
+                            double r_dot_v = dx*dvx + dy*dvy + dz*dvz;
+
+                            double c_ff = 1.5 * r_dot_v * inv_r2;
+                            double c_fb = r_dot_v * inv_r2 * (1.0 + G * mass_sum * inv_r * inv_vsq);
+
+                            double ct_ff = c_ff * t_ff_sq;
+                            double s_ff = 1.0 + c_ff * ct_ff;
+                            double u_ff = s_ff * fast_rsqrt(s_ff);
+                            double t_sym_ff = t_ff + ct_ff / (u_ff + 1.0);
+
+                            double ct_fb = c_fb * t_fb_sq;
+                            double s_fb = 1.0 + c_fb * ct_fb;
+                            double u_fb = s_fb * fast_rsqrt(s_fb);
+                            double t_sym_fb = t_fb + ct_fb / (u_fb + 1.0);
+
+                            t_min_sq = Kokkos::fmin(t_min_sq,
+                                       Kokkos::fmin(t_sym_ff * t_sym_ff, t_sym_fb * t_sym_fb));
+                        }
+                    }
+                } else {
+                    if (tid == 0) {
+                        stack_top = current_stack_top;
+                        for (int c = 0; c < 8; c++) {
+                            int child = cell_children(node, c);
+                            if (child >= 0 && stack_top < TREE_STACK_SIZE - 1) {
+                                stack(stack_top++) = child;
+                            }
+                        }
+                    }
+                }
+
+                team.team_barrier();
+                if (tid == 0) stack(TREE_STACK_SIZE - 2) = stack_top;
+                team.team_barrier();
+                stack_top = stack(TREE_STACK_SIZE - 2);
+            }
+
+            if (is_target) {
+                pax(my_orig_idx) = axi;
+                pay(my_orig_idx) = ayi;
+                paz(my_orig_idx) = azi;
+                dt_f(my_orig_idx) = Kokkos::sqrt(t_min_sq) * eta;
+            }
+        });
+}

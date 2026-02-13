@@ -152,6 +152,7 @@ int main(int argc, char** argv) {
         tree_theta = cfg.get_double("TREE_THETA", 0.5);
         tree_n_leaf = cfg.get_int("TREE_N_LEAF", 32);
         tree_n_group = cfg.get_int("TREE_N_GROUP", 64);
+        gadget4_cross = (cfg.get_str("GADGET4_CROSS", "false") == "true");
 
         double G = G_CODE;
         double soft2 = soft_pc * soft_pc;
@@ -250,8 +251,9 @@ int main(int argc, char** argv) {
                             domain_halfsize, int_pos_scale);
             }
             if (use_tree) {
-                std::printf("Barnes-Hut tree: theta=%.2f, n_leaf=%d, n_group=%d, threshold=%d\n",
-                            tree_theta, tree_n_leaf, tree_n_group, tree_threshold);
+                std::printf("Barnes-Hut tree: theta=%.2f, n_leaf=%d, n_group=%d, threshold=%d%s\n",
+                            tree_theta, tree_n_leaf, tree_n_group, tree_threshold,
+                            gadget4_cross ? ", GADGET4_CROSS" : "");
             }
             std::printf("\n");
             std::fflush(stdout);

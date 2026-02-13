@@ -21,17 +21,18 @@ SERIAL_N2_CPU = 256                        	# Full N² on CPU below this count (
 FUSE_GRADIENT = false                      	# Fuse force+gradient into single N^2 pass using stale accelerations (saves ~30% gradient time, O(dt^3) accuracy trade-off)
 INTEGER_POSITIONS = false                  	# Use int64 positions (exact drift, MPI-safe)
 DOMAIN_HALFSIZE_PC = 200                   	# Integer position domain half-size in pc
-MPI_NON_BLOCKING = true                    	# Use MPI_Iallgatherv for overlapped transfers
+MPI_NON_BLOCKING = false                    	# Use MPI_Iallgatherv for overlapped transfers
 SYMMETRIC_TIMESTEPS = true                	# Fuse force+timestep with harmonic symmetrization (FROST paper Eq. 23)
 
 # =============================================================================
 # Barnes-Hut tree: O(N log N) force via monopole approximation
 # =============================================================================
-USE_TREE = false                           	# Enable tree for self-forces
+USE_TREE = true                           	# Enable tree for self-forces
 TREE_THRESHOLD = 100000 	                # Use tree above this count, N² below
 TREE_THETA = 0.7                          	# Opening angle (smaller = more accurate, slower)
 TREE_N_LEAF = 32                          	# Max particles per leaf cell
 TREE_N_GROUP = 64                         	# Particles per traversal group
+GADGET4_CROSS = false                     	# F_cross = F_all - F_self decomposition (requires USE_TREE)
 
 # =============================================================================
 # Plummer cluster parameters (only used if TEST_CASE = plummer)

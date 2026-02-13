@@ -106,7 +106,16 @@ struct Octree {
 
     // Full update after partition: rebuild indices, refresh positions, mark subsets,
     // recompute dual monopoles. Call once per HHS level after partition_by_pivot.
+    // Two-flag version: particles in [slow_start, slow_start+slow_count) = 0 (slow), rest = 1 (fast)
     void update_subsets(Particles& p, int slow_start, int slow_count);
+
+    // Three-flag version for GADGET-4 cross-force decomposition:
+    // [start, start+slow_count) = 0 (slow), [start+slow_count, start+count) = 1 (fast), rest = 2 (other)
+    void update_subsets_3flag(Particles& p, int start, int count, int slow_count);
+
+    // Recompute total cell monopoles (cell_com) from sorted_pos.
+    // Call after refresh_positions() when total monopoles need to be current.
+    void recompute_total_monopoles();
 
     // Recompute dual monopoles (cell_com_slow/fast, cell_vel_slow/fast) from sorted_pos + flags.
     // Bottom-up on host. Call after refresh_positions + mark_subsets.
@@ -116,6 +125,10 @@ struct Octree {
     // Compute dual cell accelerations (cell_accel_slow, cell_accel_fast) bottom-up.
     // Call after cross-force computation (p.ax/ay/az contain cross-forces).
     void compute_dual_cell_accelerations(Particles& p);
+
+    // Compute cell_accel from active particles only (sflag != 2).
+    // For GADGET-4: after computing F_all on active subset, get cell monopole accels.
+    void compute_active_cell_accelerations(Particles& p);
 
     // Deallocate all Views
     void deallocate();
@@ -200,3 +213,25 @@ void tree_global_self_acceleration_and_timestep(Particles& p, const Octree& tree
 // to enforce exact linear momentum conservation (tree forces are not
 // antisymmetric due to asymmetric MAC decisions between groups)
 void tree_momentum_correction(Particles& p, int start, int count);
+
+// ==========================================================================
+// GADGET-4 cross-force decomposition: F_cross = F_all - F_self
+// These compute forces from ALL particles (using total cell_com monopoles)
+// on particles at the current HHS level (sflag != 2).
+// ==========================================================================
+
+// Force from ALL particles on active subset (sflag != 2).
+// Uses cell_com (total monopoles). P2P: all sorted particles, self-skip only.
+// Results OVERWRITE p.ax, p.ay, p.az for active particles (sflag != 2).
+void tree_all_forces_on_subset(Particles& p, const Octree& tree,
+                                double G, double soft2);
+
+// Gradient correction from ALL particles on active subset (sflag != 2).
+// Uses cell_com + cell_accel (total). Results ADDED to p.ax, p.ay, p.az.
+void tree_all_gradient_on_subset(Particles& p, const Octree& tree,
+                                  double G, double soft2, double dt);
+
+// Fused force + timestep from ALL particles on active subset (sflag != 2).
+// Uses cell_com + cell_vel (total). Results OVERWRITE p.ax, p.ay, p.az, p.dt_adapt.
+void tree_all_forces_and_timestep_on_subset(Particles& p, const Octree& tree,
+                                             double G, double soft2, double eta);

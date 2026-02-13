@@ -36,6 +36,7 @@ int tree_threshold = 10000;
 double tree_theta = 0.5;
 int tree_n_leaf = 32;
 int tree_n_group = 64;
+bool gadget4_cross = false;
 
 // Global tree instance (rebuilt each top-level step)
 static Octree g_octree;
@@ -3301,17 +3302,22 @@ static void hhs_fsi_recursive_distributed(
 #else
     // --- Default: i-partitioned force → allgatherv → separate kick ---
 
-    // use_tree_cross: use global tree for cross-forces (only valid at top level
-    // where tree was built for exactly [start, start+count) with no inactive particles)
-    bool use_tree_cross = !global_tree_available && tree_built_for_subset;
+    // use_tree_cross: use global tree for cross-forces via dual monopoles.
+    // With 3-flag system (0=slow, 1=fast, 2=other), this works at ALL recursion depths.
+    // Only worth it above tree_threshold — below that, direct N² is faster than tree overhead.
+    bool use_tree_cross = tree_for_subs && use_tree && count >= tree_threshold;
 
     // use_tree_self: use global tree for self-forces on slow subset
     bool use_tree_self = tree_for_subs && use_tree && slow_count >= tree_threshold;
 
-    // Mark slow/fast in global tree (needed for both cross and self operations)
+    // Mark slow/fast/other in global tree (3-flag for cross, 2-flag fallback otherwise)
     if (use_tree_cross || use_tree_self) {
         g_profiler.start();
-        g_octree.update_subsets(dp.local, slow_start, slow_count);
+        if (use_tree_cross) {
+            g_octree.update_subsets_3flag(dp.local, start, count, slow_count);
+        } else {
+            g_octree.update_subsets(dp.local, slow_start, slow_count);
+        }
         g_profiler.stop(StepProfiler::TREE_MAINT);
     }
 
@@ -3332,7 +3338,7 @@ static void hhs_fsi_recursive_distributed(
 
     // Step 2: FSI half-step on slow
     // flag=0 = slow (from update_subsets above), so global_tree_subset=0 is correct
-    if (use_tree_self) {
+    if (use_tree_self || use_tree_cross) {
         fsi_step_distributed(dp, slow_start, slow_count, G, soft2, pivot_dt * 0.5,
                              false, false, 0);
     } else {
@@ -3347,7 +3353,11 @@ static void hhs_fsi_recursive_distributed(
     // Restore tree state after steps 2-3 (positions and flags changed by drifts/recursion)
     if (use_tree_cross || use_tree_self) {
         g_profiler.start();
-        g_octree.update_subsets(dp.local, slow_start, slow_count);
+        if (use_tree_cross) {
+            g_octree.update_subsets_3flag(dp.local, start, count, slow_count);
+        } else {
+            g_octree.update_subsets(dp.local, slow_start, slow_count);
+        }
         g_profiler.stop(StepProfiler::TREE_MAINT);
     }
 
@@ -3378,12 +3388,16 @@ static void hhs_fsi_recursive_distributed(
     // Restore tree state for step 6 (self-force on slow) and step 7 (cross-force)
     if (use_tree_cross || use_tree_self) {
         g_profiler.start();
-        g_octree.update_subsets(dp.local, slow_start, slow_count);
+        if (use_tree_cross) {
+            g_octree.update_subsets_3flag(dp.local, start, count, slow_count);
+        } else {
+            g_octree.update_subsets(dp.local, slow_start, slow_count);
+        }
         g_profiler.stop(StepProfiler::TREE_MAINT);
     }
 
     // Step 6: FSI half-step on slow
-    if (use_tree_self) {
+    if (use_tree_self || use_tree_cross) {
         fsi_step_distributed(dp, slow_start, slow_count, G, soft2, pivot_dt * 0.5,
                              false, false, 0);
     } else {
@@ -3393,7 +3407,7 @@ static void hhs_fsi_recursive_distributed(
     // Refresh tree for step 7 cross-force (step 6 FSI drifted slow particles)
     if (use_tree_cross) {
         g_profiler.start();
-        g_octree.update_subsets(dp.local, slow_start, slow_count);
+        g_octree.update_subsets_3flag(dp.local, start, count, slow_count);
         g_profiler.stop(StepProfiler::TREE_MAINT);
     }
 
@@ -3412,6 +3426,240 @@ static void hhs_fsi_recursive_distributed(
     kick_velocities(dp.local, fast_start, fast_count, pivot_dt * FSI_KICK);
     g_profiler.stop(StepProfiler::DRIFT_KICK);
 #endif // MPI_TOPOLOGY_RING
+}
+
+// =============================================================================
+// GADGET-4 Cross-Force Decomposition: F_cross = F_all - F_self
+//
+// Instead of computing explicit cross-forces (N²_slow × N²_fast), we compute:
+//   F_cross(i) = F_all(i) - F_self(i)
+// where F_all = force from ALL particles (one tree walk using total cell_com),
+// and F_self = force within own subset (using dual cell_com_slow/fast).
+//
+// Uses 3-flag system: 0=slow, 1=fast, 2=other (not at this level).
+// Total monopoles (cell_com) always valid; dual monopoles recomputed per level.
+// =============================================================================
+
+// Save ax/ay/az → scratch1/2/3 for particles [start, start+count)
+static void save_accelerations(Particles& p, int start, int count) {
+    auto ax = p.ax, ay = p.ay, az = p.az;
+    auto s1 = p.scratch1, s2 = p.scratch2, s3 = p.scratch3;
+    Kokkos::parallel_for("save_accel", count, KOKKOS_LAMBDA(int ii) {
+        int i = start + ii;
+        s1(i) = ax(i);
+        s2(i) = ay(i);
+        s3(i) = az(i);
+    });
+}
+
+// Cross-kick: v += (scratch - ax) * dt for particles [start, start+count)
+// scratch1/2/3 holds F_all, ax/ay/az holds F_self → difference = F_cross
+static void kick_cross_from_scratch(Particles& p, int start, int count, double dt) {
+    auto vx = p.vx, vy = p.vy, vz = p.vz;
+    auto ax = p.ax, ay = p.ay, az = p.az;
+    auto s1 = p.scratch1, s2 = p.scratch2, s3 = p.scratch3;
+    Kokkos::parallel_for("kick_cross", count, KOKKOS_LAMBDA(int ii) {
+        int i = start + ii;
+        vx(i) += (s1(i) - ax(i)) * dt;
+        vy(i) += (s2(i) - ay(i)) * dt;
+        vz(i) += (s3(i) - az(i)) * dt;
+    });
+}
+
+// Compute cell_accel for total monopoles from active particles only (sflag != 2)
+// Used by tree_all_gradient_on_subset for GADGET-4 G_all gradient correction
+static void compute_active_total_cell_accelerations(Particles& p) {
+    g_octree.compute_active_cell_accelerations(p);
+}
+
+// GADGET-4 HHS recursive implementation (distributed, i-partitioned topology)
+// Uses F_cross = F_all - F_self decomposition with global tree.
+// forces_from_all_valid: if true, p.ax/ay/az already contain F_all for [start, count)
+static void gadget4_hhs_recursive_distributed(
+    DistributedParticles& dp,
+    int start, int count,
+    double pivot_dt,
+    double G, double soft2,
+    double dt_min, double eta,
+    bool forces_from_all_valid) {
+
+    if (count == 0) return;
+    g_subset_hist.record(SubsetHistogram::DISTRIBUTED, count);
+
+    // Below serial_n2_gpu threshold: skip MPI, compute full N² locally
+    if (serial_n2_gpu > 0 && count <= serial_n2_gpu) {
+        hhs_fsi_recursive_local(dp.local, start, count, pivot_dt,
+                                G, soft2, dt_min, eta, forces_from_all_valid);
+        dp.local.pack_pos_range(start, count);
+        return;
+    }
+
+    // Base case: at minimum timestep, use FSI on the subset with global tree
+    if (pivot_dt * 0.5 < dt_min) {
+        g_profiler.start();
+        g_octree.update_subsets(dp.local, start, count);
+        g_profiler.stop(StepProfiler::TREE_MAINT);
+        // All particles at this level are "slow" (flag=0), use global tree self-force
+        fsi_step_distributed(dp, start, count, G, soft2, pivot_dt,
+                             false, false, 0);
+        return;
+    }
+
+    // ─── Timestep + Partition ────────────────────────────
+    if (!forces_from_all_valid && count > 1) {
+        g_profiler.start();
+        // Use 3-flag system: all particles at this level are active (flag=0 or 1)
+        // For timestep, we need F_all. Use tree_all_forces_and_timestep_on_subset.
+        // First, set 3-flag: everything in [start, start+count) = flag 0, rest = flag 2
+        g_octree.update_subsets_3flag(dp.local, start, count, count);  // all "slow" for now
+        g_octree.recompute_total_monopoles();
+        tree_all_forces_and_timestep_on_subset(dp.local, g_octree, G, soft2, eta);
+        tree_momentum_correction(dp.local, start, count);
+        forces_from_all_valid = true;
+        g_profiler.stop(StepProfiler::ADAPTIVE_DT, (long long)count * count);
+    }
+
+    // Partition into slow (dt >= pivot) and fast (dt < pivot)
+    g_profiler.start();
+    int slow_count = partition_by_pivot(dp.local, start, count, pivot_dt);
+    g_profiler.stop(StepProfiler::PARTITION);
+    int slow_start = start;
+    int fast_start = start + slow_count;
+    int fast_count = count - slow_count;
+
+    // Base case: all particles are slow
+    if (fast_count == 0) {
+        g_profiler.start();
+        g_octree.update_subsets(dp.local, start, count);
+        g_profiler.stop(StepProfiler::TREE_MAINT);
+        fsi_step_distributed(dp, start, count, G, soft2, pivot_dt,
+                             false, false, 0);
+        return;
+    }
+
+    // Base case: all particles are fast
+    if (slow_count == 0) {
+        double sub_pivot = pivot_dt * 0.5;
+        gadget4_hhs_recursive_distributed(dp, start, count, sub_pivot,
+                                          G, soft2, dt_min, eta, false);
+        gadget4_hhs_recursive_distributed(dp, start, count, sub_pivot,
+                                          G, soft2, dt_min, eta, false);
+        return;
+    }
+
+    // ─── Set up 3-flag system for this level ───────────
+    g_profiler.start();
+    g_octree.update_subsets_3flag(dp.local, start, count, slow_count);
+    g_octree.recompute_total_monopoles();
+    g_profiler.stop(StepProfiler::TREE_MAINT);
+
+    long long self_pairs_s = (long long)slow_count * slow_count;
+    long long self_pairs_f = (long long)fast_count * fast_count;
+
+    // ─── Step 1: Cross-kick(dt/6) ───────────────────────
+    // F_all is already in ax (from timestep, permuted with partition)
+    // Save F_all → scratch
+    g_profiler.start();
+    if (forces_from_all_valid) {
+        save_accelerations(dp.local, start, count);
+    } else {
+        // Recompute F_all if not valid
+        tree_all_forces_on_subset(dp.local, g_octree, G, soft2);
+        tree_momentum_correction(dp.local, start, count);
+        save_accelerations(dp.local, start, count);
+    }
+    // Compute F_self for slow (flag=0) and fast (flag=1)
+    tree_global_self_acceleration(dp.local, g_octree, 0, G, soft2);
+    tree_momentum_correction(dp.local, slow_start, slow_count);
+    tree_global_self_acceleration(dp.local, g_octree, 1, G, soft2);
+    tree_momentum_correction(dp.local, fast_start, fast_count);
+    g_profiler.stop(StepProfiler::CROSS_FORCE, self_pairs_s + self_pairs_f);
+
+    // kick_cross: v += (F_all - F_self) * dt/6
+    g_profiler.start();
+    kick_cross_from_scratch(dp.local, start, count, pivot_dt * FSI_KICK);
+    g_profiler.stop(StepProfiler::DRIFT_KICK);
+
+    // ─── Step 2: E_S(dt/2) — FSI half-step on slow ──────
+    // F_self_slow is in ax for slow particles — reuse as forces_valid
+    fsi_step_distributed(dp, slow_start, slow_count, G, soft2, pivot_dt * 0.5,
+                         true, false, 0);
+
+    // ─── Step 3: Recurse on fast (first half) ────────────
+    gadget4_hhs_recursive_distributed(dp, fast_start, fast_count, pivot_dt * 0.5,
+                                      G, soft2, dt_min, eta, false);
+
+    // ─── Step 4: Cross-kick+gradient(2dt/3) ──────────────
+    // Restore 3-flag system (recursion and FSI drifts changed particle positions/ordering)
+    g_profiler.start();
+    g_octree.update_subsets_3flag(dp.local, start, count, slow_count);
+    g_octree.recompute_total_monopoles();
+    g_profiler.stop(StepProfiler::TREE_MAINT);
+
+    // F_all + G_all
+    g_profiler.start();
+    tree_all_forces_on_subset(dp.local, g_octree, G, soft2);
+    tree_momentum_correction(dp.local, start, count);
+    compute_active_total_cell_accelerations(dp.local);
+    tree_all_gradient_on_subset(dp.local, g_octree, G, soft2, pivot_dt);
+    tree_momentum_correction(dp.local, start, count);
+    save_accelerations(dp.local, start, count);  // scratch = F_all + G_all
+    g_profiler.stop(StepProfiler::CROSS_FORCE, self_pairs_s + self_pairs_f);
+
+    // F_self for both subsets (must both be in ax before computing cell accelerations)
+    g_profiler.start();
+    tree_global_self_acceleration(dp.local, g_octree, 0, G, soft2);
+    tree_momentum_correction(dp.local, slow_start, slow_count);
+    tree_global_self_acceleration(dp.local, g_octree, 1, G, soft2);
+    tree_momentum_correction(dp.local, fast_start, fast_count);
+
+    // Dual cell accelerations from F_self (needed for G_self gradient correction)
+    g_octree.compute_dual_cell_accelerations(dp.local);
+
+    // G_self for both subsets (ADDED to ax which already has F_self)
+    tree_global_self_gradient_correction(dp.local, g_octree, 0, G, soft2, pivot_dt);
+    tree_momentum_correction(dp.local, slow_start, slow_count);
+    tree_global_self_gradient_correction(dp.local, g_octree, 1, G, soft2, pivot_dt);
+    tree_momentum_correction(dp.local, fast_start, fast_count);
+    g_profiler.stop(StepProfiler::CROSS_GRAD, self_pairs_s + self_pairs_f);
+
+    // kick_cross: v += (F_all+G_all - F_self-G_self) * 2dt/3
+    g_profiler.start();
+    kick_cross_from_scratch(dp.local, start, count, pivot_dt * FSI_MOD_KICK);
+    g_profiler.stop(StepProfiler::DRIFT_KICK);
+
+    // ─── Step 5: Recurse on fast (second half) ──────────
+    gadget4_hhs_recursive_distributed(dp, fast_start, fast_count, pivot_dt * 0.5,
+                                      G, soft2, dt_min, eta, false);
+
+    // ─── Step 6: E_S(dt/2) — FSI half-step on slow ──────
+    // Restore flags for slow self-force
+    g_profiler.start();
+    g_octree.update_subsets_3flag(dp.local, start, count, slow_count);
+    g_profiler.stop(StepProfiler::TREE_MAINT);
+    fsi_step_distributed(dp, slow_start, slow_count, G, soft2, pivot_dt * 0.5,
+                         false, false, 0);
+
+    // ─── Step 7: Cross-kick(dt/6) ───────────────────────
+    // Restore flags (step 6 FSI drifted slow particles)
+    g_profiler.start();
+    g_octree.update_subsets_3flag(dp.local, start, count, slow_count);
+    g_octree.recompute_total_monopoles();
+    g_profiler.stop(StepProfiler::TREE_MAINT);
+
+    g_profiler.start();
+    tree_all_forces_on_subset(dp.local, g_octree, G, soft2);
+    tree_momentum_correction(dp.local, start, count);
+    save_accelerations(dp.local, start, count);  // scratch = F_all
+    tree_global_self_acceleration(dp.local, g_octree, 0, G, soft2);
+    tree_momentum_correction(dp.local, slow_start, slow_count);
+    tree_global_self_acceleration(dp.local, g_octree, 1, G, soft2);
+    tree_momentum_correction(dp.local, fast_start, fast_count);
+    g_profiler.stop(StepProfiler::CROSS_FORCE, self_pairs_s + self_pairs_f);
+
+    g_profiler.start();
+    kick_cross_from_scratch(dp.local, start, count, pivot_dt * FSI_KICK);
+    g_profiler.stop(StepProfiler::DRIFT_KICK);
 }
 
 // Distributed HHS-FSI - main entry point
@@ -3435,11 +3683,20 @@ void hhs_fsi_step_distributed(DistributedParticles& dp, double pivot_dt,
     }
 
 #ifdef USE_MPI
-    // In replicated mode, all ranks have all particles
-    // Just run the recursive implementation - all ranks execute identical code
-    // Only force computation is distributed (via Allgather after each)
-    hhs_fsi_recursive_distributed(dp, 0, dp.N_total, pivot_dt,
-                                  G, soft2, dt_min, eta, false);
+    if (gadget4_cross && use_tree) {
+        // GADGET-4 decomposition: F_cross = F_all - F_self
+        // Build the global tree once at the top level
+        g_octree.n_leaf = tree_n_leaf;
+        g_octree.n_group = tree_n_group;
+        g_octree.build(dp.local, 0, dp.N_total, tree_theta);
+
+        gadget4_hhs_recursive_distributed(dp, 0, dp.N_total, pivot_dt,
+                                          G, soft2, dt_min, eta, false);
+    } else {
+        // Standard HHS-FSI with explicit cross-forces
+        hhs_fsi_recursive_distributed(dp, 0, dp.N_total, pivot_dt,
+                                      G, soft2, dt_min, eta, false);
+    }
 #endif
 }
 

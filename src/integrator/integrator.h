@@ -28,6 +28,7 @@ extern int tree_threshold;              // Particle count above which tree is us
 extern double tree_theta;               // Opening angle (default: 0.5)
 extern int tree_n_leaf;                 // Max particles per leaf (default: 32)
 extern int tree_n_group;                // Particles per traversal group (default: 64)
+extern bool gadget4_cross;              // GADGET4_CROSS: use F_cross = F_all - F_self decomposition
 
 // Forward declaration for distributed particles
 struct DistributedParticles;

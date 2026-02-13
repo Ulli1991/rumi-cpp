@@ -457,6 +457,83 @@ void Octree::compute_cell_accelerations(Particles& p) {
 }
 
 // ==========================================================================
+// Compute cell_accel from active particles only (sflag != 2).
+// For GADGET-4: cell monopole accelerations for gradient correction.
+// ==========================================================================
+void Octree::compute_active_cell_accelerations(Particles& p) {
+    if (n_cells <= 0 || n_particles <= 0) return;
+
+    if ((int)cell_accel.extent(0) != n_cells)
+        cell_accel = Kokkos::View<double*[3], Kokkos::LayoutRight>("cell_accel", n_cells);
+
+    auto ax = p.ax;
+    auto ay = p.ay;
+    auto az = p.az;
+    auto mass = p.mass;
+    auto si = sorted_indices;
+    auto flg = sorted_subset_flag;
+    auto pbeg_v = cell_pbeg;
+    auto pend_v = cell_pend;
+    auto sp = sorted_pos;
+    auto ca = cell_accel;
+    int nc = n_cells;
+
+    constexpr int TEAM_SZ = 32;
+    size_t scratch_bytes = 4 * TEAM_SZ * sizeof(double);  // m_active, max, may, maz
+
+    using team_policy = Kokkos::TeamPolicy<>;
+    using team_member = team_policy::member_type;
+    using scratch_t = Kokkos::View<double*, Kokkos::DefaultExecutionSpace::scratch_memory_space,
+                                    Kokkos::MemoryUnmanaged>;
+
+    Kokkos::parallel_for("active_cell_accel",
+        team_policy(nc, TEAM_SZ).set_scratch_size(0, Kokkos::PerTeam(scratch_bytes)),
+        KOKKOS_LAMBDA(const team_member& team) {
+            int c = team.league_rank();
+            int tid = team.team_rank();
+            int tsz = team.team_size();
+            scratch_t scratch(team.team_scratch(0), 4 * tsz);
+
+            int b = pbeg_v(c), e = pend_v(c);
+
+            double lm = 0, lax = 0, lay = 0, laz = 0;
+            for (int i = b + tid; i < e; i += tsz) {
+                if (flg(i) == 2) continue;  // skip inactive particles
+                int orig = si(i);
+                double m = sp(i, 3);  // use sorted mass (consistent)
+                lm += m;
+                lax += m * ax(orig);
+                lay += m * ay(orig);
+                laz += m * az(orig);
+            }
+
+            scratch(tid)          = lm;
+            scratch(tid + tsz)    = lax;
+            scratch(tid + 2*tsz)  = lay;
+            scratch(tid + 3*tsz)  = laz;
+            team.team_barrier();
+
+            if (tid == 0) {
+                double sm = 0, sax = 0, say = 0, saz = 0;
+                for (int t = 0; t < tsz; t++) {
+                    sm  += scratch(t);
+                    sax += scratch(t + tsz);
+                    say += scratch(t + 2*tsz);
+                    saz += scratch(t + 3*tsz);
+                }
+                if (sm > 0) {
+                    double inv = 1.0 / sm;
+                    ca(c, 0) = sax * inv;
+                    ca(c, 1) = say * inv;
+                    ca(c, 2) = saz * inv;
+                } else {
+                    ca(c, 0) = ca(c, 1) = ca(c, 2) = 0;
+                }
+            }
+        });
+}
+
+// ==========================================================================
 // Rebuild sorted_indices after particle reordering (e.g. partition_by_pivot)
 // Uses permanent IDs (sorted_orig_ids) + reverse map to find current indices.
 // O(N) GPU kernels.
@@ -514,10 +591,118 @@ void Octree::update_subsets(Particles& p, int slow_start, int slow_count) {
 }
 
 // ==========================================================================
+// Three-flag update_subsets for GADGET-4 cross-force decomposition.
+// [start, start+slow_count) → flag=0 (slow)
+// [start+slow_count, start+count) → flag=1 (fast)
+// Everything else → flag=2 (not at this level)
+// ==========================================================================
+void Octree::update_subsets_3flag(Particles& p, int start, int count, int slow_count) {
+    if (n_particles <= 0) return;
+
+    // 1. Fix sorted_indices after particle reordering
+    rebuild_sorted_indices(p);
+
+    // 2. Refresh positions from updated sorted_indices
+    refresh_positions(p);
+
+    // 3. Mark three-flag system per sorted particle
+    auto si = sorted_indices;
+    auto flag = sorted_subset_flag;
+    int n = n_particles;
+    int ss = start, sc = slow_count, tc = count;
+    Kokkos::parallel_for("mark_subsets_3flag", n, KOKKOS_LAMBDA(int j) {
+        int idx = si(j);
+        if (idx >= ss && idx < ss + sc)
+            flag(j) = 0;        // slow
+        else if (idx >= ss + sc && idx < ss + tc)
+            flag(j) = 1;        // fast
+        else
+            flag(j) = 2;        // not at this level
+    });
+
+    // 4. Recompute dual monopoles (only flag=0 and flag=1 contribute)
+    recompute_dual_monopoles(p);
+}
+
+// ==========================================================================
+// Recompute total cell monopoles (cell_com) from sorted_pos.
+// Each cell reduces over ALL its particles regardless of flag.
+// Call after refresh_positions() when F_all tree walks need current cell_com.
+// ==========================================================================
+void Octree::recompute_total_monopoles() {
+    if (n_cells <= 0 || n_particles <= 0) return;
+
+    auto sp = sorted_pos;
+    auto si = sorted_indices;
+    auto pbeg_v = cell_pbeg;
+    auto pend_v = cell_pend;
+    auto com = cell_com;
+    auto vel_v = cell_vel;
+    int nc = n_cells;
+
+    constexpr int TEAM_SZ = 32;
+
+    using team_policy = Kokkos::TeamPolicy<>;
+    using team_member = team_policy::member_type;
+    using scratch_t = Kokkos::View<double*, Kokkos::DefaultExecutionSpace::scratch_memory_space,
+                                    Kokkos::MemoryUnmanaged>;
+
+    // NOTE: We don't have velocity in sorted_pos, and we don't need cell_vel for
+    // the total monopoles (F_all only uses cell_com, not cell_vel).
+    // So we only recompute {cx, cy, cz, mass} in cell_com.
+
+    Kokkos::parallel_for("recompute_total_mono",
+        team_policy(nc, TEAM_SZ).set_scratch_size(0, Kokkos::PerTeam(4 * TEAM_SZ * sizeof(double))),
+        KOKKOS_LAMBDA(const team_member& team) {
+            int c = team.league_rank();
+            int tid = team.team_rank();
+            int tsz = team.team_size();
+            scratch_t scratch(team.team_scratch(0), 4 * tsz);
+
+            int b = pbeg_v(c), e = pend_v(c);
+
+            double lm = 0, lx = 0, ly = 0, lz = 0;
+            for (int i = b + tid; i < e; i += tsz) {
+                double m = sp(i, 3);
+                lm += m;
+                lx += m * sp(i, 0);
+                ly += m * sp(i, 1);
+                lz += m * sp(i, 2);
+            }
+
+            scratch(tid)          = lm;
+            scratch(tid + tsz)    = lx;
+            scratch(tid + 2*tsz)  = ly;
+            scratch(tid + 3*tsz)  = lz;
+            team.team_barrier();
+
+            if (tid == 0) {
+                double sm = 0, sx = 0, sy = 0, sz = 0;
+                for (int t = 0; t < tsz; t++) {
+                    sm += scratch(t);
+                    sx += scratch(t + tsz);
+                    sy += scratch(t + 2*tsz);
+                    sz += scratch(t + 3*tsz);
+                }
+                if (sm > 0) {
+                    double inv = 1.0 / sm;
+                    com(c, 0) = sx * inv;
+                    com(c, 1) = sy * inv;
+                    com(c, 2) = sz * inv;
+                } else {
+                    com(c, 0) = com(c, 1) = com(c, 2) = 0;
+                }
+                com(c, 3) = sm;
+            }
+        });
+}
+
+// ==========================================================================
 // Recompute dual monopoles (cell_com_slow/fast, cell_vel_slow/fast) on GPU.
 // Each cell independently reduces over its particle range [pbeg, pend).
 // TeamPolicy: one team per cell, threads cooperatively reduce particles.
 // No bottom-up dependency — every cell is independent.
+// Only flag=0 (slow) and flag=1 (fast) particles contribute; flag=2 skipped.
 // ==========================================================================
 void Octree::recompute_dual_monopoles(Particles& p) {
     if (n_cells <= 0 || n_particles <= 0) return;
@@ -576,10 +761,11 @@ void Octree::recompute_dual_monopoles(Particles& p) {
                 double x = sp(i, 0), y = sp(i, 1), z = sp(i, 2);
                 int orig = si(i);
                 double vx = pvx(orig), vy = pvy(orig), vz = pvz(orig);
-                if (flg(i) == 0) {  // slow
+                int f = flg(i);
+                if (f == 0) {  // slow
                     lsm_s += m; lsx_s += m * x; lsy_s += m * y; lsz_s += m * z;
                     lsvx_s += m * vx; lsvy_s += m * vy; lsvz_s += m * vz;
-                } else {  // fast
+                } else if (f == 1) {  // fast (skip flag=2 = not at this level)
                     lsm_f += m; lsx_f += m * x; lsy_f += m * y; lsz_f += m * z;
                     lsvx_f += m * vx; lsvy_f += m * vy; lsvz_f += m * vz;
                 }
@@ -701,9 +887,10 @@ void Octree::compute_dual_cell_accelerations(Particles& p) {
             for (int i = b + tid; i < e; i += tsz) {
                 int orig = si(i);
                 double m = mass(orig);
-                if (flg(i) == 0) {
+                int f = flg(i);
+                if (f == 0) {
                     lax_s += m * ax(orig); lay_s += m * ay(orig); laz_s += m * az(orig);
-                } else {
+                } else if (f == 1) {  // skip flag=2 (not at this level)
                     lax_f += m * ax(orig); lay_f += m * ay(orig); laz_f += m * az(orig);
                 }
             }
