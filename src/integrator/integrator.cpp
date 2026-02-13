@@ -229,8 +229,11 @@ void fsi_step(Particles& p, int start, int count,
         g_profiler.stop(StepProfiler::DRIFT_KICK);
     } else {
         g_profiler.start();
-        self_acceleration_kick(p, start, count, G, soft2, dt * FSI_KICK);
+        self_acceleration(p, start, count, G, soft2);
         g_profiler.stop(StepProfiler::SELF_FORCE);
+        g_profiler.start();
+        kick_velocities(p, start, count, dt * FSI_KICK);
+        g_profiler.stop(StepProfiler::DRIFT_KICK);
     }
 
     // T drift (dt/2)
@@ -257,8 +260,14 @@ void fsi_step(Particles& p, int start, int count,
         g_profiler.stop(StepProfiler::DRIFT_KICK);
     } else {
         g_profiler.start();
-        self_acceleration_and_gradient_kick(p, start, count, G, soft2, dt, dt * FSI_MOD_KICK);
+        self_acceleration(p, start, count, G, soft2);
+        g_profiler.stop(StepProfiler::SELF_FORCE);
+        g_profiler.start();
+        self_gradient_correction(p, start, count, G, soft2, dt);
         g_profiler.stop(StepProfiler::SELF_GRAD);
+        g_profiler.start();
+        kick_velocities(p, start, count, dt * FSI_MOD_KICK);
+        g_profiler.stop(StepProfiler::DRIFT_KICK);
     }
 
     // T drift (dt/2)
@@ -278,8 +287,11 @@ void fsi_step(Particles& p, int start, int count,
         g_profiler.stop(StepProfiler::DRIFT_KICK);
     } else {
         g_profiler.start();
-        self_acceleration_kick(p, start, count, G, soft2, dt * FSI_KICK);
+        self_acceleration(p, start, count, G, soft2);
         g_profiler.stop(StepProfiler::SELF_FORCE);
+        g_profiler.start();
+        kick_velocities(p, start, count, dt * FSI_KICK);
+        g_profiler.stop(StepProfiler::DRIFT_KICK);
     }
 }
 
@@ -416,8 +428,12 @@ static void hhs_fsi_step_dynamic_impl(Particles& p, int start, int count, double
     // HHS-FSI structure (Algorithm 4 / Eq. 40)
     // 1. Cross-Newton kick (dt/6)
     g_profiler.start();
-    cross_acceleration_kick_and_cache(p, slow_start, slow_count, fast_start, fast_count, G, soft2, pivot_dt * FSI_KICK);
+    cross_acceleration(p, slow_start, slow_count, fast_start, fast_count, G, soft2);
     g_profiler.stop(StepProfiler::CROSS_FORCE);
+    g_profiler.start();
+    kick_velocities(p, slow_start, slow_count, pivot_dt * FSI_KICK);
+    kick_velocities(p, fast_start, fast_count, pivot_dt * FSI_KICK);
+    g_profiler.stop(StepProfiler::DRIFT_KICK);
 
     // 2. FSI half-step on slow
     fsi_step(p, slow_start, slow_count, G, soft2, pivot_dt * 0.5);
@@ -427,8 +443,15 @@ static void hhs_fsi_step_dynamic_impl(Particles& p, int start, int count, double
 
     // 4. Cross-gradient kick (2dt/3)
     g_profiler.start();
-    cross_acceleration_and_gradient_kick(p, slow_start, slow_count, fast_start, fast_count, G, soft2, pivot_dt, pivot_dt * FSI_MOD_KICK);
+    cross_acceleration(p, slow_start, slow_count, fast_start, fast_count, G, soft2);
+    g_profiler.stop(StepProfiler::CROSS_FORCE);
+    g_profiler.start();
+    cross_gradient_correction(p, slow_start, slow_count, fast_start, fast_count, G, soft2, pivot_dt);
     g_profiler.stop(StepProfiler::CROSS_GRAD);
+    g_profiler.start();
+    kick_velocities(p, slow_start, slow_count, pivot_dt * FSI_MOD_KICK);
+    kick_velocities(p, fast_start, fast_count, pivot_dt * FSI_MOD_KICK);
+    g_profiler.stop(StepProfiler::DRIFT_KICK);
 
     // 5. Recurse on fast (second half)
     {
@@ -441,8 +464,12 @@ static void hhs_fsi_step_dynamic_impl(Particles& p, int start, int count, double
 
     // 7. Cross-Newton kick (dt/6)
     g_profiler.start();
-    cross_acceleration_kick_and_cache(p, slow_start, slow_count, fast_start, fast_count, G, soft2, pivot_dt * FSI_KICK);
+    cross_acceleration(p, slow_start, slow_count, fast_start, fast_count, G, soft2);
     g_profiler.stop(StepProfiler::CROSS_FORCE);
+    g_profiler.start();
+    kick_velocities(p, slow_start, slow_count, pivot_dt * FSI_KICK);
+    kick_velocities(p, fast_start, fast_count, pivot_dt * FSI_KICK);
+    g_profiler.stop(StepProfiler::DRIFT_KICK);
 }
 
 void hhs_fsi_step_dynamic(Particles& p, int start, int count, double pivot_dt,
@@ -2922,10 +2949,14 @@ static void hhs_fsi_recursive_local(
         return;
     }
 
-    // Step 1: Cross-kick S<->F (dt/6) — no caching
+    // Step 1: Cross-kick S<->F (dt/6)
     g_profiler.start();
-    cross_acceleration_kick(p, slow_start, slow_count, fast_start, fast_count, G, soft2, pivot_dt * FSI_KICK);
+    cross_acceleration(p, slow_start, slow_count, fast_start, fast_count, G, soft2);
     g_profiler.stop(StepProfiler::CROSS_FORCE);
+    g_profiler.start();
+    kick_velocities(p, slow_start, slow_count, pivot_dt * FSI_KICK);
+    kick_velocities(p, fast_start, fast_count, pivot_dt * FSI_KICK);
+    g_profiler.stop(StepProfiler::DRIFT_KICK);
 
     // Step 2: FSI half-step on slow (force N² — no tree in serial path)
     fsi_step(p, slow_start, slow_count, G, soft2, pivot_dt * 0.5, false, /*force_direct_n2=*/true);
@@ -2936,8 +2967,15 @@ static void hhs_fsi_recursive_local(
 
     // Step 4: Cross-gradient kick (2dt/3)
     g_profiler.start();
-    cross_acceleration_and_gradient_kick(p, slow_start, slow_count, fast_start, fast_count, G, soft2, pivot_dt, pivot_dt * FSI_MOD_KICK);
+    cross_acceleration(p, slow_start, slow_count, fast_start, fast_count, G, soft2);
+    g_profiler.stop(StepProfiler::CROSS_FORCE);
+    g_profiler.start();
+    cross_gradient_correction(p, slow_start, slow_count, fast_start, fast_count, G, soft2, pivot_dt);
     g_profiler.stop(StepProfiler::CROSS_GRAD);
+    g_profiler.start();
+    kick_velocities(p, slow_start, slow_count, pivot_dt * FSI_MOD_KICK);
+    kick_velocities(p, fast_start, fast_count, pivot_dt * FSI_MOD_KICK);
+    g_profiler.stop(StepProfiler::DRIFT_KICK);
 
     // Step 5: Recurse on fast (second half)
     hhs_fsi_recursive_local(p, fast_start, fast_count, pivot_dt * 0.5,
@@ -2946,10 +2984,14 @@ static void hhs_fsi_recursive_local(
     // Step 6: FSI half-step on slow (force N² — no tree in serial path)
     fsi_step(p, slow_start, slow_count, G, soft2, pivot_dt * 0.5, false, /*force_direct_n2=*/true);
 
-    // Step 7: Cross-kick S<->F (dt/6) — no caching
+    // Step 7: Cross-kick S<->F (dt/6)
     g_profiler.start();
-    cross_acceleration_kick(p, slow_start, slow_count, fast_start, fast_count, G, soft2, pivot_dt * FSI_KICK);
+    cross_acceleration(p, slow_start, slow_count, fast_start, fast_count, G, soft2);
     g_profiler.stop(StepProfiler::CROSS_FORCE);
+    g_profiler.start();
+    kick_velocities(p, slow_start, slow_count, pivot_dt * FSI_KICK);
+    kick_velocities(p, fast_start, fast_count, pivot_dt * FSI_KICK);
+    g_profiler.stop(StepProfiler::DRIFT_KICK);
 }
 
 // =============================================================================
