@@ -196,7 +196,7 @@ void tree_self_acceleration(Particles& p, const Octree& tree,
                 paz(my_orig_idx) = azi;
             }
         });
-    Kokkos::fence();
+
 }
 
 // ==========================================================================
@@ -430,7 +430,7 @@ void tree_self_acceleration_and_timestep(Particles& p, const Octree& tree,
                 dt_f(my_orig_idx) = Kokkos::sqrt(t_min_sq) * eta;
             }
         });
-    Kokkos::fence();
+
 }
 
 // ==========================================================================
@@ -588,7 +588,7 @@ void tree_cross_acceleration(Particles& p,
                 paz(my_orig_idx) = azi;
             }
         });
-    Kokkos::fence();
+
 }
 
 // ==========================================================================
@@ -768,7 +768,7 @@ void tree_self_gradient_correction(Particles& p, const Octree& tree,
                 paz(my_orig_idx) = azi + cz;
             }
         });
-    Kokkos::fence();
+
 }
 
 // ==========================================================================
@@ -949,7 +949,7 @@ void tree_cross_gradient_correction(Particles& p,
                 paz(my_orig_idx) += cz;
             }
         });
-    Kokkos::fence();
+
 }
 
 // ==========================================================================
@@ -1123,7 +1123,7 @@ void tree_global_cross_acceleration(Particles& p, const Octree& tree,
                 paz(my_orig_idx) = azi;
             }
         });
-    Kokkos::fence();
+
 }
 
 // ==========================================================================
@@ -1318,7 +1318,7 @@ void tree_global_cross_gradient_correction(Particles& p, const Octree& tree,
                 paz(my_orig_idx) += cz;
             }
         });
-    Kokkos::fence();
+
 }
 
 // ==========================================================================
@@ -1486,7 +1486,7 @@ void tree_global_self_acceleration(Particles& p, const Octree& tree,
                 paz(my_orig_idx) = azi;
             }
         });
-    Kokkos::fence();
+
 }
 
 // ==========================================================================
@@ -1679,7 +1679,7 @@ void tree_global_self_gradient_correction(Particles& p, const Octree& tree,
                 paz(my_orig_idx) += cz;
             }
         });
-    Kokkos::fence();
+
 }
 
 // ==========================================================================
@@ -1926,7 +1926,7 @@ void tree_global_self_acceleration_and_timestep(Particles& p, const Octree& tree
                 dt_f(my_orig_idx) = Kokkos::sqrt(t_min_sq) * eta;
             }
         });
-    Kokkos::fence();
+
 }
 
 // ==========================================================================

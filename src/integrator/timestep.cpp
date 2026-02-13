@@ -39,6 +39,5 @@ void assign_levels(Particles& p, const std::vector<double>& levels) {
         }
         p_level(i) = l;
     });
-    Kokkos::fence();
 }
 

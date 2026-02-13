@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <Kokkos_Core.hpp>
 
 #ifdef KOKKOS_ENABLE_CUDA
 #include <cuda_runtime.h>
@@ -66,6 +67,7 @@ struct StepProfiler {
     }
 
     void stop(Timer t, long long n_pairs = 0) {
+        Kokkos::fence();  // ensure GPU work is complete before timing
         auto t_end = std::chrono::high_resolution_clock::now();
         elapsed[t] += std::chrono::duration<double>(t_end - t_start).count();
         counts[t]++;
@@ -213,3 +215,89 @@ struct StepProfiler {
 };
 
 extern StepProfiler g_profiler;
+
+// ==========================================================================
+// Subset size histogram: tracks where N² work happens in HHS recursion
+// ==========================================================================
+struct SubsetHistogram {
+    static constexpr int N_BUCKETS = 7;
+    static constexpr int boundaries[N_BUCKETS] = {64, 256, 1024, 4096, 10000, 50000, INT_MAX};
+
+    // Separate counters for each code path
+    enum Path { DISTRIBUTED = 0, LOCAL_GPU, LOCAL_CPU, FSI_STEP, N_PATHS };
+    static const char* path_name(int p) {
+        static const char* names[N_PATHS] = {"Distributed", "Local GPU", "Local CPU", "FSI step"};
+        return names[p];
+    }
+
+    long long calls[N_PATHS][N_BUCKETS];
+    long long pairs[N_PATHS][N_BUCKETS];  // N² pairs per bucket
+
+    SubsetHistogram() { reset(); }
+
+    void reset() {
+        std::memset(calls, 0, sizeof(calls));
+        std::memset(pairs, 0, sizeof(pairs));
+    }
+
+    void record(Path path, int count) {
+        for (int b = 0; b < N_BUCKETS; b++) {
+            if (count < boundaries[b]) {
+                calls[path][b]++;
+                pairs[path][b] += (long long)count * count;
+                return;
+            }
+        }
+    }
+
+    void print_report() const {
+        // Check if any data recorded
+        long long total = 0;
+        for (int p = 0; p < N_PATHS; p++)
+            for (int b = 0; b < N_BUCKETS; b++)
+                total += calls[p][b];
+        if (total == 0) return;
+
+        std::printf("\n--- Subset size histogram ");
+        for (int i = 0; i < 47; i++) std::printf("-");
+        std::printf("\n");
+        std::printf("  %-14s", "Size range");
+        int prev = 0;
+        for (int b = 0; b < N_BUCKETS; b++) {
+            if (boundaries[b] == INT_MAX)
+                std::printf(" %7d+", prev);
+            else
+                std::printf(" %5d-%-5d", prev, boundaries[b]);
+            prev = boundaries[b];
+        }
+        std::printf("\n");
+
+        for (int p = 0; p < N_PATHS; p++) {
+            long long row_total = 0;
+            for (int b = 0; b < N_BUCKETS; b++) row_total += calls[p][b];
+            if (row_total == 0) continue;
+
+            std::printf("  %-14s", path_name(p));
+            for (int b = 0; b < N_BUCKETS; b++) {
+                if (boundaries[b] == INT_MAX)
+                    std::printf(" %8lld", calls[p][b]);
+                else
+                    std::printf(" %10lld", calls[p][b]);
+            }
+            std::printf("  (calls)\n");
+
+            std::printf("  %-14s", "");
+            for (int b = 0; b < N_BUCKETS; b++) {
+                double gp = pairs[p][b] / 1.0e9;
+                if (boundaries[b] == INT_MAX)
+                    std::printf(" %7.1fG", gp);
+                else
+                    std::printf(" %9.1fG", gp);
+            }
+            std::printf("  (pairs)\n");
+        }
+        std::fflush(stdout);
+    }
+};
+
+extern SubsetHistogram g_subset_hist;

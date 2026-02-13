@@ -111,13 +111,13 @@ void compute_acceleration_and_timestep(Particles& p, double G, double soft2, dou
                 dt_f(i) = Kokkos::sqrt(t_min_i);
             }
         });
-    Kokkos::fence();
+
 
     // Apply eta (tiled path already applied sqrt)
     Kokkos::parallel_for("apply_eta", N, KOKKOS_LAMBDA(int i) {
         dt_f(i) *= eta;
     });
-    Kokkos::fence();
+
 }
 
 // ==========================================================================
@@ -175,7 +175,7 @@ void self_acceleration(Particles& p, int start, int count,
             }
             if (ii < count) { pax(i) = axi; pay(i) = ayi; paz(i) = azi; }
         });
-    Kokkos::fence();
+
 }
 
 // ==========================================================================
@@ -197,7 +197,7 @@ void self_gradient_correction(Particles& p, int start, int count,
         ay0(ii) = pay(start + ii);
         az0(ii) = paz(start + ii);
     });
-    Kokkos::fence();
+
 
     using team_policy = Kokkos::TeamPolicy<>;
     using member_type = team_policy::member_type;
@@ -260,7 +260,7 @@ void self_gradient_correction(Particles& p, int start, int count,
             }
             if (ii < count) { pax(i) += cx; pay(i) += cy; paz(i) += cz; }
         });
-    Kokkos::fence();
+
 }
 
 // ==========================================================================
@@ -368,7 +368,7 @@ void cross_acceleration(Particles& p,
             }
             if (ii < b_count) { pax(j) = axj; pay(j) = ayj; paz(j) = azj; }
         });
-    Kokkos::fence();
+
 }
 
 // ==========================================================================
@@ -398,7 +398,7 @@ void cross_gradient_correction(Particles& p,
         ay0_b(jj) = pay(b_start + jj);
         az0_b(jj) = paz(b_start + jj);
     });
-    Kokkos::fence();
+
 
     using team_policy = Kokkos::TeamPolicy<>;
     using member_type = team_policy::member_type;
@@ -515,7 +515,7 @@ void cross_gradient_correction(Particles& p,
             }
             if (ii < b_count) { pax(j) += cx; pay(j) += cy; paz(j) += cz; }
         });
-    Kokkos::fence();
+
 }
 
 // ==========================================================================
@@ -547,7 +547,7 @@ void compute_timestep_subset(Particles& p, int start, int count,
     Kokkos::parallel_for("init_dt_subset", count, KOKKOS_LAMBDA(int ii) {
         dt_f(start + ii) = DBL_MAX;
     });
-    Kokkos::fence();
+
 
     // Full N^2 within subset - tiled with shared memory, squared-space timestep
     using team_policy = Kokkos::TeamPolicy<>;
@@ -631,7 +631,7 @@ void compute_timestep_subset(Particles& p, int start, int count,
                 dt_f(i) = Kokkos::sqrt(t_min_sq) * eta;
             }
         });
-    Kokkos::fence();
+
 }
 
 // ==========================================================================
@@ -695,7 +695,7 @@ void self_acceleration_kick(Particles& p, int start, int count,
                 pvz(i) += azi * kick_dt;
             }
         });
-    Kokkos::fence();
+
 }
 
 // ==========================================================================
@@ -807,7 +807,7 @@ void self_acceleration_and_timestep(Particles& p, int start, int count,
                 dt_f(i) = t_min_i * eta;
             }
         });
-    Kokkos::fence();
+
 }
 
 // ==========================================================================
@@ -829,7 +829,7 @@ void self_acceleration_and_gradient_kick(Particles& p, int start, int count,
         pvy(i) += pay(i) * kick_dt;
         pvz(i) += paz(i) * kick_dt;
     });
-    Kokkos::fence();
+
 }
 
 // ==========================================================================
@@ -939,7 +939,7 @@ void cross_acceleration_kick(Particles& p,
                 pvz(j) += azj * kick_dt;
             }
         });
-    Kokkos::fence();
+
 }
 
 // ==========================================================================
@@ -970,7 +970,7 @@ void cross_acceleration_and_gradient_kick(Particles& p,
         pvy(j) += pay(j) * kick_dt;
         pvz(j) += paz(j) * kick_dt;
     });
-    Kokkos::fence();
+
 }
 
 // ==========================================================================
@@ -1086,5 +1086,5 @@ void cross_acceleration_kick_and_cache(Particles& p,
                 pvz(j) += azj * kick_dt;
             }
         });
-    Kokkos::fence();
+
 }

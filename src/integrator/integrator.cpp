@@ -12,6 +12,7 @@
 
 // Global profiler instance
 StepProfiler g_profiler;
+SubsetHistogram g_subset_hist;
 
 // Serial N² GPU threshold: skip MPI, compute full N² locally (no tree)
 int serial_n2_gpu = 0;
@@ -205,6 +206,7 @@ void drift(Particles& p, int start, int count, double dt) {
 void fsi_step(Particles& p, int start, int count,
               double G, double soft2, double dt, bool forces_valid,
               bool force_direct_n2) {
+    g_subset_hist.record(SubsetHistogram::FSI_STEP, count);
     bool tree_mode = !force_direct_n2 && (use_tree && count >= tree_threshold);
     bool tree_built = false;
 
@@ -339,7 +341,6 @@ static int partition_by_pivot(Particles& p, int start, int count, double pivot) 
         }
         perm(dest) = start + ii;
     });
-    Kokkos::fence();
 
     // Apply permutation: fused gather of all fields
     RawView px{p.x.data()}, py{p.y.data()}, pz{p.z.data()};
@@ -368,7 +369,6 @@ static int partition_by_pivot(Particles& p, int start, int count, double pivot) 
         ti1(ii) = porig(src); ti2(ii) = plevel(src);
         tl1(ii) = pix(src); tl2(ii) = piy(src); tl3(ii) = piz(src);
     });
-    Kokkos::fence();
 
     // Single fused copy back of all fields
     Kokkos::parallel_for("copy_all", count, KOKKOS_LAMBDA(int ii) {
@@ -380,7 +380,6 @@ static int partition_by_pivot(Particles& p, int start, int count, double pivot) 
         porig(dst) = ti1(ii); plevel(dst) = ti2(ii);
         pix(dst) = tl1(ii); piy(dst) = tl2(ii); piz(dst) = tl3(ii);
     });
-    Kokkos::fence();
 
     return slow_count;
 }
@@ -812,7 +811,6 @@ static void self_gradient_correction_ring(DistributedParticles& dp, int start, i
         say(i) = pay(i);
         saz(i) = paz(i);
     });
-    Kokkos::fence();
 
     const double coeff = G * grad_dt * grad_dt * GRAD_COEFF;
 
@@ -913,7 +911,6 @@ static void self_gradient_correction_ring(DistributedParticles& dp, int start, i
         pay(i) += say(i);
         paz(i) += saz(i);
     });
-    Kokkos::fence();
 }
 
 // Cross-force: ALL slow from fast-chunk + ALL fast from slow-chunk, then allreduce both
@@ -1098,7 +1095,6 @@ static void cross_acceleration_and_gradient_ring(DistributedParticles& dp,
         say(i) = pay(i);
         saz(i) = paz(i);
     });
-    Kokkos::fence();
 
     const double coeff = G * dt * dt * GRAD_COEFF;
 
@@ -1280,7 +1276,6 @@ static void cross_acceleration_and_gradient_ring(DistributedParticles& dp,
         pay(i) += say(i);
         paz(i) += saz(i);
     });
-    Kokkos::fence();
 }
 
 // Fused force + symmetrized timestep (ring): ALL i from this rank's j-chunk
@@ -2828,6 +2823,7 @@ static void cpu_hhs_recursive(CpuSubset& s, int start, int count,
 static void hhs_fsi_recursive_cpu(Particles& p, int start, int count,
                                   double pivot_dt, double G, double soft2,
                                   double dt_min, double eta, bool dt_valid) {
+    g_subset_hist.record(SubsetHistogram::LOCAL_CPU, count);
     CpuSubset s;
     s.resize(count);
     s.copy_from_device(p, start);
@@ -2849,6 +2845,7 @@ static void hhs_fsi_recursive_local(
     bool dt_valid) {
 
     if (count == 0) return;
+    g_subset_hist.record(SubsetHistogram::LOCAL_GPU, count);
 
     // CPU serial path for very small subsets
     if (serial_n2_cpu > 0 && count <= serial_n2_cpu) {
@@ -2993,6 +2990,7 @@ static void hhs_fsi_recursive_distributed(
     bool global_tree_available = false) {
 
     if (count == 0) return;
+    g_subset_hist.record(SubsetHistogram::DISTRIBUTED, count);
 
     // Below threshold: skip MPI, all ranks compute full N² locally
     if (serial_n2_gpu > 0 && count <= serial_n2_gpu) {

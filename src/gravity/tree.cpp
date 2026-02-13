@@ -508,7 +508,6 @@ void Octree::update_subsets(Particles& p, int slow_start, int slow_count) {
         int idx = si(j);
         flag(j) = (idx >= ss && idx < ss + sc) ? 0 : 1;  // 0=slow, 1=fast
     });
-    Kokkos::fence();
 
     // 4. Recompute dual monopoles (including velocities)
     recompute_dual_monopoles(p);

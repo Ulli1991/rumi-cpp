@@ -341,8 +341,10 @@ int main(int argc, char** argv) {
                     print_progress(t, step);
                     if (my_rank == 0 && profiling_enabled) {
                         g_profiler.print_report(N_display, n_ranks);
+                        g_subset_hist.print_report();
                     }
                     g_profiler.reset();
+                    g_subset_hist.reset();
                 }
             }
         } else {
@@ -386,8 +388,10 @@ int main(int argc, char** argv) {
                     print_progress(t, step);
                     if (my_rank == 0 && profiling_enabled) {
                         g_profiler.print_report(N_display, n_ranks);
+                        g_subset_hist.print_report();
                     }
                     g_profiler.reset();
+                    g_subset_hist.reset();
                 }
             }
         }
@@ -408,8 +412,10 @@ int main(int argc, char** argv) {
         print_progress(t, step);
         if (my_rank == 0 && profiling_enabled && g_profiler.step_count > 0) {
             g_profiler.print_report(N_display, n_ranks);
+            g_subset_hist.print_report();
         }
         g_profiler.reset();
+        g_subset_hist.reset();
 
         auto diag_final = compute_diagnostics(work_p, G, soft2);
         if (my_rank == 0) {

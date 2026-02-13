@@ -96,7 +96,7 @@ void Particles::pack() {
         vel(i, 2) = pvz(i);
         vel(i, 3) = 0.0;
     });
-    Kokkos::fence();
+
 }
 
 void Particles::unpack() {
@@ -116,7 +116,7 @@ void Particles::unpack() {
         pvy(i) = vel(i, 1);
         pvz(i) = vel(i, 2);
     });
-    Kokkos::fence();
+
 }
 
 void Particles::pack_pos_range(int start, int count) {
@@ -129,7 +129,7 @@ void Particles::pack_pos_range(int start, int count) {
         pos(i, 2) = pz(i);
         pos(i, 3) = pm(i);
     });
-    Kokkos::fence();
+
 }
 
 void Particles::pack_vel_range(int start, int count) {
@@ -142,7 +142,7 @@ void Particles::pack_vel_range(int start, int count) {
         vel(i, 2) = pvz(i);
         vel(i, 3) = 0.0;
     });
-    Kokkos::fence();
+
 }
 
 void Particles::partition_by_level() {
@@ -183,7 +183,7 @@ void Particles::partition_by_level() {
                 partial_sum += is_level;
             });
     }
-    Kokkos::fence();
+
 
     // Step 3: Apply permutation with fused gather/copy (2 kernels instead of 26)
     auto px = x; auto py = y; auto pz = z;
@@ -212,7 +212,7 @@ void Particles::partition_by_level() {
         ti1(i) = porig(src); ti2(i) = p_level(src);
         tl1(i) = pix(src); tl2(i) = piy(src); tl3(i) = piz(src);
     });
-    Kokkos::fence();
+
 
     // Single fused copy back
     Kokkos::parallel_for("copy_all", NN, KOKKOS_LAMBDA(int i) {
@@ -223,5 +223,5 @@ void Particles::partition_by_level() {
         porig(i) = ti1(i); p_level(i) = ti2(i);
         pix(i) = tl1(i); piy(i) = tl2(i); piz(i) = tl3(i);
     });
-    Kokkos::fence();
+
 }
