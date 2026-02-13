@@ -12,7 +12,7 @@ make
 
 Produces `nbody`.
 
-### GPU version (`src-kokkos/`)
+### GPU version (`src/`)
 
 Load the required modules:
 

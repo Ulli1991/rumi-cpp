@@ -17,7 +17,7 @@ DT_MIN_MYR = 1.0e-9                       	# ≈ 1e-3 yr
 ETA = 0.2					# Integrator accuracy eta
 SOFTENING_PC = 1e-3                        	# Softening length in pc (= 206 AU)
 SERIAL_N2_GPU = 10000                      	# Full N² on GPU without MPI or tree below this count
-SERIAL_N2_CPU = 500                        	# Full N² on CPU below this count (avoids kernel launch overhead)
+SERIAL_N2_CPU = 0                        	# Full N² on CPU below this count (avoids kernel launch overhead)
 FUSE_GRADIENT = false                      	# Fuse force+gradient into single N^2 pass using stale accelerations (saves ~30% gradient time, O(dt^3) accuracy trade-off)
 INTEGER_POSITIONS = false                  	# Use int64 positions (exact drift, MPI-safe)
 DOMAIN_HALFSIZE_PC = 200                   	# Integer position domain half-size in pc
@@ -27,7 +27,7 @@ SYMMETRIC_TIMESTEPS = true                	# Fuse force+timestep with harmonic s
 # =============================================================================
 # Barnes-Hut tree: O(N log N) force via monopole approximation
 # =============================================================================
-USE_TREE = true                           	# Enable tree for self-forces
+USE_TREE = false                           	# Enable tree for self-forces
 TREE_THRESHOLD = 100000 	                # Use tree above this count, N² below
 TREE_THETA = 0.7                          	# Opening angle (smaller = more accurate, slower)
 TREE_N_LEAF = 32                          	# Max particles per leaf cell

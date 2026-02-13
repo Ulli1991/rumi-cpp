@@ -15,23 +15,29 @@ if(USE_MPI)
     find_package(MPI REQUIRED)
 endif()
 
-set(SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src-kokkos)
+set(SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 add_executable(nbody-kokkos
     ${SRC_DIR}/main.cpp
-    ${SRC_DIR}/particles.cpp
-    ${SRC_DIR}/forces.cpp
-    ${SRC_DIR}/integrator.cpp
-    ${SRC_DIR}/timestep.cpp
-    ${SRC_DIR}/initial_conditions.cpp
-    ${SRC_DIR}/diagnostics.cpp
-    ${SRC_DIR}/mpi_comm.cpp
-    ${SRC_DIR}/tree.cpp
-    ${SRC_DIR}/tree_forces.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/initial_conditions/sse.cpp
+    ${SRC_DIR}/core/particles.cpp
+    ${SRC_DIR}/core/mpi_comm.cpp
+    ${SRC_DIR}/gravity/forces.cpp
+    ${SRC_DIR}/gravity/tree.cpp
+    ${SRC_DIR}/gravity/tree_forces.cpp
+    ${SRC_DIR}/integrator/integrator.cpp
+    ${SRC_DIR}/integrator/timestep.cpp
+    ${SRC_DIR}/ic_gen/initial_conditions.cpp
+    ${SRC_DIR}/ic_gen/sse.cpp
+    ${SRC_DIR}/io/diagnostics.cpp
 )
 
-target_include_directories(nbody-kokkos PRIVATE ${SRC_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/initial_conditions)
+target_include_directories(nbody-kokkos PRIVATE
+    ${SRC_DIR}/core
+    ${SRC_DIR}/gravity
+    ${SRC_DIR}/integrator
+    ${SRC_DIR}/ic_gen
+    ${SRC_DIR}/io
+)
 target_link_libraries(nbody-kokkos Kokkos::kokkos)
 target_compile_options(nbody-kokkos PRIVATE -O3)
 

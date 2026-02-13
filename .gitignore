@@ -3,7 +3,7 @@ build*/
 nbody
 nbody-kokkos
 src/*.o
-src-kokkos/*.o
+src/*.o
 *.o
 *.a
 *.so
