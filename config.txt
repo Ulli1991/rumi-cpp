@@ -16,7 +16,7 @@ DT_MAX_MYR = 1.0e-3                       	# ≈ 1000 yr
 DT_MIN_MYR = 1.0e-9                       	# ≈ 1e-3 yr
 ETA = 0.2					# Integrator accuracy eta
 SOFTENING_PC = 1e-3                        	# Softening length in pc (= 206 AU)
-SERIAL_N2_GPU = 10000                      	# Full N² on GPU without MPI or tree below this count
+SERIAL_N2_GPU = 16384                      	# Full N² on GPU without MPI or tree below this count
 SERIAL_N2_CPU = 256                        	# Full N² on CPU below this count (avoids kernel launch overhead)
 FUSE_GRADIENT = false                      	# Fuse force+gradient into single N^2 pass using stale accelerations (saves ~30% gradient time, O(dt^3) accuracy trade-off)
 INTEGER_POSITIONS = false                  	# Use int64 positions (exact drift, MPI-safe)
@@ -37,7 +37,7 @@ TREE_N_GROUP = 64                         	# Particles per traversal group
 # Plummer cluster parameters (only used if TEST_CASE = plummer)
 # =============================================================================
 PLUMMER_N = 1000000
-PLUMMER_M_TOTAL = 3.91e5            		# Total mass in solar masses
+PLUMMER_M_TOTAL = 3.91e5            		# Total mass in solar masses (not used when kroupa_evolved)
 PLUMMER_R_HALF = 3.5                		# Half-mass radius in parsecs
 PLUMMER_SEED = 42
 PLUMMER_MASS_DIST = kroupa_evolved  		# equal, kroupa, or kroupa_evolved
