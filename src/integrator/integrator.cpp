@@ -2531,6 +2531,67 @@ static void cpu_self_acc_grad_kick(CpuSubset& s, int start, int count,
 }
 
 // CPU cross-acceleration + kick (N3L: each pair computed once, applied to both)
+// CPU cross-acceleration (N3L, no kick)
+static void cpu_cross_acc(CpuSubset& s,
+                           int a_start, int a_count,
+                           int b_start, int b_count,
+                           double G, double soft2) {
+    const int a_end = a_start + a_count;
+    const int b_end = b_start + b_count;
+    for (int i = a_start; i < a_end; i++) { s.ax[i] = 0; s.ay[i] = 0; s.az[i] = 0; }
+    for (int j = b_start; j < b_end; j++) { s.ax[j] = 0; s.ay[j] = 0; s.az[j] = 0; }
+    for (int i = a_start; i < a_end; i++) {
+        for (int j = b_start; j < b_end; j++) {
+            double dx = s.x[j] - s.x[i];
+            double dy = s.y[j] - s.y[i];
+            double dz = s.z[j] - s.z[i];
+            double r2 = dx*dx + dy*dy + dz*dz + soft2;
+            double inv_r = 1.0 / std::sqrt(r2);
+            double inv_r3 = inv_r * inv_r * inv_r;
+            double fj = G * s.mass[j] * inv_r3;
+            double fi = G * s.mass[i] * inv_r3;
+            s.ax[i] += fj * dx; s.ay[i] += fj * dy; s.az[i] += fj * dz;
+            s.ax[j] -= fi * dx; s.ay[j] -= fi * dy; s.az[j] -= fi * dz;
+        }
+    }
+}
+
+// CPU cross-gradient correction (N3L, modifies ax/ay/az in-place)
+static void cpu_cross_grad(CpuSubset& s,
+                            int a_start, int a_count,
+                            int b_start, int b_count,
+                            double G, double soft2, double grad_dt) {
+    const double coeff = G * grad_dt * grad_dt * GRAD_COEFF;
+    std::vector<double> ax0_a(a_count), ay0_a(a_count), az0_a(a_count);
+    std::vector<double> ax0_b(b_count), ay0_b(b_count), az0_b(b_count);
+    for (int i = 0; i < a_count; i++) {
+        ax0_a[i] = s.ax[a_start+i]; ay0_a[i] = s.ay[a_start+i]; az0_a[i] = s.az[a_start+i];
+    }
+    for (int j = 0; j < b_count; j++) {
+        ax0_b[j] = s.ax[b_start+j]; ay0_b[j] = s.ay[b_start+j]; az0_b[j] = s.az[b_start+j];
+    }
+    for (int ii = 0; ii < a_count; ii++) {
+        int i = a_start + ii;
+        for (int jj = 0; jj < b_count; jj++) {
+            int j = b_start + jj;
+            double dx = s.x[j] - s.x[i], dy = s.y[j] - s.y[i], dz = s.z[j] - s.z[i];
+            double dax = ax0_b[jj] - ax0_a[ii], day = ay0_b[jj] - ay0_a[ii], daz = az0_b[jj] - az0_a[ii];
+            double r2 = dx*dx + dy*dy + dz*dz + soft2;
+            double inv_r = 1.0 / std::sqrt(r2);
+            double inv_r2 = inv_r * inv_r;
+            double inv_r5 = inv_r2 * inv_r2 * inv_r;
+            double r_dot_a = dx*dax + dy*day + dz*daz;
+            double term_x = r2 * dax - 3.0 * r_dot_a * dx;
+            double term_y = r2 * day - 3.0 * r_dot_a * dy;
+            double term_z = r2 * daz - 3.0 * r_dot_a * dz;
+            double fj = coeff * s.mass[j] * inv_r5;
+            double fi = coeff * s.mass[i] * inv_r5;
+            s.ax[i] += fj * term_x; s.ay[i] += fj * term_y; s.az[i] += fj * term_z;
+            s.ax[j] -= fi * term_x; s.ay[j] -= fi * term_y; s.az[j] -= fi * term_z;
+        }
+    }
+}
+
 static void cpu_cross_acc_kick(CpuSubset& s,
                                int a_start, int a_count,
                                int b_start, int b_count,
@@ -2805,15 +2866,17 @@ static int cpu_partition_by_pivot(CpuSubset& s, int start, int count, double piv
 static void cpu_fsi_step(CpuSubset& s, int start, int count,
                          double G, double soft2, double dt,
                          bool forces_valid = false) {
-    if (forces_valid) {
-        cpu_kick(s, start, count, dt * FSI_KICK);
-    } else {
-        cpu_self_acc_kick(s, start, count, G, soft2, dt * FSI_KICK);
+    if (!forces_valid) {
+        cpu_self_acc(s, start, count, G, soft2);
     }
+    cpu_kick(s, start, count, dt * FSI_KICK);
     cpu_drift(s, start, count, dt * FSI_DRIFT);
-    cpu_self_acc_grad_kick(s, start, count, G, soft2, dt, dt * FSI_MOD_KICK);
+    cpu_self_acc(s, start, count, G, soft2);
+    cpu_self_grad(s, start, count, G, soft2, dt);
+    cpu_kick(s, start, count, dt * FSI_MOD_KICK);
     cpu_drift(s, start, count, dt * FSI_DRIFT);
-    cpu_self_acc_kick(s, start, count, G, soft2, dt * FSI_KICK);
+    cpu_self_acc(s, start, count, G, soft2);
+    cpu_kick(s, start, count, dt * FSI_KICK);
 }
 
 // CPU HHS-FSI recursion
@@ -2827,14 +2890,8 @@ static void cpu_hhs_recursive(CpuSubset& s, int start, int count,
         return;
     }
 
-    bool forces_valid = false;
     if (!dt_valid && count > 1) {
-        if (symmetric_timesteps) {
-            cpu_compute_force_and_timestep(s, start, count, G, soft2, eta);
-            forces_valid = true;
-        } else {
-            cpu_compute_timestep(s, start, count, G, soft2, eta);
-        }
+        cpu_compute_timestep(s, start, count, G, soft2, eta);
     }
 
     int slow_count = cpu_partition_by_pivot(s, start, count, pivot_dt);
@@ -2843,7 +2900,7 @@ static void cpu_hhs_recursive(CpuSubset& s, int start, int count,
     int fast_count = count - slow_count;
 
     if (fast_count == 0) {
-        cpu_fsi_step(s, start, count, G, soft2, pivot_dt, forces_valid);
+        cpu_fsi_step(s, start, count, G, soft2, pivot_dt);
         return;
     }
 
@@ -2856,7 +2913,9 @@ static void cpu_hhs_recursive(CpuSubset& s, int start, int count,
     }
 
     // Step 1: Cross-kick (dt/6)
-    cpu_cross_acc_kick(s, slow_start, slow_count, fast_start, fast_count, G, soft2, pivot_dt * FSI_KICK);
+    cpu_cross_acc(s, slow_start, slow_count, fast_start, fast_count, G, soft2);
+    cpu_kick(s, slow_start, slow_count, pivot_dt * FSI_KICK);
+    cpu_kick(s, fast_start, fast_count, pivot_dt * FSI_KICK);
 
     // Step 2: FSI half-step on slow
     cpu_fsi_step(s, slow_start, slow_count, G, soft2, pivot_dt * 0.5);
@@ -2865,7 +2924,10 @@ static void cpu_hhs_recursive(CpuSubset& s, int start, int count,
     cpu_hhs_recursive(s, fast_start, fast_count, pivot_dt * 0.5, G, soft2, dt_min, eta, false);
 
     // Step 4: Cross-gradient kick (2dt/3)
-    cpu_cross_acc_grad_kick(s, slow_start, slow_count, fast_start, fast_count, G, soft2, pivot_dt, pivot_dt * FSI_MOD_KICK);
+    cpu_cross_acc(s, slow_start, slow_count, fast_start, fast_count, G, soft2);
+    cpu_cross_grad(s, slow_start, slow_count, fast_start, fast_count, G, soft2, pivot_dt);
+    cpu_kick(s, slow_start, slow_count, pivot_dt * FSI_MOD_KICK);
+    cpu_kick(s, fast_start, fast_count, pivot_dt * FSI_MOD_KICK);
 
     // Step 5: Recurse on fast (second half)
     cpu_hhs_recursive(s, fast_start, fast_count, pivot_dt * 0.5, G, soft2, dt_min, eta, false);
@@ -2874,7 +2936,9 @@ static void cpu_hhs_recursive(CpuSubset& s, int start, int count,
     cpu_fsi_step(s, slow_start, slow_count, G, soft2, pivot_dt * 0.5);
 
     // Step 7: Cross-kick (dt/6)
-    cpu_cross_acc_kick(s, slow_start, slow_count, fast_start, fast_count, G, soft2, pivot_dt * FSI_KICK);
+    cpu_cross_acc(s, slow_start, slow_count, fast_start, fast_count, G, soft2);
+    cpu_kick(s, slow_start, slow_count, pivot_dt * FSI_KICK);
+    cpu_kick(s, fast_start, fast_count, pivot_dt * FSI_KICK);
 }
 
 // Entry point: copy subset to host, run CPU HHS, copy back
