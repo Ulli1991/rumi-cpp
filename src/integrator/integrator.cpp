@@ -393,15 +393,9 @@ static void hhs_fsi_step_dynamic_impl(Particles& p, int start, int count, double
     if (count == 0) return;
 
     // Compute adaptive timesteps for this subset (skip if reusing from first half-step)
-    bool forces_valid = false;
     if (!dt_valid && count > 1) {
         g_profiler.start();
-        if (symmetric_timesteps) {
-            self_acceleration_and_timestep(p, start, count, G, soft2, eta);
-            forces_valid = true;
-        } else {
-            compute_timestep_subset(p, start, count, G, soft2, eta);
-        }
+        compute_timestep_subset(p, start, count, G, soft2, eta, symmetric_timesteps);
         g_profiler.stop(StepProfiler::ADAPTIVE_DT);
     }
 
@@ -415,7 +409,7 @@ static void hhs_fsi_step_dynamic_impl(Particles& p, int start, int count, double
 
     // Base case: no fast particles or at minimum timestep
     if (fast_count == 0 || pivot_dt * 0.5 < dt_min) {
-        fsi_step(p, start, count, G, soft2, pivot_dt, forces_valid);
+        fsi_step(p, start, count, G, soft2, pivot_dt);
         return;
     }
 
@@ -1412,7 +1406,8 @@ static void self_acceleration_and_timestep_ring(DistributedParticles& dp, int st
 
 // Timestep: ALL i-particles from this rank's j-chunk, then allreduce(MIN)
 static void compute_timestep_ring(DistributedParticles& dp, int start, int count,
-                                   double G, double soft2, double eta) {
+                                   double G, double soft2, double eta,
+                                   bool symmetrize = false) {
     if (count <= 1) return;
 
     int j_start, j_count;
@@ -1451,7 +1446,8 @@ static void compute_timestep_ring(DistributedParticles& dp, int start, int count
                 load4(&vel(i, 0), vxi, vyi, vzi, vpad);
             }
 
-            double t_min_sq = 1e60;
+            double t_min_sq = 1e60;   // non-symmetrized path
+            double t_min_i = 1e30;    // symmetrized path
 
             for (int tile_st = js; tile_st < je; tile_st += TILE_SIZE) {
                 int tile_end = (tile_st + TILE_SIZE < je) ? tile_st + TILE_SIZE : je;
@@ -1487,18 +1483,45 @@ static void compute_timestep_ring(DistributedParticles& dp, int start, int count
                         double inv_r = fast_rsqrt(r2s);
                         double r3 = r2s * r2s * inv_r;
                         double mass_sum = mi + tile(jb+3);
-                        double t_ff_sq = r3 / (G * mass_sum + EPS);
-                        double t_fb_sq = r2s / (v_sq + EPS);
 
-                        double t_min_sq_pair = Kokkos::fmin(t_ff_sq, t_fb_sq);
-                        t_min_sq = Kokkos::fmin(t_min_sq, t_min_sq_pair);
+                        if (symmetrize) {
+                            double inv_Gm = 1.0 / (G * mass_sum + EPS);
+                            double inv_vsq = 1.0 / (v_sq + EPS);
+                            double t_ff_sq = r3 * inv_Gm;
+                            double t_fb_sq = r2s * inv_vsq;
+                            double t_ff = t_ff_sq * fast_rsqrt(t_ff_sq + EPS);
+                            double t_fb = t_fb_sq * fast_rsqrt(t_fb_sq + EPS);
+
+                            double inv_r2 = inv_r * inv_r;
+                            double r_dot_v = dx*dvx + dy*dvy + dz*dvz;
+
+                            double c_ff = 1.5 * r_dot_v * inv_r2;
+                            double c_fb = r_dot_v * inv_r2 * (1.0 + G * mass_sum * inv_r * inv_vsq);
+
+                            double ct_ff = c_ff * t_ff_sq;
+                            double s_ff = 1.0 + c_ff * ct_ff;
+                            double u_ff = s_ff * fast_rsqrt(s_ff);
+                            double t_sym_ff = t_ff + ct_ff / (u_ff + 1.0);
+
+                            double ct_fb = c_fb * t_fb_sq;
+                            double s_fb = 1.0 + c_fb * ct_fb;
+                            double u_fb = s_fb * fast_rsqrt(s_fb);
+                            double t_sym_fb = t_fb + ct_fb / (u_fb + 1.0);
+
+                            t_min_i = Kokkos::fmin(t_min_i, Kokkos::fmin(t_sym_ff, t_sym_fb));
+                        } else {
+                            double t_ff_sq = r3 / (G * mass_sum + EPS);
+                            double t_fb_sq = r2s / (v_sq + EPS);
+                            double t_min_sq_pair = Kokkos::fmin(t_ff_sq, t_fb_sq);
+                            t_min_sq = Kokkos::fmin(t_min_sq, t_min_sq_pair);
+                        }
                     }
                 }
                 team.team_barrier();
             }
 
             if (ii < icnt) {
-                dt_f(i) = Kokkos::sqrt(t_min_sq) * eta;
+                dt_f(i) = symmetrize ? (t_min_i * eta) : (Kokkos::sqrt(t_min_sq) * eta);
             }
         });
     Kokkos::fence();
@@ -2159,7 +2182,8 @@ static void cross_acceleration_and_gradient_distributed(DistributedParticles& dp
 
 // Distributed adaptive timestep computation - tiled GPU kernel
 static void compute_timestep_distributed(DistributedParticles& dp, int start, int count,
-                                      double G, double soft2, double eta) {
+                                      double G, double soft2, double eta,
+                                      bool symmetrize = true) {
     if (count <= 1) return;
 
 
@@ -2204,7 +2228,8 @@ static void compute_timestep_distributed(DistributedParticles& dp, int start, in
                 load4(&vel(i, 0), vxi, vyi, vzi, vpad);
             }
 
-            double t_min_i = 1e30;
+            double t_min_sq = 1e60;   // non-symmetrized path
+            double t_min_i = 1e30;    // symmetrized path
 
             for (int tile_st = j_start; tile_st < j_end; tile_st += TILE_SIZE) {
                 int tile_end = (tile_st + TILE_SIZE < j_end) ? tile_st + TILE_SIZE : j_end;
@@ -2236,44 +2261,50 @@ static void compute_timestep_distributed(DistributedParticles& dp, int start, in
                         double dvz = tile(jb+6) - vzi;
                         double v_sq = dvx*dvx + dvy*dvy + dvz*dvz;
 
-                        // Symmetrized timestep — branchless, precomputed reciprocals
                         double r2s = r2 + soft2;
                         double inv_r = fast_rsqrt(r2s);
                         double mj = tile(jb+3);
                         double mass_sum = mi + mj;
-                        double inv_Gm = 1.0 / (G * mass_sum + EPS);
-                        double inv_vsq = 1.0 / (v_sq + EPS);
-
                         double r3 = r2s * r2s * inv_r;
-                        double t_ff_sq = r3 * inv_Gm;
-                        double t_fb_sq = r2s * inv_vsq;
-                        double t_ff = t_ff_sq * fast_rsqrt(t_ff_sq + EPS);
-                        double t_fb = t_fb_sq * fast_rsqrt(t_fb_sq + EPS);
 
-                        double inv_r2 = inv_r * inv_r;
-                        double r_dot_v = dx*dvx + dy*dvy + dz*dvz;
+                        if (symmetrize) {
+                            double inv_Gm = 1.0 / (G * mass_sum + EPS);
+                            double inv_vsq = 1.0 / (v_sq + EPS);
+                            double t_ff_sq = r3 * inv_Gm;
+                            double t_fb_sq = r2s * inv_vsq;
+                            double t_ff = t_ff_sq * fast_rsqrt(t_ff_sq + EPS);
+                            double t_fb = t_fb_sq * fast_rsqrt(t_fb_sq + EPS);
 
-                        double c_ff = 1.5 * r_dot_v * inv_r2;
-                        double c_fb = r_dot_v * inv_r2 * (1.0 + G * mass_sum * inv_r * inv_vsq);
+                            double inv_r2 = inv_r * inv_r;
+                            double r_dot_v = dx*dvx + dy*dvy + dz*dvz;
 
-                        double ct_ff = c_ff * t_ff_sq;
-                        double s_ff = 1.0 + c_ff * ct_ff;
-                        double u_ff = s_ff * fast_rsqrt(s_ff);
-                        double t_sym_ff = t_ff + ct_ff / (u_ff + 1.0);
+                            double c_ff = 1.5 * r_dot_v * inv_r2;
+                            double c_fb = r_dot_v * inv_r2 * (1.0 + G * mass_sum * inv_r * inv_vsq);
 
-                        double ct_fb = c_fb * t_fb_sq;
-                        double s_fb = 1.0 + c_fb * ct_fb;
-                        double u_fb = s_fb * fast_rsqrt(s_fb);
-                        double t_sym_fb = t_fb + ct_fb / (u_fb + 1.0);
+                            double ct_ff = c_ff * t_ff_sq;
+                            double s_ff = 1.0 + c_ff * ct_ff;
+                            double u_ff = s_ff * fast_rsqrt(s_ff);
+                            double t_sym_ff = t_ff + ct_ff / (u_ff + 1.0);
 
-                        t_min_i = Kokkos::fmin(t_min_i, Kokkos::fmin(t_sym_ff, t_sym_fb));
+                            double ct_fb = c_fb * t_fb_sq;
+                            double s_fb = 1.0 + c_fb * ct_fb;
+                            double u_fb = s_fb * fast_rsqrt(s_fb);
+                            double t_sym_fb = t_fb + ct_fb / (u_fb + 1.0);
+
+                            t_min_i = Kokkos::fmin(t_min_i, Kokkos::fmin(t_sym_ff, t_sym_fb));
+                        } else {
+                            double t_ff_sq = r3 / (G * mass_sum + EPS);
+                            double t_fb_sq = r2s / (v_sq + EPS);
+                            double t_min_sq_pair = Kokkos::fmin(t_ff_sq, t_fb_sq);
+                            t_min_sq = Kokkos::fmin(t_min_sq, t_min_sq_pair);
+                        }
                     }
                 }
                 team.team_barrier();
             }
 
             if (ii < slice_count) {
-                dt_f(i) = t_min_i * eta;
+                dt_f(i) = symmetrize ? (t_min_i * eta) : (Kokkos::sqrt(t_min_sq) * eta);
             }
         });
     Kokkos::fence();
@@ -2860,15 +2891,9 @@ static void hhs_fsi_recursive_local(
     }
 
     // Compute adaptive timesteps for this subset (always direct N² in serial path)
-    bool forces_valid = false;
     if (!dt_valid && count > 1) {
         g_profiler.start();
-        if (symmetric_timesteps) {
-            self_acceleration_and_timestep(p, start, count, G, soft2, eta);
-            forces_valid = true;
-        } else {
-            compute_timestep_subset(p, start, count, G, soft2, eta);
-        }
+        compute_timestep_subset(p, start, count, G, soft2, eta, symmetric_timesteps);
         g_profiler.stop(StepProfiler::ADAPTIVE_DT);
     }
 
@@ -2881,9 +2906,8 @@ static void hhs_fsi_recursive_local(
     int fast_count = count - slow_count;
 
     // Base case: all particles are slow
-    // Reuse fused forces for first FSI kick
     if (fast_count == 0) {
-        fsi_step(p, start, count, G, soft2, pivot_dt, forces_valid, /*force_direct_n2=*/true);
+        fsi_step(p, start, count, G, soft2, pivot_dt, false, /*force_direct_n2=*/true);
         return;
     }
 
@@ -3055,19 +3079,11 @@ static void hhs_fsi_recursive_distributed(
             // Sync packed pos+vel for vectorized timestep kernel
             dp.local.pack_pos_range(start, count);
             dp.local.pack_vel_range(start, count);
-            if (symmetric_timesteps) {
 #ifdef MPI_TOPOLOGY_RING
-                self_acceleration_and_timestep_ring(dp, start, count, G, soft2, eta);
+                compute_timestep_ring(dp, start, count, G, soft2, eta, symmetric_timesteps);
 #else
-                compute_timestep_distributed(dp, start, count, G, soft2, eta);
+                compute_timestep_distributed(dp, start, count, G, soft2, eta, symmetric_timesteps);
 #endif
-            } else {
-#ifdef MPI_TOPOLOGY_RING
-                compute_timestep_ring(dp, start, count, G, soft2, eta);
-#else
-                compute_timestep_distributed(dp, start, count, G, soft2, eta);
-#endif
-            }
         }
         g_profiler.stop(StepProfiler::ADAPTIVE_DT, (long long)count * count);
     }
