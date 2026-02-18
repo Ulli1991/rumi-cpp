@@ -86,5 +86,8 @@ KOKKOS_INLINE_FUNCTION double harmonic_sym_factor(double d) {
     return (d + sqrt_s - 1.0) / d;
 }
 
+// Speed of light in code units (km/s)
+constexpr double C_CODE = 299792.458;
+
 // Plummer sphere
 constexpr double PLUMMER_SCALE_FACTOR = 1.305;
