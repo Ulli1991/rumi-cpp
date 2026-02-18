@@ -75,6 +75,22 @@ struct SubsystemManager {
     // Update subsystem_id field in Particles based on active subsystems
     void update_particle_flags(Particles& p) const;
 
+    // Step-level diagnostics: accumulated across HHS recursion levels
+    int step_total_pairs = 0;       // total neighbor pairs found across all levels
+    int step_total_subsystems = 0;  // total subsystems formed
+    int step_n_bin = 0, step_n_fly = 0, step_n_trip_s = 0, step_n_trip_u = 0, step_n_multi = 0;
+    int step_n_secular = 0;
+    int step_total_members = 0;
+
+    // Reset step-level counters (call at start of each outer step)
+    void reset_step_diagnostics();
+
+    // Accumulate current detection results into step counters
+    void accumulate_diagnostics();
+
+    // Print summary for the completed outer step
+    void print_step_summary() const;
+
     // Clear all subsystems
     void clear();
 

@@ -371,6 +371,49 @@ void SubsystemManager::prune(Particles& p, double G) {
         }), active.end());
 }
 
+void SubsystemManager::reset_step_diagnostics() {
+    step_total_pairs = 0;
+    step_total_subsystems = 0;
+    step_n_bin = 0; step_n_fly = 0; step_n_trip_s = 0; step_n_trip_u = 0; step_n_multi = 0;
+    step_n_secular = 0;
+    step_total_members = 0;
+}
+
+void SubsystemManager::accumulate_diagnostics() {
+    // Read neighbor pair count from device
+    auto h_count = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), ngb_count);
+    step_total_pairs += h_count(0);
+    step_total_subsystems += (int)active.size();
+    for (const auto& sub : active) {
+        step_total_members += sub.n_bodies;
+        switch (sub.type) {
+            case SubsystemType::BINARY:         step_n_bin++; break;
+            case SubsystemType::FLYBY:          step_n_fly++; break;
+            case SubsystemType::TRIPLE_STABLE:  step_n_trip_s++; break;
+            case SubsystemType::TRIPLE_UNSTABLE:step_n_trip_u++; break;
+            case SubsystemType::MULTIPLET:      step_n_multi++; break;
+        }
+        if (sub.is_secular) step_n_secular++;
+    }
+}
+
+void SubsystemManager::print_step_summary() const {
+    std::printf("  Subsystems: %d pairs found, %d subsystems (%d particles)",
+                step_total_pairs, step_total_subsystems, step_total_members);
+    if (step_total_subsystems > 0) {
+        std::printf(" [");
+        bool first = true;
+        if (step_n_bin > 0)    { std::printf("%s%d bin", first ? "" : ", ", step_n_bin); first = false; }
+        if (step_n_fly > 0)    { std::printf("%s%d fly", first ? "" : ", ", step_n_fly); first = false; }
+        if (step_n_trip_s > 0) { std::printf("%s%d triple(s)", first ? "" : ", ", step_n_trip_s); first = false; }
+        if (step_n_trip_u > 0) { std::printf("%s%d triple(u)", first ? "" : ", ", step_n_trip_u); first = false; }
+        if (step_n_multi > 0)  { std::printf("%s%d multi", first ? "" : ", ", step_n_multi); first = false; }
+        if (step_n_secular > 0){ std::printf("%s%d secular", first ? "" : ", ", step_n_secular); first = false; }
+        std::printf("]");
+    }
+    std::printf("\n");
+}
+
 void SubsystemManager::clear() {
     active.clear();
 }

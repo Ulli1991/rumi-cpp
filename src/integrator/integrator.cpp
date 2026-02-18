@@ -551,28 +551,33 @@ static int partition_by_pivot(Particles& p, int start, int count, double pivot) 
 // ==========================================================================
 static void hhs_fsi_step_dynamic_impl(Particles& p, int start, int count, double pivot_dt,
                           double G, double soft2, double dt_min,
-                          double eta, bool dt_valid, bool top_level = false) {
+                          double eta, bool dt_valid) {
     if (count == 0) return;
 
     // Compute adaptive timesteps for this subset (skip if reusing from first half-step)
     if (!dt_valid && count > 1) {
+#ifdef ENABLE_COLLISIONAL
+        // Reset neighbor pair counter before force kernels detect new pairs at this level
+        if (p.collisional) g_subsystem_mgr.reset_ngb_count();
+#endif
         g_profiler.start();
         compute_timestep_subset(p, start, count, G, soft2, eta, symmetric_timesteps);
         g_profiler.stop(StepProfiler::ADAPTIVE_DT);
-    }
-
 #ifdef ENABLE_COLLISIONAL
-    // Top-level subsystem detection (single-rank path)
-    if (top_level && p.collisional) {
-        Kokkos::fence();
-        g_subsystem_mgr.detect_from_pairs(p, G, pivot_dt,
-                                           g_collisional.r_ngb, g_collisional.r_ngb_max,
-                                           g_collisional.n_orb_secular);
-        g_subsystem_mgr.update_particle_flags(p);
-        g_subsystem_mgr.prune(p, G);
-        g_subsystem_mgr.update_particle_flags(p);
-    }
+        // Subsystem detection at this HHS level (after timestep found neighbor pairs,
+        // before partition reorders particles). Uses level-appropriate pivot_dt.
+        if (p.collisional) {
+            Kokkos::fence();
+            g_subsystem_mgr.detect_from_pairs(p, G, pivot_dt,
+                                               g_collisional.r_ngb, g_collisional.r_ngb_max,
+                                               g_collisional.n_orb_secular);
+            g_subsystem_mgr.update_particle_flags(p);
+            g_subsystem_mgr.prune(p, G);
+            g_subsystem_mgr.update_particle_flags(p);
+            g_subsystem_mgr.accumulate_diagnostics();
+        }
 #endif
+    }
 
     // Partition into slow (dt >= pivot) and fast (dt < pivot)
     g_profiler.start();
@@ -638,13 +643,8 @@ static void hhs_fsi_step_dynamic_impl(Particles& p, int start, int count, double
 void hhs_fsi_step_dynamic(Particles& p, int start, int count, double pivot_dt,
                           double G, double soft2, double dt_min,
                           double eta) {
-#ifdef ENABLE_COLLISIONAL
-    if (p.collisional) {
-        g_subsystem_mgr.reset_ngb_count();
-    }
-#endif
     hhs_fsi_step_dynamic_impl(p, start, count, pivot_dt, G, soft2, dt_min, eta,
-                              false, /*top_level=*/true);
+                              false);
 }
 
 // =============================================================================
@@ -1749,7 +1749,18 @@ static void compute_timestep_ring(DistributedParticles& dp, int start, int count
     RawView dt_f{dp.local.dt_adapt.data()};
 #ifdef ENABLE_COLLISIONAL
     const int* sid_raw = dp.local.subsystem_id.data();
+    const int* pid_raw = dp.local.particle_id.data();
     bool coll = dp.local.collisional;
+    int* ngb_i_raw = coll ? g_subsystem_mgr.ngb_pair_i.data() : nullptr;
+    int* ngb_j_raw = coll ? g_subsystem_mgr.ngb_pair_j.data() : nullptr;
+    double* ngb_a_raw = coll ? g_subsystem_mgr.ngb_pair_a.data() : nullptr;
+    double* ngb_e_raw = coll ? g_subsystem_mgr.ngb_pair_e.data() : nullptr;
+    double* ngb_E_raw = coll ? g_subsystem_mgr.ngb_pair_E.data() : nullptr;
+    int* ngb_bound_raw = coll ? g_subsystem_mgr.ngb_pair_bound.data() : nullptr;
+    int* ngb_cnt_raw = coll ? g_subsystem_mgr.ngb_count.data() : nullptr;
+    int max_ngb = coll ? g_subsystem_mgr.max_ngb_pairs : 0;
+    double r_ngb_max_sq_val = coll ? g_collisional.r_ngb_max_sq : 0.0;
+    double r_ngb_val = coll ? g_collisional.r_ngb : 0.0;
 #endif
 
     using team_policy = Kokkos::TeamPolicy<>;
@@ -1860,6 +1871,34 @@ static void compute_timestep_ring(DistributedParticles& dp, int start, int count
                             double t_min_sq_pair = Kokkos::fmin(t_ff_sq, t_fb_sq);
                             t_min_sq = Kokkos::fmin(t_min_sq, t_min_sq_pair);
                         }
+
+#ifdef ENABLE_COLLISIONAL
+                        // Neighbor detection: identify bound/close pairs
+                        if (coll && r2 < r_ngb_max_sq_val && i < j) {
+                            double mu = G * mass_sum;
+                            double r_val = Kokkos::sqrt(r2);
+                            double E_orb = 0.5 * v_sq - mu / (r_val + EPS);
+                            bool is_bound = (E_orb < 0);
+                            double a_val = -mu / (2.0 * E_orb + EPS);
+                            double Lx = dy*dvz - dz*dvy;
+                            double Ly = dz*dvx - dx*dvz;
+                            double Lz = dx*dvy - dy*dvx;
+                            double L2 = Lx*Lx + Ly*Ly + Lz*Lz;
+                            double e_val = is_bound ?
+                                Kokkos::sqrt(Kokkos::fmax(0.0, 1.0 + 2.0*E_orb*L2/(mu*mu + EPS))) : 0.0;
+                            if (is_bound && (a_val < r_ngb_val || r_val < r_ngb_val)) {
+                                int idx = Kokkos::atomic_fetch_add(ngb_cnt_raw, 1);
+                                if (idx < max_ngb) {
+                                    int pi = pid_raw[i], pj = pid_raw[j];
+                                    if (pi > pj) { int tmp = pi; pi = pj; pj = tmp; }
+                                    ngb_i_raw[idx] = pi; ngb_j_raw[idx] = pj;
+                                    ngb_a_raw[idx] = a_val; ngb_e_raw[idx] = e_val;
+                                    ngb_E_raw[idx] = E_orb;
+                                    ngb_bound_raw[idx] = 1;
+                                }
+                            }
+                        }
+#endif
                     }
                 }
                 team.team_barrier();
@@ -2651,7 +2690,18 @@ static void compute_timestep_distributed(DistributedParticles& dp, int start, in
     RawView dt_f{dp.local.dt_adapt.data()};
 #ifdef ENABLE_COLLISIONAL
     const int* sid_raw = dp.local.subsystem_id.data();
+    const int* pid_raw = dp.local.particle_id.data();
     bool coll = dp.local.collisional;
+    int* ngb_i_raw = coll ? g_subsystem_mgr.ngb_pair_i.data() : nullptr;
+    int* ngb_j_raw = coll ? g_subsystem_mgr.ngb_pair_j.data() : nullptr;
+    double* ngb_a_raw = coll ? g_subsystem_mgr.ngb_pair_a.data() : nullptr;
+    double* ngb_e_raw = coll ? g_subsystem_mgr.ngb_pair_e.data() : nullptr;
+    double* ngb_E_raw = coll ? g_subsystem_mgr.ngb_pair_E.data() : nullptr;
+    int* ngb_bound_raw = coll ? g_subsystem_mgr.ngb_pair_bound.data() : nullptr;
+    int* ngb_cnt_raw = coll ? g_subsystem_mgr.ngb_count.data() : nullptr;
+    int max_ngb = coll ? g_subsystem_mgr.max_ngb_pairs : 0;
+    double r_ngb_max_sq_val = coll ? g_collisional.r_ngb_max_sq : 0.0;
+    double r_ngb_val = coll ? g_collisional.r_ngb : 0.0;
 #endif
 
     const int j_start = start;
@@ -2762,6 +2812,34 @@ static void compute_timestep_distributed(DistributedParticles& dp, int start, in
                             double t_min_sq_pair = Kokkos::fmin(t_ff_sq, t_fb_sq);
                             t_min_sq = Kokkos::fmin(t_min_sq, t_min_sq_pair);
                         }
+
+#ifdef ENABLE_COLLISIONAL
+                        // Neighbor detection: identify bound/close pairs
+                        if (coll && r2 < r_ngb_max_sq_val && i < j) {
+                            double mu = G * mass_sum;
+                            double r_val = Kokkos::sqrt(r2);
+                            double E_orb = 0.5 * v_sq - mu / (r_val + EPS);
+                            bool is_bound = (E_orb < 0);
+                            double a_val = -mu / (2.0 * E_orb + EPS);
+                            double Lx = dy*dvz - dz*dvy;
+                            double Ly = dz*dvx - dx*dvz;
+                            double Lz = dx*dvy - dy*dvx;
+                            double L2 = Lx*Lx + Ly*Ly + Lz*Lz;
+                            double e_val = is_bound ?
+                                Kokkos::sqrt(Kokkos::fmax(0.0, 1.0 + 2.0*E_orb*L2/(mu*mu + EPS))) : 0.0;
+                            if (is_bound && (a_val < r_ngb_val || r_val < r_ngb_val)) {
+                                int idx = Kokkos::atomic_fetch_add(ngb_cnt_raw, 1);
+                                if (idx < max_ngb) {
+                                    int pi = pid_raw[i], pj = pid_raw[j];
+                                    if (pi > pj) { int tmp = pi; pi = pj; pj = tmp; }
+                                    ngb_i_raw[idx] = pi; ngb_j_raw[idx] = pj;
+                                    ngb_a_raw[idx] = a_val; ngb_e_raw[idx] = e_val;
+                                    ngb_E_raw[idx] = E_orb;
+                                    ngb_bound_raw[idx] = 1;
+                                }
+                            }
+                        }
+#endif
                     }
                 }
                 team.team_barrier();
@@ -3633,8 +3711,7 @@ static void hhs_fsi_recursive_distributed(
     double G, double soft2,
     double dt_min, double eta,
     bool dt_valid,
-    bool global_tree_available = false,
-    bool top_level = false) {
+    bool global_tree_available = false) {
 
     if (count == 0) return;
     g_subset_hist.record(SubsetHistogram::DISTRIBUTED, count);
@@ -3676,6 +3753,10 @@ static void hhs_fsi_recursive_distributed(
     bool forces_valid = false;
     bool tree_built_for_subset = false;  // true when g_octree was BUILT (not reused) for this level
     if (!dt_valid && count > 1) {
+#ifdef ENABLE_COLLISIONAL
+        // Reset neighbor pair counter before force kernels detect new pairs at this level
+        if (dp.local.collisional) g_subsystem_mgr.reset_ngb_count();
+#endif
         g_profiler.start();
         if (global_tree_available && tree_eligible) {
             // DEEPER LEVEL: use global tree with subset marking for timestep
@@ -3709,21 +3790,21 @@ static void hhs_fsi_recursive_distributed(
 #endif
         }
         g_profiler.stop(StepProfiler::ADAPTIVE_DT, (long long)count * count);
-    }
-
 #ifdef ENABLE_COLLISIONAL
-    // Top-level subsystem detection: after timestep (which found neighbor pairs)
-    // and before partition (which reorders particles)
-    if (top_level && dp.local.collisional) {
-        Kokkos::fence();  // ensure force kernels have written neighbor pairs
-        g_subsystem_mgr.detect_from_pairs(dp.local, G, pivot_dt,
-                                           g_collisional.r_ngb, g_collisional.r_ngb_max,
-                                           g_collisional.n_orb_secular);
-        g_subsystem_mgr.update_particle_flags(dp.local);
-        g_subsystem_mgr.prune(dp.local, G);
-        g_subsystem_mgr.update_particle_flags(dp.local);
-    }
+        // Subsystem detection at this HHS level (after timestep found neighbor pairs,
+        // before partition reorders particles). Uses level-appropriate pivot_dt.
+        if (dp.local.collisional) {
+            Kokkos::fence();
+            g_subsystem_mgr.detect_from_pairs(dp.local, G, pivot_dt,
+                                               g_collisional.r_ngb, g_collisional.r_ngb_max,
+                                               g_collisional.n_orb_secular);
+            g_subsystem_mgr.update_particle_flags(dp.local);
+            g_subsystem_mgr.prune(dp.local, G);
+            g_subsystem_mgr.update_particle_flags(dp.local);
+            g_subsystem_mgr.accumulate_diagnostics();
+        }
 #endif
+    }
 
     // Partition into slow (dt >= pivot) and fast (dt < pivot)
     // All ranks do identical partitioning (deterministic)
@@ -4200,6 +4281,10 @@ void hhs_fsi_step_distributed(DistributedParticles& dp, double pivot_dt,
 
     (void)global_levels;  // Not used in new implementation
 
+#ifdef ENABLE_COLLISIONAL
+    if (dp.local.collisional) g_subsystem_mgr.reset_step_diagnostics();
+#endif
+
 #ifdef USE_MPI
     bool is_distributed = MPIComm::size() > 1;
 #else
@@ -4209,17 +4294,13 @@ void hhs_fsi_step_distributed(DistributedParticles& dp, double pivot_dt,
     if (!is_distributed) {
         // Single rank: use standard HHS (uses efficient fused kernels)
         hhs_fsi_step_dynamic(dp.local, 0, dp.N_total, pivot_dt, G, soft2, dt_min, eta);
+#ifdef ENABLE_COLLISIONAL
+        if (dp.local.collisional) g_subsystem_mgr.print_step_summary();
+#endif
         return;
     }
 
 #ifdef USE_MPI
-#ifdef ENABLE_COLLISIONAL
-    // Reset neighbor pair counter before force kernels detect new pairs
-    if (dp.local.collisional) {
-        g_subsystem_mgr.reset_ngb_count();
-    }
-#endif
-
     if (gadget4_cross && use_tree) {
         // GADGET-4 decomposition: F_cross = F_all - F_self
         // Build the global tree once at the top level
@@ -4232,9 +4313,11 @@ void hhs_fsi_step_distributed(DistributedParticles& dp, double pivot_dt,
     } else {
         // Standard HHS-FSI with explicit cross-forces
         hhs_fsi_recursive_distributed(dp, 0, dp.N_total, pivot_dt,
-                                      G, soft2, dt_min, eta, false,
-                                      /*top_level=*/true);
+                                      G, soft2, dt_min, eta, false);
     }
+#ifdef ENABLE_COLLISIONAL
+    if (dp.local.collisional) g_subsystem_mgr.print_step_summary();
+#endif
 #endif
 }
 
