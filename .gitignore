@@ -1,4 +1,4 @@
-# Build artifacts
+ Build artifacts
 build*/
 nbody
 nbody-kokkos
@@ -16,6 +16,8 @@ cmake_install.cmake
 Makefile.cmake
 
 # Job scheduler scripts and output
+*.sh
+!src/scripts/*.sh
 *.sh.o*
 *.sh.e*
 *.out
