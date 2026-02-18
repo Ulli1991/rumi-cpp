@@ -5,6 +5,9 @@
 #include <cstdio>
 #include <vector>
 
+// Global energy bookkeeping instance
+EnergyBookkeeping g_energy_books;
+
 DiagnosticState compute_diagnostics(const Particles& p, double G, double soft2) {
     const int N = p.N;
     auto px = p.x; auto py = p.y; auto pz = p.z;
