@@ -1,0 +1,376 @@
+#include "subsystem.h"
+#include "collisional_config.h"
+#include <algorithm>
+#include <numeric>
+#include <cmath>
+#include <cstdio>
+
+// Global subsystem manager instance
+SubsystemManager g_subsystem_mgr;
+
+// ============================================================================
+// GPU buffer allocation
+// ============================================================================
+
+void SubsystemManager::allocate_ngb_buffers(int max_pairs) {
+    if (max_pairs <= max_ngb_pairs) return;
+    max_ngb_pairs = max_pairs;
+    ngb_pair_i     = Kokkos::View<int*>("ngb_i", max_pairs);
+    ngb_pair_j     = Kokkos::View<int*>("ngb_j", max_pairs);
+    ngb_pair_a     = Kokkos::View<double*>("ngb_a", max_pairs);
+    ngb_pair_e     = Kokkos::View<double*>("ngb_e", max_pairs);
+    ngb_pair_E     = Kokkos::View<double*>("ngb_E", max_pairs);
+    ngb_pair_bound = Kokkos::View<int*>("ngb_bound", max_pairs);
+    ngb_count      = Kokkos::View<int*>("ngb_count", 1);
+}
+
+void SubsystemManager::reset_ngb_count() {
+    if (ngb_count.extent(0) > 0) {
+        Kokkos::deep_copy(ngb_count, 0);
+    }
+}
+
+// ============================================================================
+// Union-Find for connected components
+// ============================================================================
+
+struct UnionFind {
+    std::vector<int> parent, rank_uf;
+
+    UnionFind(int n) : parent(n), rank_uf(n, 0) {
+        std::iota(parent.begin(), parent.end(), 0);
+    }
+
+    int find(int x) {
+        while (parent[x] != x) {
+            parent[x] = parent[parent[x]];
+            x = parent[x];
+        }
+        return x;
+    }
+
+    void unite(int x, int y) {
+        x = find(x); y = find(y);
+        if (x == y) return;
+        if (rank_uf[x] < rank_uf[y]) std::swap(x, y);
+        parent[y] = x;
+        if (rank_uf[x] == rank_uf[y]) rank_uf[x]++;
+    }
+};
+
+// ============================================================================
+// Mardling (2001) stability criterion
+// ============================================================================
+
+bool SubsystemManager::mardling_stability(double a_in, double e_in,
+                                           double a_out, double e_out,
+                                           double m1, double m2, double m3) {
+    // Mardling & Aarseth (2001) stability criterion:
+    // a_out/a_in > 2.8 * ((1+q_out)*(1+e_out)/sqrt(1-e_out))^{2/5} * (1 - 0.3*inc/pi)
+    // Using the simplified version without inclination:
+    double q_out = m3 / (m1 + m2);
+    double ratio_crit = 2.8 * std::pow((1.0 + q_out) * (1.0 + e_out) / std::sqrt(1.0 - e_out), 0.4);
+    double ratio_actual = a_out * (1.0 - e_out) / (a_in * (1.0 + e_in));
+
+    return ratio_actual > ratio_crit;
+}
+
+// ============================================================================
+// Detect subsystems from neighbor pairs
+// ============================================================================
+
+void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
+                                          double r_ngb, double r_ngb_max,
+                                          int n_orb_secular) {
+    // Copy neighbor count from device
+    auto h_count = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), ngb_count);
+    int n_pairs = h_count(0);
+    if (n_pairs == 0) {
+        active.clear();
+        return;
+    }
+    n_pairs = std::min(n_pairs, max_ngb_pairs);
+
+    // Copy neighbor pairs to host
+    auto h_pi = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
+                    Kokkos::subview(ngb_pair_i, std::make_pair(0, n_pairs)));
+    auto h_pj = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
+                    Kokkos::subview(ngb_pair_j, std::make_pair(0, n_pairs)));
+    auto h_pa = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
+                    Kokkos::subview(ngb_pair_a, std::make_pair(0, n_pairs)));
+    auto h_pe = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
+                    Kokkos::subview(ngb_pair_e, std::make_pair(0, n_pairs)));
+    auto h_pE = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
+                    Kokkos::subview(ngb_pair_E, std::make_pair(0, n_pairs)));
+    auto h_pb = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
+                    Kokkos::subview(ngb_pair_bound, std::make_pair(0, n_pairs)));
+
+    // Get particle IDs on host
+    auto h_pid = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.particle_id);
+
+    // Build mapping from particle_id to array index
+    int max_pid = 0;
+    for (int i = 0; i < p.N; i++) max_pid = std::max(max_pid, h_pid(i));
+    std::vector<int> pid_to_idx(max_pid + 1, -1);
+    for (int i = 0; i < p.N; i++) pid_to_idx[h_pid(i)] = i;
+
+    // Sort pairs by (min_pid, max_pid) for determinism across MPI ranks
+    struct PairInfo {
+        int pid_lo, pid_hi;
+        double a, e, E_orb;
+        bool bound;
+    };
+    std::vector<PairInfo> pairs(n_pairs);
+    for (int k = 0; k < n_pairs; k++) {
+        int pi = h_pi(k), pj = h_pj(k);
+        // Convert array indices to particle IDs
+        int pid_i = h_pid(pi);
+        int pid_j = h_pid(pj);
+        pairs[k].pid_lo = std::min(pid_i, pid_j);
+        pairs[k].pid_hi = std::max(pid_i, pid_j);
+        pairs[k].a = h_pa(k);
+        pairs[k].e = h_pe(k);
+        pairs[k].E_orb = h_pE(k);
+        pairs[k].bound = (h_pb(k) != 0);
+    }
+    std::sort(pairs.begin(), pairs.end(), [](const PairInfo& a, const PairInfo& b) {
+        if (a.pid_lo != b.pid_lo) return a.pid_lo < b.pid_lo;
+        return a.pid_hi < b.pid_hi;
+    });
+
+    // Remove duplicates (same pair may be found by different threads)
+    pairs.erase(std::unique(pairs.begin(), pairs.end(),
+        [](const PairInfo& a, const PairInfo& b) {
+            return a.pid_lo == b.pid_lo && a.pid_hi == b.pid_hi;
+        }), pairs.end());
+
+    // Union-find to identify connected components
+    // Only merge bound pairs
+    UnionFind uf(max_pid + 1);
+    for (auto& pr : pairs) {
+        if (pr.bound) {
+            uf.unite(pr.pid_lo, pr.pid_hi);
+        }
+    }
+
+    // Build components
+    std::map<int, std::vector<int>> components;
+    for (auto& pr : pairs) {
+        if (pr.bound) {
+            int root = uf.find(pr.pid_lo);
+            if (components.find(root) == components.end()) {
+                // Collect all members
+                std::set<int> members;
+                for (auto& pr2 : pairs) {
+                    if (pr2.bound && uf.find(pr2.pid_lo) == root) {
+                        members.insert(pr2.pid_lo);
+                        members.insert(pr2.pid_hi);
+                    }
+                }
+                components[root] = std::vector<int>(members.begin(), members.end());
+            }
+        }
+    }
+
+    // Create subsystems
+    active.clear();
+    auto h_mass = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.mass);
+
+    for (auto& [root, members] : components) {
+        Subsystem sub{};
+        sub.id = next_id++;
+        sub.particle_ids = members;
+        sub.n_bodies = (int)members.size();
+        sub.is_secular = false;
+        sub.inner_binary_id = -1;
+        sub.outer_companion_pid = -1;
+
+        if (sub.n_bodies == 2) {
+            // Binary
+            int idx_i = pid_to_idx[members[0]];
+            int idx_j = pid_to_idx[members[1]];
+
+            // Find the pair info
+            for (auto& pr : pairs) {
+                if ((pr.pid_lo == members[0] && pr.pid_hi == members[1]) ||
+                    (pr.pid_lo == members[1] && pr.pid_hi == members[0])) {
+                    sub.orb.a = pr.a;
+                    sub.orb.e = pr.e;
+                    sub.orb.E_orb = pr.E_orb;
+                    break;
+                }
+            }
+
+            // Compute period
+            if (sub.orb.a > 0 && idx_i >= 0 && idx_j >= 0) {
+                double mu = G * (h_mass(idx_i) + h_mass(idx_j));
+                sub.orb.period = 2.0 * M_PI * std::sqrt(sub.orb.a * sub.orb.a * sub.orb.a / mu);
+                sub.n_orb_per_dt = (int)(dt_step / sub.orb.period);
+                sub.is_secular = (sub.n_orb_per_dt >= n_orb_secular);
+            }
+
+            sub.type = SubsystemType::BINARY;
+            sub.dt_sub = dt_step;
+        } else if (sub.n_bodies == 3) {
+            // Triple — check stability
+            // Find the tightest pair (inner binary)
+            double a_min = 1e30;
+            int inner_i = -1, inner_j = -1;
+            for (auto& pr : pairs) {
+                if (pr.bound && pr.a > 0 && pr.a < a_min) {
+                    int root_lo = uf.find(pr.pid_lo);
+                    if (root_lo == root) {
+                        a_min = pr.a;
+                        inner_i = pr.pid_lo;
+                        inner_j = pr.pid_hi;
+                    }
+                }
+            }
+
+            // Outer companion is the remaining member
+            int outer_pid = -1;
+            for (int pid : members) {
+                if (pid != inner_i && pid != inner_j) {
+                    outer_pid = pid;
+                    break;
+                }
+            }
+
+            if (inner_i >= 0 && inner_j >= 0 && outer_pid >= 0) {
+                int idx_i = pid_to_idx[inner_i];
+                int idx_j = pid_to_idx[inner_j];
+                int idx_o = pid_to_idx[outer_pid];
+
+                if (idx_i >= 0 && idx_j >= 0 && idx_o >= 0) {
+                    double m1 = h_mass(idx_i), m2 = h_mass(idx_j), m3 = h_mass(idx_o);
+
+                    // Find inner and outer orbital elements
+                    double a_in = a_min, e_in = 0.0;
+                    for (auto& pr : pairs) {
+                        if ((pr.pid_lo == inner_i && pr.pid_hi == inner_j) ||
+                            (pr.pid_lo == inner_j && pr.pid_hi == inner_i)) {
+                            e_in = pr.e;
+                            break;
+                        }
+                    }
+
+                    // Approximate outer semi-major axis from CoM
+                    // (simplified — use pair between outer and inner CoM)
+                    double a_out = 0.0, e_out = 0.0;
+                    for (auto& pr : pairs) {
+                        if ((pr.pid_lo == outer_pid || pr.pid_hi == outer_pid) &&
+                            pr.bound && pr.a > a_in) {
+                            a_out = pr.a;
+                            e_out = pr.e;
+                            break;
+                        }
+                    }
+
+                    if (a_out > 0) {
+                        bool stable = mardling_stability(a_in, e_in, a_out, e_out, m1, m2, m3);
+                        sub.type = stable ? SubsystemType::TRIPLE_STABLE : SubsystemType::TRIPLE_UNSTABLE;
+                        sub.inner_binary_id = inner_i;  // store inner binary info
+                        sub.outer_companion_pid = outer_pid;
+                    } else {
+                        sub.type = SubsystemType::TRIPLE_UNSTABLE;
+                    }
+                }
+            } else {
+                sub.type = SubsystemType::TRIPLE_UNSTABLE;
+            }
+            sub.dt_sub = dt_step;
+        } else {
+            sub.type = SubsystemType::MULTIPLET;
+            sub.dt_sub = dt_step;
+        }
+
+        active.push_back(sub);
+    }
+}
+
+// ============================================================================
+// Update subsystem_id in Particles
+// ============================================================================
+
+void SubsystemManager::update_particle_flags(Particles& p) const {
+    // Reset all to -1
+    auto sid = p.subsystem_id;
+    int N = p.N;
+    Kokkos::parallel_for("reset_sid", N, KOKKOS_LAMBDA(int i) { sid(i) = -1; });
+
+    if (active.empty()) return;
+
+    // Build mapping on host: particle_id -> subsystem_id
+    auto h_pid = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.particle_id);
+    auto h_sid = Kokkos::create_mirror_view(p.subsystem_id);
+    for (int i = 0; i < N; i++) h_sid(i) = -1;
+
+    for (const auto& sub : active) {
+        for (int pid : sub.particle_ids) {
+            for (int i = 0; i < N; i++) {
+                if (h_pid(i) == pid) {
+                    h_sid(i) = sub.id;
+                    break;
+                }
+            }
+        }
+    }
+    Kokkos::deep_copy(p.subsystem_id, h_sid);
+}
+
+// ============================================================================
+// Remap indices after partition
+// ============================================================================
+
+void SubsystemManager::remap_indices(const Particles& p) {
+    // Subsystem tracks permanent particle_ids, not array indices.
+    // No remapping needed — we always look up by particle_id.
+}
+
+// ============================================================================
+// Prune unbound subsystems
+// ============================================================================
+
+void SubsystemManager::prune(Particles& p, double G) {
+    auto h_x  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.x);
+    auto h_y  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.y);
+    auto h_z  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.z);
+    auto h_vx = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vx);
+    auto h_vy = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vy);
+    auto h_vz = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vz);
+    auto h_m  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.mass);
+    auto h_pid = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.particle_id);
+
+    // Build pid->idx
+    int max_pid = 0;
+    for (int i = 0; i < p.N; i++) max_pid = std::max(max_pid, h_pid(i));
+    std::vector<int> pid_to_idx(max_pid + 1, -1);
+    for (int i = 0; i < p.N; i++) pid_to_idx[h_pid(i)] = i;
+
+    active.erase(std::remove_if(active.begin(), active.end(),
+        [&](Subsystem& sub) {
+            if (sub.n_bodies != 2) return false;  // only prune binaries for now
+
+            int idx_i = pid_to_idx[sub.particle_ids[0]];
+            int idx_j = pid_to_idx[sub.particle_ids[1]];
+            if (idx_i < 0 || idx_j < 0) return true;
+
+            double dx = h_x(idx_j) - h_x(idx_i);
+            double dy = h_y(idx_j) - h_y(idx_i);
+            double dz = h_z(idx_j) - h_z(idx_i);
+            double dvx = h_vx(idx_j) - h_vx(idx_i);
+            double dvy = h_vy(idx_j) - h_vy(idx_i);
+            double dvz = h_vz(idx_j) - h_vz(idx_i);
+
+            double r = std::sqrt(dx*dx + dy*dy + dz*dz);
+            double v2 = dvx*dvx + dvy*dvy + dvz*dvz;
+            double mu = G * (h_m(idx_i) + h_m(idx_j));
+            double E = 0.5 * v2 - mu / r;
+
+            return (E >= 0.0);  // unbound → remove
+        }), active.end());
+}
+
+void SubsystemManager::clear() {
+    active.clear();
+}
