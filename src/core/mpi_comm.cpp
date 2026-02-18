@@ -99,7 +99,7 @@ void DistributedParticles::distribute_initial(Particles& global_particles) {
     N_local = N_total;
 
     // Step 3: Allocate local particles (full size on all ranks)
-    local.allocate(N_total);
+    local.allocate(N_total, global_particles.collisional);
 
     // Step 4: Broadcast ALL particles from rank 0 to all ranks
     if (my_rank == 0) {
@@ -210,6 +210,38 @@ void DistributedParticles::distribute_initial(Particles& global_particles) {
         Kokkos::deep_copy(local.ix, h_ix);
         Kokkos::deep_copy(local.iy, h_iy);
         Kokkos::deep_copy(local.iz, h_iz);
+    }
+
+    // Broadcast collisional fields if enabled
+    if (local.collisional) {
+        auto src = (my_rank == 0) ? global_particles : local;
+        auto h_pid = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), src.particle_id);
+        auto h_sid = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), src.subsystem_id);
+        auto h_stype = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), src.stellar_type);
+        auto h_mzams = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), src.m_zams);
+        auto h_sage = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), src.stellar_age);
+        auto h_srad = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), src.stellar_radius);
+        auto h_lum = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), src.luminosity);
+        auto h_cmass = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), src.core_mass);
+        auto h_smag = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), src.spin_mag);
+        MPI_Bcast(h_pid.data(), N_total, MPI_INT, 0, MPI_COMM_WORLD);
+        MPI_Bcast(h_sid.data(), N_total, MPI_INT, 0, MPI_COMM_WORLD);
+        MPI_Bcast(h_stype.data(), N_total, MPI_INT, 0, MPI_COMM_WORLD);
+        MPI_Bcast(h_mzams.data(), N_total, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+        MPI_Bcast(h_sage.data(), N_total, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+        MPI_Bcast(h_srad.data(), N_total, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+        MPI_Bcast(h_lum.data(), N_total, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+        MPI_Bcast(h_cmass.data(), N_total, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+        MPI_Bcast(h_smag.data(), N_total, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+        Kokkos::deep_copy(local.particle_id, h_pid);
+        Kokkos::deep_copy(local.subsystem_id, h_sid);
+        Kokkos::deep_copy(local.stellar_type, h_stype);
+        Kokkos::deep_copy(local.m_zams, h_mzams);
+        Kokkos::deep_copy(local.stellar_age, h_sage);
+        Kokkos::deep_copy(local.stellar_radius, h_srad);
+        Kokkos::deep_copy(local.luminosity, h_lum);
+        Kokkos::deep_copy(local.core_mass, h_cmass);
+        Kokkos::deep_copy(local.spin_mag, h_smag);
     }
 
     // Pre-allocate MPI communication buffers to avoid cudaMalloc per allgather

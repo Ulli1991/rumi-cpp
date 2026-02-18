@@ -5,6 +5,7 @@
 
 struct Particles {
     int N = 0;
+    bool collisional = false;  // whether collisional fields are allocated
 
     // SoA using Kokkos Views (default memory space)
     Kokkos::View<double*> x, y, z;
@@ -40,7 +41,32 @@ struct Particles {
     Kokkos::View<int*> scratch_i2, scratch_i3;
     Kokkos::View<int64_t*> scratch_l1, scratch_l2, scratch_l3;  // int64 scratch for permutation
 
-    void allocate(int n);
+    // =========================================================================
+    // Collisional fields (allocated only when collisional=true)
+    // =========================================================================
+
+    // Permanent unique ID (survives mergers, removals — distinct from orig_index)
+    Kokkos::View<int*> particle_id;
+
+    // Subsystem membership (-1 = field particle, >= 0 = subsystem index)
+    Kokkos::View<int*> subsystem_id;
+
+    // Stellar properties (for runtime SSE)
+    Kokkos::View<int*>    stellar_type;    // kw: 0-15 (Hurley classification)
+    Kokkos::View<double*> m_zams;          // ZAMS mass (M_sun)
+    Kokkos::View<double*> stellar_age;     // age (Myr)
+    Kokkos::View<double*> stellar_radius;  // radius (R_sun)
+    Kokkos::View<double*> luminosity;      // L_sun
+    Kokkos::View<double*> core_mass;       // core mass (M_sun)
+
+    // Post-Newtonian spin (for BHs)
+    Kokkos::View<double*[3], Kokkos::LayoutRight> spin_vec;
+    Kokkos::View<double*> spin_mag;        // |chi| dimensionless parameter
+
+    // Level-0 clamping
+    Kokkos::View<double*> dt_level0;       // timestep from top level, never increases
+
+    void allocate(int n, bool collisional_mode = false);
     void deallocate();
     void partition_by_level();
     void pack();    // Copy SoA to packed format

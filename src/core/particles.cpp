@@ -2,8 +2,9 @@
 #include <cstdlib>
 #include <cstring>
 
-void Particles::allocate(int n) {
+void Particles::allocate(int n, bool collisional_mode) {
     N = n;
+    collisional = collisional_mode;
     x  = Kokkos::View<double*>("x",  n);
     y  = Kokkos::View<double*>("y",  n);
     z  = Kokkos::View<double*>("z",  n);
@@ -53,6 +54,29 @@ void Particles::allocate(int n) {
     // Packed views for vectorized memory access (LayoutRight for double4 loads)
     pos_packed = Kokkos::View<double*[4], Kokkos::LayoutRight>("pos_packed", n);
     vel_packed = Kokkos::View<double*[4], Kokkos::LayoutRight>("vel_packed", n);
+
+    // Collisional fields (only allocated when needed)
+    if (collisional_mode) {
+        particle_id   = Kokkos::View<int*>("particle_id", n);
+        subsystem_id  = Kokkos::View<int*>("subsystem_id", n);
+        stellar_type  = Kokkos::View<int*>("stellar_type", n);
+        m_zams        = Kokkos::View<double*>("m_zams", n);
+        stellar_age   = Kokkos::View<double*>("stellar_age", n);
+        stellar_radius = Kokkos::View<double*>("stellar_radius", n);
+        luminosity    = Kokkos::View<double*>("luminosity", n);
+        core_mass     = Kokkos::View<double*>("core_mass", n);
+        spin_vec      = Kokkos::View<double*[3], Kokkos::LayoutRight>("spin_vec", n);
+        spin_mag      = Kokkos::View<double*>("spin_mag", n);
+        dt_level0     = Kokkos::View<double*>("dt_level0", n);
+
+        // Initialize particle_id = 0..N-1
+        auto pid = particle_id;
+        Kokkos::parallel_for("init_pid", n, KOKKOS_LAMBDA(int i) { pid(i) = i; });
+
+        // Initialize subsystem_id = -1 (all field particles)
+        auto sid = subsystem_id;
+        Kokkos::parallel_for("init_sid", n, KOKKOS_LAMBDA(int i) { sid(i) = -1; });
+    }
 }
 
 void Particles::deallocate() {
@@ -72,9 +96,19 @@ void Particles::deallocate() {
     d_level_dts = Kokkos::View<double*>();
     pos_packed = Kokkos::View<double*[4], Kokkos::LayoutRight>();
     vel_packed = Kokkos::View<double*[4], Kokkos::LayoutRight>();
+
+    // Collisional fields
+    particle_id = Kokkos::View<int*>();
+    subsystem_id = Kokkos::View<int*>();
+    stellar_type = Kokkos::View<int*>();
+    m_zams = stellar_age = stellar_radius = luminosity = core_mass = Kokkos::View<double*>();
+    spin_vec = Kokkos::View<double*[3], Kokkos::LayoutRight>();
+    spin_mag = dt_level0 = Kokkos::View<double*>();
+
     std::free(level_start); level_start = nullptr;
     std::free(level_count); level_count = nullptr;
     N = 0; n_levels = 0;
+    collisional = false;
 }
 
 void Particles::pack() {
@@ -224,4 +258,57 @@ void Particles::partition_by_level() {
         pix(i) = tl1(i); piy(i) = tl2(i); piz(i) = tl3(i);
     });
 
+
+    // Second pass: permute collisional-only fields (avoids overhead in softened mode)
+    if (collisional) {
+        auto ppid = particle_id;   auto psid = subsystem_id;
+        auto pstype = stellar_type;
+        auto pmzams = m_zams;      auto psage = stellar_age;
+        auto psrad = stellar_radius; auto plum = luminosity;
+        auto pcmass = core_mass;   auto psmag = spin_mag;
+        auto pdtl0 = dt_level0;
+        auto pspin = spin_vec;
+
+        // Gather collisional fields using scratch (reuse t1-t10 for doubles, ti1-ti2 for ints)
+        // Pass 1: ints (particle_id, subsystem_id, stellar_type) + doubles (m_zams, stellar_age, stellar_radius, luminosity, core_mass, spin_mag, dt_level0)
+        Kokkos::parallel_for("gather_coll", NN, KOKKOS_LAMBDA(int i) {
+            int src = perm(i);
+            ti1(i) = ppid(src);
+            ti2(i) = psid(src);
+            tl1(i) = pstype(src);  // reuse int64 scratch for int
+            t1(i) = pmzams(src);
+            t2(i) = psage(src);
+            t3(i) = psrad(src);
+            t4(i) = plum(src);
+            t5(i) = pcmass(src);
+            t6(i) = psmag(src);
+            t7(i) = pdtl0(src);
+        });
+
+        Kokkos::parallel_for("copy_coll", NN, KOKKOS_LAMBDA(int i) {
+            ppid(i) = ti1(i);
+            psid(i) = ti2(i);
+            pstype(i) = (int)tl1(i);
+            pmzams(i) = t1(i);
+            psage(i) = t2(i);
+            psrad(i) = t3(i);
+            plum(i) = t4(i);
+            pcmass(i) = t5(i);
+            psmag(i) = t6(i);
+            pdtl0(i) = t7(i);
+        });
+
+        // Spin vector (3 components) — separate pass using t1-t3
+        Kokkos::parallel_for("gather_spin", NN, KOKKOS_LAMBDA(int i) {
+            int src = perm(i);
+            t1(i) = pspin(src, 0);
+            t2(i) = pspin(src, 1);
+            t3(i) = pspin(src, 2);
+        });
+        Kokkos::parallel_for("copy_spin", NN, KOKKOS_LAMBDA(int i) {
+            pspin(i, 0) = t1(i);
+            pspin(i, 1) = t2(i);
+            pspin(i, 2) = t3(i);
+        });
+    }
 }
