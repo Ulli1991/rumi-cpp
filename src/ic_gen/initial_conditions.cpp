@@ -1,5 +1,11 @@
 #include "initial_conditions.h"
 #include "constants.h"
+#ifdef ENABLE_COLLISIONAL
+#include "collisional_config.h"
+#define COLL_ENABLED g_collisional.enabled
+#else
+#define COLL_ENABLED false
+#endif
 #include "sse.h"
 #include <Kokkos_Core.hpp>
 #include <cmath>
@@ -10,7 +16,7 @@
 #include <string>
 
 void init_outer_planets(Particles& p) {
-    p.allocate(5);
+    p.allocate(5, COLL_ENABLED);
 
     double pos_au[][3] = {
         {0.0, 0.0, 0.0},
@@ -111,7 +117,7 @@ static std::vector<double> sample_kroupa_imf(int N, std::mt19937_64& rng,
 
 void init_plummer(Particles& p, int N, double M_total_msun, double r_half_pc, int seed,
                   const std::string& mass_distribution, double age_gyr, double metallicity) {
-    p.allocate(N);
+    p.allocate(N, COLL_ENABLED);
 
     double M_total = M_total_msun;            // M_sun = code mass unit
     double a_pc = r_half_pc / PLUMMER_SCALE_FACTOR;
@@ -148,9 +154,11 @@ void init_plummer(Particles& p, int N, double M_total_msun, double r_half_pc, in
         auto m_initial = sample_kroupa_imf(N, rng);
         int n_ms = 0, n_evolved = 0, n_wd = 0, n_ns = 0, n_bh = 0;
         std::vector<double> masses(N);
+        std::vector<int> kw_types(N);
         for (int i = 0; i < N; i++) {
             SSEResult res = sse.evolve(m_initial[i], age_myr);
             masses[i] = res.mass;
+            kw_types[i] = res.kw;
             if (res.kw <= 1) n_ms++;
             else if (res.kw >= 2 && res.kw <= 9) n_evolved++;
             else if (res.kw >= 10 && res.kw <= 12) n_wd++;
@@ -176,6 +184,16 @@ void init_plummer(Particles& p, int N, double M_total_msun, double r_half_pc, in
         double mn = *std::min_element(masses.begin(), masses.end());
         double mx = *std::max_element(masses.begin(), masses.end());
         std::printf("    Mass range: %.4f - %.4f M_sun\n", mn, mx);
+        // Per-type mass ranges
+        double wd_mn = 1e30, wd_mx = 0, ns_mn = 1e30, ns_mx = 0, bh_mn = 1e30, bh_mx = 0;
+        for (int i = 0; i < N; i++) {
+            if (kw_types[i] >= 10 && kw_types[i] <= 12) { wd_mn = std::min(wd_mn, masses[i]); wd_mx = std::max(wd_mx, masses[i]); }
+            else if (kw_types[i] == 13) { ns_mn = std::min(ns_mn, masses[i]); ns_mx = std::max(ns_mx, masses[i]); }
+            else if (kw_types[i] == 14) { bh_mn = std::min(bh_mn, masses[i]); bh_mx = std::max(bh_mx, masses[i]); }
+        }
+        if (n_wd > 0) std::printf("    WD masses:  %.4f - %.4f M_sun\n", wd_mn, wd_mx);
+        if (n_ns > 0) std::printf("    NS masses:  %.4f - %.4f M_sun\n", ns_mn, ns_mx);
+        if (n_bh > 0) std::printf("    BH masses:  %.4f - %.4f M_sun\n", bh_mn, bh_mx);
     }
 
     // Crossing time: t_cr = sqrt(R_h^3 / (G * M)) in code TU, then convert to Myr
