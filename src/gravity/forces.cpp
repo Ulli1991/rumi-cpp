@@ -1,6 +1,10 @@
 #include "forces.h"
 #include "constants.h"
 #include "integrator.h"
+#ifdef ENABLE_COLLISIONAL
+#include "collisional_config.h"
+#include "subsystem.h"
+#endif
 #include <Kokkos_Core.hpp>
 #include <cfloat>
 
@@ -9,13 +13,35 @@
 // ==========================================================================
 // Full N^2 acceleration + adaptive timestep (fused)
 // ==========================================================================
-void compute_acceleration_and_timestep(Particles& p, double G, double soft2, double eta) {
+template<bool COLL>
+static void compute_acceleration_and_timestep_impl(Particles& p, double G, double soft2, double eta) {
     const int N = p.N;
     RawView px{p.x.data()}, py{p.y.data()}, pz{p.z.data()};
     RawView pvx{p.vx.data()}, pvy{p.vy.data()}, pvz{p.vz.data()};
     RawView pax{p.ax.data()}, pay{p.ay.data()}, paz{p.az.data()};
     RawView m{p.mass.data()};
     RawView dt_f{p.dt_adapt.data()};
+    // Collisional: subsystem exclusion + neighbor detection (raw pointers to avoid View capture overhead)
+    const int* sid_raw = COLL ? p.subsystem_id.data() : nullptr;
+    const int* pid_raw = COLL ? p.particle_id.data() : nullptr;
+#ifdef ENABLE_COLLISIONAL
+    int* ngb_i_raw = COLL ? g_subsystem_mgr.ngb_pair_i.data() : nullptr;
+    int* ngb_j_raw = COLL ? g_subsystem_mgr.ngb_pair_j.data() : nullptr;
+    double* ngb_a_raw = COLL ? g_subsystem_mgr.ngb_pair_a.data() : nullptr;
+    double* ngb_e_raw = COLL ? g_subsystem_mgr.ngb_pair_e.data() : nullptr;
+    double* ngb_E_raw = COLL ? g_subsystem_mgr.ngb_pair_E.data() : nullptr;
+    int* ngb_bound_raw = COLL ? g_subsystem_mgr.ngb_pair_bound.data() : nullptr;
+    int* ngb_cnt_raw = COLL ? g_subsystem_mgr.ngb_count.data() : nullptr;
+    int max_ngb = COLL ? g_subsystem_mgr.max_ngb_pairs : 0;
+    double r_ngb_max_sq_val = COLL ? g_collisional.r_ngb_max_sq : 0.0;
+    double r_ngb_val = COLL ? g_collisional.r_ngb : 0.0;
+#else
+    int* ngb_i_raw = nullptr; int* ngb_j_raw = nullptr;
+    double* ngb_a_raw = nullptr; double* ngb_e_raw = nullptr;
+    double* ngb_E_raw = nullptr;
+    int* ngb_bound_raw = nullptr; int* ngb_cnt_raw = nullptr;
+    int max_ngb = 0; double r_ngb_max_sq_val = 0.0; double r_ngb_val = 0.0;
+#endif
 
     // Tiled version using shared memory with packed vector loads
     // Each team of TILE_SIZE threads handles TILE_SIZE particles (i)
@@ -46,9 +72,11 @@ void compute_acceleration_and_timestep(Particles& p, double G, double soft2, dou
             double xi = 0, yi = 0, zi = 0;
             double vxi = 0, vyi = 0, vzi = 0;
             double mi = 0, pad = 0;
+            int sid_i = -1;
             if (i < N) {
                 load4(&pos(i, 0), xi, yi, zi, mi);
                 load4(&vel(i, 0), vxi, vyi, vzi, pad);
+                if (COLL) sid_i = sid_raw[i];
             }
 
             double axi = 0, ayi = 0, azi = 0;
@@ -73,6 +101,8 @@ void compute_acceleration_and_timestep(Particles& p, double G, double soft2, dou
                     for (int jt = 0; jt < tile_count; jt++) {
                         int j = tile_start + jt;
                         if (j == i) continue;
+                        // Subsystem exclusion: skip intra-subsystem pairs
+                        if (COLL) { if (sid_i >= 0 && sid_raw[j] == sid_i) continue; }
 
                         int jb = jt * 7;
                         double dx = tile(jb    ) - xi;
@@ -101,6 +131,34 @@ void compute_acceleration_and_timestep(Particles& p, double G, double soft2, dou
                         double t_fb_sq = r2s / (v_sq + EPS);
                         double t_min_sq_pair = Kokkos::fmin(t_ff_sq, t_fb_sq);
                         t_min_i = Kokkos::fmin(t_min_i, t_min_sq_pair);
+
+                        // Neighbor detection: identify bound/close pairs
+                        if (COLL) {
+                            if (r2 < r_ngb_max_sq_val && i < j) {
+                                double mu = G * mass_sum;
+                                double r_val = Kokkos::sqrt(r2);
+                                double E_orb = 0.5 * v_sq - mu / (r_val + EPS);
+                                bool is_bound = (E_orb < 0);
+                                double a_val = -mu / (2.0 * E_orb + EPS);
+                                double Lx = dy*dvz - dz*dvy;
+                                double Ly = dz*dvx - dx*dvz;
+                                double Lz = dx*dvy - dy*dvx;
+                                double L2 = Lx*Lx + Ly*Ly + Lz*Lz;
+                                double e_val = is_bound ?
+                                    Kokkos::sqrt(Kokkos::fmax(0.0, 1.0 + 2.0*E_orb*L2/(mu*mu + EPS))) : 0.0;
+                                if (is_bound && (a_val < r_ngb_val || r_val < r_ngb_val)) {
+                                    int idx = Kokkos::atomic_fetch_add(ngb_cnt_raw, 1);
+                                    if (idx < max_ngb) {
+                                        int pi = pid_raw[i], pj = pid_raw[j];
+                                        if (pi > pj) { int tmp = pi; pi = pj; pj = tmp; }
+                                        ngb_i_raw[idx] = pi; ngb_j_raw[idx] = pj;
+                                        ngb_a_raw[idx] = a_val; ngb_e_raw[idx] = e_val;
+                                        ngb_E_raw[idx] = E_orb;
+                                        ngb_bound_raw[idx] = is_bound ? 1 : 0;
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
                 team.team_barrier();
@@ -120,14 +178,24 @@ void compute_acceleration_and_timestep(Particles& p, double G, double soft2, dou
 
 }
 
+void compute_acceleration_and_timestep(Particles& p, double G, double soft2, double eta) {
+#ifdef ENABLE_COLLISIONAL
+    if (p.collisional) compute_acceleration_and_timestep_impl<true>(p, G, soft2, eta);
+    else
+#endif
+    compute_acceleration_and_timestep_impl<false>(p, G, soft2, eta);
+}
+
 // ==========================================================================
 // Self-interaction: [start, start+count)
 // ==========================================================================
-void self_acceleration(Particles& p, int start, int count,
+template<bool COLL>
+static void self_acceleration_impl(Particles& p, int start, int count,
                        double G, double soft2) {
     RawView px{p.x.data()}, py{p.y.data()}, pz{p.z.data()};
     RawView pax{p.ax.data()}, pay{p.ay.data()}, paz{p.az.data()};
     RawView m{p.mass.data()};
+    const int* sid_raw = COLL ? p.subsystem_id.data() : nullptr;
     const int end = start + count;
 
     using team_policy = Kokkos::TeamPolicy<>;
@@ -145,7 +213,8 @@ void self_acceleration(Particles& p, int start, int count,
                 tile(team.team_scratch(0), TILE_SIZE * 4);
 
             double xi = 0, yi = 0, zi = 0;
-            if (ii < count) { xi = px(i); yi = py(i); zi = pz(i); }
+            int sid_i = -1;
+            if (ii < count) { xi = px(i); yi = py(i); zi = pz(i); if (COLL) sid_i = sid_raw[i]; }
             double axi = 0, ayi = 0, azi = 0;
 
             for (int tile_start = start; tile_start < end; tile_start += TILE_SIZE) {
@@ -161,6 +230,7 @@ void self_acceleration(Particles& p, int start, int count,
                     for (int jt = 0; jt < tile_count; jt++) {
                         int j = tile_start + jt;
                         if (j == i) continue;
+                        if (COLL) { if (sid_i >= 0 && sid_raw[j] == sid_i) continue; }
                         double dx = tile(jt*4+0) - xi;
                         double dy = tile(jt*4+1) - yi;
                         double dz = tile(jt*4+2) - zi;
@@ -178,17 +248,25 @@ void self_acceleration(Particles& p, int start, int count,
 
 }
 
+void self_acceleration(Particles& p, int start, int count, double G, double soft2) {
+#ifdef ENABLE_COLLISIONAL
+    if (p.collisional) self_acceleration_impl<true>(p, start, count, G, soft2);
+    else
+#endif
+    self_acceleration_impl<false>(p, start, count, G, soft2);
+}
+
 // ==========================================================================
 // Self gradient correction
 // ==========================================================================
-void self_gradient_correction(Particles& p, int start, int count,
+template<bool COLL>
+static void self_gradient_correction_impl(Particles& p, int start, int count,
                               double G, double soft2, double dt) {
     RawView px{p.x.data()}, py{p.y.data()}, pz{p.z.data()};
     RawView pax{p.ax.data()}, pay{p.ay.data()}, paz{p.az.data()};
     RawView m{p.mass.data()};
+    const int* sid_raw = COLL ? p.subsystem_id.data() : nullptr;
     const double coeff = G * dt * dt * GRAD_COEFF;
-
-
 
     // Snapshot accelerations into scratch
     RawView ax0{p.scratch1.data()}, ay0{p.scratch2.data()}, az0{p.scratch3.data()};
@@ -197,7 +275,6 @@ void self_gradient_correction(Particles& p, int start, int count,
         ay0(ii) = pay(start + ii);
         az0(ii) = paz(start + ii);
     });
-
 
     using team_policy = Kokkos::TeamPolicy<>;
     using member_type = team_policy::member_type;
@@ -215,9 +292,11 @@ void self_gradient_correction(Particles& p, int start, int count,
 
             double xi = 0, yi = 0, zi = 0;
             double axi0 = 0, ayi0 = 0, azi0 = 0;
+            int sid_i = -1;
             if (ii < count) {
                 xi = px(i); yi = py(i); zi = pz(i);
                 axi0 = ax0(ii); ayi0 = ay0(ii); azi0 = az0(ii);
+                if (COLL) sid_i = sid_raw[i];
             }
             double cx = 0, cy = 0, cz = 0;
 
@@ -238,6 +317,7 @@ void self_gradient_correction(Particles& p, int start, int count,
                     for (int jt = 0; jt < tile_count; jt++) {
                         int jj = tile_idx + jt;
                         if (jj == ii) continue;
+                        if (COLL) { if (sid_i >= 0 && sid_raw[start + jj] == sid_i) continue; }
                         int jb = jt * 7;
                         double dx = tile(jb+0) - xi;
                         double dy = tile(jb+1) - yi;
@@ -263,6 +343,14 @@ void self_gradient_correction(Particles& p, int start, int count,
 
 }
 
+void self_gradient_correction(Particles& p, int start, int count, double G, double soft2, double dt) {
+#ifdef ENABLE_COLLISIONAL
+    if (p.collisional) self_gradient_correction_impl<true>(p, start, count, G, soft2, dt);
+    else
+#endif
+    self_gradient_correction_impl<false>(p, start, count, G, soft2, dt);
+}
+
 // ==========================================================================
 // Fused self_acceleration + self_gradient_correction
 // ==========================================================================
@@ -275,13 +363,15 @@ void self_acceleration_and_gradient(Particles& p, int start, int count,
 // ==========================================================================
 // Cross-interaction: group A x group B
 // ==========================================================================
-void cross_acceleration(Particles& p,
+template<bool COLL>
+static void cross_acceleration_impl(Particles& p,
                         int a_start, int a_count,
                         int b_start, int b_count,
                         double G, double soft2) {
     RawView px{p.x.data()}, py{p.y.data()}, pz{p.z.data()};
     RawView pax{p.ax.data()}, pay{p.ay.data()}, paz{p.az.data()};
     RawView m{p.mass.data()};
+    const int* sid_raw = COLL ? p.subsystem_id.data() : nullptr;
     const int b_end = b_start + b_count;
     const int a_end = a_start + a_count;
 
@@ -301,7 +391,8 @@ void cross_acceleration(Particles& p,
                 tile(team.team_scratch(0), TILE_SIZE * 4);
 
             double xi = 0, yi = 0, zi = 0;
-            if (ii < a_count) { xi = px(i); yi = py(i); zi = pz(i); }
+            int sid_i = -1;
+            if (ii < a_count) { xi = px(i); yi = py(i); zi = pz(i); if (COLL) sid_i = sid_raw[i]; }
             double axi = 0, ayi = 0, azi = 0;
 
             for (int tile_start = b_start; tile_start < b_end; tile_start += TILE_SIZE) {
@@ -315,6 +406,8 @@ void cross_acceleration(Particles& p,
                 team.team_barrier();
                 if (ii < a_count) {
                     for (int jt = 0; jt < tile_count; jt++) {
+                        int j_cross = tile_start + jt;
+                        if (COLL) { if (sid_i >= 0 && sid_raw[j_cross] == sid_i) continue; }
                         double dx = tile(jt*4+0) - xi;
                         double dy = tile(jt*4+1) - yi;
                         double dz = tile(jt*4+2) - zi;
@@ -340,7 +433,8 @@ void cross_acceleration(Particles& p,
                 tile(team.team_scratch(0), TILE_SIZE * 4);
 
             double xj = 0, yj = 0, zj = 0;
-            if (ii < b_count) { xj = px(j); yj = py(j); zj = pz(j); }
+            int sid_j = -1;
+            if (ii < b_count) { xj = px(j); yj = py(j); zj = pz(j); if (COLL) sid_j = sid_raw[j]; }
             double axj = 0, ayj = 0, azj = 0;
 
             for (int tile_start = a_start; tile_start < a_end; tile_start += TILE_SIZE) {
@@ -354,6 +448,8 @@ void cross_acceleration(Particles& p,
                 team.team_barrier();
                 if (ii < b_count) {
                     for (int it = 0; it < tile_count; it++) {
+                        int i2_cross = tile_start + it;
+                        if (COLL) { if (sid_j >= 0 && sid_raw[i2_cross] == sid_j) continue; }
                         double dx = tile(it*4+0) - xj;
                         double dy = tile(it*4+1) - yj;
                         double dz = tile(it*4+2) - zj;
@@ -371,19 +467,28 @@ void cross_acceleration(Particles& p,
 
 }
 
+void cross_acceleration(Particles& p, int a_start, int a_count,
+                        int b_start, int b_count, double G, double soft2) {
+#ifdef ENABLE_COLLISIONAL
+    if (p.collisional) cross_acceleration_impl<true>(p, a_start, a_count, b_start, b_count, G, soft2);
+    else
+#endif
+    cross_acceleration_impl<false>(p, a_start, a_count, b_start, b_count, G, soft2);
+}
+
 // ==========================================================================
 // Cross gradient correction
 // ==========================================================================
-void cross_gradient_correction(Particles& p,
+template<bool COLL>
+static void cross_gradient_correction_impl(Particles& p,
                                int a_start, int a_count,
                                int b_start, int b_count,
                                double G, double soft2, double dt) {
     RawView px{p.x.data()}, py{p.y.data()}, pz{p.z.data()};
     RawView pax{p.ax.data()}, pay{p.ay.data()}, paz{p.az.data()};
     RawView m{p.mass.data()};
+    const int* sid_raw = COLL ? p.subsystem_id.data() : nullptr;
     const double coeff = G * dt * dt * GRAD_COEFF;
-
-
 
     // Snapshot accelerations
     RawView ax0_a{p.scratch1.data()}, ay0_a{p.scratch2.data()}, az0_a{p.scratch3.data()};
@@ -398,7 +503,6 @@ void cross_gradient_correction(Particles& p,
         ay0_b(jj) = pay(b_start + jj);
         az0_b(jj) = paz(b_start + jj);
     });
-
 
     using team_policy = Kokkos::TeamPolicy<>;
     using member_type = team_policy::member_type;
@@ -417,9 +521,11 @@ void cross_gradient_correction(Particles& p,
 
             double xi = 0, yi = 0, zi = 0;
             double axi0 = 0, ayi0 = 0, azi0 = 0;
+            int sid_i = -1;
             if (ii < a_count) {
                 xi = px(i); yi = py(i); zi = pz(i);
                 axi0 = ax0_a(ii); ayi0 = ay0_a(ii); azi0 = az0_a(ii);
+                if (COLL) sid_i = sid_raw[i];
             }
             double cx = 0, cy = 0, cz = 0;
 
@@ -438,6 +544,8 @@ void cross_gradient_correction(Particles& p,
                 team.team_barrier();
                 if (ii < a_count) {
                     for (int jt = 0; jt < tile_count; jt++) {
+                        int j_cross = b_start + tile_idx + jt;
+                        if (COLL) { if (sid_i >= 0 && sid_raw[j_cross] == sid_i) continue; }
                         int jb = jt * 7;
                         double dx = tile(jb+0) - xi;
                         double dy = tile(jb+1) - yi;
@@ -472,9 +580,11 @@ void cross_gradient_correction(Particles& p,
 
             double xj = 0, yj = 0, zj = 0;
             double axj0 = 0, ayj0 = 0, azj0 = 0;
+            int sid_j = -1;
             if (ii < b_count) {
                 xj = px(j); yj = py(j); zj = pz(j);
                 axj0 = ax0_b(ii); ayj0 = ay0_b(ii); azj0 = az0_b(ii);
+                if (COLL) sid_j = sid_raw[j];
             }
             double cx = 0, cy = 0, cz = 0;
 
@@ -493,6 +603,8 @@ void cross_gradient_correction(Particles& p,
                 team.team_barrier();
                 if (ii < b_count) {
                     for (int it = 0; it < tile_count; it++) {
+                        int i2_cross = a_start + tile_idx + it;
+                        if (COLL) { if (sid_j >= 0 && sid_raw[i2_cross] == sid_j) continue; }
                         int ib = it * 7;
                         double dx = tile(ib+0) - xj;
                         double dy = tile(ib+1) - yj;
@@ -518,6 +630,15 @@ void cross_gradient_correction(Particles& p,
 
 }
 
+void cross_gradient_correction(Particles& p, int a_start, int a_count,
+                               int b_start, int b_count, double G, double soft2, double dt) {
+#ifdef ENABLE_COLLISIONAL
+    if (p.collisional) cross_gradient_correction_impl<true>(p, a_start, a_count, b_start, b_count, G, soft2, dt);
+    else
+#endif
+    cross_gradient_correction_impl<false>(p, a_start, a_count, b_start, b_count, G, soft2, dt);
+}
+
 // ==========================================================================
 // Fused cross_acceleration + cross_gradient_correction
 // ==========================================================================
@@ -533,7 +654,8 @@ void cross_acceleration_and_gradient(Particles& p,
 // Compute adaptive timesteps for a subset [start, start+count)
 // Only considers mutual interactions within the subset (for HHS recursion)
 // ==========================================================================
-void compute_timestep_subset(Particles& p, int start, int count,
+template<bool COLL>
+static void compute_timestep_subset_impl(Particles& p, int start, int count,
                           double G, double soft2, double eta,
                           bool symmetrize) {
     if (count <= 1) return;  // No pairs to consider
@@ -542,6 +664,26 @@ void compute_timestep_subset(Particles& p, int start, int count,
     RawView pvx{p.vx.data()}, pvy{p.vy.data()}, pvz{p.vz.data()};
     RawView m{p.mass.data()};
     RawView dt_f{p.dt_adapt.data()};
+    const int* sid_raw = COLL ? p.subsystem_id.data() : nullptr;
+    const int* pid_raw = COLL ? p.particle_id.data() : nullptr;
+#ifdef ENABLE_COLLISIONAL
+    int* ngb_i_raw = COLL ? g_subsystem_mgr.ngb_pair_i.data() : nullptr;
+    int* ngb_j_raw = COLL ? g_subsystem_mgr.ngb_pair_j.data() : nullptr;
+    double* ngb_a_raw = COLL ? g_subsystem_mgr.ngb_pair_a.data() : nullptr;
+    double* ngb_e_raw = COLL ? g_subsystem_mgr.ngb_pair_e.data() : nullptr;
+    double* ngb_E_raw = COLL ? g_subsystem_mgr.ngb_pair_E.data() : nullptr;
+    int* ngb_bound_raw = COLL ? g_subsystem_mgr.ngb_pair_bound.data() : nullptr;
+    int* ngb_cnt_raw = COLL ? g_subsystem_mgr.ngb_count.data() : nullptr;
+    int max_ngb = COLL ? g_subsystem_mgr.max_ngb_pairs : 0;
+    double r_ngb_max_sq_val = COLL ? g_collisional.r_ngb_max_sq : 0.0;
+    double r_ngb_val = COLL ? g_collisional.r_ngb : 0.0;
+#else
+    int* ngb_i_raw = nullptr; int* ngb_j_raw = nullptr;
+    double* ngb_a_raw = nullptr; double* ngb_e_raw = nullptr;
+    double* ngb_E_raw = nullptr;
+    int* ngb_bound_raw = nullptr; int* ngb_cnt_raw = nullptr;
+    int max_ngb = 0; double r_ngb_max_sq_val = 0.0; double r_ngb_val = 0.0;
+#endif
     const int end = start + count;
 
     // Initialize dt_adapt to large value for subset
@@ -571,10 +713,12 @@ void compute_timestep_subset(Particles& p, int start, int count,
             double xi = 0, yi = 0, zi = 0;
             double vxi = 0, vyi = 0, vzi = 0;
             double mi = 0;
+            int sid_i = -1;
             if (ii < count) {
                 xi = px(i); yi = py(i); zi = pz(i);
                 vxi = pvx(i); vyi = pvy(i); vzi = pvz(i);
                 mi = m(i);
+                if (COLL) sid_i = sid_raw[i];
             }
 
             double t_min_sq = 1e60;   // non-symmetrized path
@@ -602,6 +746,7 @@ void compute_timestep_subset(Particles& p, int start, int count,
                     for (int jt = 0; jt < tile_cnt; jt++) {
                         int j = tile_st + jt;
                         if (j == i) continue;
+                        if (COLL) { if (sid_i >= 0 && sid_raw[j] == sid_i) continue; }
 
                         int jb = jt * 7;
                         double dx = tile(jb    ) - xi;
@@ -651,6 +796,31 @@ void compute_timestep_subset(Particles& p, int start, int count,
                             double t_min_sq_pair = Kokkos::fmin(t_ff_sq, t_fb_sq);
                             t_min_sq = Kokkos::fmin(t_min_sq, t_min_sq_pair);
                         }
+
+                        // Neighbor detection
+                        if (COLL) {
+                            if (r2 < r_ngb_max_sq_val && i < j) {
+                                double mu = G * mass_sum;
+                                double r_val = Kokkos::sqrt(r2);
+                                double E_orb = 0.5 * v_sq - mu / (r_val + EPS);
+                                bool is_bound = (E_orb < 0);
+                                double a_val = -mu / (2.0 * E_orb + EPS);
+                                double Lx = dy*dvz - dz*dvy, Ly = dz*dvx - dx*dvz, Lz = dx*dvy - dy*dvx;
+                                double L2 = Lx*Lx + Ly*Ly + Lz*Lz;
+                                double e_val = is_bound ?
+                                    Kokkos::sqrt(Kokkos::fmax(0.0, 1.0 + 2.0*E_orb*L2/(mu*mu + EPS))) : 0.0;
+                                if (is_bound && (a_val < r_ngb_val || r_val < r_ngb_val)) {
+                                    int idx = Kokkos::atomic_fetch_add(ngb_cnt_raw, 1);
+                                    if (idx < max_ngb) {
+                                        int pi = pid_raw[i], pj = pid_raw[j];
+                                        if (pi > pj) { int tmp = pi; pi = pj; pj = tmp; }
+                                        ngb_i_raw[idx] = pi; ngb_j_raw[idx] = pj;
+                                        ngb_a_raw[idx] = a_val; ngb_e_raw[idx] = e_val;
+                                        ngb_E_raw[idx] = E_orb; ngb_bound_raw[idx] = 1;
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
                 team.team_barrier();
@@ -663,15 +833,26 @@ void compute_timestep_subset(Particles& p, int start, int count,
 
 }
 
+void compute_timestep_subset(Particles& p, int start, int count,
+                          double G, double soft2, double eta, bool symmetrize) {
+#ifdef ENABLE_COLLISIONAL
+    if (p.collisional) compute_timestep_subset_impl<true>(p, start, count, G, soft2, eta, symmetrize);
+    else
+#endif
+    compute_timestep_subset_impl<false>(p, start, count, G, soft2, eta, symmetrize);
+}
+
 // ==========================================================================
 // Fused self_acceleration + kick (reduces kernel launches)
 // ==========================================================================
-void self_acceleration_kick(Particles& p, int start, int count,
+template<bool COLL>
+static void self_acceleration_kick_impl(Particles& p, int start, int count,
                             double G, double soft2, double kick_dt) {
     RawView px{p.x.data()}, py{p.y.data()}, pz{p.z.data()};
     RawView pvx{p.vx.data()}, pvy{p.vy.data()}, pvz{p.vz.data()};
     RawView pax{p.ax.data()}, pay{p.ay.data()}, paz{p.az.data()};
     RawView m{p.mass.data()};
+    const int* sid_raw = COLL ? p.subsystem_id.data() : nullptr;
     const int end = start + count;
 
     using team_policy = Kokkos::TeamPolicy<>;
@@ -689,7 +870,8 @@ void self_acceleration_kick(Particles& p, int start, int count,
                 tile(team.team_scratch(0), TILE_SIZE * 4);
 
             double xi = 0, yi = 0, zi = 0;
-            if (ii < count) { xi = px(i); yi = py(i); zi = pz(i); }
+            int sid_i = -1;
+            if (ii < count) { xi = px(i); yi = py(i); zi = pz(i); if (COLL) sid_i = sid_raw[i]; }
             double axi = 0, ayi = 0, azi = 0;
 
             for (int tile_start = start; tile_start < end; tile_start += TILE_SIZE) {
@@ -705,6 +887,7 @@ void self_acceleration_kick(Particles& p, int start, int count,
                     for (int jt = 0; jt < tile_count; jt++) {
                         int j = tile_start + jt;
                         if (j == i) continue;
+                        if (COLL) { if (sid_i >= 0 && sid_raw[j] == sid_i) continue; }
                         double dx = tile(jt*4+0) - xi;
                         double dy = tile(jt*4+1) - yi;
                         double dz = tile(jt*4+2) - zi;
@@ -727,18 +910,48 @@ void self_acceleration_kick(Particles& p, int start, int count,
 
 }
 
+void self_acceleration_kick(Particles& p, int start, int count,
+                            double G, double soft2, double kick_dt) {
+#ifdef ENABLE_COLLISIONAL
+    if (p.collisional) self_acceleration_kick_impl<true>(p, start, count, G, soft2, kick_dt);
+    else
+#endif
+    self_acceleration_kick_impl<false>(p, start, count, G, soft2, kick_dt);
+}
+
 // ==========================================================================
 // Fused self_acceleration + symmetrized timestep (no kick)
 // Computes forces AND timesteps with harmonic symmetrization in one N² pass.
 // Forces stored in ax/ay/az for reuse by the first FSI kick.
 // ==========================================================================
-void self_acceleration_and_timestep(Particles& p, int start, int count,
+template<bool COLL>
+static void self_acceleration_and_timestep_impl(Particles& p, int start, int count,
                                      double G, double soft2, double eta) {
     RawView px{p.x.data()}, py{p.y.data()}, pz{p.z.data()};
     RawView pvx{p.vx.data()}, pvy{p.vy.data()}, pvz{p.vz.data()};
     RawView pax{p.ax.data()}, pay{p.ay.data()}, paz{p.az.data()};
     RawView m{p.mass.data()};
     RawView dt_f{p.dt_adapt.data()};
+    const int* sid_raw = COLL ? p.subsystem_id.data() : nullptr;
+    const int* pid_raw = COLL ? p.particle_id.data() : nullptr;
+#ifdef ENABLE_COLLISIONAL
+    int* ngb_i_raw = COLL ? g_subsystem_mgr.ngb_pair_i.data() : nullptr;
+    int* ngb_j_raw = COLL ? g_subsystem_mgr.ngb_pair_j.data() : nullptr;
+    double* ngb_a_raw = COLL ? g_subsystem_mgr.ngb_pair_a.data() : nullptr;
+    double* ngb_e_raw = COLL ? g_subsystem_mgr.ngb_pair_e.data() : nullptr;
+    double* ngb_E_raw = COLL ? g_subsystem_mgr.ngb_pair_E.data() : nullptr;
+    int* ngb_bound_raw = COLL ? g_subsystem_mgr.ngb_pair_bound.data() : nullptr;
+    int* ngb_cnt_raw = COLL ? g_subsystem_mgr.ngb_count.data() : nullptr;
+    int max_ngb = COLL ? g_subsystem_mgr.max_ngb_pairs : 0;
+    double r_ngb_max_sq_val = COLL ? g_collisional.r_ngb_max_sq : 0.0;
+    double r_ngb_val = COLL ? g_collisional.r_ngb : 0.0;
+#else
+    int* ngb_i_raw = nullptr; int* ngb_j_raw = nullptr;
+    double* ngb_a_raw = nullptr; double* ngb_e_raw = nullptr;
+    double* ngb_E_raw = nullptr;
+    int* ngb_bound_raw = nullptr; int* ngb_cnt_raw = nullptr;
+    int max_ngb = 0; double r_ngb_max_sq_val = 0.0; double r_ngb_val = 0.0;
+#endif
     const int end = start + count;
 
     using team_policy = Kokkos::TeamPolicy<>;
@@ -757,9 +970,11 @@ void self_acceleration_and_timestep(Particles& p, int start, int count,
 
             double xi = 0, yi = 0, zi = 0, mi_val = 0;
             double vxi = 0, vyi = 0, vzi = 0;
+            int sid_i = -1;
             if (ii < count) {
                 xi = px(i); yi = py(i); zi = pz(i); mi_val = m(i);
                 vxi = pvx(i); vyi = pvy(i); vzi = pvz(i);
+                if (COLL) sid_i = sid_raw[i];
             }
             double axi = 0, ayi = 0, azi = 0;
             double t_min_i = 1e30;
@@ -780,6 +995,7 @@ void self_acceleration_and_timestep(Particles& p, int start, int count,
                     for (int jt = 0; jt < tile_count; jt++) {
                         int j = tile_start + jt;
                         if (j == i) continue;
+                        if (COLL) { if (sid_i >= 0 && sid_raw[j] == sid_i) continue; }
                         int jb = jt * 7;
                         double dx = tile(jb+0) - xi;
                         double dy = tile(jb+1) - yi;
@@ -827,6 +1043,32 @@ void self_acceleration_and_timestep(Particles& p, int start, int count,
                         double t_sym_fb = t_fb + ct_fb / (u_fb + 1.0);
 
                         t_min_i = Kokkos::fmin(t_min_i, Kokkos::fmin(t_sym_ff, t_sym_fb));
+
+                        // Neighbor detection
+                        if (COLL) {
+                            if (r2 < r_ngb_max_sq_val && i < j) {
+                                double mu = G * (mi_val + mj);
+                                double r_val = Kokkos::sqrt(r2);
+                                double v_sq_nd = dvx*dvx + dvy*dvy + dvz*dvz;
+                                double E_orb = 0.5 * v_sq_nd - mu / (r_val + EPS);
+                                bool is_bound = (E_orb < 0);
+                                double a_val = -mu / (2.0 * E_orb + EPS);
+                                double Lx = dy*dvz - dz*dvy, Ly = dz*dvx - dx*dvz, Lz = dx*dvy - dy*dvx;
+                                double L2 = Lx*Lx + Ly*Ly + Lz*Lz;
+                                double e_val = is_bound ?
+                                    Kokkos::sqrt(Kokkos::fmax(0.0, 1.0 + 2.0*E_orb*L2/(mu*mu + EPS))) : 0.0;
+                                if (is_bound && (a_val < r_ngb_val || r_val < r_ngb_val)) {
+                                    int idx = Kokkos::atomic_fetch_add(ngb_cnt_raw, 1);
+                                    if (idx < max_ngb) {
+                                        int pi = pid_raw[i], pj = pid_raw[j];
+                                        if (pi > pj) { int tmp = pi; pi = pj; pj = tmp; }
+                                        ngb_i_raw[idx] = pi; ngb_j_raw[idx] = pj;
+                                        ngb_a_raw[idx] = a_val; ngb_e_raw[idx] = e_val;
+                                        ngb_E_raw[idx] = E_orb; ngb_bound_raw[idx] = 1;
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
                 team.team_barrier();
@@ -837,6 +1079,15 @@ void self_acceleration_and_timestep(Particles& p, int start, int count,
             }
         });
 
+}
+
+void self_acceleration_and_timestep(Particles& p, int start, int count,
+                                     double G, double soft2, double eta) {
+#ifdef ENABLE_COLLISIONAL
+    if (p.collisional) self_acceleration_and_timestep_impl<true>(p, start, count, G, soft2, eta);
+    else
+#endif
+    self_acceleration_and_timestep_impl<false>(p, start, count, G, soft2, eta);
 }
 
 // ==========================================================================
@@ -864,7 +1115,8 @@ void self_acceleration_and_gradient_kick(Particles& p, int start, int count,
 // ==========================================================================
 // Fused cross_acceleration + kick
 // ==========================================================================
-void cross_acceleration_kick(Particles& p,
+template<bool COLL>
+static void cross_acceleration_kick_impl(Particles& p,
                              int a_start, int a_count,
                              int b_start, int b_count,
                              double G, double soft2, double kick_dt) {
@@ -872,6 +1124,7 @@ void cross_acceleration_kick(Particles& p,
     RawView pvx{p.vx.data()}, pvy{p.vy.data()}, pvz{p.vz.data()};
     RawView pax{p.ax.data()}, pay{p.ay.data()}, paz{p.az.data()};
     RawView m{p.mass.data()};
+    const int* sid_raw = COLL ? p.subsystem_id.data() : nullptr;
     const int b_end = b_start + b_count;
     const int a_end = a_start + a_count;
 
@@ -891,7 +1144,8 @@ void cross_acceleration_kick(Particles& p,
                 tile(team.team_scratch(0), TILE_SIZE * 4);
 
             double xi = 0, yi = 0, zi = 0;
-            if (ii < a_count) { xi = px(i); yi = py(i); zi = pz(i); }
+            int sid_i = -1;
+            if (ii < a_count) { xi = px(i); yi = py(i); zi = pz(i); if (COLL) sid_i = sid_raw[i]; }
             double axi = 0, ayi = 0, azi = 0;
 
             for (int tile_start = b_start; tile_start < b_end; tile_start += TILE_SIZE) {
@@ -905,6 +1159,8 @@ void cross_acceleration_kick(Particles& p,
                 team.team_barrier();
                 if (ii < a_count) {
                     for (int jt = 0; jt < tile_count; jt++) {
+                        int j_cross = tile_start + jt;
+                        if (COLL) { if (sid_i >= 0 && sid_raw[j_cross] == sid_i) continue; }
                         double dx = tile(jt*4+0) - xi;
                         double dy = tile(jt*4+1) - yi;
                         double dz = tile(jt*4+2) - zi;
@@ -935,7 +1191,8 @@ void cross_acceleration_kick(Particles& p,
                 tile(team.team_scratch(0), TILE_SIZE * 4);
 
             double xj = 0, yj = 0, zj = 0;
-            if (ii < b_count) { xj = px(j); yj = py(j); zj = pz(j); }
+            int sid_j = -1;
+            if (ii < b_count) { xj = px(j); yj = py(j); zj = pz(j); if (COLL) sid_j = sid_raw[j]; }
             double axj = 0, ayj = 0, azj = 0;
 
             for (int tile_start = a_start; tile_start < a_end; tile_start += TILE_SIZE) {
@@ -949,6 +1206,8 @@ void cross_acceleration_kick(Particles& p,
                 team.team_barrier();
                 if (ii < b_count) {
                     for (int it = 0; it < tile_count; it++) {
+                        int i2_cross = tile_start + it;
+                        if (COLL) { if (sid_j >= 0 && sid_raw[i2_cross] == sid_j) continue; }
                         double dx = tile(it*4+0) - xj;
                         double dy = tile(it*4+1) - yj;
                         double dz = tile(it*4+2) - zj;
@@ -969,6 +1228,15 @@ void cross_acceleration_kick(Particles& p,
             }
         });
 
+}
+
+void cross_acceleration_kick(Particles& p, int a_start, int a_count,
+                             int b_start, int b_count, double G, double soft2, double kick_dt) {
+#ifdef ENABLE_COLLISIONAL
+    if (p.collisional) cross_acceleration_kick_impl<true>(p, a_start, a_count, b_start, b_count, G, soft2, kick_dt);
+    else
+#endif
+    cross_acceleration_kick_impl<false>(p, a_start, a_count, b_start, b_count, G, soft2, kick_dt);
 }
 
 // ==========================================================================
@@ -1006,7 +1274,8 @@ void cross_acceleration_and_gradient_kick(Particles& p,
 // Cached cross-acceleration: compute, cache to scratch, and kick
 // Uses scratch4/5/6 for group A cache, scratch7/8/9 for group B cache
 // ==========================================================================
-void cross_acceleration_kick_and_cache(Particles& p,
+template<bool COLL>
+static void cross_acceleration_kick_and_cache_impl(Particles& p,
                                        int a_start, int a_count,
                                        int b_start, int b_count,
                                        double G, double soft2, double kick_dt) {
@@ -1014,6 +1283,7 @@ void cross_acceleration_kick_and_cache(Particles& p,
     RawView pvx{p.vx.data()}, pvy{p.vy.data()}, pvz{p.vz.data()};
     RawView pax{p.ax.data()}, pay{p.ay.data()}, paz{p.az.data()};
     RawView m{p.mass.data()};
+    const int* sid_raw = COLL ? p.subsystem_id.data() : nullptr;
     // Cache arrays (indexed by absolute position)
     RawView cax_a{p.scratch4.data()}, cay_a{p.scratch5.data()}, caz_a{p.scratch6.data()};
     RawView cax_b{p.scratch7.data()}, cay_b{p.scratch8.data()}, caz_b{p.scratch9.data()};
@@ -1036,7 +1306,8 @@ void cross_acceleration_kick_and_cache(Particles& p,
                 tile(team.team_scratch(0), TILE_SIZE * 4);
 
             double xi = 0, yi = 0, zi = 0;
-            if (ii < a_count) { xi = px(i); yi = py(i); zi = pz(i); }
+            int sid_i = -1;
+            if (ii < a_count) { xi = px(i); yi = py(i); zi = pz(i); if (COLL) sid_i = sid_raw[i]; }
             double axi = 0, ayi = 0, azi = 0;
 
             for (int tile_start = b_start; tile_start < b_end; tile_start += TILE_SIZE) {
@@ -1050,6 +1321,8 @@ void cross_acceleration_kick_and_cache(Particles& p,
                 team.team_barrier();
                 if (ii < a_count) {
                     for (int jt = 0; jt < tile_count; jt++) {
+                        int j_cross = tile_start + jt;
+                        if (COLL) { if (sid_i >= 0 && sid_raw[j_cross] == sid_i) continue; }
                         double dx = tile(jt*4+0) - xi;
                         double dy = tile(jt*4+1) - yi;
                         double dz = tile(jt*4+2) - zi;
@@ -1081,7 +1354,8 @@ void cross_acceleration_kick_and_cache(Particles& p,
                 tile(team.team_scratch(0), TILE_SIZE * 4);
 
             double xj = 0, yj = 0, zj = 0;
-            if (ii < b_count) { xj = px(j); yj = py(j); zj = pz(j); }
+            int sid_j = -1;
+            if (ii < b_count) { xj = px(j); yj = py(j); zj = pz(j); if (COLL) sid_j = sid_raw[j]; }
             double axj = 0, ayj = 0, azj = 0;
 
             for (int tile_start = a_start; tile_start < a_end; tile_start += TILE_SIZE) {
@@ -1095,6 +1369,8 @@ void cross_acceleration_kick_and_cache(Particles& p,
                 team.team_barrier();
                 if (ii < b_count) {
                     for (int it = 0; it < tile_count; it++) {
+                        int i2_cross = tile_start + it;
+                        if (COLL) { if (sid_j >= 0 && sid_raw[i2_cross] == sid_j) continue; }
                         double dx = tile(it*4+0) - xj;
                         double dy = tile(it*4+1) - yj;
                         double dz = tile(it*4+2) - zj;
@@ -1116,4 +1392,13 @@ void cross_acceleration_kick_and_cache(Particles& p,
             }
         });
 
+}
+
+void cross_acceleration_kick_and_cache(Particles& p, int a_start, int a_count,
+                                       int b_start, int b_count, double G, double soft2, double kick_dt) {
+#ifdef ENABLE_COLLISIONAL
+    if (p.collisional) cross_acceleration_kick_and_cache_impl<true>(p, a_start, a_count, b_start, b_count, G, soft2, kick_dt);
+    else
+#endif
+    cross_acceleration_kick_and_cache_impl<false>(p, a_start, a_count, b_start, b_count, G, soft2, kick_dt);
 }

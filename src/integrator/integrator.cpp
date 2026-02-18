@@ -5,6 +5,11 @@
 #include "mpi_comm.h"
 #include "profiling.h"
 #include "tree.h"
+#ifdef ENABLE_COLLISIONAL
+#include "collisional_config.h"
+#include "subsystem.h"
+#include "logh_gpu.h"
+#endif
 #include <Kokkos_Core.hpp>
 #include <vector>
 #include <cfloat>
@@ -204,6 +209,80 @@ void drift(Particles& p, int start, int count, double dt) {
     // No fence - next operation will handle dependency
 }
 
+#ifdef ENABLE_COLLISIONAL
+void drift_field_only(Particles& p, int start, int count, double dt) {
+    if (!p.collisional) {
+        drift(p, start, count, dt);
+        return;
+    }
+    RawView px{p.x.data()}, py{p.y.data()}, pz{p.z.data()};
+    RawView pvx{p.vx.data()}, pvy{p.vy.data()}, pvz{p.vz.data()};
+    auto p_sid = p.subsystem_id;
+    if (use_integer_positions) {
+        auto pix = p.ix; auto piy = p.iy; auto piz = p.iz;
+        double scale = int_pos_scale;
+        double inv_scale = int_pos_inv_scale;
+        Kokkos::parallel_for("drift_field_int", count, KOKKOS_LAMBDA(int ii) {
+            int i = start + ii;
+            if (p_sid(i) >= 0) return;  // skip subsystem members
+            pix(i) += llrint(pvx(i) * dt * inv_scale);
+            piy(i) += llrint(pvy(i) * dt * inv_scale);
+            piz(i) += llrint(pvz(i) * dt * inv_scale);
+            px(i) = (double)pix(i) * scale;
+            py(i) = (double)piy(i) * scale;
+            pz(i) = (double)piz(i) * scale;
+        });
+    } else {
+        Kokkos::parallel_for("drift_field", count, KOKKOS_LAMBDA(int ii) {
+            int i = start + ii;
+            if (p_sid(i) >= 0) return;  // skip subsystem members
+            px(i) += pvx(i) * dt;
+            py(i) += pvy(i) * dt;
+            pz(i) += pvz(i) * dt;
+        });
+    }
+}
+
+void advance_subsystems_in_range(Particles& p, int start, int count,
+                                  double G, double dt) {
+    if (!p.collisional || g_subsystem_mgr.active.empty()) return;
+
+    // Find which subsystems have ALL members in [start, start+count)
+    // Build pid->idx mapping on host
+    auto h_pid = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.particle_id);
+    int max_pid = 0;
+    for (int i = 0; i < p.N; i++) max_pid = std::max(max_pid, h_pid(i));
+    std::vector<int> pid_to_idx(max_pid + 1, -1);
+    for (int i = 0; i < p.N; i++) pid_to_idx[h_pid(i)] = i;
+
+    // Filter: only subsystems fully contained in [start, start+count)
+    std::vector<int> eligible;
+    int end = start + count;
+    for (int s = 0; s < (int)g_subsystem_mgr.active.size(); s++) {
+        const auto& sub = g_subsystem_mgr.active[s];
+        bool all_in = true;
+        for (int pid : sub.particle_ids) {
+            int idx = (pid <= max_pid) ? pid_to_idx[pid] : -1;
+            if (idx < start || idx >= end) { all_in = false; break; }
+        }
+        if (all_in) eligible.push_back(s);
+    }
+
+    if (eligible.empty()) return;
+
+    // Build a temporary SubsystemManager with only eligible subsystems
+    SubsystemManager tmp_mgr;
+    for (int s : eligible) {
+        tmp_mgr.active.push_back(g_subsystem_mgr.active[s]);
+    }
+
+    // Pack, integrate, unpack
+    g_logh_batch.pack(tmp_mgr, p, G, dt);
+    logh_integrate_batch_gpu(g_logh_batch, G, g_collisional.eta_gbs);
+    g_logh_batch.unpack(tmp_mgr, p);
+}
+#endif
+
 void fsi_step(Particles& p, int start, int count,
               double G, double soft2, double dt, bool forces_valid,
               bool force_direct_n2) {
@@ -237,9 +316,17 @@ void fsi_step(Particles& p, int start, int count,
         g_profiler.stop(StepProfiler::DRIFT_KICK);
     }
 
-    // T drift (dt/2)
+    // T drift (dt/2) — field particles only if subsystems active
     g_profiler.start();
-    drift(p, start, count, dt * FSI_DRIFT);
+#ifdef ENABLE_COLLISIONAL
+    if (p.collisional && !g_subsystem_mgr.active.empty()) {
+        drift_field_only(p, start, count, dt * FSI_DRIFT);
+        advance_subsystems_in_range(p, start, count, G, dt * FSI_DRIFT);
+    } else
+#endif
+    {
+        drift(p, start, count, dt * FSI_DRIFT);
+    }
     g_profiler.stop(StepProfiler::DRIFT_KICK);
 
     // U-tilde kick (2dt/3)
@@ -271,9 +358,17 @@ void fsi_step(Particles& p, int start, int count,
         g_profiler.stop(StepProfiler::DRIFT_KICK);
     }
 
-    // T drift (dt/2)
+    // T drift (dt/2) — field particles only if subsystems active
     g_profiler.start();
-    drift(p, start, count, dt * FSI_DRIFT);
+#ifdef ENABLE_COLLISIONAL
+    if (p.collisional && !g_subsystem_mgr.active.empty()) {
+        drift_field_only(p, start, count, dt * FSI_DRIFT);
+        advance_subsystems_in_range(p, start, count, G, dt * FSI_DRIFT);
+    } else
+#endif
+    {
+        drift(p, start, count, dt * FSI_DRIFT);
+    }
     g_profiler.stop(StepProfiler::DRIFT_KICK);
 
     // U kick (dt/6)
@@ -394,6 +489,60 @@ static int partition_by_pivot(Particles& p, int start, int count, double pivot) 
         pix(dst) = tl1(ii); piy(dst) = tl2(ii); piz(dst) = tl3(ii);
     });
 
+#ifdef ENABLE_COLLISIONAL
+    // Second pass: permute collisional-only fields
+    if (p.collisional) {
+        auto ppid = p.particle_id;   auto psid = p.subsystem_id;
+        auto pstype = p.stellar_type;
+        auto pmzams = p.m_zams;      auto psage = p.stellar_age;
+        auto psrad = p.stellar_radius; auto plum = p.luminosity;
+        auto pcmass = p.core_mass;   auto psmag = p.spin_mag;
+        auto pdtl0 = p.dt_level0;
+        auto pspin = p.spin_vec;
+
+        Kokkos::parallel_for("gather_coll_pivot", count, KOKKOS_LAMBDA(int ii) {
+            int src = perm(ii);
+            ti1(ii) = ppid(src);
+            ti2(ii) = psid(src);
+            tl1(ii) = pstype(src);
+            t1(ii) = pmzams(src);
+            t2(ii) = psage(src);
+            t3(ii) = psrad(src);
+            t4(ii) = plum(src);
+            t5(ii) = pcmass(src);
+            t6(ii) = psmag(src);
+            t7(ii) = pdtl0(src);
+        });
+        Kokkos::parallel_for("copy_coll_pivot", count, KOKKOS_LAMBDA(int ii) {
+            int dst = start + ii;
+            ppid(dst) = ti1(ii);
+            psid(dst) = ti2(ii);
+            pstype(dst) = (int)tl1(ii);
+            pmzams(dst) = t1(ii);
+            psage(dst) = t2(ii);
+            psrad(dst) = t3(ii);
+            plum(dst) = t4(ii);
+            pcmass(dst) = t5(ii);
+            psmag(dst) = t6(ii);
+            pdtl0(dst) = t7(ii);
+        });
+
+        // Spin vector (3 components)
+        Kokkos::parallel_for("gather_spin_pivot", count, KOKKOS_LAMBDA(int ii) {
+            int src = perm(ii);
+            t1(ii) = pspin(src, 0);
+            t2(ii) = pspin(src, 1);
+            t3(ii) = pspin(src, 2);
+        });
+        Kokkos::parallel_for("copy_spin_pivot", count, KOKKOS_LAMBDA(int ii) {
+            int dst = start + ii;
+            pspin(dst, 0) = t1(ii);
+            pspin(dst, 1) = t2(ii);
+            pspin(dst, 2) = t3(ii);
+        });
+    }
+#endif
+
     return slow_count;
 }
 
@@ -402,7 +551,7 @@ static int partition_by_pivot(Particles& p, int start, int count, double pivot) 
 // ==========================================================================
 static void hhs_fsi_step_dynamic_impl(Particles& p, int start, int count, double pivot_dt,
                           double G, double soft2, double dt_min,
-                          double eta, bool dt_valid) {
+                          double eta, bool dt_valid, bool top_level = false) {
     if (count == 0) return;
 
     // Compute adaptive timesteps for this subset (skip if reusing from first half-step)
@@ -411,6 +560,19 @@ static void hhs_fsi_step_dynamic_impl(Particles& p, int start, int count, double
         compute_timestep_subset(p, start, count, G, soft2, eta, symmetric_timesteps);
         g_profiler.stop(StepProfiler::ADAPTIVE_DT);
     }
+
+#ifdef ENABLE_COLLISIONAL
+    // Top-level subsystem detection (single-rank path)
+    if (top_level && p.collisional) {
+        Kokkos::fence();
+        g_subsystem_mgr.detect_from_pairs(p, G, pivot_dt,
+                                           g_collisional.r_ngb, g_collisional.r_ngb_max,
+                                           g_collisional.n_orb_secular);
+        g_subsystem_mgr.update_particle_flags(p);
+        g_subsystem_mgr.prune(p, G);
+        g_subsystem_mgr.update_particle_flags(p);
+    }
+#endif
 
     // Partition into slow (dt >= pivot) and fast (dt < pivot)
     g_profiler.start();
@@ -476,7 +638,13 @@ static void hhs_fsi_step_dynamic_impl(Particles& p, int start, int count, double
 void hhs_fsi_step_dynamic(Particles& p, int start, int count, double pivot_dt,
                           double G, double soft2, double dt_min,
                           double eta) {
-    hhs_fsi_step_dynamic_impl(p, start, count, pivot_dt, G, soft2, dt_min, eta, false);
+#ifdef ENABLE_COLLISIONAL
+    if (p.collisional) {
+        g_subsystem_mgr.reset_ngb_count();
+    }
+#endif
+    hhs_fsi_step_dynamic_impl(p, start, count, pivot_dt, G, soft2, dt_min, eta,
+                              false, /*top_level=*/true);
 }
 
 // =============================================================================
@@ -526,6 +694,10 @@ static void self_acceleration_distributed(DistributedParticles& dp, int start, i
 
     auto pos = dp.local.pos_packed;
     RawView pax{dp.local.ax.data()}, pay{dp.local.ay.data()}, paz{dp.local.az.data()};
+#ifdef ENABLE_COLLISIONAL
+    const int* sid_raw = dp.local.subsystem_id.data();
+    bool coll = dp.local.collisional;
+#endif
 
     const int j_start = start;
     const int j_end = start + count;
@@ -548,9 +720,16 @@ static void self_acceleration_distributed(DistributedParticles& dp, int start, i
                 tile(team.team_scratch(0), TILE_SIZE * 4);
 
             double xi = 0, yi = 0, zi = 0;
+#ifdef ENABLE_COLLISIONAL
+            int sid_i = -1;
+#endif
+
             if (ii < slice_count) {
                 double mi_pad;
                 load4(&pos(i, 0), xi, yi, zi, mi_pad);
+#ifdef ENABLE_COLLISIONAL
+                if (coll) sid_i = sid_raw[i];
+#endif
             }
 
             double axi = 0, ayi = 0, azi = 0;
@@ -571,6 +750,10 @@ static void self_acceleration_distributed(DistributedParticles& dp, int start, i
                     for (int jt = 0; jt < tile_count; jt++) {
                         int j = tile_start + jt;
                         if (j == i) continue;
+#ifdef ENABLE_COLLISIONAL
+                        if (coll && sid_i >= 0 && sid_raw[j] == sid_i) continue;
+#endif
+
 
                         int jb = jt * 4;
                         double dx = tile(jb    ) - xi;
@@ -623,6 +806,10 @@ static void self_gradient_correction_distributed(DistributedParticles& dp, int s
 
     auto pos = dp.local.pos_packed;
     RawView pax{dp.local.ax.data()}, pay{dp.local.ay.data()}, paz{dp.local.az.data()};
+#ifdef ENABLE_COLLISIONAL
+    const int* sid_raw = dp.local.subsystem_id.data();
+    bool coll = dp.local.collisional;
+#endif
 
     const double coeff = G * grad_dt * grad_dt * GRAD_COEFF;
     const int j_start = start;
@@ -646,10 +833,17 @@ static void self_gradient_correction_distributed(DistributedParticles& dp, int s
 
             double xi = 0, yi = 0, zi = 0;
             double axi = 0, ayi = 0, azi = 0;
+#ifdef ENABLE_COLLISIONAL
+            int sid_i = -1;
+#endif
+
             if (ii < slice_count) {
                 double mi_pad;
                 load4(&pos(i, 0), xi, yi, zi, mi_pad);
                 axi = pax(i); ayi = pay(i); azi = paz(i);
+#ifdef ENABLE_COLLISIONAL
+                if (coll) sid_i = sid_raw[i];
+#endif
             }
 
             double cx = 0, cy = 0, cz = 0;
@@ -673,6 +867,10 @@ static void self_gradient_correction_distributed(DistributedParticles& dp, int s
                     for (int jt = 0; jt < tile_count; jt++) {
                         int j = tile_start + jt;
                         if (j == i) continue;
+#ifdef ENABLE_COLLISIONAL
+                        if (coll && sid_i >= 0 && sid_raw[j] == sid_i) continue;
+#endif
+
 
                         int jb = jt * 7;
                         double dx = tile(jb    ) - xi;
@@ -736,6 +934,10 @@ static void self_acceleration_ring(DistributedParticles& dp, int start, int coun
 
     auto pos = dp.local.pos_packed;
     RawView pax{dp.local.ax.data()}, pay{dp.local.ay.data()}, paz{dp.local.az.data()};
+#ifdef ENABLE_COLLISIONAL
+    const int* sid_raw = dp.local.subsystem_id.data();
+    bool coll = dp.local.collisional;
+#endif
 
     using team_policy = Kokkos::TeamPolicy<>;
     using member_type = team_policy::member_type;
@@ -758,9 +960,16 @@ static void self_acceleration_ring(DistributedParticles& dp, int start, int coun
                 tile(team.team_scratch(0), TILE_SIZE * 4);
 
             double xi = 0, yi = 0, zi = 0;
+#ifdef ENABLE_COLLISIONAL
+            int sid_i = -1;
+#endif
+
             if (ii < icnt) {
                 double mi_pad;
                 load4(&pos(i, 0), xi, yi, zi, mi_pad);
+#ifdef ENABLE_COLLISIONAL
+                if (coll) sid_i = sid_raw[i];
+#endif
             }
 
             double axi = 0, ayi = 0, azi = 0;
@@ -781,6 +990,10 @@ static void self_acceleration_ring(DistributedParticles& dp, int start, int coun
                     for (int jt = 0; jt < tile_cnt; jt++) {
                         int j = tile_st + jt;
                         if (j == i) continue;
+#ifdef ENABLE_COLLISIONAL
+                        if (coll && sid_i >= 0 && sid_raw[j] == sid_i) continue;
+#endif
+
 
                         int jb = jt * 4;
                         double dx = tile(jb) - xi;
@@ -824,6 +1037,10 @@ static void self_gradient_correction_ring(DistributedParticles& dp, int start, i
 
     auto pos = dp.local.pos_packed;
     RawView pax{dp.local.ax.data()}, pay{dp.local.ay.data()}, paz{dp.local.az.data()};
+#ifdef ENABLE_COLLISIONAL
+    const int* sid_raw = dp.local.subsystem_id.data();
+    bool coll = dp.local.collisional;
+#endif
 
     // Save complete forces to scratch (needed after gradient allreduce)
     RawView sax{dp.local.scratch1.data()}, say{dp.local.scratch2.data()}, saz{dp.local.scratch3.data()};
@@ -859,11 +1076,18 @@ static void self_gradient_correction_ring(DistributedParticles& dp, int start, i
 
             double xi = 0, yi = 0, zi = 0;
             double axi = 0, ayi = 0, azi = 0;
+#ifdef ENABLE_COLLISIONAL
+            int sid_i = -1;
+#endif
+
             if (ii < icnt) {
                 double mi_pad;
                 load4(&pos(i, 0), xi, yi, zi, mi_pad);
                 // Read complete forces from scratch
                 axi = sax(i); ayi = say(i); azi = saz(i);
+#ifdef ENABLE_COLLISIONAL
+                if (coll) sid_i = sid_raw[i];
+#endif
             }
 
             double cx = 0, cy = 0, cz = 0;
@@ -888,6 +1112,10 @@ static void self_gradient_correction_ring(DistributedParticles& dp, int start, i
                     for (int jt = 0; jt < tile_cnt; jt++) {
                         int j = tile_st + jt;
                         if (j == i) continue;
+#ifdef ENABLE_COLLISIONAL
+                        if (coll && sid_i >= 0 && sid_raw[j] == sid_i) continue;
+#endif
+
 
                         int jb = jt * 7;
                         double dx = tile(jb) - xi;
@@ -944,6 +1172,10 @@ static void cross_acceleration_ring(DistributedParticles& dp,
 
     auto pos = dp.local.pos_packed;
     RawView pax{dp.local.ax.data()}, pay{dp.local.ay.data()}, paz{dp.local.az.data()};
+#ifdef ENABLE_COLLISIONAL
+    const int* sid_raw = dp.local.subsystem_id.data();
+    bool coll = dp.local.collisional;
+#endif
 
     using team_policy = Kokkos::TeamPolicy<>;
     using member_type = team_policy::member_type;
@@ -973,9 +1205,16 @@ static void cross_acceleration_ring(DistributedParticles& dp,
                     tile(team.team_scratch(0), TILE_SIZE * 4);
 
                 double xi = 0, yi = 0, zi = 0;
+#ifdef ENABLE_COLLISIONAL
+                int sid_i = -1;
+#endif
+
                 if (ii < icnt) {
                     double mi_pad;
                     load4(&pos(i, 0), xi, yi, zi, mi_pad);
+#ifdef ENABLE_COLLISIONAL
+                    if (coll) sid_i = sid_raw[i];
+#endif
                 }
 
                 double axi = 0, ayi = 0, azi = 0;
@@ -994,6 +1233,12 @@ static void cross_acceleration_ring(DistributedParticles& dp,
 
                     if (ii < icnt) {
                         for (int jt = 0; jt < tile_cnt; jt++) {
+                            int j_cross = tile_st + jt;
+#ifdef ENABLE_COLLISIONAL
+                            if (coll && sid_i >= 0 && sid_raw[j_cross] == sid_i) continue;
+#endif
+
+
                             int jb = jt * 4;
                             double dx = tile(jb) - xi;
                             double dy = tile(jb+1) - yi;
@@ -1042,9 +1287,16 @@ static void cross_acceleration_ring(DistributedParticles& dp,
                     tile(team.team_scratch(0), TILE_SIZE * 4);
 
                 double xi = 0, yi = 0, zi = 0;
+#ifdef ENABLE_COLLISIONAL
+                int sid_i = -1;
+#endif
+
                 if (ii < icnt) {
                     double mi_pad;
                     load4(&pos(i, 0), xi, yi, zi, mi_pad);
+#ifdef ENABLE_COLLISIONAL
+                    if (coll) sid_i = sid_raw[i];
+#endif
                 }
 
                 double axi = 0, ayi = 0, azi = 0;
@@ -1063,6 +1315,11 @@ static void cross_acceleration_ring(DistributedParticles& dp,
 
                     if (ii < icnt) {
                         for (int jt = 0; jt < tile_cnt; jt++) {
+                            int j_cross = tile_st + jt;
+#ifdef ENABLE_COLLISIONAL
+                            if (coll && sid_i >= 0 && sid_raw[j_cross] == sid_i) continue;
+#endif
+
                             int jb = jt * 4;
                             double dx = tile(jb) - xi;
                             double dy = tile(jb+1) - yi;
@@ -1109,6 +1366,11 @@ static void cross_acceleration_and_gradient_ring(DistributedParticles& dp,
     auto pos = dp.local.pos_packed;
     RawView pax{dp.local.ax.data()}, pay{dp.local.ay.data()}, paz{dp.local.az.data()};
     RawView sax{dp.local.scratch1.data()}, say{dp.local.scratch2.data()}, saz{dp.local.scratch3.data()};
+#ifdef ENABLE_COLLISIONAL
+    const int* sid_raw = dp.local.subsystem_id.data();
+    bool coll = dp.local.collisional;
+#endif
+
     int total_start = slow_start;
     int total_count = slow_count + fast_count;
     Kokkos::parallel_for("ring_save_cross_forces", total_count, KOKKOS_LAMBDA(int ii) {
@@ -1148,10 +1410,17 @@ static void cross_acceleration_and_gradient_ring(DistributedParticles& dp,
 
                 double xi = 0, yi = 0, zi = 0;
                 double axi = 0, ayi = 0, azi = 0;
+#ifdef ENABLE_COLLISIONAL
+                int sid_i = -1;
+#endif
+
                 if (ii < icnt) {
                     double mi_pad;
                     load4(&pos(i, 0), xi, yi, zi, mi_pad);
                     axi = sax(i); ayi = say(i); azi = saz(i);
+#ifdef ENABLE_COLLISIONAL
+                    if (coll) sid_i = sid_raw[i];
+#endif
                 }
 
                 double cx = 0, cy = 0, cz = 0;
@@ -1173,6 +1442,11 @@ static void cross_acceleration_and_gradient_ring(DistributedParticles& dp,
 
                     if (ii < icnt) {
                         for (int jt = 0; jt < tile_cnt; jt++) {
+                            int j_cross = tile_st + jt;
+#ifdef ENABLE_COLLISIONAL
+                            if (coll && sid_i >= 0 && sid_raw[j_cross] == sid_i) continue;
+#endif
+
                             int jb = jt * 7;
                             double dx = tile(jb) - xi;
                             double dy = tile(jb+1) - yi;
@@ -1228,10 +1502,17 @@ static void cross_acceleration_and_gradient_ring(DistributedParticles& dp,
 
                 double xi = 0, yi = 0, zi = 0;
                 double axi = 0, ayi = 0, azi = 0;
+#ifdef ENABLE_COLLISIONAL
+                int sid_i = -1;
+#endif
+
                 if (ii < icnt) {
                     double mi_pad;
                     load4(&pos(i, 0), xi, yi, zi, mi_pad);
                     axi = sax(i); ayi = say(i); azi = saz(i);
+#ifdef ENABLE_COLLISIONAL
+                    if (coll) sid_i = sid_raw[i];
+#endif
                 }
 
                 double cx = 0, cy = 0, cz = 0;
@@ -1253,6 +1534,12 @@ static void cross_acceleration_and_gradient_ring(DistributedParticles& dp,
 
                     if (ii < icnt) {
                         for (int jt = 0; jt < tile_cnt; jt++) {
+                            int j_cross = tile_st + jt;
+#ifdef ENABLE_COLLISIONAL
+                            if (coll && sid_i >= 0 && sid_raw[j_cross] == sid_i) continue;
+#endif
+
+
                             int jb = jt * 7;
                             double dx = tile(jb) - xi;
                             double dy = tile(jb+1) - yi;
@@ -1314,6 +1601,10 @@ static void self_acceleration_and_timestep_ring(DistributedParticles& dp, int st
     auto vel = dp.local.vel_packed;
     RawView pax{dp.local.ax.data()}, pay{dp.local.ay.data()}, paz{dp.local.az.data()};
     RawView dt_f{dp.local.dt_adapt.data()};
+#ifdef ENABLE_COLLISIONAL
+    const int* sid_raw = dp.local.subsystem_id.data();
+    bool coll = dp.local.collisional;
+#endif
 
     using team_policy = Kokkos::TeamPolicy<>;
     using member_type = team_policy::member_type;
@@ -1337,10 +1628,17 @@ static void self_acceleration_and_timestep_ring(DistributedParticles& dp, int st
 
             double xi = 0, yi = 0, zi = 0, mi = 0;
             double vxi = 0, vyi = 0, vzi = 0;
+#ifdef ENABLE_COLLISIONAL
+            int sid_i = -1;
+#endif
+
             if (ii < icnt) {
                 double vpad;
                 load4(&pos(i, 0), xi, yi, zi, mi);
                 load4(&vel(i, 0), vxi, vyi, vzi, vpad);
+#ifdef ENABLE_COLLISIONAL
+                if (coll) sid_i = sid_raw[i];
+#endif
             }
 
             double axi = 0, ayi = 0, azi = 0;
@@ -1364,6 +1662,10 @@ static void self_acceleration_and_timestep_ring(DistributedParticles& dp, int st
                     for (int jt = 0; jt < tile_cnt; jt++) {
                         int j = tile_st + jt;
                         if (j == i) continue;
+#ifdef ENABLE_COLLISIONAL
+                        if (coll && sid_i >= 0 && sid_raw[j] == sid_i) continue;
+#endif
+
 
                         int jb = jt * 7;
                         double dx = tile(jb    ) - xi;
@@ -1445,6 +1747,10 @@ static void compute_timestep_ring(DistributedParticles& dp, int start, int count
     auto pos = dp.local.pos_packed;
     auto vel = dp.local.vel_packed;
     RawView dt_f{dp.local.dt_adapt.data()};
+#ifdef ENABLE_COLLISIONAL
+    const int* sid_raw = dp.local.subsystem_id.data();
+    bool coll = dp.local.collisional;
+#endif
 
     using team_policy = Kokkos::TeamPolicy<>;
     using member_type = team_policy::member_type;
@@ -1468,10 +1774,17 @@ static void compute_timestep_ring(DistributedParticles& dp, int start, int count
 
             double xi = 0, yi = 0, zi = 0, mi = 0;
             double vxi = 0, vyi = 0, vzi = 0;
+#ifdef ENABLE_COLLISIONAL
+            int sid_i = -1;
+#endif
+
             if (ii < icnt) {
                 double vpad;
                 load4(&pos(i, 0), xi, yi, zi, mi);
                 load4(&vel(i, 0), vxi, vyi, vzi, vpad);
+#ifdef ENABLE_COLLISIONAL
+                if (coll) sid_i = sid_raw[i];
+#endif
             }
 
             double t_min_sq = 1e60;   // non-symmetrized path
@@ -1495,6 +1808,10 @@ static void compute_timestep_ring(DistributedParticles& dp, int start, int count
                     for (int jt = 0; jt < tile_cnt; jt++) {
                         int j = tile_st + jt;
                         if (j == i) continue;
+#ifdef ENABLE_COLLISIONAL
+                        if (coll && sid_i >= 0 && sid_raw[j] == sid_i) continue;
+#endif
+
 
                         int jb = jt * 7;
                         double dx = tile(jb) - xi;
@@ -1582,9 +1899,17 @@ static void fsi_step_ring(DistributedParticles& dp, int start, int count,
         g_profiler.stop(StepProfiler::DRIFT_KICK);
     }
 
-    // T drift (dt/2)
+    // T drift (dt/2) — field particles only if subsystems active
     g_profiler.start();
-    drift(dp.local, start, count, dt * FSI_DRIFT);
+#ifdef ENABLE_COLLISIONAL
+    if (dp.local.collisional && !g_subsystem_mgr.active.empty()) {
+        drift_field_only(dp.local, start, count, dt * FSI_DRIFT);
+        advance_subsystems_in_range(dp.local, start, count, G, dt * FSI_DRIFT);
+    } else
+#endif
+    {
+        drift(dp.local, start, count, dt * FSI_DRIFT);
+    }
     g_profiler.stop(StepProfiler::DRIFT_KICK);
 
     dp.local.pack_pos_range(start, count);
@@ -1600,9 +1925,17 @@ static void fsi_step_ring(DistributedParticles& dp, int start, int count,
     kick_velocities(dp.local, start, count, dt * FSI_MOD_KICK);
     g_profiler.stop(StepProfiler::DRIFT_KICK);
 
-    // T drift (dt/2)
+    // T drift (dt/2) — field particles only if subsystems active
     g_profiler.start();
-    drift(dp.local, start, count, dt * FSI_DRIFT);
+#ifdef ENABLE_COLLISIONAL
+    if (dp.local.collisional && !g_subsystem_mgr.active.empty()) {
+        drift_field_only(dp.local, start, count, dt * FSI_DRIFT);
+        advance_subsystems_in_range(dp.local, start, count, G, dt * FSI_DRIFT);
+    } else
+#endif
+    {
+        drift(dp.local, start, count, dt * FSI_DRIFT);
+    }
     g_profiler.stop(StepProfiler::DRIFT_KICK);
 
     dp.local.pack_pos_range(start, count);
@@ -1682,9 +2015,17 @@ static void fsi_step_distributed(DistributedParticles& dp, int start, int count,
             g_profiler.stop(StepProfiler::DRIFT_KICK);
         }
 
-        // T drift (dt/2)
+        // T drift (dt/2) — field particles only if subsystems active
         g_profiler.start();
-        drift(dp.local, start, count, dt * FSI_DRIFT);
+#ifdef ENABLE_COLLISIONAL
+        if (dp.local.collisional && !g_subsystem_mgr.active.empty()) {
+            drift_field_only(dp.local, start, count, dt * FSI_DRIFT);
+            advance_subsystems_in_range(dp.local, start, count, G, dt * FSI_DRIFT);
+        } else
+#endif
+        {
+            drift(dp.local, start, count, dt * FSI_DRIFT);
+        }
         g_profiler.stop(StepProfiler::DRIFT_KICK);
 
         // Refresh positions in global tree after drift
@@ -1706,9 +2047,17 @@ static void fsi_step_distributed(DistributedParticles& dp, int start, int count,
         kick_velocities(dp.local, start, count, dt * FSI_MOD_KICK);
         g_profiler.stop(StepProfiler::DRIFT_KICK);
 
-        // T drift (dt/2)
+        // T drift (dt/2) — field particles only if subsystems active
         g_profiler.start();
-        drift(dp.local, start, count, dt * FSI_DRIFT);
+#ifdef ENABLE_COLLISIONAL
+        if (dp.local.collisional && !g_subsystem_mgr.active.empty()) {
+            drift_field_only(dp.local, start, count, dt * FSI_DRIFT);
+            advance_subsystems_in_range(dp.local, start, count, G, dt * FSI_DRIFT);
+        } else
+#endif
+        {
+            drift(dp.local, start, count, dt * FSI_DRIFT);
+        }
         g_profiler.stop(StepProfiler::DRIFT_KICK);
 
         // Refresh positions in global tree after drift
@@ -1766,9 +2115,17 @@ static void fsi_step_distributed(DistributedParticles& dp, int start, int count,
         g_profiler.stop(StepProfiler::DRIFT_KICK);
     }
 
-    // T drift (dt/2) - all ranks drift identically
+    // T drift (dt/2) — field particles only if subsystems active
     g_profiler.start();
-    drift(dp.local, start, count, dt * FSI_DRIFT);
+#ifdef ENABLE_COLLISIONAL
+    if (dp.local.collisional && !g_subsystem_mgr.active.empty()) {
+        drift_field_only(dp.local, start, count, dt * FSI_DRIFT);
+        advance_subsystems_in_range(dp.local, start, count, G, dt * FSI_DRIFT);
+    } else
+#endif
+    {
+        drift(dp.local, start, count, dt * FSI_DRIFT);
+    }
     g_profiler.stop(StepProfiler::DRIFT_KICK);
 
     // Re-sync packed positions after drift
@@ -1817,9 +2174,17 @@ static void fsi_step_distributed(DistributedParticles& dp, int start, int count,
         g_profiler.stop(StepProfiler::DRIFT_KICK);
     }
 
-    // T drift (dt/2)
+    // T drift (dt/2) — field particles only if subsystems active
     g_profiler.start();
-    drift(dp.local, start, count, dt * FSI_DRIFT);
+#ifdef ENABLE_COLLISIONAL
+    if (dp.local.collisional && !g_subsystem_mgr.active.empty()) {
+        drift_field_only(dp.local, start, count, dt * FSI_DRIFT);
+        advance_subsystems_in_range(dp.local, start, count, G, dt * FSI_DRIFT);
+    } else
+#endif
+    {
+        drift(dp.local, start, count, dt * FSI_DRIFT);
+    }
     g_profiler.stop(StepProfiler::DRIFT_KICK);
 
     // Re-sync packed positions after drift
@@ -1862,6 +2227,10 @@ static void cross_acceleration_distributed(DistributedParticles& dp,
 
     auto pos = dp.local.pos_packed;
     RawView pax{dp.local.ax.data()}, pay{dp.local.ay.data()}, paz{dp.local.az.data()};
+#ifdef ENABLE_COLLISIONAL
+    const int* sid_raw = dp.local.subsystem_id.data();
+    bool coll = dp.local.collisional;
+#endif
 
     using team_policy = Kokkos::TeamPolicy<>;
     using member_type = team_policy::member_type;
@@ -1888,9 +2257,16 @@ static void cross_acceleration_distributed(DistributedParticles& dp,
                     tile(team.team_scratch(0), TILE_SIZE * 4);
 
                 double xi = 0, yi = 0, zi = 0;
+#ifdef ENABLE_COLLISIONAL
+                int sid_i = -1;
+#endif
+
                 if (ii < slice_count) {
                     double mi_pad;
                     load4(&pos(i, 0), xi, yi, zi, mi_pad);
+#ifdef ENABLE_COLLISIONAL
+                    if (coll) sid_i = sid_raw[i];
+#endif
                 }
 
                 double axi = 0, ayi = 0, azi = 0;
@@ -1909,6 +2285,12 @@ static void cross_acceleration_distributed(DistributedParticles& dp,
 
                     if (ii < slice_count) {
                         for (int jt = 0; jt < tile_cnt; jt++) {
+                            int j_cross = f_start + (tile_st - f_start) + jt;
+#ifdef ENABLE_COLLISIONAL
+                            if (coll && sid_i >= 0 && sid_raw[j_cross] == sid_i) continue;
+#endif
+
+
                             int jb = jt * 4;
                             double dx = tile(jb    ) - xi;
                             double dy = tile(jb + 1) - yi;
@@ -1955,9 +2337,16 @@ static void cross_acceleration_distributed(DistributedParticles& dp,
                     tile(team.team_scratch(0), N * 4);
 
                 double xi = 0, yi = 0, zi = 0;
+#ifdef ENABLE_COLLISIONAL
+                int sid_i = -1;
+#endif
+
                 if (ii < slice_count_f) {
                     double mi_pad;
                     load4(&pos(i, 0), xi, yi, zi, mi_pad);
+#ifdef ENABLE_COLLISIONAL
+                    if (coll) sid_i = sid_raw[i];
+#endif
                 }
 
                 double axi = 0, ayi = 0, azi = 0;
@@ -1976,6 +2365,11 @@ static void cross_acceleration_distributed(DistributedParticles& dp,
 
                     if (ii < slice_count_f) {
                         for (int jt = 0; jt < tile_cnt; jt++) {
+                            int j_cross = s_start + (tile_st - s_start) + jt;
+#ifdef ENABLE_COLLISIONAL
+                            if (coll && sid_i >= 0 && sid_raw[j_cross] == sid_i) continue;
+#endif
+
                             int jb = jt * 4;
                             double dx = tile(jb)   - xi;
                             double dy = tile(jb+1) - yi;
@@ -2028,6 +2422,10 @@ static void cross_acceleration_and_gradient_distributed(DistributedParticles& dp
 
     auto pos = dp.local.pos_packed;
     RawView pax{dp.local.ax.data()}, pay{dp.local.ay.data()}, paz{dp.local.az.data()};
+#ifdef ENABLE_COLLISIONAL
+    const int* sid_raw = dp.local.subsystem_id.data();
+    bool coll = dp.local.collisional;
+#endif
 
     const double coeff = G * dt * dt * GRAD_COEFF;
 
@@ -2058,10 +2456,17 @@ static void cross_acceleration_and_gradient_distributed(DistributedParticles& dp
 
                 double xi = 0, yi = 0, zi = 0;
                 double axi = 0, ayi = 0, azi = 0;
+#ifdef ENABLE_COLLISIONAL
+                int sid_i = -1;
+#endif
+
                 if (ii < slice_count) {
                     double mi_pad;
                     load4(&pos(i, 0), xi, yi, zi, mi_pad);
                     axi = pax(i); ayi = pay(i); azi = paz(i);
+#ifdef ENABLE_COLLISIONAL
+                    if (coll) sid_i = sid_raw[i];
+#endif
                 }
 
                 double cx = 0, cy = 0, cz = 0;
@@ -2083,6 +2488,11 @@ static void cross_acceleration_and_gradient_distributed(DistributedParticles& dp
 
                     if (ii < slice_count) {
                         for (int jt = 0; jt < tile_cnt; jt++) {
+                            int j_cross = tile_st + jt;
+#ifdef ENABLE_COLLISIONAL
+                            if (coll && sid_i >= 0 && sid_raw[j_cross] == sid_i) continue;
+#endif
+
                             int jb = jt * 7;
                             double dx = tile(jb)   - xi;
                             double dy = tile(jb+1) - yi;
@@ -2137,10 +2547,17 @@ static void cross_acceleration_and_gradient_distributed(DistributedParticles& dp
 
                 double xi = 0, yi = 0, zi = 0;
                 double axi = 0, ayi = 0, azi = 0;
+#ifdef ENABLE_COLLISIONAL
+                int sid_i = -1;
+#endif
+
                 if (ii < slice_count_f) {
                     double mi_pad;
                     load4(&pos(i, 0), xi, yi, zi, mi_pad);
                     axi = pax(i); ayi = pay(i); azi = paz(i);
+#ifdef ENABLE_COLLISIONAL
+                    if (coll) sid_i = sid_raw[i];
+#endif
                 }
 
                 double cx = 0, cy = 0, cz = 0;
@@ -2162,6 +2579,12 @@ static void cross_acceleration_and_gradient_distributed(DistributedParticles& dp
 
                     if (ii < slice_count_f) {
                         for (int jt = 0; jt < tile_cnt; jt++) {
+                            int j_cross = tile_st + jt;
+#ifdef ENABLE_COLLISIONAL
+                            if (coll && sid_i >= 0 && sid_raw[j_cross] == sid_i) continue;
+#endif
+
+
                             int jb = jt * 7;
                             double dx = tile(jb)   - xi;
                             double dy = tile(jb+1) - yi;
@@ -2226,6 +2649,10 @@ static void compute_timestep_distributed(DistributedParticles& dp, int start, in
     auto pos = dp.local.pos_packed;
     auto vel = dp.local.vel_packed;
     RawView dt_f{dp.local.dt_adapt.data()};
+#ifdef ENABLE_COLLISIONAL
+    const int* sid_raw = dp.local.subsystem_id.data();
+    bool coll = dp.local.collisional;
+#endif
 
     const int j_start = start;
     const int j_end = start + count;
@@ -2250,10 +2677,16 @@ static void compute_timestep_distributed(DistributedParticles& dp, int start, in
 
             double xi = 0, yi = 0, zi = 0, mi = 0;
             double vxi = 0, vyi = 0, vzi = 0;
+#ifdef ENABLE_COLLISIONAL
+            int sid_i = -1;
+#endif
             if (ii < slice_count) {
                 double vpad;
                 load4(&pos(i, 0), xi, yi, zi, mi);
                 load4(&vel(i, 0), vxi, vyi, vzi, vpad);
+#ifdef ENABLE_COLLISIONAL
+                if (coll) sid_i = sid_raw[i];
+#endif
             }
 
             double t_min_sq = 1e60;   // non-symmetrized path
@@ -2277,6 +2710,9 @@ static void compute_timestep_distributed(DistributedParticles& dp, int start, in
                     for (int jt = 0; jt < tile_cnt; jt++) {
                         int j = tile_st + jt;
                         if (j == i) continue;
+#ifdef ENABLE_COLLISIONAL
+                        if (coll && sid_i >= 0 && sid_raw[j] == sid_i) continue;
+#endif
 
                         int jb = jt * 7;
                         double dx = tile(jb)   - xi;
@@ -2350,6 +2786,12 @@ static void compute_timestep_distributed(DistributedParticles& dp, int start, in
 struct CpuSubset {
     std::vector<double> x, y, z, vx, vy, vz, ax, ay, az, mass, dt_adapt;
     std::vector<int64_t> ix, iy, iz;
+    std::vector<int> sid;  // subsystem_id (collisional mode)
+#ifdef ENABLE_COLLISIONAL
+    bool collisional = false;
+#else
+    static constexpr bool collisional = false;
+#endif
     int count;
 
     void resize(int n) {
@@ -2359,6 +2801,9 @@ struct CpuSubset {
         ax.resize(n); ay.resize(n); az.resize(n);
         mass.resize(n); dt_adapt.resize(n);
         ix.resize(n); iy.resize(n); iz.resize(n);
+#ifdef ENABLE_COLLISIONAL
+        sid.resize(n, -1);
+#endif
     }
 
     // Copy subset [start, start+count) from device to host
@@ -2392,6 +2837,15 @@ struct CpuSubset {
             mass[i] = h_m(i); dt_adapt[i] = h_dt(i);
             ix[i] = h_ix(i); iy[i] = h_iy(i); iz[i] = h_iz(i);
         }
+#ifdef ENABLE_COLLISIONAL
+        collisional = p.collisional;
+        if (collisional) {
+            auto h_sid = Kokkos::create_mirror_view(Kokkos::subview(p.subsystem_id, Kokkos::pair<int,int>(start, start+count)));
+            Kokkos::deep_copy(h_sid, Kokkos::subview(p.subsystem_id, Kokkos::pair<int,int>(start, start+count)));
+            Kokkos::fence();
+            for (int i = 0; i < count; i++) sid[i] = h_sid(i);
+        }
+#endif
     }
 
     // Copy results back to device (positions, velocities, mass, dt_adapt, ix/iy/iz)
@@ -2425,6 +2879,13 @@ struct CpuSubset {
         Kokkos::deep_copy(Kokkos::subview(p.ix, Kokkos::pair<int,int>(start, start+count)), h_ix);
         Kokkos::deep_copy(Kokkos::subview(p.iy, Kokkos::pair<int,int>(start, start+count)), h_iy);
         Kokkos::deep_copy(Kokkos::subview(p.iz, Kokkos::pair<int,int>(start, start+count)), h_iz);
+#ifdef ENABLE_COLLISIONAL
+        if (collisional) {
+            auto h_sid = Kokkos::create_mirror_view(Kokkos::subview(p.subsystem_id, Kokkos::pair<int,int>(start, start+count)));
+            for (int i = 0; i < count; i++) h_sid(i) = sid[i];
+            Kokkos::deep_copy(Kokkos::subview(p.subsystem_id, Kokkos::pair<int,int>(start, start+count)), h_sid);
+        }
+#endif
         Kokkos::fence();
     }
 };
@@ -2438,6 +2899,7 @@ static void cpu_self_acc_kick(CpuSubset& s, int start, int count,
     }
     for (int i = start; i < end; i++) {
         for (int j = i + 1; j < end; j++) {
+            if (s.collisional && s.sid[i] >= 0 && s.sid[j] == s.sid[i]) continue;
             double dx = s.x[j] - s.x[i];
             double dy = s.y[j] - s.y[i];
             double dz = s.z[j] - s.z[i];
@@ -2466,6 +2928,7 @@ static void cpu_self_acc(CpuSubset& s, int start, int count,
     }
     for (int i = start; i < end; i++) {
         for (int j = i + 1; j < end; j++) {
+            if (s.collisional && s.sid[i] >= 0 && s.sid[j] == s.sid[i]) continue;
             double dx = s.x[j] - s.x[i];
             double dy = s.y[j] - s.y[i];
             double dz = s.z[j] - s.z[i];
@@ -2496,6 +2959,7 @@ static void cpu_self_grad(CpuSubset& s, int start, int count,
         int i = start + ii;
         for (int jj = ii + 1; jj < count; jj++) {
             int j = start + jj;
+            if (s.collisional && s.sid[i] >= 0 && s.sid[j] == s.sid[i]) continue;
             double dx = s.x[j] - s.x[i];
             double dy = s.y[j] - s.y[i];
             double dz = s.z[j] - s.z[i];
@@ -2543,6 +3007,7 @@ static void cpu_cross_acc(CpuSubset& s,
     for (int j = b_start; j < b_end; j++) { s.ax[j] = 0; s.ay[j] = 0; s.az[j] = 0; }
     for (int i = a_start; i < a_end; i++) {
         for (int j = b_start; j < b_end; j++) {
+            if (s.collisional && s.sid[i] >= 0 && s.sid[j] == s.sid[i]) continue;
             double dx = s.x[j] - s.x[i];
             double dy = s.y[j] - s.y[i];
             double dz = s.z[j] - s.z[i];
@@ -2575,6 +3040,7 @@ static void cpu_cross_grad(CpuSubset& s,
         int i = a_start + ii;
         for (int jj = 0; jj < b_count; jj++) {
             int j = b_start + jj;
+            if (s.collisional && s.sid[i] >= 0 && s.sid[j] == s.sid[i]) continue;
             double dx = s.x[j] - s.x[i], dy = s.y[j] - s.y[i], dz = s.z[j] - s.z[i];
             double dax = ax0_b[jj] - ax0_a[ii], day = ay0_b[jj] - ay0_a[ii], daz = az0_b[jj] - az0_a[ii];
             double r2 = dx*dx + dy*dy + dz*dz + soft2;
@@ -2605,6 +3071,7 @@ static void cpu_cross_acc_kick(CpuSubset& s,
     // N3L: compute each (i,j) pair once
     for (int i = a_start; i < a_end; i++) {
         for (int j = b_start; j < b_end; j++) {
+            if (s.collisional && s.sid[i] >= 0 && s.sid[j] == s.sid[i]) continue;
             double dx = s.x[j] - s.x[i];
             double dy = s.y[j] - s.y[i];
             double dz = s.z[j] - s.z[i];
@@ -2644,6 +3111,7 @@ static void cpu_cross_acc_grad_kick(CpuSubset& s,
     for (int j = b_start; j < b_end; j++) { s.ax[j] = 0; s.ay[j] = 0; s.az[j] = 0; }
     for (int i = a_start; i < a_end; i++) {
         for (int j = b_start; j < b_end; j++) {
+            if (s.collisional && s.sid[i] >= 0 && s.sid[j] == s.sid[i]) continue;
             double dx = s.x[j] - s.x[i], dy = s.y[j] - s.y[i], dz = s.z[j] - s.z[i];
             double r2 = dx*dx + dy*dy + dz*dz + soft2;
             double inv_r = 1.0 / std::sqrt(r2);
@@ -2670,6 +3138,7 @@ static void cpu_cross_acc_grad_kick(CpuSubset& s,
         int i = a_start + ii;
         for (int jj = 0; jj < b_count; jj++) {
             int j = b_start + jj;
+            if (s.collisional && s.sid[i] >= 0 && s.sid[j] == s.sid[i]) continue;
             double dx = s.x[j] - s.x[i], dy = s.y[j] - s.y[i], dz = s.z[j] - s.z[i];
             double dax = ax0_b[jj] - ax0_a[ii], day = ay0_b[jj] - ay0_a[ii], daz = az0_b[jj] - az0_a[ii];
             double r2 = dx*dx + dy*dy + dz*dz + soft2;
@@ -2722,6 +3191,33 @@ static void cpu_drift(CpuSubset& s, int start, int count, double dt) {
     }
 }
 
+#ifdef ENABLE_COLLISIONAL
+// CPU drift for field particles only (skip subsystem members)
+static void cpu_drift_field_only(CpuSubset& s, int start, int count, double dt) {
+    if (!s.collisional) { cpu_drift(s, start, count, dt); return; }
+    if (use_integer_positions) {
+        double scale = int_pos_scale;
+        double inv_scale = int_pos_inv_scale;
+        for (int i = start; i < start + count; i++) {
+            if (s.sid[i] >= 0) continue;
+            s.ix[i] += llrint(s.vx[i] * dt * inv_scale);
+            s.iy[i] += llrint(s.vy[i] * dt * inv_scale);
+            s.iz[i] += llrint(s.vz[i] * dt * inv_scale);
+            s.x[i] = (double)s.ix[i] * scale;
+            s.y[i] = (double)s.iy[i] * scale;
+            s.z[i] = (double)s.iz[i] * scale;
+        }
+    } else {
+        for (int i = start; i < start + count; i++) {
+            if (s.sid[i] >= 0) continue;
+            s.x[i] += s.vx[i] * dt;
+            s.y[i] += s.vy[i] * dt;
+            s.z[i] += s.vz[i] * dt;
+        }
+    }
+}
+#endif
+
 // CPU kick using pre-computed accelerations
 static void cpu_kick(CpuSubset& s, int start, int count, double kick_dt) {
     const int end = start + count;
@@ -2739,6 +3235,7 @@ static void cpu_compute_timestep(CpuSubset& s, int start, int count,
     for (int i = start; i < end; i++) s.dt_adapt[i] = 1e60;
     for (int i = start; i < end; i++) {
         for (int j = i + 1; j < end; j++) {
+            if (s.collisional && s.sid[i] >= 0 && s.sid[j] == s.sid[i]) continue;
             double dx = s.x[j] - s.x[i];
             double dy = s.y[j] - s.y[i];
             double dz = s.z[j] - s.z[i];
@@ -2772,6 +3269,7 @@ static void cpu_compute_force_and_timestep(CpuSubset& s, int start, int count,
     }
     for (int i = start; i < end; i++) {
         for (int j = i + 1; j < end; j++) {
+            if (s.collisional && s.sid[i] >= 0 && s.sid[j] == s.sid[i]) continue;
             double dx = s.x[j] - s.x[i];
             double dy = s.y[j] - s.y[i];
             double dz = s.z[j] - s.z[i];
@@ -2842,6 +3340,9 @@ static int cpu_partition_by_pivot(CpuSubset& s, int start, int count, double piv
     std::vector<double> tax(count), tay(count), taz(count);
     std::vector<double> tm(count), tdt(count);
     std::vector<int64_t> tix(count), tiy(count), tiz(count);
+#ifdef ENABLE_COLLISIONAL
+    std::vector<int> tsid(count);
+#endif
     int si = 0, fi = slow_count;
     for (int i = 0; i < count; i++) {
         int src = start + i;
@@ -2851,6 +3352,9 @@ static int cpu_partition_by_pivot(CpuSubset& s, int start, int count, double piv
         tax[dst] = s.ax[src]; tay[dst] = s.ay[src]; taz[dst] = s.az[src];
         tm[dst] = s.mass[src]; tdt[dst] = s.dt_adapt[src];
         tix[dst] = s.ix[src]; tiy[dst] = s.iy[src]; tiz[dst] = s.iz[src];
+#ifdef ENABLE_COLLISIONAL
+        tsid[dst] = s.sid[src];
+#endif
     }
     for (int i = 0; i < count; i++) {
         int dst = start + i;
@@ -2859,6 +3363,9 @@ static int cpu_partition_by_pivot(CpuSubset& s, int start, int count, double piv
         s.ax[dst] = tax[i]; s.ay[dst] = tay[i]; s.az[dst] = taz[i];
         s.mass[dst] = tm[i]; s.dt_adapt[dst] = tdt[i];
         s.ix[dst] = tix[i]; s.iy[dst] = tiy[i]; s.iz[dst] = tiz[i];
+#ifdef ENABLE_COLLISIONAL
+        s.sid[dst] = tsid[i];
+#endif
     }
     return slow_count;
 }
@@ -2871,11 +3378,19 @@ static void cpu_fsi_step(CpuSubset& s, int start, int count,
         cpu_self_acc(s, start, count, G, soft2);
     }
     cpu_kick(s, start, count, dt * FSI_KICK);
+#ifdef ENABLE_COLLISIONAL
+    cpu_drift_field_only(s, start, count, dt * FSI_DRIFT);
+#else
     cpu_drift(s, start, count, dt * FSI_DRIFT);
+#endif
     cpu_self_acc(s, start, count, G, soft2);
     cpu_self_grad(s, start, count, G, soft2, dt);
     cpu_kick(s, start, count, dt * FSI_MOD_KICK);
+#ifdef ENABLE_COLLISIONAL
+    cpu_drift_field_only(s, start, count, dt * FSI_DRIFT);
+#else
     cpu_drift(s, start, count, dt * FSI_DRIFT);
+#endif
     cpu_self_acc(s, start, count, G, soft2);
     cpu_kick(s, start, count, dt * FSI_KICK);
 }
@@ -3118,7 +3633,8 @@ static void hhs_fsi_recursive_distributed(
     double G, double soft2,
     double dt_min, double eta,
     bool dt_valid,
-    bool global_tree_available = false) {
+    bool global_tree_available = false,
+    bool top_level = false) {
 
     if (count == 0) return;
     g_subset_hist.record(SubsetHistogram::DISTRIBUTED, count);
@@ -3194,6 +3710,20 @@ static void hhs_fsi_recursive_distributed(
         }
         g_profiler.stop(StepProfiler::ADAPTIVE_DT, (long long)count * count);
     }
+
+#ifdef ENABLE_COLLISIONAL
+    // Top-level subsystem detection: after timestep (which found neighbor pairs)
+    // and before partition (which reorders particles)
+    if (top_level && dp.local.collisional) {
+        Kokkos::fence();  // ensure force kernels have written neighbor pairs
+        g_subsystem_mgr.detect_from_pairs(dp.local, G, pivot_dt,
+                                           g_collisional.r_ngb, g_collisional.r_ngb_max,
+                                           g_collisional.n_orb_secular);
+        g_subsystem_mgr.update_particle_flags(dp.local);
+        g_subsystem_mgr.prune(dp.local, G);
+        g_subsystem_mgr.update_particle_flags(dp.local);
+    }
+#endif
 
     // Partition into slow (dt >= pivot) and fast (dt < pivot)
     // All ranks do identical partitioning (deterministic)
@@ -3683,6 +4213,13 @@ void hhs_fsi_step_distributed(DistributedParticles& dp, double pivot_dt,
     }
 
 #ifdef USE_MPI
+#ifdef ENABLE_COLLISIONAL
+    // Reset neighbor pair counter before force kernels detect new pairs
+    if (dp.local.collisional) {
+        g_subsystem_mgr.reset_ngb_count();
+    }
+#endif
+
     if (gadget4_cross && use_tree) {
         // GADGET-4 decomposition: F_cross = F_all - F_self
         // Build the global tree once at the top level
@@ -3695,7 +4232,8 @@ void hhs_fsi_step_distributed(DistributedParticles& dp, double pivot_dt,
     } else {
         // Standard HHS-FSI with explicit cross-forces
         hhs_fsi_recursive_distributed(dp, 0, dp.N_total, pivot_dt,
-                                      G, soft2, dt_min, eta, false);
+                                      G, soft2, dt_min, eta, false,
+                                      /*top_level=*/true);
     }
 #endif
 }

@@ -71,6 +71,13 @@ void kick_velocities(Particles& p, int start, int count, double dt);
 // Drift positions
 void drift(Particles& p, int start, int count, double dt);
 
+// Drift field particles only (skip subsystem members with subsystem_id >= 0)
+// Falls through to standard drift() when !p.collisional
+void drift_field_only(Particles& p, int start, int count, double dt);
+
+// Advance subsystems whose members are all in [start, start+count) via LogH
+void advance_subsystems_in_range(Particles& p, int start, int count, double G, double dt);
+
 // Distributed force + timestep computation for between-step updates
 // Each rank computes for its slice, then allgather accelerations and timesteps
 void compute_acceleration_and_timestep_distributed(DistributedParticles& dp,
