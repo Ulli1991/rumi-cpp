@@ -27,7 +27,7 @@ SYMMETRIC_TIMESTEPS = true                	# Fuse force+timestep with harmonic s
 # =============================================================================
 # Barnes-Hut tree: O(N log N) force via monopole approximation
 # =============================================================================
-USE_TREE = true                           	# Enable tree for self-forces
+USE_TREE = false                           	# Master switch to enable tree for self-forces
 TREE_THRESHOLD = 100000 	                # Use tree above this count, N² below
 TREE_THETA = 0.7                          	# Opening angle (smaller = more accurate, slower)
 TREE_N_LEAF = 32                          	# Max particles per leaf cell
@@ -35,12 +35,29 @@ TREE_N_GROUP = 64                         	# Particles per traversal group
 GADGET4_CROSS = false                     	# F_cross = F_all - F_self decomposition (requires USE_TREE)
 
 # =============================================================================
+# Collisional dynamics
+# Enable for unsoftened direct N-body with close encounter handling.
+# Forces SOFTENING_PC = 0 when enabled.
+# =============================================================================
+COLLISIONAL = true 				# Master switch to enable proper collional treatment of the Nbody system
+R_NGB = 1e-3                        		# Neighbor search radius (pc) for subsystem detection
+R_NGB_MAX = 0.1                     		# Max distance for orbital element check (pc)
+ETA_GBS = 1e-10                     		# GBS extrapolation accuracy for LogH integrator
+N_ORB_SECULAR = 3                   		# Orbits/timestep threshold for secular evolution
+M_PN = 5.0                          		# Minimum mass (M_sun) for PN corrections
+PN_ORDER = 7                        		# PN bitmask: 1=PN1, 2=PN2, 4=PN2.5 (7=all up to PN2.5)
+R_ESCAPE_RH = 100.0                 		# Escape radius in half-mass radii
+MSTAR_THRESHOLD = 8                 		# N-body threshold: MSTAR (>=) vs LogH (<)
+SSE_ENABLED = true                  		# Runtime single stellar evolution
+SSE_METALLICITY = 0.02              		# Metallicity Z for SSE
+
+# =============================================================================
 # Plummer cluster parameters (only used if TEST_CASE = plummer)
 # =============================================================================
 PLUMMER_N = 1000000
 PLUMMER_M_TOTAL = 3.91e5            		# Total mass in solar masses (not used when kroupa_evolved)
 PLUMMER_R_HALF = 3.5                		# Half-mass radius in parsecs
-PLUMMER_SEED = 42
+PLUMMER_SEED = 42                               # random seed for the mass sampling (I like 42)
 PLUMMER_MASS_DIST = kroupa_evolved  		# equal, kroupa, or kroupa_evolved
 PLUMMER_AGE_GYR = 1.0               		# Cluster age in Gyr (for kroupa_evolved)
 PLUMMER_METALLICITY = 0.02          		# Stellar metallicity Z (solar)
