@@ -6,6 +6,7 @@ option(USE_MPI "Enable MPI for multi-node support" OFF)
 option(USE_GPU_AWARE_MPI "Enable GPU-aware MPI (CUDA-aware/ROCm-aware)" OFF)
 option(MPI_TOPOLOGY_RING "Use ring/j-partitioned MPI topology (allreduce instead of allgatherv)" OFF)
 option(MIXED_PRECISION "FP32 rsqrt seed + FP64 Newton-Raphson (~1e-14 precision)" OFF)
+option(ENABLE_COLLISIONAL "Compile collisional (unsoftened) support" OFF)
 
 # Find Kokkos (set Kokkos_ROOT or CMAKE_PREFIX_PATH)
 find_package(Kokkos REQUIRED)
@@ -31,6 +32,22 @@ add_executable(nbody-kokkos
     ${SRC_DIR}/io/diagnostics.cpp
 )
 
+# Collisional source files (only compiled when ENABLE_COLLISIONAL=ON)
+if(ENABLE_COLLISIONAL)
+    target_sources(nbody-kokkos PRIVATE
+        ${SRC_DIR}/collisional/kepler.cpp
+        ${SRC_DIR}/collisional/subsystem.cpp
+        ${SRC_DIR}/collisional/logh.cpp
+        ${SRC_DIR}/collisional/gbs.cpp
+        ${SRC_DIR}/collisional/logh_gpu.cpp
+        ${SRC_DIR}/collisional/secular.cpp
+        ${SRC_DIR}/collisional/post_newtonian.cpp
+        ${SRC_DIR}/collisional/mergers.cpp
+        ${SRC_DIR}/collisional/mstar.cpp
+        ${SRC_DIR}/collisional/checkpoint.cpp
+    )
+endif()
+
 target_include_directories(nbody-kokkos PRIVATE
     ${SRC_DIR}/core
     ${SRC_DIR}/gravity
@@ -38,6 +55,11 @@ target_include_directories(nbody-kokkos PRIVATE
     ${SRC_DIR}/ic_gen
     ${SRC_DIR}/io
 )
+if(ENABLE_COLLISIONAL)
+    target_include_directories(nbody-kokkos PRIVATE ${SRC_DIR}/collisional)
+    target_compile_definitions(nbody-kokkos PRIVATE ENABLE_COLLISIONAL)
+    message(STATUS "Collisional (unsoftened direct N-body) support enabled")
+endif()
 target_link_libraries(nbody-kokkos Kokkos::kokkos)
 target_compile_options(nbody-kokkos PRIVATE -O3)
 
