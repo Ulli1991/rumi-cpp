@@ -7,6 +7,11 @@
 #include "constants.h"
 #include "mpi_comm.h"
 #include "profiling.h"
+#ifdef ENABLE_COLLISIONAL
+#include "collisional_config.h"
+#include "subsystem.h"
+CollisionalConfig g_collisional;
+#endif
 
 #include <Kokkos_Core.hpp>
 #include <cstdio>
@@ -154,6 +159,37 @@ int main(int argc, char** argv) {
         tree_n_group = cfg.get_int("TREE_N_GROUP", 64);
         gadget4_cross = (cfg.get_str("GADGET4_CROSS", "false") == "true");
 
+#ifdef ENABLE_COLLISIONAL
+        // Collisional (unsoftened direct N-body) configuration
+        g_collisional.enabled = (cfg.get_str("COLLISIONAL", "false") == "true");
+        if (g_collisional.enabled) {
+            g_collisional.r_ngb           = cfg.get_double("R_NGB", 1e-3);
+            g_collisional.r_ngb_max       = cfg.get_double("R_NGB_MAX", 0.1);
+            g_collisional.eta_ff          = cfg.get_double("ETA_FF", 0.2);
+            g_collisional.eta_fb          = cfg.get_double("ETA_FB", 0.2);
+            g_collisional.eta_grad        = cfg.get_double("ETA_GRAD", 0.1);
+            g_collisional.eta_jerk        = cfg.get_double("ETA_JERK", 0.1);
+            g_collisional.eta_gbs         = cfg.get_double("ETA_GBS", 1e-10);
+            g_collisional.eta_pert        = cfg.get_double("ETA_PERT", 0.02);
+            g_collisional.eta_restart     = cfg.get_double("ETA_RESTART", 1e-6);
+            g_collisional.n_orb_secular   = cfg.get_int("N_ORB_SECULAR", 3);
+            g_collisional.m_pn            = cfg.get_double("M_PN", 5.0);
+            g_collisional.pn_order        = cfg.get_int("PN_ORDER", 7);
+            g_collisional.r_escape_rh     = cfg.get_double("R_ESCAPE_RH", 100.0);
+            g_collisional.mstar_threshold = cfg.get_int("MSTAR_THRESHOLD", 8);
+            g_collisional.sse_enabled     = (cfg.get_str("SSE_ENABLED", "true") == "true");
+            g_collisional.sse_metallicity = cfg.get_double("SSE_METALLICITY", 0.02);
+            g_collisional.compute_derived();
+
+            // Collisional mode requires zero softening
+            if (soft_pc > 0.0 && my_rank == 0) {
+                std::printf("WARNING: COLLISIONAL=true but SOFTENING_PC=%.2e > 0. "
+                            "Setting softening to 0.\n", soft_pc);
+            }
+            soft_pc = 0.0;
+        }
+#endif
+
         double G = G_CODE;
         double soft2 = soft_pc * soft_pc;
         double dt_max = dt_max_myr / TIME_UNIT_MYR;   // Myr → code TU
@@ -255,6 +291,17 @@ int main(int argc, char** argv) {
                             tree_theta, tree_n_leaf, tree_n_group, tree_threshold,
                             gadget4_cross ? ", GADGET4_CROSS" : "");
             }
+#ifdef ENABLE_COLLISIONAL
+            if (g_collisional.enabled) {
+                std::printf("Collisional mode: r_ngb=%.2e, r_ngb_max=%.2e, eta_gbs=%.2e\n",
+                            g_collisional.r_ngb, g_collisional.r_ngb_max, g_collisional.eta_gbs);
+                std::printf("  PN order=%d, M_PN=%.1f M_sun, MSTAR threshold=%d\n",
+                            g_collisional.pn_order, g_collisional.m_pn, g_collisional.mstar_threshold);
+                if (g_collisional.sse_enabled) {
+                    std::printf("  SSE: Z=%.4f\n", g_collisional.sse_metallicity);
+                }
+            }
+#endif
             std::printf("\n");
             std::fflush(stdout);
             if (profiling_enabled) {
@@ -303,6 +350,18 @@ int main(int argc, char** argv) {
             }
             std::printf("Particle dt range: [%.4e, %.4e] Myr\n\n", mn*TIME_UNIT_MYR, mx*TIME_UNIT_MYR);
         }
+
+#ifdef ENABLE_COLLISIONAL
+        // Allocate neighbor pair buffers for collisional subsystem detection
+        if (g_collisional.enabled) {
+            int max_pairs = std::max(1000, work_p.N / 10);
+            g_subsystem_mgr.allocate_ngb_buffers(max_pairs);
+            if (my_rank == 0) {
+                std::printf("Collisional: neighbor buffer allocated for %d pairs\n", max_pairs);
+                std::fflush(stdout);
+            }
+        }
+#endif
 
         auto diag0 = compute_diagnostics(work_p, G, soft2);
 
