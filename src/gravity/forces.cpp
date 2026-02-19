@@ -35,12 +35,14 @@ static void compute_acceleration_and_timestep_impl(Particles& p, double G, doubl
     int max_ngb = COLL ? g_subsystem_mgr.max_ngb_pairs : 0;
     double r_ngb_max_sq_val = COLL ? g_collisional.r_ngb_max_sq : 0.0;
     double r_ngb_val = COLL ? g_collisional.r_ngb : 0.0;
+    double pivot_dt_val = COLL ? g_collisional.flyby_pivot_dt : 0.0;
 #else
     int* ngb_i_raw = nullptr; int* ngb_j_raw = nullptr;
     double* ngb_a_raw = nullptr; double* ngb_e_raw = nullptr;
     double* ngb_E_raw = nullptr;
     int* ngb_bound_raw = nullptr; int* ngb_cnt_raw = nullptr;
     int max_ngb = 0; double r_ngb_max_sq_val = 0.0; double r_ngb_val = 0.0;
+    double pivot_dt_val = 0.0;
 #endif
 
     // Tiled version using shared memory with packed vector loads
@@ -132,7 +134,7 @@ static void compute_acceleration_and_timestep_impl(Particles& p, double G, doubl
                         double t_min_sq_pair = Kokkos::fmin(t_ff_sq, t_fb_sq);
                         t_min_i = Kokkos::fmin(t_min_i, t_min_sq_pair);
 
-                        // Neighbor detection: identify bound/close pairs
+                        // Neighbor detection: identify bound/close pairs and unbound fly-bys
                         if (COLL) {
                             if (r2 < r_ngb_max_sq_val && i < j) {
                                 double mu = G * mass_sum;
@@ -144,9 +146,30 @@ static void compute_acceleration_and_timestep_impl(Particles& p, double G, doubl
                                 double Ly = dz*dvx - dx*dvz;
                                 double Lz = dx*dvy - dy*dvx;
                                 double L2 = Lx*Lx + Ly*Ly + Lz*Lz;
-                                double e_val = is_bound ?
-                                    Kokkos::sqrt(Kokkos::fmax(0.0, 1.0 + 2.0*E_orb*L2/(mu*mu + EPS))) : 0.0;
-                                if (is_bound && (a_val < r_ngb_val || r_val < r_ngb_val)) {
+                                double e_val;
+                                if (is_bound) {
+                                    e_val = Kokkos::sqrt(Kokkos::fmax(0.0, 1.0 + 2.0*E_orb*L2/(mu*mu + EPS)));
+                                } else {
+                                    e_val = Kokkos::sqrt(Kokkos::fmax(1.0, 1.0 + 2.0*E_orb*L2/(mu*mu + EPS)));
+                                }
+
+                                bool is_neighbor = false;
+                                if (is_bound) {
+                                    is_neighbor = (a_val < r_ngb_val || r_val < r_ngb_val);
+                                } else {
+                                    // Unbound fly-by detection (BIFROST Eq. 4)
+                                    // Hyperbolic orbit: a < 0, e > 1, r_peri = |a|*(e-1)
+                                    double r_peri = Kokkos::fabs(a_val) * (e_val - 1.0);
+                                    if (r_val < r_ngb_val) {
+                                        is_neighbor = true;  // already close
+                                    } else if (r_peri < r_ngb_val && v_sq > EPS) {
+                                        // Check approach timescale: C * r / v < pivot_dt
+                                        double t_approach = 0.5 * r_val / Kokkos::sqrt(v_sq);
+                                        is_neighbor = (t_approach < pivot_dt_val);
+                                    }
+                                }
+
+                                if (is_neighbor) {
                                     int idx = Kokkos::atomic_fetch_add(ngb_cnt_raw, 1);
                                     if (idx < max_ngb) {
                                         int pi = pid_raw[i], pj = pid_raw[j];
@@ -265,6 +288,7 @@ static void self_gradient_correction_impl(Particles& p, int start, int count,
     RawView px{p.x.data()}, py{p.y.data()}, pz{p.z.data()};
     RawView pax{p.ax.data()}, pay{p.ay.data()}, paz{p.az.data()};
     RawView m{p.mass.data()};
+    RawView pgmag = COLL ? RawView{p.grad_mag.data()} : RawView{nullptr};
     const int* sid_raw = COLL ? p.subsystem_id.data() : nullptr;
     const double coeff = G * dt * dt * GRAD_COEFF;
 
@@ -338,7 +362,10 @@ static void self_gradient_correction_impl(Particles& p, int start, int count,
                 }
                 team.team_barrier();
             }
-            if (ii < count) { pax(i) += cx; pay(i) += cy; paz(i) += cz; }
+            if (ii < count) {
+                pax(i) += cx; pay(i) += cy; paz(i) += cz;
+                if (COLL) pgmag(i) = Kokkos::sqrt(cx*cx + cy*cy + cz*cz);
+            }
         });
 
 }
@@ -487,6 +514,7 @@ static void cross_gradient_correction_impl(Particles& p,
     RawView px{p.x.data()}, py{p.y.data()}, pz{p.z.data()};
     RawView pax{p.ax.data()}, pay{p.ay.data()}, paz{p.az.data()};
     RawView m{p.mass.data()};
+    RawView pgmag = COLL ? RawView{p.grad_mag.data()} : RawView{nullptr};
     const int* sid_raw = COLL ? p.subsystem_id.data() : nullptr;
     const double coeff = G * dt * dt * GRAD_COEFF;
 
@@ -566,7 +594,10 @@ static void cross_gradient_correction_impl(Particles& p,
                 }
                 team.team_barrier();
             }
-            if (ii < a_count) { pax(i) += cx; pay(i) += cy; paz(i) += cz; }
+            if (ii < a_count) {
+                pax(i) += cx; pay(i) += cy; paz(i) += cz;
+                if (COLL) pgmag(i) = Kokkos::sqrt(cx*cx + cy*cy + cz*cz);
+            }
         });
     // B from A: tile over A particles
     int num_teams_b = (b_count + TILE_SIZE - 1) / TILE_SIZE;
@@ -625,7 +656,10 @@ static void cross_gradient_correction_impl(Particles& p,
                 }
                 team.team_barrier();
             }
-            if (ii < b_count) { pax(j) += cx; pay(j) += cy; paz(j) += cz; }
+            if (ii < b_count) {
+                pax(j) += cx; pay(j) += cy; paz(j) += cz;
+                if (COLL) pgmag(j) = Kokkos::sqrt(cx*cx + cy*cy + cz*cz);
+            }
         });
 
 }
@@ -677,12 +711,20 @@ static void compute_timestep_subset_impl(Particles& p, int start, int count,
     int max_ngb = COLL ? g_subsystem_mgr.max_ngb_pairs : 0;
     double r_ngb_max_sq_val = COLL ? g_collisional.r_ngb_max_sq : 0.0;
     double r_ngb_val = COLL ? g_collisional.r_ngb : 0.0;
+    double pivot_dt_val = COLL ? g_collisional.flyby_pivot_dt : 0.0;
 #else
     int* ngb_i_raw = nullptr; int* ngb_j_raw = nullptr;
     double* ngb_a_raw = nullptr; double* ngb_e_raw = nullptr;
     double* ngb_E_raw = nullptr;
     int* ngb_bound_raw = nullptr; int* ngb_cnt_raw = nullptr;
     int max_ngb = 0; double r_ngb_max_sq_val = 0.0; double r_ngb_val = 0.0;
+    double pivot_dt_val = 0.0;
+#endif
+    RawView pax{p.ax.data()}, pay{p.ay.data()}, paz{p.az.data()};
+#ifdef ENABLE_COLLISIONAL
+    double eta_jerk_val = COLL ? g_collisional.eta_jerk : 0.0;
+#else
+    double eta_jerk_val = 0.0;
 #endif
     const int end = start + count;
 
@@ -723,6 +765,7 @@ static void compute_timestep_subset_impl(Particles& p, int start, int count,
 
             double t_min_sq = 1e60;   // non-symmetrized path
             double t_min_i = 1e30;    // symmetrized path
+            double jerk_x = 0, jerk_y = 0, jerk_z = 0;  // jerk accumulators (collisional only)
 
             for (int tile_st = start; tile_st < end; tile_st += TILE_SIZE) {
                 int tile_end_idx = (tile_st + TILE_SIZE < end) ? tile_st + TILE_SIZE : end;
@@ -797,7 +840,19 @@ static void compute_timestep_subset_impl(Particles& p, int start, int count,
                             t_min_sq = Kokkos::fmin(t_min_sq, t_min_sq_pair);
                         }
 
-                        // Neighbor detection
+                        // Jerk accumulation (collisional only)
+                        // j_ij = G*m_j * (v_ij/r³ - 3*(r·v)/(r^5) * r_ij)
+                        if (COLL) {
+                            double inv_r3 = inv_r * inv_r * inv_r;
+                            double rdotv = dx*dvx + dy*dvy + dz*dvz;
+                            double fac1 = G * mj * inv_r3;
+                            double fac2 = 3.0 * rdotv * inv_r * inv_r;
+                            jerk_x += fac1 * (dvx - fac2 * dx);
+                            jerk_y += fac1 * (dvy - fac2 * dy);
+                            jerk_z += fac1 * (dvz - fac2 * dz);
+                        }
+
+                        // Neighbor detection: identify bound/close pairs and unbound fly-bys
                         if (COLL) {
                             if (r2 < r_ngb_max_sq_val && i < j) {
                                 double mu = G * mass_sum;
@@ -807,16 +862,36 @@ static void compute_timestep_subset_impl(Particles& p, int start, int count,
                                 double a_val = -mu / (2.0 * E_orb + EPS);
                                 double Lx = dy*dvz - dz*dvy, Ly = dz*dvx - dx*dvz, Lz = dx*dvy - dy*dvx;
                                 double L2 = Lx*Lx + Ly*Ly + Lz*Lz;
-                                double e_val = is_bound ?
-                                    Kokkos::sqrt(Kokkos::fmax(0.0, 1.0 + 2.0*E_orb*L2/(mu*mu + EPS))) : 0.0;
-                                if (is_bound && (a_val < r_ngb_val || r_val < r_ngb_val)) {
+                                double e_val;
+                                if (is_bound) {
+                                    e_val = Kokkos::sqrt(Kokkos::fmax(0.0, 1.0 + 2.0*E_orb*L2/(mu*mu + EPS)));
+                                } else {
+                                    e_val = Kokkos::sqrt(Kokkos::fmax(1.0, 1.0 + 2.0*E_orb*L2/(mu*mu + EPS)));
+                                }
+
+                                bool is_neighbor = false;
+                                if (is_bound) {
+                                    is_neighbor = (a_val < r_ngb_val || r_val < r_ngb_val);
+                                } else {
+                                    // Unbound fly-by detection (BIFROST Eq. 4)
+                                    double r_peri = Kokkos::fabs(a_val) * (e_val - 1.0);
+                                    if (r_val < r_ngb_val) {
+                                        is_neighbor = true;
+                                    } else if (r_peri < r_ngb_val && v_sq > EPS) {
+                                        double t_approach = 0.5 * r_val / Kokkos::sqrt(v_sq);
+                                        is_neighbor = (t_approach < pivot_dt_val);
+                                    }
+                                }
+
+                                if (is_neighbor) {
                                     int idx = Kokkos::atomic_fetch_add(ngb_cnt_raw, 1);
                                     if (idx < max_ngb) {
                                         int pi = pid_raw[i], pj = pid_raw[j];
                                         if (pi > pj) { int tmp = pi; pi = pj; pj = tmp; }
                                         ngb_i_raw[idx] = pi; ngb_j_raw[idx] = pj;
                                         ngb_a_raw[idx] = a_val; ngb_e_raw[idx] = e_val;
-                                        ngb_E_raw[idx] = E_orb; ngb_bound_raw[idx] = 1;
+                                        ngb_E_raw[idx] = E_orb;
+                                        ngb_bound_raw[idx] = is_bound ? 1 : 0;
                                     }
                                 }
                             }
@@ -827,7 +902,19 @@ static void compute_timestep_subset_impl(Particles& p, int start, int count,
             }
 
             if (ii < count) {
-                dt_f(i) = symmetrize ? (t_min_i * eta) : (Kokkos::sqrt(t_min_sq) * eta);
+                double dt_val = symmetrize ? (t_min_i * eta) : (Kokkos::sqrt(t_min_sq) * eta);
+
+                // Jerk timestep: dt_jerk = eta_j * |a| / |j| (collisional only)
+                if (COLL && eta_jerk_val > 0.0) {
+                    double a_mag = Kokkos::sqrt(pax(i)*pax(i) + pay(i)*pay(i) + paz(i)*paz(i));
+                    double j_mag = Kokkos::sqrt(jerk_x*jerk_x + jerk_y*jerk_y + jerk_z*jerk_z);
+                    if (j_mag > EPS) {
+                        double dt_jerk = eta_jerk_val * a_mag / j_mag;
+                        dt_val = Kokkos::fmin(dt_val, dt_jerk);
+                    }
+                }
+
+                dt_f(i) = dt_val;
             }
         });
 
@@ -945,12 +1032,14 @@ static void self_acceleration_and_timestep_impl(Particles& p, int start, int cou
     int max_ngb = COLL ? g_subsystem_mgr.max_ngb_pairs : 0;
     double r_ngb_max_sq_val = COLL ? g_collisional.r_ngb_max_sq : 0.0;
     double r_ngb_val = COLL ? g_collisional.r_ngb : 0.0;
+    double pivot_dt_val = COLL ? g_collisional.flyby_pivot_dt : 0.0;
 #else
     int* ngb_i_raw = nullptr; int* ngb_j_raw = nullptr;
     double* ngb_a_raw = nullptr; double* ngb_e_raw = nullptr;
     double* ngb_E_raw = nullptr;
     int* ngb_bound_raw = nullptr; int* ngb_cnt_raw = nullptr;
     int max_ngb = 0; double r_ngb_max_sq_val = 0.0; double r_ngb_val = 0.0;
+    double pivot_dt_val = 0.0;
 #endif
     const int end = start + count;
 
@@ -1044,7 +1133,7 @@ static void self_acceleration_and_timestep_impl(Particles& p, int start, int cou
 
                         t_min_i = Kokkos::fmin(t_min_i, Kokkos::fmin(t_sym_ff, t_sym_fb));
 
-                        // Neighbor detection
+                        // Neighbor detection: identify bound/close pairs and unbound fly-bys
                         if (COLL) {
                             if (r2 < r_ngb_max_sq_val && i < j) {
                                 double mu = G * (mi_val + mj);
@@ -1055,16 +1144,36 @@ static void self_acceleration_and_timestep_impl(Particles& p, int start, int cou
                                 double a_val = -mu / (2.0 * E_orb + EPS);
                                 double Lx = dy*dvz - dz*dvy, Ly = dz*dvx - dx*dvz, Lz = dx*dvy - dy*dvx;
                                 double L2 = Lx*Lx + Ly*Ly + Lz*Lz;
-                                double e_val = is_bound ?
-                                    Kokkos::sqrt(Kokkos::fmax(0.0, 1.0 + 2.0*E_orb*L2/(mu*mu + EPS))) : 0.0;
-                                if (is_bound && (a_val < r_ngb_val || r_val < r_ngb_val)) {
+                                double e_val;
+                                if (is_bound) {
+                                    e_val = Kokkos::sqrt(Kokkos::fmax(0.0, 1.0 + 2.0*E_orb*L2/(mu*mu + EPS)));
+                                } else {
+                                    e_val = Kokkos::sqrt(Kokkos::fmax(1.0, 1.0 + 2.0*E_orb*L2/(mu*mu + EPS)));
+                                }
+
+                                bool is_neighbor = false;
+                                if (is_bound) {
+                                    is_neighbor = (a_val < r_ngb_val || r_val < r_ngb_val);
+                                } else {
+                                    // Unbound fly-by detection (BIFROST Eq. 4)
+                                    double r_peri = Kokkos::fabs(a_val) * (e_val - 1.0);
+                                    if (r_val < r_ngb_val) {
+                                        is_neighbor = true;
+                                    } else if (r_peri < r_ngb_val && v_sq_nd > EPS) {
+                                        double t_approach = 0.5 * r_val / Kokkos::sqrt(v_sq_nd);
+                                        is_neighbor = (t_approach < pivot_dt_val);
+                                    }
+                                }
+
+                                if (is_neighbor) {
                                     int idx = Kokkos::atomic_fetch_add(ngb_cnt_raw, 1);
                                     if (idx < max_ngb) {
                                         int pi = pid_raw[i], pj = pid_raw[j];
                                         if (pi > pj) { int tmp = pi; pi = pj; pj = tmp; }
                                         ngb_i_raw[idx] = pi; ngb_j_raw[idx] = pj;
                                         ngb_a_raw[idx] = a_val; ngb_e_raw[idx] = e_val;
-                                        ngb_E_raw[idx] = E_orb; ngb_bound_raw[idx] = 1;
+                                        ngb_E_raw[idx] = E_orb;
+                                        ngb_bound_raw[idx] = is_bound ? 1 : 0;
                                     }
                                 }
                             }
