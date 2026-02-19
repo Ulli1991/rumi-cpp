@@ -82,7 +82,7 @@ void bh_bh_remnant(double m1, double m2, const double chi1[3], const double chi2
     // Simplified: random direction in orbital plane
     if (L_mag > 1e-30) {
         // Find perpendicular direction in orbital plane
-        double e1[3], e2[3];
+        double e1[3];
         // e1 = L x z_hat (or x_hat if L || z_hat)
         double lhat[3] = {L_orb[0]/L_mag, L_orb[1]/L_mag, L_orb[2]/L_mag};
         if (std::fabs(lhat[2]) < 0.9) {

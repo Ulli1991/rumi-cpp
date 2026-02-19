@@ -14,6 +14,9 @@ void GBSIntegrator::pack_state(const LogHState& state, double* y, int& dim) {
     int n = state.n_bodies;
     for (int i = 0; i < n * 3; i++) y[dim++] = state.pos[i];
     for (int i = 0; i < n * 3; i++) y[dim++] = state.vel[i];
+    if (state.use_aux_vel) {
+        for (int i = 0; i < n * 3; i++) y[dim++] = state.aux_vel[i];
+    }
     y[dim++] = state.t;
     y[dim++] = state.B;
 }
@@ -23,6 +26,9 @@ void GBSIntegrator::unpack_state(const double* y, int dim, LogHState& state) {
     int n = state.n_bodies;
     for (int i = 0; i < n * 3; i++) state.pos[i] = y[idx++];
     for (int i = 0; i < n * 3; i++) state.vel[i] = y[idx++];
+    if (state.use_aux_vel) {
+        for (int i = 0; i < n * 3; i++) state.aux_vel[i] = y[idx++];
+    }
     state.t = y[idx++];
     state.B = y[idx++];
 }
@@ -34,11 +40,18 @@ void GBSIntegrator::unpack_state(const double* y, int dim, LogHState& state) {
 // ============================================================================
 
 void GBSIntegrator::midpoint(const LogHState& in, LogHState& out,
-                              int n_substeps, double ds_total, double G) {
+                              int n_substeps, double ds_total, double G,
+                              double c_code, int pn_order) {
     double h = ds_total / n_substeps;
     out = in;
-    for (int step = 0; step < n_substeps; step++) {
-        logh_leapfrog_step(out, h, G);
+    if (pn_order > 0 && out.use_aux_vel) {
+        for (int s = 0; s < n_substeps; s++) {
+            logh_leapfrog_step_pn(out, h, G, c_code, pn_order);
+        }
+    } else {
+        for (int s = 0; s < n_substeps; s++) {
+            logh_leapfrog_step(out, h, G);
+        }
     }
 }
 
@@ -82,16 +95,17 @@ double GBSIntegrator::extrapolate(int stage, int dim) {
 // Full GBS step with adaptive order
 // ============================================================================
 
-bool GBSIntegrator::step(LogHState& state, double ds, double G, double& ds_next) {
+bool GBSIntegrator::step(LogHState& state, double ds, double G, double& ds_next,
+                          double c_code, int pn_order) {
     int dim = 0;
-    double y0[LOGH_MAX_BODIES * 6 + 2];
+    double y0[LOGH_MAX_BODIES * 9 + 2];
     pack_state(state, y0, dim);
 
     for (int stage = 0; stage < MAX_STAGES; stage++) {
         LogHState result;
         result = state;  // copy masses, B, n_bodies, etc.
 
-        midpoint(state, result, STEP_SEQ[stage], ds, G);
+        midpoint(state, result, STEP_SEQ[stage], ds, G, c_code, pn_order);
         pack_state(result, table[stage], dim);
 
         if (stage > 0) {
@@ -121,7 +135,8 @@ bool GBSIntegrator::step(LogHState& state, double ds, double G, double& ds_next)
 // ============================================================================
 
 int GBSIntegrator::integrate_to_time(LogHState& state, double t_target, double G,
-                                      double ds_initial, int max_iter) {
+                                      double ds_initial, double c_code, int pn_order,
+                                      int max_iter) {
     double ds = ds_initial;
     int n_steps = 0;
 
@@ -145,7 +160,7 @@ int GBSIntegrator::integrate_to_time(LogHState& state, double t_target, double G
         LogHState saved = state;
         double ds_next;
 
-        bool ok = step(state, ds, G, ds_next);
+        bool ok = step(state, ds, G, ds_next, c_code, pn_order);
         n_steps++;
 
         if (!ok) {

@@ -145,30 +145,26 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
         }), pairs.end());
 
     // Union-find to identify connected components
-    // Only merge bound pairs
+    // Merge ALL pairs (bound and unbound fly-bys both form subsystems)
     UnionFind uf(max_pid + 1);
     for (auto& pr : pairs) {
-        if (pr.bound) {
-            uf.unite(pr.pid_lo, pr.pid_hi);
-        }
+        uf.unite(pr.pid_lo, pr.pid_hi);
     }
 
-    // Build components
+    // Build components from ALL pairs (bound and unbound)
     std::map<int, std::vector<int>> components;
     for (auto& pr : pairs) {
-        if (pr.bound) {
-            int root = uf.find(pr.pid_lo);
-            if (components.find(root) == components.end()) {
-                // Collect all members
-                std::set<int> members;
-                for (auto& pr2 : pairs) {
-                    if (pr2.bound && uf.find(pr2.pid_lo) == root) {
-                        members.insert(pr2.pid_lo);
-                        members.insert(pr2.pid_hi);
-                    }
+        int root = uf.find(pr.pid_lo);
+        if (components.find(root) == components.end()) {
+            // Collect all members
+            std::set<int> members;
+            for (auto& pr2 : pairs) {
+                if (uf.find(pr2.pid_lo) == root) {
+                    members.insert(pr2.pid_lo);
+                    members.insert(pr2.pid_hi);
                 }
-                components[root] = std::vector<int>(members.begin(), members.end());
             }
+            components[root] = std::vector<int>(members.begin(), members.end());
         }
     }
 
@@ -186,22 +182,24 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
         sub.outer_companion_pid = -1;
 
         if (sub.n_bodies == 2) {
-            // Binary
+            // Binary or fly-by
             int idx_i = pid_to_idx[members[0]];
             int idx_j = pid_to_idx[members[1]];
 
             // Find the pair info
+            bool pair_bound = false;
             for (auto& pr : pairs) {
                 if ((pr.pid_lo == members[0] && pr.pid_hi == members[1]) ||
                     (pr.pid_lo == members[1] && pr.pid_hi == members[0])) {
                     sub.orb.a = pr.a;
                     sub.orb.e = pr.e;
                     sub.orb.E_orb = pr.E_orb;
+                    pair_bound = pr.bound;
                     break;
                 }
             }
 
-            // Compute period
+            // Compute period (only meaningful for bound orbits with a > 0)
             if (sub.orb.a > 0 && idx_i >= 0 && idx_j >= 0) {
                 double mu = G * (h_mass(idx_i) + h_mass(idx_j));
                 sub.orb.period = 2.0 * M_PI * std::sqrt(sub.orb.a * sub.orb.a * sub.orb.a / mu);
@@ -209,7 +207,7 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
                 sub.is_secular = (sub.n_orb_per_dt >= n_orb_secular);
             }
 
-            sub.type = SubsystemType::BINARY;
+            sub.type = pair_bound ? SubsystemType::BINARY : SubsystemType::FLYBY;
             sub.dt_sub = dt_step;
         } else if (sub.n_bodies == 3) {
             // Triple — check stability
@@ -369,6 +367,127 @@ void SubsystemManager::prune(Particles& p, double G) {
 
             return (E >= 0.0);  // unbound → remove
         }), active.end());
+}
+
+// ============================================================================
+// Enforce shared timestep for subsystem members (BIFROST Section 3.4.2)
+// ============================================================================
+
+void SubsystemManager::enforce_shared_timestep(Particles& p) const {
+    if (active.empty()) return;
+
+    auto h_dt = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.dt_adapt);
+    auto h_pid = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.particle_id);
+
+    // Build pid->idx mapping
+    int max_pid = 0;
+    for (int i = 0; i < p.N; i++) max_pid = std::max(max_pid, h_pid(i));
+    std::vector<int> pid_to_idx(max_pid + 1, -1);
+    for (int i = 0; i < p.N; i++) pid_to_idx[h_pid(i)] = i;
+
+    // For each subsystem, find min dt and set all members to it
+    for (const auto& sub : active) {
+        double dt_min = 1e30;
+        for (int pid : sub.particle_ids) {
+            int idx = pid_to_idx[pid];
+            if (idx >= 0) dt_min = std::min(dt_min, h_dt(idx));
+        }
+        for (int pid : sub.particle_ids) {
+            int idx = pid_to_idx[pid];
+            if (idx >= 0) h_dt(idx) = dt_min;
+        }
+    }
+
+    Kokkos::deep_copy(p.dt_adapt, h_dt);
+}
+
+// ============================================================================
+// Perturbation timestep for subsystems (BIFROST Section 3.4.3)
+// ============================================================================
+
+void SubsystemManager::apply_perturbation_timestep(Particles& p, double G, double eta_pert) const {
+    if (active.empty() || eta_pert <= 0.0) return;
+
+    auto h_x  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.x);
+    auto h_y  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.y);
+    auto h_z  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.z);
+    auto h_vx = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vx);
+    auto h_vy = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vy);
+    auto h_vz = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vz);
+    auto h_ax = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.ax);
+    auto h_ay = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.ay);
+    auto h_az = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.az);
+    auto h_m  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.mass);
+    auto h_dt = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.dt_adapt);
+    auto h_pid = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.particle_id);
+
+    // Build pid->idx mapping
+    int max_pid = 0;
+    for (int i = 0; i < p.N; i++) max_pid = std::max(max_pid, h_pid(i));
+    std::vector<int> pid_to_idx(max_pid + 1, -1);
+    for (int i = 0; i < p.N; i++) pid_to_idx[h_pid(i)] = i;
+
+    bool modified = false;
+
+    for (const auto& sub : active) {
+        if (sub.n_bodies != 2) continue;  // only binaries for now
+
+        int idx_i = pid_to_idx[sub.particle_ids[0]];
+        int idx_j = pid_to_idx[sub.particle_ids[1]];
+        if (idx_i < 0 || idx_j < 0) continue;
+
+        // Relative position and velocity
+        double rx = h_x(idx_j) - h_x(idx_i);
+        double ry = h_y(idx_j) - h_y(idx_i);
+        double rz = h_z(idx_j) - h_z(idx_i);
+        double r2 = rx*rx + ry*ry + rz*rz;
+        double r_mag = std::sqrt(r2);
+        if (r_mag < 1e-30) continue;
+
+        double vx = h_vx(idx_j) - h_vx(idx_i);
+        double vy = h_vy(idx_j) - h_vy(idx_i);
+        double vz = h_vz(idx_j) - h_vz(idx_i);
+        double v_mag = std::sqrt(vx*vx + vy*vy + vz*vz);
+
+        // Total N-body acceleration difference
+        double dax = h_ax(idx_j) - h_ax(idx_i);
+        double day = h_ay(idx_j) - h_ay(idx_i);
+        double daz = h_az(idx_j) - h_az(idx_i);
+
+        // Internal two-body acceleration on relative coordinate:
+        // a_rel_internal = -G*(m1+m2)/r^3 * r_rel
+        double mu = G * (h_m(idx_i) + h_m(idx_j));
+        double inv_r3 = 1.0 / (r_mag * r2);
+        double a_int_x = -mu * inv_r3 * rx;
+        double a_int_y = -mu * inv_r3 * ry;
+        double a_int_z = -mu * inv_r3 * rz;
+
+        // Tidal perturbation: delta_a = (a_j - a_i) - a_rel_internal
+        double da_tid_x = dax - a_int_x;
+        double da_tid_y = day - a_int_y;
+        double da_tid_z = daz - a_int_z;
+        double da_tid = std::sqrt(da_tid_x*da_tid_x + da_tid_y*da_tid_y + da_tid_z*da_tid_z);
+
+        if (da_tid < 1e-30) continue;
+
+        // Perturbation timestep: dt_pert = eta_pert * |v_rel| / |delta_a_tidal|
+        // This is the timescale over which the tidal perturbation significantly
+        // changes the relative velocity (and hence orbital elements).
+        double dt_pert = eta_pert * std::max(v_mag, std::sqrt(mu / std::max(sub.orb.a, r_mag))) / da_tid;
+
+        // Clamp dt_adapt of both members
+        for (int pid : sub.particle_ids) {
+            int idx = pid_to_idx[pid];
+            if (idx >= 0 && dt_pert < h_dt(idx)) {
+                h_dt(idx) = dt_pert;
+                modified = true;
+            }
+        }
+    }
+
+    if (modified) {
+        Kokkos::deep_copy(p.dt_adapt, h_dt);
+    }
 }
 
 void SubsystemManager::reset_step_diagnostics() {

@@ -75,6 +75,18 @@ struct SubsystemManager {
     // Update subsystem_id field in Particles based on active subsystems
     void update_particle_flags(Particles& p) const;
 
+    // Enforce shared timestep: all members of each subsystem get min dt_adapt
+    // Call after detection and before partition_by_pivot
+    void enforce_shared_timestep(Particles& p) const;
+
+    // Perturbation timestep: clamp dt_adapt of subsystem members so the FSI
+    // timestep resolves changes in orbital elements caused by external tidal
+    // perturbations (BIFROST Section 3.4.3).
+    // dt_pert = eta_pert * |v_rel| / |delta_a_tidal|
+    // where delta_a_tidal = (a_j - a_i) + G*(m1+m2)/r^3 * r_rel
+    // Call after enforce_shared_timestep, before partition_by_pivot.
+    void apply_perturbation_timestep(Particles& p, double G, double eta_pert) const;
+
     // Step-level diagnostics: accumulated across HHS recursion levels
     int step_total_pairs = 0;       // total neighbor pairs found across all levels
     int step_total_subsystems = 0;  // total subsystems formed

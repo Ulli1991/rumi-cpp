@@ -13,14 +13,15 @@ struct GBSIntegrator {
 
     // Extrapolation table (Neville-Aitken)
     // dim = number of state variables to extrapolate
-    double table[MAX_STAGES][LOGH_MAX_BODIES * 6 + 2];  // pos+vel+t+B per stage
-    double work[MAX_STAGES][LOGH_MAX_BODIES * 6 + 2];
+    double table[MAX_STAGES][LOGH_MAX_BODIES * 9 + 2];  // pos+vel+aux_vel+t+B per stage
+    double work[MAX_STAGES][LOGH_MAX_BODIES * 9 + 2];
 
     GBSIntegrator(double eta = 1e-10) : eta_gbs(eta) {}
 
     // Modified midpoint method: integrate LogHState by n_substeps of ds_total/n
     void midpoint(const LogHState& in, LogHState& out,
-                  int n_substeps, double ds_total, double G);
+                  int n_substeps, double ds_total, double G,
+                  double c_code = 0.0, int pn_order = 0);
 
     // Rational polynomial extrapolation (Stoer & Bulirsch)
     // Returns max relative error across all extrapolated components
@@ -29,13 +30,15 @@ struct GBSIntegrator {
     // Full GBS step: advance LogHState by ds
     // Returns true if converged within eta_gbs tolerance
     // out: converged state, ds_next: suggested next step size
-    bool step(LogHState& state, double ds, double G, double& ds_next);
+    bool step(LogHState& state, double ds, double G, double& ds_next,
+              double c_code = 0.0, int pn_order = 0);
 
     // Integrate from current time to t_target
     // Iterates on ds until physical time matches t_target
     // Returns actual number of GBS steps taken
     int integrate_to_time(LogHState& state, double t_target, double G,
-                          double ds_initial, int max_iter = 50);
+                          double ds_initial, double c_code = 0.0, int pn_order = 0,
+                          int max_iter = 50);
 
 private:
     // Pack LogHState into flat array for extrapolation

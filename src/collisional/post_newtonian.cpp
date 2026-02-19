@@ -1,7 +1,9 @@
 #include "post_newtonian.h"
 #include "constants.h"
+#include <Kokkos_Core.hpp>
 #include <cmath>
 #include <cstring>
+#include <vector>
 
 // ============================================================================
 // PN acceleration terms (Blanchet 2014 / Will 1996 conventions)
@@ -79,49 +81,6 @@ void pn_acceleration(const double r[3], const double v[3],
 }
 
 // ============================================================================
-// Auxiliary velocity kick for PN in leapfrog
-// ============================================================================
-
-void pn_auxiliary_kick(LogHState& state, double ds, double G, double c_code, int pn_order) {
-    if (!state.use_aux_vel) return;
-    int n = state.n_bodies;
-
-    // For each pair, compute PN correction and apply to auxiliary velocities
-    for (int i = 0; i < n; i++) {
-        for (int j = i + 1; j < n; j++) {
-            double r[3], v[3];
-            r[0] = state.pos[j*3+0] - state.pos[i*3+0];
-            r[1] = state.pos[j*3+1] - state.pos[i*3+1];
-            r[2] = state.pos[j*3+2] - state.pos[i*3+2];
-
-            // Use auxiliary velocities for velocity-dependent terms
-            v[0] = state.aux_vel[j*3+0] - state.aux_vel[i*3+0];
-            v[1] = state.aux_vel[j*3+1] - state.aux_vel[i*3+1];
-            v[2] = state.aux_vel[j*3+2] - state.aux_vel[i*3+2];
-
-            double a_pn_i[3];
-            pn_acceleration(r, v, state.mass[i], state.mass[j], G, c_code, a_pn_i, pn_order);
-
-            // Compute Omega for time transformation
-            double T = logh_kinetic_energy(state);
-            double Omega = T + state.B;
-
-            // Apply to velocities
-            double factor = ds * Omega;
-            state.vel[i*3+0] += factor * a_pn_i[0];
-            state.vel[i*3+1] += factor * a_pn_i[1];
-            state.vel[i*3+2] += factor * a_pn_i[2];
-            state.vel[j*3+0] -= factor * a_pn_i[0] * state.mass[i] / state.mass[j];
-            state.vel[j*3+1] -= factor * a_pn_i[1] * state.mass[i] / state.mass[j];
-            state.vel[j*3+2] -= factor * a_pn_i[2] * state.mass[i] / state.mass[j];
-        }
-    }
-
-    // Update auxiliary velocities
-    std::memcpy(state.aux_vel, state.vel, n * 3 * sizeof(double));
-}
-
-// ============================================================================
 // Spin precession
 // ============================================================================
 
@@ -188,4 +147,90 @@ void evolve_spins(double S1[3], double S2[3],
 
     S1[0] += dS1[0]; S1[1] += dS1[1]; S1[2] += dS1[2];
     S2[0] += dS2[0]; S2[1] += dS2[1]; S2[2] += dS2[2];
+}
+
+// ============================================================================
+// Global PN1.0 kick for compact objects outside subsystems
+// (BIFROST Section 3.7)
+//
+// Applied to all pairs where at least one particle has mass >= m_pn
+// and both are NOT in the same subsystem (subsystem_id < 0, or different IDs).
+// Only PN1.0 (conservative) is applied globally — higher PN orders are
+// handled inside LogH subsystem integration.
+// ============================================================================
+
+void global_pn1_kick(Particles& p, int start, int count,
+                     double G, double c_code, double m_pn, double dt) {
+    if (count == 0 || c_code <= 0.0 || dt == 0.0) return;
+
+    // Copy particle data to host
+    auto h_x  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.x);
+    auto h_y  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.y);
+    auto h_z  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.z);
+    auto h_vx = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vx);
+    auto h_vy = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vy);
+    auto h_vz = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vz);
+    auto h_m  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.mass);
+    auto h_sid = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.subsystem_id);
+
+    // Find compact objects (mass >= m_pn) in [start, start+count)
+    int end = start + count;
+    std::vector<int> compact;
+    compact.reserve(256);
+    for (int i = start; i < end; i++) {
+        if (h_m(i) >= m_pn) compact.push_back(i);
+    }
+
+    int n_compact = (int)compact.size();
+    if (n_compact < 2) return;  // need at least 2 compact objects
+
+    // Accumulate PN1.0 velocity kicks on host
+    // dvx[i], dvy[i], dvz[i] for each compact object
+    std::vector<double> dvx(n_compact, 0.0), dvy(n_compact, 0.0), dvz(n_compact, 0.0);
+
+    for (int ii = 0; ii < n_compact; ii++) {
+        int i = compact[ii];
+        int sid_i = h_sid(i);
+
+        for (int jj = ii + 1; jj < n_compact; jj++) {
+            int j = compact[jj];
+            int sid_j = h_sid(j);
+
+            // Skip pairs in the same subsystem (they get full PN inside LogH)
+            if (sid_i >= 0 && sid_j == sid_i) continue;
+
+            double r[3] = { h_x(j) - h_x(i), h_y(j) - h_y(i), h_z(j) - h_z(i) };
+            double v[3] = { h_vx(j) - h_vx(i), h_vy(j) - h_vy(i), h_vz(j) - h_vz(i) };
+
+            double a_rel[3];
+            pn_acceleration(r, v, h_m(i), h_m(j), G, c_code, a_rel, 1);  // PN1.0 only
+
+            // Convert relative PN acceleration to individual:
+            // a_i = -(m_j/M) * a_rel,  a_j = +(m_i/M) * a_rel
+            // (pn_acceleration returns a_rel for the relative coord r=r_j-r_i)
+            double M_ij = h_m(i) + h_m(j);
+            double fi = h_m(j) / M_ij;
+            double fj = h_m(i) / M_ij;
+
+            dvx[ii] -= dt * fi * a_rel[0];
+            dvy[ii] -= dt * fi * a_rel[1];
+            dvz[ii] -= dt * fi * a_rel[2];
+            dvx[jj] += dt * fj * a_rel[0];
+            dvy[jj] += dt * fj * a_rel[1];
+            dvz[jj] += dt * fj * a_rel[2];
+        }
+    }
+
+    // Apply velocity kicks
+    for (int ii = 0; ii < n_compact; ii++) {
+        int i = compact[ii];
+        h_vx(i) += dvx[ii];
+        h_vy(i) += dvy[ii];
+        h_vz(i) += dvz[ii];
+    }
+
+    // Copy velocities back to device
+    Kokkos::deep_copy(p.vx, h_vx);
+    Kokkos::deep_copy(p.vy, h_vy);
+    Kokkos::deep_copy(p.vz, h_vz);
 }

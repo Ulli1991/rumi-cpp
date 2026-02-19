@@ -34,5 +34,10 @@ double logh_potential_energy(const LogHState& state, double G);
 // Single leapfrog step in regularized time s
 void logh_leapfrog_step(LogHState& state, double ds, double G);
 
+// Single leapfrog step with PN corrections using auxiliary velocity technique
+// (Hellstrom & Mikkola 2010): v gets g(w), w gets g(v)
+void logh_leapfrog_step_pn(LogHState& state, double ds, double G,
+                            double c_code, int pn_order);
+
 // Compute total energy (kinetic + potential) for error checking
 double logh_total_energy(const LogHState& state, double G);

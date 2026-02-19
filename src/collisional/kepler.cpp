@@ -3,7 +3,8 @@
 #include <algorithm>
 
 // ============================================================================
-// Kepler equation solver: Mikkola (1987) cubic start + Newton-Raphson
+// Kepler equation solver: Mikkola (1987) cubic start with BIFROST empirical
+// correction (a_K = 6 - 0.768688675*M) + Newton-Raphson + bisection fallback
 // ============================================================================
 
 double solve_kepler(double M, double e, double tol) {
@@ -11,24 +12,68 @@ double solve_kepler(double M, double e, double tol) {
     M = std::fmod(M, 2.0 * M_PI);
     if (M < 0.0) M += 2.0 * M_PI;
 
-    // Mikkola (1987) cubic starting value
-    double alpha = (1.0 - e) / (4.0 * e + 0.5);
-    double beta = 0.5 * M / (4.0 * e + 0.5);
-    double aux = std::sqrt(beta * beta + alpha * alpha * alpha);
-    double z = std::cbrt(std::fabs(beta + aux));
+    // Map to [0, pi] with sign tracking (Mikkola cubic is symmetric about pi)
+    double sign = 1.0;
+    double M_reduced = M;
+    if (M_reduced > M_PI) {
+        M_reduced = 2.0 * M_PI - M_reduced;
+        sign = -1.0;
+    }
 
-    double s = z - alpha / z;
-    // Correct for s near zero
-    double w = s - 0.078 * s * s * s * s * s / (1.0 + e);
-    double E = M + e * (3.0 * w - 4.0 * w * w * w);
+    // Mikkola (1987) cubic starting value with BIFROST empirical correction
+    // (Section 3.10): a_K = 6 - 0.768688675 * M makes the cubic exact at M=pi
+    double a_K = 6.0 - 0.768688675 * M_reduced;
+    // Guard against a_K becoming too small or negative for very large M_reduced
+    if (a_K < 0.5) a_K = 0.5;
+    double K = std::sqrt((1.0 - e) / (1.0 / a_K + 4.0 / 3.0 * e));
+    double s = K * std::sinh(1.0 / 3.0 * std::asinh(M_reduced / ((1.0 - e) * K)));
+    double E = M_reduced + e * (3.0 * s - 4.0 * s * s * s);
+
+    // Restore full [0, 2*pi) range
+    if (sign < 0.0) {
+        E = 2.0 * M_PI - E;
+    }
 
     // Newton-Raphson refinement (typically converges in 2-3 iterations)
+    bool converged = false;
     for (int iter = 0; iter < 15; iter++) {
         double f = E - e * std::sin(E) - M;
         double fp = 1.0 - e * std::cos(E);
         double dE = -f / fp;
         E += dE;
-        if (std::fabs(dE) < tol) break;
+        if (std::fabs(dE) < tol) {
+            converged = true;
+            break;
+        }
+    }
+
+    // Bisection fallback if Newton-Raphson did not converge
+    // (guaranteed convergence for any e in [0,1))
+    if (!converged) {
+        // Bracket: f(E) = E - e*sin(E) - M is monotonically increasing,
+        // so f(0) = -M <= 0 and f(2*pi) = 2*pi - M >= 0
+        double E_lo = 0.0;
+        double E_hi = 2.0 * M_PI;
+
+        // Tighten bracket using current best estimate
+        double f_mid = E - e * std::sin(E) - M;
+        if (f_mid > 0.0) {
+            E_hi = E;
+        } else {
+            E_lo = E;
+        }
+
+        for (int iter = 0; iter < 64; iter++) {
+            E = 0.5 * (E_lo + E_hi);
+            double f = E - e * std::sin(E) - M;
+            if (f > 0.0) {
+                E_hi = E;
+            } else {
+                E_lo = E;
+            }
+            if (E_hi - E_lo < tol) break;
+        }
+        E = 0.5 * (E_lo + E_hi);
     }
 
     return E;

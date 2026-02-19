@@ -2,6 +2,7 @@
 #include "logh.h"
 #include "gbs.h"
 #include "collisional_config.h"
+#include "post_newtonian.h"
 #include <Kokkos_Core.hpp>
 #include <cstring>
 
@@ -180,8 +181,11 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
         LogHState state{};
         state.n_bodies = nb;
         state.t = 0.0;
-        state.use_aux_vel = false;
 
+        // Check if any member mass >= m_pn for PN activation
+        double c_code = g_collisional.c_code;
+        int pn_order = g_collisional.pn_order;
+        bool any_compact = false;
         for (int b = 0; b < nb; b++) {
             state.pos[b*3+0] = h_pos((off+b)*3+0);
             state.pos[b*3+1] = h_pos((off+b)*3+1);
@@ -190,8 +194,19 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
             state.vel[b*3+1] = h_vel((off+b)*3+1);
             state.vel[b*3+2] = h_vel((off+b)*3+2);
             state.mass[b] = h_mass(off+b);
+            if (h_mass(off+b) >= g_collisional.m_pn) any_compact = true;
             // ext_accel stays zero (LogHState{} zero-initializes)
             // External perturbation handled by FSI kicks, not inside LogH
+        }
+
+        // Enable auxiliary velocity for PN when compact objects present
+        if (any_compact && pn_order > 0 && c_code > 0.0) {
+            state.use_aux_vel = true;
+            // Initialize aux_vel = vel (Hellstrom & Mikkola 2010)
+            std::memcpy(state.aux_vel, state.vel, nb * 3 * sizeof(double));
+        } else {
+            state.use_aux_vel = false;
+            pn_order = 0;  // disable PN for this subsystem
         }
 
         // Initialize binding energy B = -E₀ = -(T + U) (positive for bound systems)
@@ -205,9 +220,9 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
         double Omega = T + state.B;
         double ds_init = (Omega > 1e-30) ? dt / Omega : dt;
 
-        // Integrate to target time
+        // Integrate to target time (with PN if enabled)
         GBSIntegrator gbs(eta_gbs);
-        gbs.integrate_to_time(state, dt, G, ds_init);
+        gbs.integrate_to_time(state, dt, G, ds_init, c_code, pn_order);
 
         // Store results
         for (int b = 0; b < nb; b++) {

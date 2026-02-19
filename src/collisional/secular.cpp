@@ -15,7 +15,7 @@ static double peters_F(double e) {
 
 static double peters_G(double e) {
     double e2 = e * e;
-    return (1.0 + 7.0/8.0 * e2) / std::pow(1.0 - e2, 2.5);
+    return (1.0 + 121.0/304.0 * e2) / std::pow(1.0 - e2, 2.5);
 }
 
 static double peters_beta(double m1, double m2, double G, double c) {
@@ -25,124 +25,317 @@ static double peters_beta(double m1, double m2, double G, double c) {
 }
 
 // ============================================================================
-// Secular binary evolution
+// Rate computation helpers for the auxiliary variable leapfrog
 // ============================================================================
+
+// GW dissipation rate da/dt (Peters 1964, Eq. 16)
+// Note: peters_beta includes the 64/5 prefactor, so da/dt = -beta/a^3 * F(e)
+static double compute_da_dt(double a, double e, double beta, int pn_order) {
+    if (!(pn_order & 4)) return 0.0;  // PN2.5 required
+    return -beta / (a * a * a) * peters_F(e);
+}
+
+// GW dissipation rate de/dt (Peters 1964, Eq. 16)
+// Paper: de/dt = -304/15 * beta_raw/a^4 * e * G(e)  where beta_raw = G^3 m1 m2 M / c^5
+// Code:  peters_beta = 64/5 * beta_raw, so beta_raw = 5/64 * peters_beta
+// Therefore: de/dt = -304/15 * (5/64) * beta/a^4 * e * G(e) = -19/12 * beta/a^4 * e * G(e)
+static double compute_de_dt(double a, double e, double beta, int pn_order) {
+    if (!(pn_order & 4)) return 0.0;  // PN2.5 required
+    return -19.0/12.0 * beta / (a * a * a * a) * e * peters_G(e);
+}
+
+// PN1.0 + PN2.0 periapsis advance rate (Eq. 31)
+static double compute_domega_dt(double a, double e, double mu, double c2, int pn_order) {
+    if (!(pn_order & 1)) return 0.0;
+    double e2 = e * e;
+    double one_me2 = 1.0 - e2;
+    double P = 2.0 * M_PI * std::sqrt(a * a * a / mu);
+    double Gm_ap = mu / (a * one_me2);
+    double rate = 6.0 * M_PI * Gm_ap / (c2 * P);
+    // PN2.0 term
+    if (pn_order & 2) {
+        double c4 = c2 * c2;
+        rate += 3.0 * (18.0 + e2) * M_PI * Gm_ap * Gm_ap / (2.0 * c4 * P);
+    }
+    return rate;
+}
+
+// ============================================================================
+// Secular binary evolution — auxiliary variable leapfrog
+// (Hellstrom & Mikkola 2010)
+// ============================================================================
+//
+// Since da/dt = f(a,e) and de/dt = g(a,e) — the rates depend on the state —
+// the ODE is not separable into independent position/velocity parts for a
+// standard leapfrog.  The auxiliary variable trick introduces copies (a_aux,
+// e_aux) and cross-evaluates:
+//
+//   da/dt      = f(a_aux, e_aux)     da_aux/dt = f(a, e)
+//   de/dt      = g(a_aux, e_aux)     de_aux/dt = g(a, e)
+//
+// This makes each pair explicit and amenable to KDK leapfrog:
+//   1) half-kick:  update (a, e) by dt/2 from rates at (a_aux, e_aux)
+//                  update (a_aux, e_aux) by dt/2 from rates at (a, e)
+//   2) drift:      advance omega by dt using rates at the half-stepped (a, e)
+//   3) half-kick:  same as step 1
 
 void secular_evolve_binary(SecularBinary& bin, double dt, double G, double c_code, int pn_order) {
     double beta = peters_beta(bin.m1, bin.m2, G, c_code);
     double c2 = c_code * c_code;
     double mu = G * (bin.m1 + bin.m2);
 
-    // Time integration with leapfrog (auxiliary variable method)
-    int n_steps = std::max(1, (int)(dt / (0.01 * std::fabs(bin.a / (bin.da_dt + 1e-30)))));
-    n_steps = std::min(n_steps, 10000);
+    // Compute initial rates to estimate secular timescale for adaptive stepping
+    double da0 = compute_da_dt(bin.a, bin.e, beta, pn_order);
+    double de0 = compute_de_dt(bin.a, bin.e, beta, pn_order);
+    double dw0 = compute_domega_dt(bin.a, bin.e, mu, c2, pn_order);
+
+    // Secular timestep criterion: eta_sec * min(|a/da_dt|, |e/de_dt|, |omega/domega_dt|)
+    const double eta_sec = 0.01;
+    double t_sec = 1e30;
+    if (std::fabs(da0) > 0.0)
+        t_sec = std::min(t_sec, std::fabs(bin.a / da0));
+    if (std::fabs(de0) > 0.0)
+        t_sec = std::min(t_sec, std::fabs(bin.e / de0));
+    if (std::fabs(dw0) > 0.0)
+        t_sec = std::min(t_sec, std::fabs(bin.omega / dw0));
+    double dt_sec = eta_sec * t_sec;
+
+    // Adaptive number of internal steps
+    int n_steps = std::max(1, (int)std::ceil(dt / dt_sec));
+    n_steps = std::min(n_steps, 100000);
     double h = dt / n_steps;
+
+    // Initialize auxiliary variables equal to the physical state
+    double a_aux = bin.a;
+    double e_aux = bin.e;
 
     for (int step = 0; step < n_steps; step++) {
         double a = bin.a;
         double e = bin.e;
-        double e2 = e * e;
-        double one_me2 = 1.0 - e2;
 
-        // GW dissipation rates (Peters 1964)
-        if (pn_order & 4) {  // PN2.5
-            bin.da_dt = -beta / (a * a * a) * peters_F(e);
-            bin.de_dt = -304.0/15.0 * beta / (a * a * a * a * std::pow(one_me2, 2.5)) * e * peters_G(e);
-        } else {
-            bin.da_dt = 0.0;
-            bin.de_dt = 0.0;
-        }
+        // --- Half-kick (step 1) ---
+        // Rates from auxiliary state for physical variables
+        double da_from_aux = compute_da_dt(a_aux, e_aux, beta, pn_order);
+        double de_from_aux = compute_de_dt(a_aux, e_aux, beta, pn_order);
+        // Rates from physical state for auxiliary variables
+        double da_from_phys = compute_da_dt(a, e, beta, pn_order);
+        double de_from_phys = compute_de_dt(a, e, beta, pn_order);
 
-        // PN1.0 periapsis advance
-        if (pn_order & 1) {
-            double P = 2.0 * M_PI * std::sqrt(a * a * a / mu);
-            bin.domega_dt = 6.0 * M_PI * mu / (c2 * P * a * one_me2);
-        } else {
-            bin.domega_dt = 0.0;
-        }
+        // Half-kick physical
+        bin.a += 0.5 * h * da_from_aux;
+        bin.e += 0.5 * h * de_from_aux;
+        // Half-kick auxiliary
+        a_aux += 0.5 * h * da_from_phys;
+        e_aux += 0.5 * h * de_from_phys;
 
-        // Leapfrog step
-        bin.a += h * bin.da_dt;
-        bin.e += h * bin.de_dt;
-        bin.omega += h * bin.domega_dt;
+        // Clamp eccentricity after half-kick
+        bin.e = std::max(0.0, std::min(bin.e, 0.9999));
+        e_aux = std::max(0.0, std::min(e_aux, 0.9999));
+
+        // --- Drift (step 2): advance omega using half-stepped (a, e) ---
+        double dw = compute_domega_dt(bin.a, bin.e, mu, c2, pn_order);
+        bin.omega += h * dw;
+
+        // --- Second half-kick (step 3) ---
+        // Recompute rates from the updated states
+        da_from_aux = compute_da_dt(a_aux, e_aux, beta, pn_order);
+        de_from_aux = compute_de_dt(a_aux, e_aux, beta, pn_order);
+        da_from_phys = compute_da_dt(bin.a, bin.e, beta, pn_order);
+        de_from_phys = compute_de_dt(bin.a, bin.e, beta, pn_order);
+
+        // Half-kick physical
+        bin.a += 0.5 * h * da_from_aux;
+        bin.e += 0.5 * h * de_from_aux;
+        // Half-kick auxiliary
+        a_aux += 0.5 * h * da_from_phys;
+        e_aux += 0.5 * h * de_from_phys;
 
         // Clamp eccentricity
         bin.e = std::max(0.0, std::min(bin.e, 0.9999));
+        e_aux = std::max(0.0, std::min(e_aux, 0.9999));
 
-        // Check for coalescence
+        // Check for coalescence: pericenter < 6 * G*M / c^2 (innermost stable circular orbit)
         if (bin.a < 0.0 || bin.a * (1.0 - bin.e) < 6.0 * mu / c2) {
             bin.a = 0.0;  // signal merger
             break;
         }
     }
+
+    // Store final rates for external use (e.g., secular timestep criterion)
+    bin.da_dt = compute_da_dt(bin.a, bin.e, beta, pn_order);
+    bin.de_dt = compute_de_dt(bin.a, bin.e, beta, pn_order);
+    bin.domega_dt = compute_domega_dt(bin.a, bin.e, mu, c2, pn_order);
 }
 
 // ============================================================================
-// Kozai-Lidov secular triple evolution
+// Kozai-Lidov secular triple evolution (quadrupole + octupole)
+// Following Blaes, Lee & Socrates (2002) / Naoz et al. (2013) conventions
+// with C2, C3, G1, G2 coefficients from the Antognini (2015) kozai package.
+// Octupole terms enable the "eccentric Kozai-Lidov" (EKL) mechanism.
 // ============================================================================
 
 void secular_evolve_triple(SecularTriple& tri, double dt, double G, double c_code, int pn_order) {
-    double mu_in = G * (tri.inner.m1 + tri.inner.m2);
-    double mu_out = G * (tri.inner.m1 + tri.inner.m2 + tri.m3);
+    double m1 = tri.inner.m1;
+    double m2 = tri.inner.m2;
+    double m3 = tri.m3;
+    double M12 = m1 + m2;
+    double M_tot = M12 + m3;
+    double mu_in = G * M12;
 
-    int n_steps = 100;
+    double a_out = tri.a_out;
+    double e_out = tri.e_out;
+    if (a_out <= 0.0) return;
+
+    double e_out2 = e_out * e_out;
+    double j2 = std::sqrt(1.0 - e_out2);  // outer angular momentum parameter
+
+    // Blaes et al. (2002) coefficients (Eq. 19-20)
+    // C2: quadrupole coefficient
+    double C2 = G * m1 * m2 * m3 / (16.0 * M12 * a_out * std::pow(j2, 3)) *
+                (tri.inner.a / a_out) * (tri.inner.a / a_out);
+    // C3: octupole coefficient (note: m2-m1 sign convention from Blaes et al.)
+    double C3 = 15.0 * G * m1 * m2 * m3 * (m2 - m1) /
+                (64.0 * M12 * M12 * a_out * std::pow(j2, 5)) *
+                (tri.inner.a / a_out) * (tri.inner.a / a_out) * (tri.inner.a / a_out);
+
+    // Delaunay angular momenta
+    // G1 = mu_red1 * sqrt(G * M12 * a1) * j1
+    // G2 = mu_red2 * sqrt(G * M_tot * a2) * j2
+    // Initial values (for H conservation)
+    double j1_init = std::sqrt(1.0 - tri.inner.e * tri.inner.e);
+    double G1_init = m1 * m2 / M12 * std::sqrt(G * M12 * tri.inner.a) * j1_init;
+    double G2 = (M12 * m3 / M_tot) * std::sqrt(G * M_tot * a_out) * j2;
+
+    // Conserved total angular momentum component
+    // H^2 = G1^2 + G2^2 + 2*G1*G2*cos(i_mut)
+    double H2 = G1_init * G1_init + G2 * G2 + 2.0 * G1_init * G2 * tri.cos_i_mut;
+
+    // Adaptive internal stepping
+    // Estimate KL timescale from C2 for step size control
+    double G1_est = G1_init;
+    double rate_est = std::fabs(30.0 * C2 * tri.inner.e * (1.0 - tri.inner.e * tri.inner.e) /
+                     std::max(G1_est, 1e-30) * (1.0 - tri.cos_i_mut * tri.cos_i_mut));
+    double t_sec = (rate_est > 0.0) ? tri.inner.e / rate_est : 1e30;
+    const double eta_sec = 0.01;
+    int n_steps = std::max(1, (int)std::ceil(dt / (eta_sec * t_sec)));
+    n_steps = std::min(n_steps, 100000);
     double h = dt / n_steps;
 
     for (int step = 0; step < n_steps; step++) {
         double a_in = tri.inner.a;
-        double e_in = tri.inner.e;
-        double a_out = tri.a_out;
-        double e_out = tri.e_out;
+        double e1 = tri.inner.e;
+        double g1 = tri.inner.omega;
+        double g2 = tri.omega_out;
+        double th = tri.cos_i_mut;
 
-        if (a_in <= 0 || a_out <= 0) break;
+        if (a_in <= 0.0) break;
 
-        double e_in2 = e_in * e_in;
-        double e_out2 = e_out * e_out;
-        double cos_i = tri.cos_i_mut;
-        double cos_i2 = cos_i * cos_i;
+        double e1_2 = e1 * e1;
+        double j1 = std::sqrt(1.0 - e1_2);
+        double th2 = th * th;
+        double sin2i = 1.0 - th2;  // sin^2(i_mut)
 
-        // Quadrupole Kozai-Lidov timescale
-        double P_in = 2.0 * M_PI * std::sqrt(a_in * a_in * a_in / mu_in);
-        double P_out = 2.0 * M_PI * std::sqrt(a_out * a_out * a_out / mu_out);
-        double t_KL = P_out * P_out / P_in * (tri.inner.m1 + tri.inner.m2 + tri.m3) / tri.m3 *
-                      std::pow(1.0 - e_out2, 1.5);
+        // Delaunay angular momentum for inner orbit
+        double G1 = m1 * m2 / M12 * std::sqrt(G * M12 * a_in) * j1;
+        if (G1 < 1e-30 || G2 < 1e-30) break;
 
-        // Quadrupole de_in/dt
-        double de_in_dt = 15.0 / (4.0 * t_KL) * e_in * std::sqrt(1.0 - e_in2) *
-                          sin(2.0 * tri.inner.omega) * (1.0 - cos_i2);
+        // Recompute C2, C3 with current a_in (a_in changes due to GW)
+        double alpha = a_in / a_out;
+        double C2_cur = G * m1 * m2 * m3 / (16.0 * M12 * a_out * std::pow(j2, 3)) * alpha * alpha;
+        double C3_cur = 15.0 * G * m1 * m2 * m3 * (m2 - m1) /
+                        (64.0 * M12 * M12 * a_out * std::pow(j2, 5)) * alpha * alpha * alpha;
 
-        // Quadrupole d(cos_i)/dt
-        double dcos_i_dt = -15.0 / (4.0 * t_KL) * e_in2 / std::sqrt(1.0 - e_in2) *
-                           sin(2.0 * tri.inner.omega) * cos_i * (1.0 - cos_i2);
+        // Trigonometric quantities
+        double sing1 = std::sin(g1), cosg1 = std::cos(g1);
+        double sing2 = std::sin(g2), cosg2 = std::cos(g2);
 
-        // Quadrupole domega_in/dt
-        double domega_dt = 3.0 / t_KL * (2.0 * (1.0 - e_in2) + 5.0 * e_in2 * sin(tri.inner.omega) * sin(tri.inner.omega)) *
-                           (cos_i2 - 1.0/3.0) / (2.0 * std::sqrt(1.0 - e_in2));
+        // Octupole auxiliary quantities (Blaes et al. 2002)
+        double B = 2.0 + 5.0 * e1_2 - 7.0 * e1_2 * std::cos(2.0 * g1);
+        double A = 4.0 + 3.0 * e1_2 - 2.5 * sin2i * B;
+        double cosphi = cosg1 * cosg2 - th * sing1 * sing2;
 
-        // Add PN1.0 precession to suppress high-e oscillations
-        if (pn_order & 1) {
-            double c2 = c_code * c_code;
-            domega_dt += 6.0 * M_PI * mu_in / (c2 * P_in * a_in * (1.0 - e_in2));
+        // ---- de1/dt ----
+        // Quadrupole (Blaes et al. 2002, Eq. 13)
+        double de1_dt = 30.0 * C2_cur * e1 * (1.0 - e1_2) / G1 *
+                        sin2i * std::sin(2.0 * g1);
+        // Octupole
+        if (std::fabs(C3_cur) > 0.0) {
+            de1_dt += -C3_cur * e_out * (1.0 - e1_2) / G1 * (
+                35.0 * cosphi * sin2i * e1_2 * std::sin(2.0 * g1)
+                - 10.0 * th * (1.0 - e1_2) * sin2i * cosg1 * sing2
+                - A * (sing1 * cosg2 - th * cosg1 * sing2)
+            );
         }
 
-        // GW dissipation on inner binary
-        double da_in_dt = 0.0, de_in_gw_dt = 0.0;
+        // ---- dg1/dt ----
+        // Quadrupole
+        double dg1_dt = 6.0 * C2_cur * (
+            (1.0 / G1) * (4.0 * th2 + (5.0 * std::cos(2.0 * g1) - 1.0) * (1.0 - e1_2 - th2))
+            + th / G2 * (2.0 + e1_2 * (3.0 - 5.0 * std::cos(2.0 * g1)))
+        );
+        // Octupole
+        if (std::fabs(C3_cur) > 0.0 && e1 > 1e-10) {
+            dg1_dt += C3_cur * e_out * e1 * (1.0 / G2 + th / G1) * (
+                sing1 * sing2 * (A + 10.0 * (3.0 * th2 - 1.0) * (1.0 - e1_2))
+                - 5.0 * th * B * cosphi
+            );
+            dg1_dt += -C3_cur * e_out * (1.0 - e1_2) / (e1 * G1) * (
+                10.0 * th * sin2i * (1.0 - 3.0 * e1_2) * sing1 * sing2
+                + cosphi * (3.0 * A - 10.0 * th2 + 2.0)
+            );
+        }
+
+        // ---- dg2/dt ----
+        // Quadrupole
+        double dg2_dt = 3.0 * C2_cur * (
+            2.0 * th / G1 * (2.0 + e1_2 * (3.0 - 5.0 * std::cos(2.0 * g1)))
+            + (1.0 / G2) * (4.0 + 6.0 * e1_2 + (5.0 * th2 - 3.0) *
+                            (2.0 + 3.0 * e1_2 - 5.0 * e1_2 * std::cos(2.0 * g1)))
+        );
+        // Octupole
+        if (std::fabs(C3_cur) > 0.0) {
+            dg2_dt += -C3_cur * e1 * sing1 * sing2 * (
+                (4.0 * e_out2 + 1.0) / (e_out * G2) * 10.0 * th * sin2i * (1.0 - e1_2)
+                - e_out * (1.0 / G1 + th / G2) * (A + 10.0 * (3.0 * th2 - 1.0) * (1.0 - e1_2))
+            );
+            dg2_dt += -C3_cur * e1 * cosphi * (
+                5.0 * B * th * e_out * (1.0 / G1 + th / G2)
+                + (4.0 * e_out2 + 1.0) / (e_out * G2) * A
+            );
+        }
+
+        // PN1.0 precession on inner orbit (suppresses high-e Kozai)
+        if (pn_order & 1) {
+            double c2 = c_code * c_code;
+            double n_in = std::sqrt(mu_in / (a_in * a_in * a_in));
+            dg1_dt += 3.0 * n_in * n_in * n_in * a_in * a_in / (c2 * (1.0 - e1_2));
+        }
+
+        // GW dissipation on inner binary (PN2.5)
+        double da_in_dt = 0.0, de1_gw_dt = 0.0;
         if (pn_order & 4) {
-            double beta = peters_beta(tri.inner.m1, tri.inner.m2, G, c_code);
-            da_in_dt = -beta / (a_in * a_in * a_in) * peters_F(e_in);
-            de_in_gw_dt = -304.0/15.0 * beta / (a_in * a_in * a_in * a_in *
-                          std::pow(1.0 - e_in2, 2.5)) * e_in * peters_G(e_in);
+            double beta = peters_beta(m1, m2, G, c_code);
+            da_in_dt = -beta / (a_in * a_in * a_in) * peters_F(e1);
+            de1_gw_dt = -19.0/12.0 * beta / (a_in * a_in * a_in * a_in) * e1 * peters_G(e1);
         }
 
         // Integrate
         tri.inner.a += h * da_in_dt;
-        tri.inner.e += h * (de_in_dt + de_in_gw_dt);
-        tri.inner.omega += h * domega_dt;
-        tri.cos_i_mut += h * dcos_i_dt;
+        tri.inner.e += h * (de1_dt + de1_gw_dt);
+        tri.inner.omega += h * dg1_dt;
+        tri.omega_out += h * dg2_dt;
 
-        // Clamp
-        tri.inner.e = std::max(0.0, std::min(tri.inner.e, 0.9999));
-        tri.cos_i_mut = std::max(-1.0, std::min(tri.cos_i_mut, 1.0));
+        // Clamp eccentricity
+        tri.inner.e = std::max(1e-6, std::min(tri.inner.e, 0.9999));
+
+        // Update mutual inclination from H conservation
+        // H^2 = G1^2 + G2^2 + 2*G1*G2*cos(i_mut) => cos(i_mut) = (H^2-G1^2-G2^2)/(2*G1*G2)
+        double j1_new = std::sqrt(1.0 - tri.inner.e * tri.inner.e);
+        double G1_new = m1 * m2 / M12 * std::sqrt(G * M12 * std::max(tri.inner.a, 1e-30)) * j1_new;
+        if (G1_new > 1e-30) {
+            double cos_i_new = (H2 - G1_new * G1_new - G2 * G2) / (2.0 * G1_new * G2);
+            tri.cos_i_mut = std::max(-1.0, std::min(cos_i_new, 1.0));
+        }
 
         if (tri.inner.a <= 0.0) break;
     }
