@@ -52,6 +52,15 @@ SSE_ENABLED = true                  		# Runtime single stellar evolution
 SSE_METALLICITY = 0.02              		# Metallicity Z for SSE
 
 # =============================================================================
+# Binary test parameters (only used if TEST_CASE = binary_test)
+# Two bodies at periapsis. Period ~ 1.5 yr for 10+10 M_sun at 10 AU.
+# =============================================================================
+BINARY_A_PC = 4.848e-5				# Semi-major axis in pc (= 10 AU)
+BINARY_E = 0.0					# Eccentricity (try 0.0, 0.9, 0.99)
+BINARY_M1 = 10.0				# Primary mass in M_sun
+BINARY_M2 = 10.0				# Secondary mass in M_sun
+
+# =============================================================================
 # Plummer cluster parameters (only used if TEST_CASE = plummer)
 # =============================================================================
 PLUMMER_N = 1000000
