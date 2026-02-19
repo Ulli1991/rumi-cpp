@@ -2,7 +2,7 @@
 # C++ N-Body Configuration
 # =============================================================================
 
-# Test case: outer_planets, plummer
+# Test case: binary_test, outer_planets, plummer
 TEST_CASE = plummer
 
 # Integrator: fsi (global timestep) or hhs (adaptive HHS-FSI per Algorithm 4 of FROST paper)
