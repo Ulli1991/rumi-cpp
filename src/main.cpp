@@ -10,7 +10,94 @@
 #ifdef ENABLE_COLLISIONAL
 #include "collisional_config.h"
 #include "subsystem.h"
+#include "kepler.h"
 CollisionalConfig g_collisional;
+
+// Binary orbit tracker for PN precession validation
+struct BinaryTracker {
+    double mu;               // G*(m1+m2)
+    double omega_prev;       // previous omega for unwrapping
+    double mean_anom_prev;   // previous mean anomaly for orbit counting
+    double omega_cumul;      // cumulative unwrapped omega
+    double orbits_cumul;     // cumulative orbit count (integer + fractional)
+    double omega_gr_per_orbit; // analytic GR precession rate
+    double a0, e0;           // initial orbital elements
+    bool initialized;
+
+    BinaryTracker() : initialized(false) {}
+
+    void init(Particles& p, double G) {
+        if (p.N != 2) return;
+        auto h_x = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.x);
+        auto h_y = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.y);
+        auto h_z = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.z);
+        auto h_vx = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vx);
+        auto h_vy = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vy);
+        auto h_vz = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vz);
+        auto h_m  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.mass);
+
+        mu = G * (h_m(0) + h_m(1));
+        double r[3] = { h_x(1)-h_x(0), h_y(1)-h_y(0), h_z(1)-h_z(0) };
+        double v[3] = { h_vx(1)-h_vx(0), h_vy(1)-h_vy(0), h_vz(1)-h_vz(0) };
+        auto oe = cartesian_to_elements(r, v, mu);
+
+        a0 = oe.a;
+        e0 = oe.e;
+        omega_prev = oe.omega;
+        mean_anom_prev = oe.mean_anom;
+        omega_cumul = 0.0;
+        orbits_cumul = 0.0;
+
+        // Analytic PN1 precession: dw/orbit = 6*pi*G*M / (a*c^2*(1-e^2))
+        double c2 = C_CODE * C_CODE;
+        omega_gr_per_orbit = 6.0 * M_PI * mu / (oe.a * c2 * (1.0 - oe.e * oe.e));
+
+        std::printf("BinaryTracker: a=%.4e pc (%.4f AU), e=%.4f, P=%.4e yr\n",
+                    oe.a, oe.a / AU_TO_PC, oe.e, oe.period * TIME_UNIT_YR);
+        std::printf("  PN1 precession: %.4e rad/orbit (%.4f deg/orbit)\n",
+                    omega_gr_per_orbit, omega_gr_per_orbit * 180.0 / M_PI);
+        std::fflush(stdout);
+        initialized = true;
+    }
+
+    void update(Particles& p, double G, double t_code) {
+        if (!initialized || p.N != 2) return;
+        auto h_x = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.x);
+        auto h_y = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.y);
+        auto h_z = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.z);
+        auto h_vx = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vx);
+        auto h_vy = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vy);
+        auto h_vz = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vz);
+
+        double r[3] = { h_x(1)-h_x(0), h_y(1)-h_y(0), h_z(1)-h_z(0) };
+        double v[3] = { h_vx(1)-h_vx(0), h_vy(1)-h_vy(0), h_vz(1)-h_vz(0) };
+        auto oe = cartesian_to_elements(r, v, mu);
+
+        // Unwrap mean anomaly to count orbits
+        double dM = oe.mean_anom - mean_anom_prev;
+        if (dM < -M_PI) dM += 2.0 * M_PI;  // wrapped forward past 2pi
+        if (dM > M_PI) dM -= 2.0 * M_PI;   // shouldn't happen for forward evolution
+        orbits_cumul += dM / (2.0 * M_PI);
+        mean_anom_prev = oe.mean_anom;
+
+        // Unwrap omega to track cumulative precession
+        double dw = oe.omega - omega_prev;
+        if (dw < -M_PI) dw += 2.0 * M_PI;
+        if (dw > M_PI) dw -= 2.0 * M_PI;
+        omega_cumul += dw;
+        omega_prev = oe.omega;
+
+        // Expected GR precession for this many orbits
+        double omega_gr_expected = orbits_cumul * omega_gr_per_orbit;
+
+        std::printf("  Binary: N_orb=%.2f  a=%.4e  e=%.6f  omega=%.4f rad"
+                    "  dw_meas=%.4e  dw_GR=%.4e  ratio=%.4f\n",
+                    orbits_cumul, oe.a, oe.e, oe.omega,
+                    omega_cumul, omega_gr_expected,
+                    omega_gr_expected > 1e-30 ? omega_cumul / omega_gr_expected : 0.0);
+        std::fflush(stdout);
+    }
+};
 #endif
 
 #include <Kokkos_Core.hpp>
@@ -212,12 +299,20 @@ int main(int argc, char** argv) {
         auto t_init0 = std::chrono::high_resolution_clock::now();
 
         // Initialize particles on rank 0 (or all ranks for single-GPU)
+        // Binary test parameters
+        double binary_a_pc  = cfg.get_double("BINARY_A_PC", 4.848e-5);
+        double binary_e     = cfg.get_double("BINARY_E", 0.0);
+        double binary_m1    = cfg.get_double("BINARY_M1", 10.0);
+        double binary_m2    = cfg.get_double("BINARY_M2", 10.0);
+
         if (my_rank == 0 || !use_distributed) {
             if (test == "outer_planets") {
                 init_outer_planets(p);
                 names = outer_planet_names;
             } else if (test == "plummer") {
                 init_plummer(p, N_plummer, M_total_msun, r_half_pc, seed, mass_dist, age_gyr, metallicity);
+            } else if (test == "binary_test") {
+                init_binary_test(p, binary_a_pc, binary_e, binary_m1, binary_m2);
             } else {
                 std::fprintf(stderr, "Unknown test case: %s\n", test.c_str());
                 MPIComm::finalize();
@@ -263,7 +358,7 @@ int main(int argc, char** argv) {
             std::fflush(stdout);
         }
 
-        bool is_cluster = (test == "plummer");
+        bool is_cluster = (test == "plummer" || test == "binary_test");
 
         // Get particle count (local or total depending on mode)
         int N_display = use_distributed ? dp.N_total : p.N;
@@ -314,6 +409,20 @@ int main(int argc, char** argv) {
         // Get reference to working particles (local for distributed, p for single)
         Particles& work_p = use_distributed ? dp.local : p;
 
+#ifdef ENABLE_COLLISIONAL
+        // Allocate neighbor pair buffers before initial force computation
+        // so the force kernels can detect close pairs
+        if (g_collisional.enabled) {
+            int max_pairs = std::max(1000, work_p.N / 10);
+            g_subsystem_mgr.allocate_ngb_buffers(max_pairs);
+            g_subsystem_mgr.reset_ngb_count();
+            if (my_rank == 0) {
+                std::printf("Collisional: neighbor buffer allocated for %d pairs\n", max_pairs);
+                std::fflush(stdout);
+            }
+        }
+#endif
+
         // Initial force computation + adaptive timestep
         if (my_rank == 0) {
             std::printf("Computing initial forces...\n"); std::fflush(stdout);
@@ -321,7 +430,6 @@ int main(int argc, char** argv) {
         auto t0 = std::chrono::high_resolution_clock::now();
 
         if (use_distributed) {
-            // Scatter-compute-gather: each rank computes its slice, then allgather
             compute_acceleration_and_timestep_distributed(dp, G, soft2, eta);
         } else {
             compute_acceleration_and_timestep(work_p, G, soft2, eta);
@@ -332,6 +440,24 @@ int main(int argc, char** argv) {
             std::printf("Initial forces: %.3f s\n", std::chrono::duration<double>(t1-t0).count());
             std::fflush(stdout);
         }
+
+#ifdef ENABLE_COLLISIONAL
+        // Run initial subsystem detection from pairs found during force computation.
+        // For N=2 binary test with FSI, this is the only detection needed —
+        // the binary is detected once and LogH handles it from there.
+        if (g_collisional.enabled) {
+            Kokkos::fence();
+            g_subsystem_mgr.detect_from_pairs(work_p, G, dt_max,
+                                               g_collisional.r_ngb, g_collisional.r_ngb_max,
+                                               g_collisional.n_orb_secular);
+            g_subsystem_mgr.update_particle_flags(work_p);
+            g_subsystem_mgr.prune(work_p, G);
+            g_subsystem_mgr.update_particle_flags(work_p);
+            g_subsystem_mgr.reset_step_diagnostics();
+            g_subsystem_mgr.accumulate_diagnostics();
+            if (my_rank == 0) g_subsystem_mgr.print_step_summary();
+        }
+#endif
 
         assign_levels(work_p, levels);
         work_p.partition_by_level();
@@ -352,14 +478,9 @@ int main(int argc, char** argv) {
         }
 
 #ifdef ENABLE_COLLISIONAL
-        // Allocate neighbor pair buffers for collisional subsystem detection
-        if (g_collisional.enabled) {
-            int max_pairs = std::max(1000, work_p.N / 10);
-            g_subsystem_mgr.allocate_ngb_buffers(max_pairs);
-            if (my_rank == 0) {
-                std::printf("Collisional: neighbor buffer allocated for %d pairs\n", max_pairs);
-                std::fflush(stdout);
-            }
+        BinaryTracker bin_tracker;
+        if (test == "binary_test" && g_collisional.enabled && g_collisional.pn_order > 0 && my_rank == 0) {
+            bin_tracker.init(work_p, G);
         }
 #endif
 
@@ -380,6 +501,11 @@ int main(int argc, char** argv) {
             compute_errors(diag, diag0, work_p, is_cluster, dE, dP, dL);
             if (my_rank == 0) {
                 print_timebin_table(work_p, levels, dE, dP, dL, t_now*TIME_UNIT_MYR, step_now, is_cluster);
+#ifdef ENABLE_COLLISIONAL
+                if (bin_tracker.initialized) {
+                    bin_tracker.update(work_p, G, t_now);
+                }
+#endif
             }
         };
 
