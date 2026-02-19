@@ -66,6 +66,9 @@ struct Particles {
     // Level-0 clamping
     Kokkos::View<double*> dt_level0;       // timestep from top level, never increases
 
+    // Gradient timestep criterion
+    Kokkos::View<double*> grad_mag;        // |gradient correction| from previous step (stale)
+
     void allocate(int n, bool collisional_mode = false);
     void deallocate();
     void partition_by_level();
