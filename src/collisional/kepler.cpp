@@ -138,10 +138,16 @@ OrbitalElements cartesian_to_elements(const double r[3], const double v[3], doub
 
     // Argument of periapsis
     if (N_mag > 1e-30 && oe.e > 1e-10) {
+        // 3D case: omega relative to ascending node
         double cos_omega = (Nx*ex + Ny*ey) / (N_mag * oe.e);
         cos_omega = std::min(1.0, std::max(-1.0, cos_omega));
         oe.omega = std::acos(cos_omega);
         if (ez < 0.0) oe.omega = 2.0 * M_PI - oe.omega;
+    } else if (oe.e > 1e-10) {
+        // Planar orbit (inc ≈ 0): use longitude of periapsis
+        // = angle of eccentricity vector from x-axis
+        oe.omega = std::atan2(ey, ex);
+        if (oe.omega < 0.0) oe.omega += 2.0 * M_PI;
     } else {
         oe.omega = 0.0;
     }

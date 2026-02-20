@@ -86,7 +86,11 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
     auto h_count = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), ngb_count);
     int n_pairs = h_count(0);
     if (n_pairs == 0) {
-        active.clear();
+        // No new pairs detected. Keep existing subsystems — they persist
+        // until prune() dissolves them (unbound) or particles escape.
+        // Same-subsystem pairs are excluded by the force/timestep kernel,
+        // so they won't appear in the neighbor buffer. Clearing here would
+        // destroy active subsystems every time re-detection runs.
         return;
     }
     n_pairs = std::min(n_pairs, max_ngb_pairs);
@@ -449,23 +453,15 @@ void SubsystemManager::apply_perturbation_timestep(Particles& p, double G, doubl
         double vz = h_vz(idx_j) - h_vz(idx_i);
         double v_mag = std::sqrt(vx*vx + vy*vy + vz*vz);
 
-        // Total N-body acceleration difference
-        double dax = h_ax(idx_j) - h_ax(idx_i);
-        double day = h_ay(idx_j) - h_ay(idx_i);
-        double daz = h_az(idx_j) - h_az(idx_i);
-
-        // Internal two-body acceleration on relative coordinate:
-        // a_rel_internal = -G*(m1+m2)/r^3 * r_rel
+        // Tidal perturbation = difference in EXTERNAL (field) accelerations.
+        // Since the force kernel already excludes internal subsystem pairs (COLL),
+        // h_ax/h_ay/h_az contain only external forces. The perturbation is simply
+        // the differential external acceleration across the binary.
+        // (No need to subtract internal a_int — it's already excluded.)
         double mu = G * (h_m(idx_i) + h_m(idx_j));
-        double inv_r3 = 1.0 / (r_mag * r2);
-        double a_int_x = -mu * inv_r3 * rx;
-        double a_int_y = -mu * inv_r3 * ry;
-        double a_int_z = -mu * inv_r3 * rz;
-
-        // Tidal perturbation: delta_a = (a_j - a_i) - a_rel_internal
-        double da_tid_x = dax - a_int_x;
-        double da_tid_y = day - a_int_y;
-        double da_tid_z = daz - a_int_z;
+        double da_tid_x = h_ax(idx_j) - h_ax(idx_i);
+        double da_tid_y = h_ay(idx_j) - h_ay(idx_i);
+        double da_tid_z = h_az(idx_j) - h_az(idx_i);
         double da_tid = std::sqrt(da_tid_x*da_tid_x + da_tid_y*da_tid_y + da_tid_z*da_tid_z);
 
         if (da_tid < 1e-30) continue;

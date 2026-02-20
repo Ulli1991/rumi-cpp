@@ -6,7 +6,10 @@
 constexpr int LOGH_MAX_BODIES = 8;
 
 // LogH regularized state: time-transformed leapfrog (TTL)
-// Omega = T + B  where T=kinetic, B=-E₀ (positive for bound systems)
+// Follows BIFROST (Rantala+ 2023) Section 3.3 / FROST Section 2.3.
+// Omega = T + B  where T=kinetic, B=-E₀ (positive for bound systems).
+// B is constant for Newtonian dynamics; evolves when PN forces are present
+// (BIFROST Eq. 4).
 struct LogHState {
     double t;                              // physical time
     double B;                              // binding energy

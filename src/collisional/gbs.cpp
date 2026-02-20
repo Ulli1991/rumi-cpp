@@ -2,6 +2,7 @@
 #include <cstring>
 #include <cmath>
 #include <algorithm>
+#include <cstdio>
 
 constexpr int GBSIntegrator::STEP_SEQ[];
 
@@ -56,37 +57,63 @@ void GBSIntegrator::midpoint(const LogHState& in, LogHState& out,
 }
 
 // ============================================================================
-// Rational polynomial extrapolation (Stoer-Bulirsch / Neville-Aitken)
-// Uses the standard Richardson extrapolation table
-// Returns max relative error
+// Polynomial extrapolation (Neville-Aitken) in h²
+//
+// table[0..stage] hold RAW midpoint results M(n_i) — never modified.
+// work[][] is used for the Neville table: T[i][j].
+//   T[i][0] = M(n_i)
+//   T[i][j] = T[i][j-1] + (T[i][j-1] - T[i-1][j-1]) / ((n_i/n_{i-j})² - 1)
+// Best estimate: T[stage][stage] stored in work[stage].
+// Error: |T[stage][stage] - T[stage-1][stage-1]|.
+//
+// IMPORTANT: The old algorithm overwrote table[] in-place, which corrupted
+// intermediate values (table[j] = T[k,k] after stage k, not M(n_j)).
+// Stages > 1 then used T[k-1,k-1] instead of the raw midpoint, producing
+// wrong extrapolation that could falsely report convergence.
 // ============================================================================
 
 double GBSIntegrator::extrapolate(int stage, int dim) {
-    // table[stage] already contains the midpoint result for STEP_SEQ[stage]
-    // Compute extrapolated values using polynomial extrapolation
+    if (stage == 0) {
+        // Save T[0][0] = raw midpoint as the "previous best" for stage 1
+        std::memcpy(work[0], table[0], dim * sizeof(double));
+        std::memcpy(diag_prev, table[0], dim * sizeof(double));
+        return 1.0;  // need at least 2 stages
+    }
 
-    if (stage == 0) return 1.0;  // need at least 2 stages
+    // Initialize work[i] = table[i] = raw midpoint result T[i][0]
+    for (int i = 0; i <= stage; i++) {
+        std::memcpy(work[i], table[i], dim * sizeof(double));
+    }
 
-    double max_err = 0.0;
+    // Build Neville table column by column (j = extrapolation order)
+    // CRITICAL: process i in REVERSE order (stage down to j) so that
+    // work[i-1] still holds T[i-1][j-1] when computing T[i][j].
+    // Forward order overwrites work[i-1] to T[i-1][j] before it's needed.
+    for (int j = 1; j <= stage; j++) {
+        for (int i = stage; i >= j; i--) {
+            // T[i][j] = T[i][j-1] + (T[i][j-1] - T[i-1][j-1]) / ((n_i/n_{i-j})^2 - 1)
+            double ratio = (double)(STEP_SEQ[i] * STEP_SEQ[i]) /
+                           (double)(STEP_SEQ[i-j] * STEP_SEQ[i-j]);
+            double factor = 1.0 / (ratio - 1.0);
 
-    for (int j = stage - 1; j >= 0; j--) {
-        double ratio = (double)(STEP_SEQ[stage] * STEP_SEQ[stage]) /
-                       (double)(STEP_SEQ[j] * STEP_SEQ[j]);
-        double factor = 1.0 / (ratio - 1.0);
-
-        for (int d = 0; d < dim; d++) {
-            double delta = table[stage][d] - table[j][d];
-            table[j][d] = table[stage][d] + factor * delta;
-            table[stage][d] = table[j][d];
+            for (int d = 0; d < dim; d++) {
+                double delta = work[i][d] - work[i-1][d];
+                work[i][d] += factor * delta;
+            }
         }
     }
 
-    // Error estimate: difference between last two extrapolated values
+    // Error: |T[stage][stage] - T[stage-1][stage-1]|
+    // diag_prev was saved from the previous call to extrapolate()
+    double max_err = 0.0;
     for (int d = 0; d < dim; d++) {
-        double scale = std::max(1.0, std::fabs(table[0][d]));
-        double err = std::fabs(table[1][d] - table[0][d]) / scale;
+        double scale = std::max(1.0, std::fabs(work[stage][d]));
+        double err = std::fabs(work[stage][d] - diag_prev[d]) / scale;
         if (err > max_err) max_err = err;
     }
+
+    // Save T[stage][stage] as "previous best" for the next stage
+    std::memcpy(diag_prev, work[stage], dim * sizeof(double));
 
     return max_err;
 }
@@ -108,12 +135,15 @@ bool GBSIntegrator::step(LogHState& state, double ds, double G, double& ds_next,
         midpoint(state, result, STEP_SEQ[stage], ds, G, c_code, pn_order);
         pack_state(result, table[stage], dim);
 
-        if (stage > 0) {
-            double err = extrapolate(stage, dim);
+        // Always call extrapolate — stage 0 initializes diag_prev (returns 1.0).
+        // Without this, diag_prev is uninitialized garbage and stage 1 can
+        // falsely report convergence.
+        double err = extrapolate(stage, dim);
 
+        if (stage > 0) {
             if (err < eta_gbs) {
-                // Converged: unpack best estimate
-                unpack_state(table[0], dim, state);
+                // Converged: unpack best estimate from work[stage]
+                unpack_state(work[stage], dim, state);
 
                 // Suggest next step size
                 double safety = 0.8;
@@ -121,6 +151,14 @@ bool GBSIntegrator::step(LogHState& state, double ds, double G, double& ds_next,
                 ds_next = ds * safety * std::pow(eta_gbs / (err + 1e-30), 1.0 / order);
                 ds_next = std::min(ds_next, 4.0 * ds);  // don't grow too fast
                 return true;
+            }
+
+            // Early exit: if error is enormous after several stages,
+            // the step is clearly too large for the dynamics. Bail out
+            // early to save computing higher stages with no hope.
+            if (stage >= 3 && err > 1.0) {
+                ds_next = 0.5 * ds;
+                return false;
             }
         }
     }
@@ -137,36 +175,87 @@ bool GBSIntegrator::step(LogHState& state, double ds, double G, double& ds_next,
 int GBSIntegrator::integrate_to_time(LogHState& state, double t_target, double G,
                                       double ds_initial, double c_code, int pn_order,
                                       int max_iter) {
-    double ds = ds_initial;
+    // Compute dynamical timescale from closest pair separation.
+    // This limits ds so that even GBS stage 0 (2 substeps) can resolve
+    // the fastest dynamics (e.g. periapsis passage at high eccentricity).
+    double r_min_sq = 1e60;
+    double M_total = 0;
+    for (int i = 0; i < state.n_bodies; i++) {
+        M_total += state.mass[i];
+        for (int j = i + 1; j < state.n_bodies; j++) {
+            double dx = state.pos[j*3] - state.pos[i*3];
+            double dy = state.pos[j*3+1] - state.pos[i*3+1];
+            double dz = state.pos[j*3+2] - state.pos[i*3+2];
+            r_min_sq = std::min(r_min_sq, dx*dx + dy*dy + dz*dz);
+        }
+    }
+    double r_min = std::sqrt(r_min_sq);
+    double t_dyn = std::sqrt(r_min * r_min * r_min / (G * M_total));
+
+    double T0 = logh_kinetic_energy(state);
+    double Omega0 = T0 + state.B;
+    if (Omega0 < 1e-30) Omega0 = 1e-30;
+
+    // Scale ds so each GBS step covers at most ~1/10 dynamical time.
+    // This ensures stage 0 (2 substeps) produces a qualitatively correct
+    // solution, which is required for GBS polynomial extrapolation.
+    double ds_dyn = t_dyn / (Omega0 * 10.0);
+    double ds = std::min(ds_initial, ds_dyn);
+
     int n_steps = 0;
+    int n_failed = 0;
+    int n_overshoot = 0;
+    double ds_min_used = ds;
+    double ds_max_used = ds;
 
     for (int iter = 0; iter < max_iter; iter++) {
         // Check if we've reached the target time
         double dt_remain = t_target - state.t;
-        if (std::fabs(dt_remain) < 1e-15 * std::fabs(t_target)) break;
+        if (std::fabs(dt_remain) < 1e-4 * std::fabs(t_target)) break;
 
-        // Estimate ds from dt_remain / Omega
+        // Recompute dynamical time constraint at current state
+        // Prevents ds from growing too large when orbit approaches periapsis
+        double r_min_now_sq = 1e60;
+        for (int i = 0; i < state.n_bodies; i++) {
+            for (int j = i + 1; j < state.n_bodies; j++) {
+                double dx = state.pos[j*3] - state.pos[i*3];
+                double dy = state.pos[j*3+1] - state.pos[i*3+1];
+                double dz = state.pos[j*3+2] - state.pos[i*3+2];
+                r_min_now_sq = std::min(r_min_now_sq, dx*dx + dy*dy + dz*dz);
+            }
+        }
+        double r_min_now = std::sqrt(r_min_now_sq);
+        double t_dyn_now = std::sqrt(r_min_now * r_min_now * r_min_now / (G * M_total));
+
+        // Estimate ds from dt_remain / Omega (caps ds to avoid overshooting)
         double T = logh_kinetic_energy(state);
         double Omega = T + state.B;
         if (Omega < 1e-30) Omega = 1e-30;
+        double ds_est = dt_remain / Omega;
 
-        // First iteration: use provided ds_initial
-        // Subsequent: estimate from remaining physical time
-        if (iter > 0) {
-            ds = dt_remain / Omega;
-        }
+        // Also cap ds by dynamical time (prevents too-large steps near periapsis)
+        double ds_dyn_now = t_dyn_now / (Omega * 10.0);
+
+        // Use the smallest of current ds, time-based estimate, and dynamical limit
+        double ds_try = ds;
+        if (std::fabs(ds_est) < std::fabs(ds_try)) ds_try = ds_est;
+        if (std::fabs(ds_dyn_now) < std::fabs(ds_try)) ds_try = ds_dyn_now;
+
+        if (std::fabs(ds_try) < ds_min_used) ds_min_used = std::fabs(ds_try);
+        if (std::fabs(ds_try) > ds_max_used) ds_max_used = std::fabs(ds_try);
 
         // Save state for bisection if we overshoot
         LogHState saved = state;
         double ds_next;
 
-        bool ok = step(state, ds, G, ds_next, c_code, pn_order);
+        bool ok = step(state, ds_try, G, ds_next, c_code, pn_order);
         n_steps++;
 
         if (!ok) {
-            // Step failed — try with smaller ds
+            // Step failed — halve and retry (ds persists to next iteration)
             state = saved;
-            ds *= 0.5;
+            ds = ds_try * 0.5;
+            n_failed++;
             continue;
         }
 
@@ -175,11 +264,20 @@ int GBSIntegrator::integrate_to_time(LogHState& state, double t_target, double G
             (dt_remain < 0 && state.t < t_target - 1e-10 * std::fabs(t_target))) {
             // Overshoot — bisect
             state = saved;
-            ds *= 0.5;
+            ds = ds_try * 0.5;
+            n_overshoot++;
             continue;
         }
 
+        // Success: use GBS-suggested step size (will be capped by ds_est next iter)
         ds = ds_next;
+    }
+
+    double dt_remain = t_target - state.t;
+    bool reached = std::fabs(dt_remain) < 1e-4 * std::fabs(t_target);
+    if (!reached) {
+        std::printf("      GBS: %d steps, t_final=%.6f/%.6f *** DID NOT REACH TARGET ***\n",
+                    n_steps, state.t, t_target);
     }
 
     return n_steps;

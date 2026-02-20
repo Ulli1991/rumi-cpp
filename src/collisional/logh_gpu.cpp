@@ -67,6 +67,12 @@ void SubsystemBatch::pack(const SubsystemManager& mgr, const Particles& p,
     auto h_mass = Kokkos::create_mirror_view(flat_mass);
     auto h_ext  = Kokkos::create_mirror_view(flat_ext_accel);
 
+    // Copy persistent B values from subsystems
+    stored_B.resize(n_sub);
+    for (int s = 0; s < n_sub; s++) {
+        stored_B[s] = mgr.active[s].B_phys;
+    }
+
     int off = 0;
     for (int s = 0; s < n_sub; s++) {
         const auto& sub = mgr.active[s];
@@ -105,7 +111,7 @@ void SubsystemBatch::pack(const SubsystemManager& mgr, const Particles& p,
 // Unpack results back into Particles
 // ============================================================================
 
-void SubsystemBatch::unpack(const SubsystemManager& mgr, Particles& p) const {
+void SubsystemBatch::unpack(SubsystemManager& mgr, Particles& p) {
     int n_sub = (int)mgr.active.size();
     if (n_sub == 0) return;
 
@@ -148,12 +154,25 @@ void SubsystemBatch::unpack(const SubsystemManager& mgr, Particles& p) const {
     Kokkos::deep_copy(p.vx, h_vx);
     Kokkos::deep_copy(p.vy, h_vy);
     Kokkos::deep_copy(p.vz, h_vz);
+
+    // Write persistent B back to subsystems
+    for (int s = 0; s < n_sub; s++) {
+        mgr.active[s].B_phys = stored_B[s];
+    }
 }
 
 // ============================================================================
 // GPU-batched integration
 // For now: host-side per-subsystem GBS (GPU kernel version requires
 // GBS entirely in device code, which we'll implement after basic correctness)
+//
+// IMPORTANT: The TTL leapfrog equations (dv/ds = a, dx/ds = Ω*v, dt/ds = Ω)
+// are only dimensionally consistent when the energy unit ≈ 1. In Hénon units
+// (G=M=1) this holds naturally. In code units (pc, M_sun, km/s), Ω ~ 10^7,
+// making kicks ~10^7x too weak.
+//
+// Fix: normalize each subsystem to internal N-body units (G'=1, M'=1)
+// before integration, then denormalize afterward.
 // ============================================================================
 
 void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
@@ -172,71 +191,160 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
     auto h_eerr = Kokkos::create_mirror_view(batch.energy_error);
     auto h_conv = Kokkos::create_mirror_view(batch.converged);
 
+    int total_gbs_steps = 0;
+    double max_dE = 0.0;
+    double min_dE = 1e30;
+
     for (int s = 0; s < n_sub; s++) {
         int nb = h_nbod(s);
         int off = h_off(s);
         double dt = h_dt(s);
 
-        // Build LogHState
+        // ==================================================================
+        // Step 1: Compute normalization scales
+        // V_scale = sqrt(2*T_CM / M_total), R_scale = G*M/V^2, T_scale = R/V
+        // In normalized units: G'=1, M'=1, Ω'~O(1)
+        // ==================================================================
+        double M_total = 0;
+        double cm_x = 0, cm_y = 0, cm_z = 0;
+        double cm_vx = 0, cm_vy = 0, cm_vz = 0;
+        for (int b = 0; b < nb; b++) {
+            double m = h_mass(off + b);
+            M_total += m;
+            cm_x += m * h_pos((off+b)*3+0);
+            cm_y += m * h_pos((off+b)*3+1);
+            cm_z += m * h_pos((off+b)*3+2);
+            cm_vx += m * h_vel((off+b)*3+0);
+            cm_vy += m * h_vel((off+b)*3+1);
+            cm_vz += m * h_vel((off+b)*3+2);
+        }
+        cm_x /= M_total; cm_y /= M_total; cm_z /= M_total;
+        cm_vx /= M_total; cm_vy /= M_total; cm_vz /= M_total;
+
+        // Kinetic energy in CM frame
+        double T_cm = 0;
+        for (int b = 0; b < nb; b++) {
+            double dvx = h_vel((off+b)*3+0) - cm_vx;
+            double dvy = h_vel((off+b)*3+1) - cm_vy;
+            double dvz = h_vel((off+b)*3+2) - cm_vz;
+            T_cm += 0.5 * h_mass(off+b) * (dvx*dvx + dvy*dvy + dvz*dvz);
+        }
+
+        // Normalization scales
+        double V_scale_sq = 2.0 * T_cm / M_total;
+        double V_scale = std::sqrt(V_scale_sq);
+        if (V_scale < 1e-30) V_scale = 1.0;  // degenerate case
+        V_scale_sq = V_scale * V_scale;
+
+        double R_scale = G * M_total / V_scale_sq;
+        double T_scale = R_scale / V_scale;
+        double G_norm = 1.0;  // by construction: G*M/(R*V²) = 1
+
+        // ==================================================================
+        // Step 2: Build LogHState in normalized units (CM-centered)
+        // ==================================================================
         LogHState state{};
         state.n_bodies = nb;
         state.t = 0.0;
 
-        // Check if any member mass >= m_pn for PN activation
         double c_code = g_collisional.c_code;
         int pn_order = g_collisional.pn_order;
         bool any_compact = false;
+
         for (int b = 0; b < nb; b++) {
-            state.pos[b*3+0] = h_pos((off+b)*3+0);
-            state.pos[b*3+1] = h_pos((off+b)*3+1);
-            state.pos[b*3+2] = h_pos((off+b)*3+2);
-            state.vel[b*3+0] = h_vel((off+b)*3+0);
-            state.vel[b*3+1] = h_vel((off+b)*3+1);
-            state.vel[b*3+2] = h_vel((off+b)*3+2);
-            state.mass[b] = h_mass(off+b);
+            // Positions: subtract CM, normalize by R_scale
+            state.pos[b*3+0] = (h_pos((off+b)*3+0) - cm_x) / R_scale;
+            state.pos[b*3+1] = (h_pos((off+b)*3+1) - cm_y) / R_scale;
+            state.pos[b*3+2] = (h_pos((off+b)*3+2) - cm_z) / R_scale;
+            // Velocities: subtract CM, normalize by V_scale
+            state.vel[b*3+0] = (h_vel((off+b)*3+0) - cm_vx) / V_scale;
+            state.vel[b*3+1] = (h_vel((off+b)*3+1) - cm_vy) / V_scale;
+            state.vel[b*3+2] = (h_vel((off+b)*3+2) - cm_vz) / V_scale;
+            // Masses: normalize to sum = 1
+            state.mass[b] = h_mass(off+b) / M_total;
             if (h_mass(off+b) >= g_collisional.m_pn) any_compact = true;
-            // ext_accel stays zero (LogHState{} zero-initializes)
-            // External perturbation handled by FSI kicks, not inside LogH
         }
+
+        // Normalized PN speed of light
+        double c_norm = c_code / V_scale;
 
         // Enable auxiliary velocity for PN when compact objects present
         if (any_compact && pn_order > 0 && c_code > 0.0) {
             state.use_aux_vel = true;
-            // Initialize aux_vel = vel (Hellstrom & Mikkola 2010)
             std::memcpy(state.aux_vel, state.vel, nb * 3 * sizeof(double));
         } else {
             state.use_aux_vel = false;
-            pn_order = 0;  // disable PN for this subsystem
+            pn_order = 0;
         }
 
-        // Initialize binding energy B = -E₀ = -(T + U) (positive for bound systems)
-        double T = logh_kinetic_energy(state);
-        double W = logh_potential_energy(state, G);
-        state.B = -W - T;  // B = |U| - T = -E₀
+        // Initialize B in normalized units.
+        // If we have a stored B from a previous LogH call, convert from physical
+        // to normalized units. Otherwise compute from scratch: B = -(T + U).
+        // Persistent B is critical for PN: re-initializing discards PN energy
+        // tracking and causes monotonic secular drift.
+        double T_norm = logh_kinetic_energy(state);
+        double U_norm = logh_potential_energy(state, G_norm);
+        double E_scale = M_total * V_scale_sq;  // energy normalization factor
 
-        double E0 = T + W;
+        if (std::isnan(batch.stored_B[s])) {
+            // First call for this subsystem: B = -(T+U) in normalized units
+            state.B = -U_norm - T_norm;
+        } else {
+            // Use persistent B from previous call, converted to current normalization
+            state.B = batch.stored_B[s] / E_scale;
+        }
 
-        // Estimate initial ds from dt / Omega
-        double Omega = T + state.B;
-        double ds_init = (Omega > 1e-30) ? dt / Omega : dt;
+        double E0_norm = T_norm + U_norm;
+        double Omega_norm = T_norm + state.B;
 
-        // Integrate to target time (with PN if enabled)
+        // Normalized time target
+        double dt_norm = dt / T_scale;
+
+        // ds estimate in normalized units
+        double ds_init = (Omega_norm > 1e-30) ? dt_norm / Omega_norm : dt_norm;
+
+        // ==================================================================
+        // Step 3: Integrate in normalized units
+        // ==================================================================
         GBSIntegrator gbs(eta_gbs);
-        gbs.integrate_to_time(state, dt, G, ds_init, c_code, pn_order);
+        int n_gbs_steps = gbs.integrate_to_time(state, dt_norm, G_norm, ds_init,
+                                                 c_norm, pn_order);
 
-        // Store results
+        // ==================================================================
+        // Step 4: Denormalize and store results
+        // CM drifts uniformly: x_CM(t) = x_CM(0) + v_CM * dt
+        // ==================================================================
+        double cm_x_final = cm_x + cm_vx * dt;
+        double cm_y_final = cm_y + cm_vy * dt;
+        double cm_z_final = cm_z + cm_vz * dt;
+
         for (int b = 0; b < nb; b++) {
-            h_pos_out((off+b)*3+0) = state.pos[b*3+0];
-            h_pos_out((off+b)*3+1) = state.pos[b*3+1];
-            h_pos_out((off+b)*3+2) = state.pos[b*3+2];
-            h_vel_out((off+b)*3+0) = state.vel[b*3+0];
-            h_vel_out((off+b)*3+1) = state.vel[b*3+1];
-            h_vel_out((off+b)*3+2) = state.vel[b*3+2];
+            h_pos_out((off+b)*3+0) = state.pos[b*3+0] * R_scale + cm_x_final;
+            h_pos_out((off+b)*3+1) = state.pos[b*3+1] * R_scale + cm_y_final;
+            h_pos_out((off+b)*3+2) = state.pos[b*3+2] * R_scale + cm_z_final;
+            h_vel_out((off+b)*3+0) = state.vel[b*3+0] * V_scale + cm_vx;
+            h_vel_out((off+b)*3+1) = state.vel[b*3+1] * V_scale + cm_vy;
+            h_vel_out((off+b)*3+2) = state.vel[b*3+2] * V_scale + cm_vz;
         }
 
-        double Ef = logh_total_energy(state, G);
-        h_eerr(s) = std::fabs((Ef - E0) / (std::fabs(E0) + 1e-30));
+        // Store updated B back to physical units for persistence across calls
+        batch.stored_B[s] = state.B * E_scale;
+
+        // Energy error in normalized units (dimensionless)
+        double Ef_norm = logh_total_energy(state, G_norm);
+        double dE_rel = std::fabs((Ef_norm - E0_norm) / (std::fabs(E0_norm) + 1e-30));
+        h_eerr(s) = dE_rel;
         h_conv(s) = 1;
+
+        total_gbs_steps += n_gbs_steps;
+        if (dE_rel > max_dE) max_dE = dE_rel;
+        if (dE_rel < min_dE) min_dE = dE_rel;
+    }
+
+    // Print compact summary (one line per batch)
+    if (n_sub > 0) {
+        std::printf("  LogH: %d subs, %d gbs_steps, dE=[%.2e, %.2e]\n",
+                    n_sub, total_gbs_steps, min_dE, max_dE);
     }
 
     Kokkos::deep_copy(batch.flat_pos_out, h_pos_out);

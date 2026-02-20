@@ -4,6 +4,7 @@
 #include "kepler.h"
 #include <Kokkos_Core.hpp>
 #include <vector>
+#include <cmath>
 
 // Neighbor pair detected during pairwise force/timestep computation
 struct NeighborPair {
@@ -35,6 +36,11 @@ struct Subsystem {
     SubsystemType type;
     bool is_secular;                     // orbit-averaged evolution
     int n_orb_per_dt;                    // orbits per FSI timestep
+
+    // Persistent binding energy B in physical (code) units.
+    // NAN = not yet initialized (compute from -(T+U) on first LogH call).
+    // Carried across LogH calls to properly track PN energy exchange.
+    double B_phys = NAN;
 
     // Hierarchy info (for triples)
     int inner_binary_id;                 // -1 if not hierarchical

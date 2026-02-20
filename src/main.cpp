@@ -17,11 +17,11 @@ CollisionalConfig g_collisional;
 struct BinaryTracker {
     double mu;               // G*(m1+m2)
     double omega_prev;       // previous omega for unwrapping
-    double mean_anom_prev;   // previous mean anomaly for orbit counting
     double omega_cumul;      // cumulative unwrapped omega
-    double orbits_cumul;     // cumulative orbit count (integer + fractional)
+    double orbits_cumul;     // cumulative orbit count (from elapsed time)
     double omega_gr_per_orbit; // analytic GR precession rate
     double a0, e0;           // initial orbital elements
+    double period0;          // initial orbital period
     bool initialized;
 
     BinaryTracker() : initialized(false) {}
@@ -43,8 +43,8 @@ struct BinaryTracker {
 
         a0 = oe.a;
         e0 = oe.e;
+        period0 = oe.period;
         omega_prev = oe.omega;
-        mean_anom_prev = oe.mean_anom;
         omega_cumul = 0.0;
         orbits_cumul = 0.0;
 
@@ -73,12 +73,9 @@ struct BinaryTracker {
         double v[3] = { h_vx(1)-h_vx(0), h_vy(1)-h_vy(0), h_vz(1)-h_vz(0) };
         auto oe = cartesian_to_elements(r, v, mu);
 
-        // Unwrap mean anomaly to count orbits
-        double dM = oe.mean_anom - mean_anom_prev;
-        if (dM < -M_PI) dM += 2.0 * M_PI;  // wrapped forward past 2pi
-        if (dM > M_PI) dM -= 2.0 * M_PI;   // shouldn't happen for forward evolution
-        orbits_cumul += dM / (2.0 * M_PI);
-        mean_anom_prev = oe.mean_anom;
+        // Count orbits from elapsed time / initial period
+        // (mean anomaly unwrapping aliases when multiple orbits per step)
+        orbits_cumul = t_code / period0;
 
         // Unwrap omega to track cumulative precession
         double dw = oe.omega - omega_prev;
@@ -358,7 +355,7 @@ int main(int argc, char** argv) {
             std::fflush(stdout);
         }
 
-        bool is_cluster = (test == "plummer" || test == "binary_test");
+        bool is_cluster = (test == "plummer");
 
         // Get particle count (local or total depending on mode)
         int N_display = use_distributed ? dp.N_total : p.N;
@@ -479,7 +476,7 @@ int main(int argc, char** argv) {
 
 #ifdef ENABLE_COLLISIONAL
         BinaryTracker bin_tracker;
-        if (test == "binary_test" && g_collisional.enabled && g_collisional.pn_order > 0 && my_rank == 0) {
+        if (test == "binary_test" && g_collisional.enabled && my_rank == 0) {
             bin_tracker.init(work_p, G);
         }
 #endif

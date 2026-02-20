@@ -281,6 +281,11 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
     g_logh_batch.pack(tmp_mgr, p, G, dt);
     logh_integrate_batch_gpu(g_logh_batch, G, g_collisional.eta_gbs);
     g_logh_batch.unpack(tmp_mgr, p);
+
+    // Propagate persistent B_phys back from tmp_mgr to g_subsystem_mgr
+    for (int i = 0; i < (int)eligible.size(); i++) {
+        g_subsystem_mgr.active[eligible[i]].B_phys = tmp_mgr.active[i].B_phys;
+    }
 }
 #endif
 

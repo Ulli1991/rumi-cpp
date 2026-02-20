@@ -12,9 +12,11 @@ struct GBSIntegrator {
     double eta_gbs;  // accuracy parameter (default 1e-10)
 
     // Extrapolation table (Neville-Aitken)
-    // dim = number of state variables to extrapolate
+    // table[i] stores RAW midpoint result M(n_i) — never modified by extrapolation
+    // work[i] stores the Neville table entries during extrapolation
     double table[MAX_STAGES][LOGH_MAX_BODIES * 9 + 2];  // pos+vel+aux_vel+t+B per stage
     double work[MAX_STAGES][LOGH_MAX_BODIES * 9 + 2];
+    double diag_prev[LOGH_MAX_BODIES * 9 + 2];  // T[k-1][k-1] saved between extrapolate() calls
 
     GBSIntegrator(double eta = 1e-10) : eta_gbs(eta) {}
 
@@ -38,7 +40,7 @@ struct GBSIntegrator {
     // Returns actual number of GBS steps taken
     int integrate_to_time(LogHState& state, double t_target, double G,
                           double ds_initial, double c_code = 0.0, int pn_order = 0,
-                          int max_iter = 50);
+                          int max_iter = 100000);
 
 private:
     // Pack LogHState into flat array for extrapolation

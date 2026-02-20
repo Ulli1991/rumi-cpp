@@ -3,6 +3,7 @@
 #include "particles.h"
 #include "subsystem.h"
 #include <Kokkos_Core.hpp>
+#include <vector>
 
 // GPU-batched LogH integration: each Kokkos team integrates one subsystem
 // Pack all subsystem states into contiguous arrays for GPU parallelism
@@ -29,6 +30,10 @@ struct SubsystemBatch {
     Kokkos::View<double*> energy_error;   // |dE/E| per subsystem
     Kokkos::View<int*>    converged;      // 1 if GBS converged
 
+    // Persistent binding energy B in physical units (one per subsystem).
+    // Threaded through pack→integrate→unpack to carry B across LogH calls.
+    std::vector<double> stored_B;
+
     // Allocate buffers
     void allocate(int n_sub, int total_bodies);
 
@@ -36,8 +41,8 @@ struct SubsystemBatch {
     void pack(const SubsystemManager& mgr, const Particles& p,
               double G, double dt);
 
-    // Unpack results back into Particles
-    void unpack(const SubsystemManager& mgr, Particles& p) const;
+    // Unpack results back into Particles and write B_phys back to subsystems
+    void unpack(SubsystemManager& mgr, Particles& p);
 };
 
 // Integrate all subsystems in batch on GPU
