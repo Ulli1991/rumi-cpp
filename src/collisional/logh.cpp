@@ -21,12 +21,15 @@
 // extrapolation converges to precession-free dynamics.
 //
 // Leapfrog in fictitious time s (KDK):
-//   0. Estimate:   Omega = T(v + ds/2 * a) + B    (plain half-kick for Omega)
-//   1. Half-kick:  v += (ds/2) * a / Omega
-//   2. Full drift: x += ds * v / Omega
-//   3. Time:       t += ds / Omega
+//   Each kick solves the implicit midpoint EXACTLY via cubic equation:
+//     Ω³ - Ω₀·Ω² - C·Ω - D = 0   (Newton's method, machine precision)
+//   This guarantees exact time-reversibility → even-power GBS error expansion.
+//
+//   1. Half-kick:  v += (ds/2) * a / Ω_cubic       (exact implicit midpoint)
+//   2. Full drift: x += ds * v / Omega(v_half)
+//   3. Time:       t += ds / Omega(v_half)
 //   4. Forces:     a = F(x)
-//   5. Half-kick:  v += (ds/2) * a / Omega         (same Omega as step 0)
+//   5. Half-kick:  v += (ds/2) * a / Ω_cubic       (exact implicit midpoint)
 //
 // B is constant for purely Newtonian dynamics (external perturbation handled
 // by FSI kicks, not inside LogH). When velocity-dependent forces (PN) are
@@ -99,11 +102,39 @@ double logh_total_energy(const LogHState& state, double G) {
 // ============================================================================
 // Single TTL leapfrog step in regularized time s
 // BIFROST convention: all operations scaled by 1/Omega for proper
-// time reparameterization (preserves LRL vector in continuous limit)
+// time reparameterization (preserves LRL vector in continuous limit).
+//
+// Implicit midpoint kick solved EXACTLY via cubic equation:
+//   v_new = v_old + Δ/Ω  where Δ = (ds/2)*a
+//   v_mid = (v_old + v_new)/2 = v_old + Δ/(2Ω)
+//   Ω = T(v_mid) + B = Ω₀ + C/Ω + D/Ω²
+//   → Ω³ - Ω₀·Ω² - C·Ω - D = 0  (cubic, solved by Newton's method)
+//   C = ½ Σ mᵢ vᵢ·Δᵢ,  D = ⅛ Σ mᵢ|Δᵢ|²
+//
+// Properties:
+//   - Exact implicit midpoint → exact time-reversibility
+//   - Even-power error expansion (h², h⁴,...) for GBS extrapolation
+//   - No spurious precession (proper 1/Ω reparameterization)
 // ============================================================================
+
+// Solve the implicit midpoint kick: v_new = v_old + delta/Omega
+// where Omega satisfies Omega^3 - Omega0*Omega^2 - C*Omega - D = 0
+// Omega0 = T(v_old) + B,  C = 0.5*sum(m*v*delta),  D = 0.125*sum(m*delta^2)
+static double solve_kick_omega(double Omega0, double C, double D) {
+    double Omega = Omega0;
+    for (int iter = 0; iter < 5; iter++) {
+        double O2 = Omega * Omega;
+        double f = O2 * Omega - Omega0 * O2 - C * Omega - D;
+        double fp = 3.0 * O2 - 2.0 * Omega0 * Omega - C;
+        if (std::fabs(fp) < 1e-30) break;
+        Omega -= f / fp;
+    }
+    return Omega;
+}
 
 void logh_leapfrog_step(LogHState& state, double ds, double G) {
     int n = state.n_bodies;
+    int n3 = n * 3;
 
     // Compute accelerations at current positions
     double accel[LOGH_MAX_BODIES * 3];
@@ -111,34 +142,63 @@ void logh_leapfrog_step(LogHState& state, double ds, double G) {
 
     double ds_half = 0.5 * ds;
 
-    // Estimate half-step velocity with plain half-kick for Omega evaluation
-    double v_save[LOGH_MAX_BODIES * 3];
-    std::memcpy(v_save, state.vel, n * 3 * sizeof(double));
-    for (int i = 0; i < n * 3; i++) {
-        state.vel[i] += ds_half * accel[i];
-    }
-    double T = logh_kinetic_energy(state);
-    double Omega = T + state.B;
-    double inv_Omega = 1.0 / Omega;
+    // ====== First half-kick: exact implicit midpoint via cubic solve ======
+    {
+        double Omega0 = logh_kinetic_energy(state) + state.B;
+        double C = 0.0, D = 0.0;
+        for (int b = 0; b < n; b++) {
+            double vdot = 0.0, dsq = 0.0;
+            for (int d = 0; d < 3; d++) {
+                int idx = b * 3 + d;
+                double delta = ds_half * accel[idx];
+                vdot += state.vel[idx] * delta;
+                dsq += delta * delta;
+            }
+            C += state.mass[b] * vdot;
+            D += state.mass[b] * dsq;
+        }
+        C *= 0.5;
+        D *= 0.125;
 
-    // Restore velocity and do actual half-kick: v += (ds/2) * a / Omega
-    std::memcpy(state.vel, v_save, n * 3 * sizeof(double));
-    for (int i = 0; i < n * 3; i++) {
-        state.vel[i] += ds_half * accel[i] * inv_Omega;
+        double Omega = solve_kick_omega(Omega0, C, D);
+        double inv_Omega = 1.0 / Omega;
+        for (int i = 0; i < n3; i++)
+            state.vel[i] += ds_half * accel[i] * inv_Omega;
     }
 
-    // Full drift: x += ds * v / Omega,  t += ds / Omega
-    for (int i = 0; i < n * 3; i++) {
-        state.pos[i] += ds * state.vel[i] * inv_Omega;
-    }
-    state.t += ds * inv_Omega;
+    // ====== Drift: x += ds * v / Omega,  t += ds / Omega ======
+    // v is constant during drift, so Omega is constant and explicit
+    double Omega_half = logh_kinetic_energy(state) + state.B;
+    double inv_Omega_half = 1.0 / Omega_half;
+    for (int i = 0; i < n3; i++)
+        state.pos[i] += ds * state.vel[i] * inv_Omega_half;
+    state.t += ds * inv_Omega_half;
 
-    // Recompute accelerations at new positions
+    // ====== Recompute accelerations at new positions ======
     logh_internal_accel(state, G, accel);
 
-    // Second half-kick with same Omega: v += (ds/2) * a / Omega
-    for (int i = 0; i < n * 3; i++) {
-        state.vel[i] += ds_half * accel[i] * inv_Omega;
+    // ====== Second half-kick: exact implicit midpoint via cubic solve ======
+    {
+        double Omega0 = logh_kinetic_energy(state) + state.B;
+        double C = 0.0, D = 0.0;
+        for (int b = 0; b < n; b++) {
+            double vdot = 0.0, dsq = 0.0;
+            for (int d = 0; d < 3; d++) {
+                int idx = b * 3 + d;
+                double delta = ds_half * accel[idx];
+                vdot += state.vel[idx] * delta;
+                dsq += delta * delta;
+            }
+            C += state.mass[b] * vdot;
+            D += state.mass[b] * dsq;
+        }
+        C *= 0.5;
+        D *= 0.125;
+
+        double Omega = solve_kick_omega(Omega0, C, D);
+        double inv_Omega = 1.0 / Omega;
+        for (int i = 0; i < n3; i++)
+            state.vel[i] += ds_half * accel[i] * inv_Omega;
     }
 }
 
