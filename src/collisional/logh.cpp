@@ -238,26 +238,90 @@ static void compute_pn_all_pairs(const LogHState& state, const double* eval_vel,
 // Single TTL leapfrog step with PN corrections via auxiliary velocity technique
 // (Hellstrom & Mikkola 2010, BIFROST Section 3.4)
 //
-// BIFROST convention: ALL kick and B evolution operators scaled by 1/Omega
-// for proper time reparameterization. Omega estimated from plain Newtonian
-// half-kick at the start of each step and held constant throughout.
+// BIFROST convention: ALL operations scaled by 1/Omega for proper time
+// reparameterization (no spurious precession in continuous limit).
 //
 // Each half-kick K(ε) splits as ABA:
-//   K_aux(ε/2): w += (ε/2) * [a + g(v)] / Omega
-//   K_phys(ε):  B -= (ε/2) * Σ m_i v · g(w) / Omega   (pre-kick B)
-//               v += ε * [a + g(w)] / Omega             (velocity kick)
-//               B -= (ε/2) * Σ m_i v'· g(w) / Omega    (post-kick B)
-//   K_aux(ε/2): w += (ε/2) * [a + g(v')] / Omega
+//   K_aux(ε/2): w += (ε/2) * [a + g(v)] / Ω   [EXPLICIT: v,B unchanged → Ω constant]
+//   K_phys(ε):  v += ε * [a + g(w)] / Ω_cubic  [IMPLICIT: cubic solve for Ω]
+//               B -= ε * W_mid / Ω_cubic        [midpoint B evolution folded into cubic]
+//   K_aux(ε/2): w += (ε/2) * [a + g(v')] / Ω  [EXPLICIT: v',B' known → Ω constant]
 //
-// B evolution (BIFROST Eq. 4): dB/ds = -Σ m_i v_i · g_i / Omega
-// Discretized with SYMMETRIC (trapezoidal) rule for time-reversibility.
+// K_phys cubic: the implicit midpoint for simultaneous (v,B) update gives
+//   Ω³ - Ω₀·Ω² - C'·Ω - D' = 0
+// where C' = C - (ε/2)*W_old, D' = D - (ε/4)*P incorporate B evolution.
+//   C = ½ Σ mᵢ vᵢ·Δᵢ, D = ⅛ Σ mᵢ|Δᵢ|², Δ = ε*(a+g(w))
+//   W_old = Σ mᵢ vᵢ·gᵢ(w), P = Σ mᵢ Δᵢ·gᵢ(w)
 //
 // The full step K(ds/2)·D(ds)·K(ds/2) has 6 PN evaluations (3 per half-kick).
 // ============================================================================
 
+// Helper: perform one K_phys step with cubic-solved Omega.
+// Advances both v and B via exact implicit midpoint.
+//   accel[] = Newtonian acceleration (constant during K_phys)
+//   pn[]    = PN acceleration g(w) from auxiliary velocity (constant during K_phys)
+//   eps     = K_phys step size in fictitious time s
+static void k_phys_cubic(LogHState& state, const double* accel, const double* pn,
+                          double eps, double G) {
+    int n = state.n_bodies;
+    int n3 = n * 3;
+
+    // Total impulse: Δ = eps * [a + g(w)]
+    double delta[LOGH_MAX_BODIES * 3];
+    for (int i = 0; i < n3; i++)
+        delta[i] = eps * (accel[i] + pn[i]);
+
+    // Cubic coefficients from T(v_mid)
+    double Omega0 = logh_kinetic_energy(state) + state.B;
+    double C = 0.0, D = 0.0;
+    for (int b = 0; b < n; b++) {
+        double vdot = 0.0, dsq = 0.0;
+        for (int d = 0; d < 3; d++) {
+            int idx = b * 3 + d;
+            vdot += state.vel[idx] * delta[idx];
+            dsq += delta[idx] * delta[idx];
+        }
+        C += state.mass[b] * vdot;
+        D += state.mass[b] * dsq;
+    }
+    C *= 0.5;
+    D *= 0.125;
+
+    // B evolution correction terms
+    // W_old = Σ m_i v_i · g_i(w)  (PN work rate at current v)
+    // P     = Σ m_i Δ_i · g_i(w)  (impulse-PN coupling)
+    double W_old = 0.0, P = 0.0;
+    for (int b = 0; b < n; b++) {
+        for (int d = 0; d < 3; d++) {
+            int idx = b * 3 + d;
+            double mg = state.mass[b] * pn[idx];
+            W_old += mg * state.vel[idx];
+            P     += mg * delta[idx];
+        }
+    }
+
+    // Modified coefficients: B_mid = B_old - (eps/2)*W_old/Ω - (eps/4)*P/Ω²
+    double C_prime = C - 0.5 * eps * W_old;
+    double D_prime = D - 0.25 * eps * P;
+
+    // Solve cubic: Ω³ - Ω₀·Ω² - C'·Ω - D' = 0
+    double Omega = solve_kick_omega(Omega0, C_prime, D_prime);
+    double inv_Omega = 1.0 / Omega;
+
+    // Apply velocity kick: v += Δ / Ω
+    for (int i = 0; i < n3; i++)
+        state.vel[i] += delta[i] * inv_Omega;
+
+    // Apply B evolution: B -= eps * W_mid / Ω
+    // W_mid = W_old + P/(2Ω) = Σ m_i v_mid · g(w)
+    double W_mid = W_old + P / (2.0 * Omega);
+    state.B -= eps * W_mid * inv_Omega;
+}
+
 void logh_leapfrog_step_pn(LogHState& state, double ds, double G,
                             double c_code, int pn_order) {
     int n = state.n_bodies;
+    int n3 = n * 3;
     double ds_half = 0.5 * ds;
     double ds_quarter = 0.25 * ds;
 
@@ -265,99 +329,65 @@ void logh_leapfrog_step_pn(LogHState& state, double ds, double G,
     double accel[LOGH_MAX_BODIES * 3];
     logh_internal_accel(state, G, accel);
 
-    // Estimate Omega from plain Newtonian half-kick
-    double v_save[LOGH_MAX_BODIES * 3];
-    std::memcpy(v_save, state.vel, n * 3 * sizeof(double));
-    for (int i = 0; i < n * 3; i++) {
-        state.vel[i] += ds_half * accel[i];
-    }
-    double T_est = logh_kinetic_energy(state);
-    double Omega = T_est + state.B;
-    double inv_Omega = 1.0 / Omega;
-    std::memcpy(state.vel, v_save, n * 3 * sizeof(double));
-
     double pn[LOGH_MAX_BODIES * 3];
 
     // ============ FIRST HALF-KICK: K(ds/2) = K_aux(ds/4) · K_phys(ds/2) · K_aux(ds/4) ============
 
-    // K_aux(ds/4): w += (ds/4) * [a + g(v)] / Omega
-    compute_pn_all_pairs(state, state.vel, G, c_code, pn_order, pn);
-    for (int i = 0; i < n * 3; i++) {
-        state.aux_vel[i] += ds_quarter * (accel[i] + pn[i]) * inv_Omega;
+    // K_aux(ds/4): w += (ds/4) * [a + g(v)] / Omega   [EXPLICIT]
+    {
+        double Omega = logh_kinetic_energy(state) + state.B;
+        double inv_Omega = 1.0 / Omega;
+        compute_pn_all_pairs(state, state.vel, G, c_code, pn_order, pn);
+        for (int i = 0; i < n3; i++)
+            state.aux_vel[i] += ds_quarter * (accel[i] + pn[i]) * inv_Omega;
     }
 
-    // K_phys(ds/2): symmetric B update + v kick using PN from UPDATED w
+    // K_phys(ds/2): cubic solve for implicit midpoint (v and B)
     compute_pn_all_pairs(state, state.aux_vel, G, c_code, pn_order, pn);
-    // Pre-kick B: ΔB₁ = -(ds/4) * Σ m_i v₀ · g(w) / Omega
-    double work_pn = 0.0;
-    for (int i = 0; i < n; i++) {
-        work_pn += state.mass[i] * (state.vel[i*3+0] * pn[i*3+0]
-                                   + state.vel[i*3+1] * pn[i*3+1]
-                                   + state.vel[i*3+2] * pn[i*3+2]);
-    }
-    state.B -= ds_quarter * work_pn * inv_Omega;
-    // Kick: v += (ds/2) * (a + g(w)) / Omega
-    for (int i = 0; i < n * 3; i++) {
-        state.vel[i] += ds_half * (accel[i] + pn[i]) * inv_Omega;
-    }
-    // Post-kick B: ΔB₂ = -(ds/4) * Σ m_i v₁ · g(w) / Omega  [using updated v]
-    work_pn = 0.0;
-    for (int i = 0; i < n; i++) {
-        work_pn += state.mass[i] * (state.vel[i*3+0] * pn[i*3+0]
-                                   + state.vel[i*3+1] * pn[i*3+1]
-                                   + state.vel[i*3+2] * pn[i*3+2]);
-    }
-    state.B -= ds_quarter * work_pn * inv_Omega;
+    k_phys_cubic(state, accel, pn, ds_half, G);
 
-    // K_aux(ds/4): w += (ds/4) * [a + g(v')] / Omega  (v' = updated physical velocity)
-    compute_pn_all_pairs(state, state.vel, G, c_code, pn_order, pn);
-    for (int i = 0; i < n * 3; i++) {
-        state.aux_vel[i] += ds_quarter * (accel[i] + pn[i]) * inv_Omega;
+    // K_aux(ds/4): w += (ds/4) * [a + g(v')] / Omega   [EXPLICIT, v' and B' updated]
+    {
+        double Omega = logh_kinetic_energy(state) + state.B;
+        double inv_Omega = 1.0 / Omega;
+        compute_pn_all_pairs(state, state.vel, G, c_code, pn_order, pn);
+        for (int i = 0; i < n3; i++)
+            state.aux_vel[i] += ds_quarter * (accel[i] + pn[i]) * inv_Omega;
     }
 
-    // ============ DRIFT: x += ds * v / Omega,  t += ds / Omega ============
-    for (int i = 0; i < n * 3; i++) {
-        state.pos[i] += ds * state.vel[i] * inv_Omega;
+    // ============ DRIFT: x += ds * v / Omega,  t += ds / Omega  [EXPLICIT] ============
+    {
+        double Omega = logh_kinetic_energy(state) + state.B;
+        double inv_Omega = 1.0 / Omega;
+        for (int i = 0; i < n3; i++)
+            state.pos[i] += ds * state.vel[i] * inv_Omega;
+        state.t += ds * inv_Omega;
     }
-    state.t += ds * inv_Omega;
 
     // ============ Recompute Newtonian accelerations at new positions ============
     logh_internal_accel(state, G, accel);
 
     // ============ SECOND HALF-KICK: K(ds/2) = K_aux(ds/4) · K_phys(ds/2) · K_aux(ds/4) ============
 
-    // K_aux(ds/4): w += (ds/4) * [a' + g'(v)] / Omega
-    compute_pn_all_pairs(state, state.vel, G, c_code, pn_order, pn);
-    for (int i = 0; i < n * 3; i++) {
-        state.aux_vel[i] += ds_quarter * (accel[i] + pn[i]) * inv_Omega;
+    // K_aux(ds/4)   [EXPLICIT]
+    {
+        double Omega = logh_kinetic_energy(state) + state.B;
+        double inv_Omega = 1.0 / Omega;
+        compute_pn_all_pairs(state, state.vel, G, c_code, pn_order, pn);
+        for (int i = 0; i < n3; i++)
+            state.aux_vel[i] += ds_quarter * (accel[i] + pn[i]) * inv_Omega;
     }
 
-    // K_phys(ds/2): symmetric B update + v kick using PN from UPDATED w
+    // K_phys(ds/2): cubic solve
     compute_pn_all_pairs(state, state.aux_vel, G, c_code, pn_order, pn);
-    // Pre-kick B: ΔB₁ = -(ds/4) * Σ m_i v₀ · g(w) / Omega
-    work_pn = 0.0;
-    for (int i = 0; i < n; i++) {
-        work_pn += state.mass[i] * (state.vel[i*3+0] * pn[i*3+0]
-                                   + state.vel[i*3+1] * pn[i*3+1]
-                                   + state.vel[i*3+2] * pn[i*3+2]);
-    }
-    state.B -= ds_quarter * work_pn * inv_Omega;
-    // Kick: v += (ds/2) * (a + g(w)) / Omega
-    for (int i = 0; i < n * 3; i++) {
-        state.vel[i] += ds_half * (accel[i] + pn[i]) * inv_Omega;
-    }
-    // Post-kick B: ΔB₂ = -(ds/4) * Σ m_i v₁ · g(w) / Omega  [using updated v]
-    work_pn = 0.0;
-    for (int i = 0; i < n; i++) {
-        work_pn += state.mass[i] * (state.vel[i*3+0] * pn[i*3+0]
-                                   + state.vel[i*3+1] * pn[i*3+1]
-                                   + state.vel[i*3+2] * pn[i*3+2]);
-    }
-    state.B -= ds_quarter * work_pn * inv_Omega;
+    k_phys_cubic(state, accel, pn, ds_half, G);
 
-    // K_aux(ds/4): w += (ds/4) * [a' + g'(v')] / Omega
-    compute_pn_all_pairs(state, state.vel, G, c_code, pn_order, pn);
-    for (int i = 0; i < n * 3; i++) {
-        state.aux_vel[i] += ds_quarter * (accel[i] + pn[i]) * inv_Omega;
+    // K_aux(ds/4)   [EXPLICIT]
+    {
+        double Omega = logh_kinetic_energy(state) + state.B;
+        double inv_Omega = 1.0 / Omega;
+        compute_pn_all_pairs(state, state.vel, G, c_code, pn_order, pn);
+        for (int i = 0; i < n3; i++)
+            state.aux_vel[i] += ds_quarter * (accel[i] + pn[i]) * inv_Omega;
     }
 }
