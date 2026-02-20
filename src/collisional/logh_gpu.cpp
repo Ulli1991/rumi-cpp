@@ -166,10 +166,10 @@ void SubsystemBatch::unpack(SubsystemManager& mgr, Particles& p) {
 // For now: host-side per-subsystem GBS (GPU kernel version requires
 // GBS entirely in device code, which we'll implement after basic correctness)
 //
-// IMPORTANT: The TTL leapfrog equations (dv/ds = a, dx/ds = Ω*v, dt/ds = Ω)
-// are only dimensionally consistent when the energy unit ≈ 1. In Hénon units
-// (G=M=1) this holds naturally. In code units (pc, M_sun, km/s), Ω ~ 10^7,
-// making kicks ~10^7x too weak.
+// IMPORTANT: The TTL leapfrog equations (BIFROST convention:
+// dv/ds = a/Ω, dx/ds = v/Ω, dt/ds = 1/Ω) are only dimensionally
+// consistent when the energy unit ≈ 1. In Hénon units (G=M=1) this
+// holds naturally. In code units (pc, M_sun, km/s), Ω ~ 10^7.
 //
 // Fix: normalize each subsystem to internal N-body units (G'=1, M'=1)
 // before integration, then denormalize afterward.
@@ -268,6 +268,28 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
         // Normalized PN speed of light
         double c_norm = c_code / V_scale;
 
+        // === DEBUG: compute omega (eccentricity vector angle) before integration ===
+        double omega_before = 0.0;
+        if (nb == 2) {
+            double rx = state.pos[1*3+0] - state.pos[0*3+0];
+            double ry = state.pos[1*3+1] - state.pos[0*3+1];
+            double rz = state.pos[1*3+2] - state.pos[0*3+2];
+            double vx = state.vel[1*3+0] - state.vel[0*3+0];
+            double vy = state.vel[1*3+1] - state.vel[0*3+1];
+            double vz = state.vel[1*3+2] - state.vel[0*3+2];
+            double rmag = std::sqrt(rx*rx + ry*ry + rz*rz);
+            double mu_bin = G_norm * (state.mass[0] + state.mass[1]);
+            double Lz = rx*vy - ry*vx;
+            double ex = vy*Lz/mu_bin - rx/rmag;
+            double ey = -vx*Lz/mu_bin - ry/rmag;
+            omega_before = std::atan2(ey, ex);
+            double emag = std::sqrt(ex*ex + ey*ey);
+            double L_mag = std::sqrt(Lz*Lz + (rz*vx - rx*vz)*(rz*vx - rx*vz)
+                                     + (rx*vy - ry*vx)*(rx*vy - ry*vx));
+            // Extra: check angular momentum in normalized units
+            // Not using L_mag for now, just omega_before
+        }
+
         // Enable auxiliary velocity for PN when compact objects present
         if (any_compact && pn_order > 0 && c_code > 0.0) {
             state.use_aux_vel = true;
@@ -300,8 +322,8 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
         // Normalized time target
         double dt_norm = dt / T_scale;
 
-        // ds estimate in normalized units
-        double ds_init = (Omega_norm > 1e-30) ? dt_norm / Omega_norm : dt_norm;
+        // ds estimate in normalized units (BIFROST: ds = dt * Omega)
+        double ds_init = (Omega_norm > 1e-30) ? dt_norm * Omega_norm : dt_norm;
 
         // ==================================================================
         // Step 3: Integrate in normalized units
@@ -309,6 +331,48 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
         GBSIntegrator gbs(eta_gbs);
         int n_gbs_steps = gbs.integrate_to_time(state, dt_norm, G_norm, ds_init,
                                                  c_norm, pn_order);
+
+        // === DEBUG: compute omega after integration ===
+        double omega_after = 0.0;
+        if (nb == 2) {
+            double rx = state.pos[1*3+0] - state.pos[0*3+0];
+            double ry = state.pos[1*3+1] - state.pos[0*3+1];
+            double rz = state.pos[1*3+2] - state.pos[0*3+2];
+            double vx = state.vel[1*3+0] - state.vel[0*3+0];
+            double vy = state.vel[1*3+1] - state.vel[0*3+1];
+            double vz = state.vel[1*3+2] - state.vel[0*3+2];
+            double rmag = std::sqrt(rx*rx + ry*ry + rz*rz);
+            double mu_bin = G_norm * (state.mass[0] + state.mass[1]);
+            double Lz = rx*vy - ry*vx;
+            double ex = vy*Lz/mu_bin - rx/rmag;
+            double ey = -vx*Lz/mu_bin - ry/rmag;
+            omega_after = std::atan2(ey, ex);
+            double emag = std::sqrt(ex*ex + ey*ey);
+
+            // Compute angular momentum before and after
+            double L_z_phys_before = 0.0;  // computed from input state
+            for (int b = 0; b < nb; b++) {
+                double px = (h_pos((off+b)*3+0) - cm_x);
+                double py = (h_pos((off+b)*3+1) - cm_y);
+                double pvx = (h_vel((off+b)*3+0) - cm_vx);
+                double pvy = (h_vel((off+b)*3+1) - cm_vy);
+                L_z_phys_before += h_mass(off+b) * (px*pvy - py*pvx);
+            }
+
+            double L_z_norm_after = 0.0;
+            for (int b = 0; b < nb; b++) {
+                L_z_norm_after += state.mass[b] * (state.pos[b*3+0]*state.vel[b*3+1]
+                                                   - state.pos[b*3+1]*state.vel[b*3+0]);
+            }
+
+            double dw = omega_after - omega_before;
+            if (dw < -M_PI) dw += 2.0 * M_PI;
+            if (dw > M_PI) dw -= 2.0 * M_PI;
+            std::printf("    LogH_debug: omega_before=%.6f  omega_after=%.6f  dw=%.6e"
+                        "  e=%.9f  dt_norm=%.4f  Lz_norm=%.10e  n_gbs=%d\n",
+                        omega_before, omega_after, dw, emag, dt_norm,
+                        L_z_norm_after, n_gbs_steps);
+        }
 
         // ==================================================================
         // Step 4: Denormalize and store results

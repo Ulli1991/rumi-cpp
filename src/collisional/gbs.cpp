@@ -122,11 +122,37 @@ double GBSIntegrator::extrapolate(int stage, int dim) {
 // Full GBS step with adaptive order
 // ============================================================================
 
+// DEBUG: compute omega from packed state for 2-body
+static double omega_from_packed(const double* y, int nb) {
+    if (nb != 2) return 0.0;
+    double rx = y[3] - y[0];   // pos[1] - pos[0]  (x)
+    double ry = y[4] - y[1];   // pos[1] - pos[0]  (y)
+    double rz = y[5] - y[2];
+    double vx = y[9] - y[6];   // vel[1] - vel[0]  (x)
+    double vy = y[10] - y[7];  // vel[1] - vel[0]  (y)
+    double rmag = std::sqrt(rx*rx + ry*ry + rz*rz);
+    double Lz = rx*vy - ry*vx;
+    // mu = G*(m0+m1) = 1.0 in normalized units
+    double ex = vy*Lz - rx/rmag;
+    double ey = -vx*Lz - ry/rmag;
+    return std::atan2(ey, ex);
+}
+
+static int gbs_debug_counter = 0;
+
 bool GBSIntegrator::step(LogHState& state, double ds, double G, double& ds_next,
                           double c_code, int pn_order) {
     int dim = 0;
     double y0[LOGH_MAX_BODIES * 9 + 2];
     pack_state(state, y0, dim);
+
+    bool do_debug = (state.n_bodies == 2 && gbs_debug_counter < 5);
+
+    if (do_debug) {
+        double w0 = omega_from_packed(y0, 2);
+        std::printf("      GBS step #%d: ds=%.6e  omega_in=%.6f\n",
+                    gbs_debug_counter, ds, w0);
+    }
 
     for (int stage = 0; stage < MAX_STAGES; stage++) {
         LogHState result;
@@ -135,15 +161,34 @@ bool GBSIntegrator::step(LogHState& state, double ds, double G, double& ds_next,
         midpoint(state, result, STEP_SEQ[stage], ds, G, c_code, pn_order);
         pack_state(result, table[stage], dim);
 
+        if (do_debug) {
+            double w_raw = omega_from_packed(table[stage], 2);
+            std::printf("        stage %d (n=%d): omega_raw=%.10f  t=%.6f\n",
+                        stage, STEP_SEQ[stage], w_raw, table[stage][dim-2]);
+        }
+
         // Always call extrapolate — stage 0 initializes diag_prev (returns 1.0).
         // Without this, diag_prev is uninitialized garbage and stage 1 can
         // falsely report convergence.
         double err = extrapolate(stage, dim);
 
         if (stage > 0) {
+            if (do_debug) {
+                double w_ext = omega_from_packed(work[stage], 2);
+                std::printf("        extrap[%d]: omega_ext=%.10f  err=%.2e\n",
+                            stage, w_ext, err);
+            }
+
             if (err < eta_gbs) {
                 // Converged: unpack best estimate from work[stage]
                 unpack_state(work[stage], dim, state);
+
+                if (do_debug) {
+                    double w_final = omega_from_packed(work[stage], 2);
+                    std::printf("        CONVERGED at stage %d: omega_final=%.10f  err=%.2e\n",
+                                stage, w_final, err);
+                    gbs_debug_counter++;
+                }
 
                 // Suggest next step size
                 double safety = 0.8;
@@ -158,6 +203,7 @@ bool GBSIntegrator::step(LogHState& state, double ds, double G, double& ds_next,
             // early to save computing higher stages with no hope.
             if (stage >= 3 && err > 1.0) {
                 ds_next = 0.5 * ds;
+                if (do_debug) gbs_debug_counter++;
                 return false;
             }
         }
@@ -165,6 +211,7 @@ bool GBSIntegrator::step(LogHState& state, double ds, double G, double& ds_next,
 
     // Did not converge — halve step size and try again
     ds_next = 0.5 * ds;
+    if (do_debug) gbs_debug_counter++;
     return false;
 }
 
@@ -197,9 +244,10 @@ int GBSIntegrator::integrate_to_time(LogHState& state, double t_target, double G
     if (Omega0 < 1e-30) Omega0 = 1e-30;
 
     // Scale ds so each GBS step covers at most ~1/10 dynamical time.
+    // BIFROST convention: dt = ds / Omega, so ds = dt * Omega.
     // This ensures stage 0 (2 substeps) produces a qualitatively correct
     // solution, which is required for GBS polynomial extrapolation.
-    double ds_dyn = t_dyn / (Omega0 * 10.0);
+    double ds_dyn = t_dyn * Omega0 / 10.0;
     double ds = std::min(ds_initial, ds_dyn);
 
     int n_steps = 0;
@@ -227,14 +275,14 @@ int GBSIntegrator::integrate_to_time(LogHState& state, double t_target, double G
         double r_min_now = std::sqrt(r_min_now_sq);
         double t_dyn_now = std::sqrt(r_min_now * r_min_now * r_min_now / (G * M_total));
 
-        // Estimate ds from dt_remain / Omega (caps ds to avoid overshooting)
+        // Estimate ds from dt_remain * Omega (BIFROST: ds = dt * Omega)
         double T = logh_kinetic_energy(state);
         double Omega = T + state.B;
         if (Omega < 1e-30) Omega = 1e-30;
-        double ds_est = dt_remain / Omega;
+        double ds_est = dt_remain * Omega;
 
-        // Also cap ds by dynamical time (prevents too-large steps near periapsis)
-        double ds_dyn_now = t_dyn_now / (Omega * 10.0);
+        // Also cap ds by dynamical time (BIFROST: ds = dt * Omega)
+        double ds_dyn_now = t_dyn_now * Omega / 10.0;
 
         // Use the smallest of current ds, time-based estimate, and dynamical limit
         double ds_try = ds;
