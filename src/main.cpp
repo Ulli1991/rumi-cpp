@@ -354,6 +354,8 @@ int main(int argc, char** argv) {
                 init_plummer(p, N_plummer, M_total_msun, r_half_pc, seed, mass_dist, age_gyr, metallicity);
             } else if (test == "binary_test") {
                 init_binary_test(p, binary_a_pc, binary_e, binary_m1, binary_m2);
+            } else if (test == "binary_test_peri") {
+                init_binary_test_peri(p, binary_a_pc, binary_e, binary_m1, binary_m2);
             } else {
                 std::fprintf(stderr, "Unknown test case: %s\n", test.c_str());
                 MPIComm::finalize();
@@ -520,7 +522,7 @@ int main(int argc, char** argv) {
 
 #ifdef ENABLE_COLLISIONAL
         BinaryTracker bin_tracker;
-        if (test == "binary_test" && g_collisional.enabled && my_rank == 0) {
+        if ((test == "binary_test" || test == "binary_test_peri") && g_collisional.enabled && my_rank == 0) {
             bin_tracker.init(work_p, G);
         }
 #endif

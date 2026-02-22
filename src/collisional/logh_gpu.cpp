@@ -366,13 +366,15 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
 
         // ==================================================================
         // Step 3: Integrate in normalized units via GBS
-        // GBS handles adaptive step size internally — no sub-cycling needed.
         // ==================================================================
-        GBSIntegrator gbs(eta_gbs);
-        double Omega_init = logh_kinetic_energy(state) + state.B;
-        double ds_init = (Omega_init > 1e-30) ? dt_norm * Omega_init : dt_norm;
-        int n_gbs_steps = gbs.integrate_to_time(state, dt_norm, G_norm, ds_init,
+        int n_gbs_steps = 0;
+        {
+            GBSIntegrator gbs(eta_gbs);
+            double Omega_cur = logh_kinetic_energy(state) + state.B;
+            double ds_est = (Omega_cur > 1e-30) ? dt_norm * Omega_cur : dt_norm;
+            n_gbs_steps = gbs.integrate_to_time(state, dt_norm, G_norm, ds_est,
                                                  c_norm, pn_order);
+        }
 
         // === DEBUG: compute omega after integration ===
         double omega_after = 0.0;

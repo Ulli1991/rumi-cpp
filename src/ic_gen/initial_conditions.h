@@ -13,3 +13,5 @@ void init_plummer(Particles& p, int N, double M_total_msun, double r_half_pc, in
 // a_pc: semi-major axis in parsecs, e: eccentricity, m1/m2: masses in M_sun
 void init_binary_test(Particles& p, double a_pc, double e,
                       double m1_msun, double m2_msun);
+void init_binary_test_peri(Particles& p, double a_pc, double e,
+                           double m1_msun, double m2_msun);

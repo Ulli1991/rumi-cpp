@@ -303,3 +303,48 @@ void init_binary_test(Particles& p, double a_pc, double e,
                 e, r_peri, r_peri / AU_TO_PC, r_apo_val, r_apo_val / AU_TO_PC);
     std::printf("  Period = %.4f yr (%.4e Myr), starting at APOAPSIS\n", period_yr, period_yr / 1e6);
 }
+
+void init_binary_test_peri(Particles& p, double a_pc, double e,
+                           double m1_msun, double m2_msun) {
+    p.allocate(2, COLL_ENABLED);
+
+    double mu = G_CODE * (m1_msun + m2_msun);
+    double M_total = m1_msun + m2_msun;
+
+    // Start at periapsis (mean anomaly = 0):
+    //   r_rel = (a*(1-e), 0, 0),  v_rel = (0, sqrt(mu/a * (1+e)/(1-e)), 0)
+    double r_peri = a_pc * (1.0 - e);
+    double v_peri = std::sqrt(mu / a_pc * (1.0 + e) / (1.0 - e + 1e-30));
+
+    double f1 = m2_msun / M_total;
+    double f2 = m1_msun / M_total;
+
+    auto h_x  = Kokkos::create_mirror_view(p.x);
+    auto h_y  = Kokkos::create_mirror_view(p.y);
+    auto h_z  = Kokkos::create_mirror_view(p.z);
+    auto h_vx = Kokkos::create_mirror_view(p.vx);
+    auto h_vy = Kokkos::create_mirror_view(p.vy);
+    auto h_vz = Kokkos::create_mirror_view(p.vz);
+    auto h_mass = Kokkos::create_mirror_view(p.mass);
+
+    h_x(0) = -f1 * r_peri;  h_y(0) = 0.0;  h_z(0) = 0.0;
+    h_x(1) =  f2 * r_peri;  h_y(1) = 0.0;  h_z(1) = 0.0;
+    h_vx(0) = 0.0; h_vy(0) = -f1 * v_peri; h_vz(0) = 0.0;
+    h_vx(1) = 0.0; h_vy(1) =  f2 * v_peri; h_vz(1) = 0.0;
+    h_mass(0) = m1_msun;
+    h_mass(1) = m2_msun;
+
+    Kokkos::deep_copy(p.x, h_x);   Kokkos::deep_copy(p.y, h_y);   Kokkos::deep_copy(p.z, h_z);
+    Kokkos::deep_copy(p.vx, h_vx); Kokkos::deep_copy(p.vy, h_vy); Kokkos::deep_copy(p.vz, h_vz);
+    Kokkos::deep_copy(p.mass, h_mass);
+
+    double period_code = 2.0 * M_PI * std::sqrt(a_pc * a_pc * a_pc / mu);
+    double period_yr = period_code * TIME_UNIT_YR;
+    double r_apo = a_pc * (1.0 + e);
+
+    std::printf("Binary test: m1=%.1f m2=%.1f M_sun, a=%.4e pc (%.2f AU)\n",
+                m1_msun, m2_msun, a_pc, a_pc / AU_TO_PC);
+    std::printf("  e=%.4f, r_peri=%.4e pc (%.2f AU), r_apo=%.4e pc (%.2f AU)\n",
+                e, r_peri, r_peri / AU_TO_PC, r_apo, r_apo / AU_TO_PC);
+    std::printf("  Period = %.4f yr (%.4e Myr), starting at PERIAPSIS\n", period_yr, period_yr / 1e6);
+}
