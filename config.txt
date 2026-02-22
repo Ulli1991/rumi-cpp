@@ -45,7 +45,7 @@ R_NGB_MAX = 0.1                     		# Max distance for orbital element check (
 ETA_GBS = 1e-10                     		# GBS extrapolation accuracy for LogH integrator
 N_ORB_SECULAR = 3                   		# Orbits/timestep threshold for secular evolution
 M_PN = 5.0                          		# Minimum mass (M_sun) for PN corrections
-PN_ORDER = 0                        		# PN bitmask: 1=PN1, 2=PN2, 4=PN2.5 (7=all up to PN2.5)
+PN_ORDER = 1                        		# PN bitmask: 1=PN1, 2=PN2, 4=PN2.5 (7=all up to PN2.5)
 R_ESCAPE_RH = 100.0                 		# Escape radius in half-mass radii
 MSTAR_THRESHOLD = 8                 		# N-body threshold: MSTAR (>=) vs LogH (<)
 SSE_ENABLED = true                  		# Runtime single stellar evolution

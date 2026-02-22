@@ -7,6 +7,8 @@ struct DiagnosticState {
     double KE, PE, E_total;
     double Px, Py, Pz;
     double Lx, Ly, Lz;
+    double E_pn1 = 0.0;   // PN1 energy correction
+    double E_pn2 = 0.0;   // PN2 energy correction
 };
 
 // Energy bookkeeping for collisional mode (tracks energy sinks)

@@ -319,6 +319,12 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
         double E0_norm = T_norm + U_norm;
         double Omega_norm = T_norm + state.B;
 
+        // Save initial state for PN energy comparison after integration
+        double state_init_pos[LOGH_MAX_BODIES * 3];
+        double state_init_vel[LOGH_MAX_BODIES * 3];
+        std::memcpy(state_init_pos, state.pos, nb * 3 * sizeof(double));
+        std::memcpy(state_init_vel, state.vel, nb * 3 * sizeof(double));
+
         // Normalized time target
         double dt_norm = dt / T_scale;
 
@@ -395,8 +401,20 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
         batch.stored_B[s] = state.B * E_scale;
 
         // Energy error in normalized units (dimensionless)
+        // Include PN1 energy correction when PN is active for meaningful dE
         double Ef_norm = logh_total_energy(state, G_norm);
-        double dE_rel = std::fabs((Ef_norm - E0_norm) / (std::fabs(E0_norm) + 1e-30));
+        double dE_rel;
+        if (any_compact && pn_order > 0 && c_norm > 0.0 && (pn_order & 1)) {
+            double E_pn_0 = pn1_energy(state_init_pos, state_init_vel, state.mass,
+                                        nb, G_norm, c_norm);
+            double E_pn_f = pn1_energy(state.pos, state.vel, state.mass,
+                                        nb, G_norm, c_norm);
+            double E0_total = E0_norm + E_pn_0;
+            double Ef_total = Ef_norm + E_pn_f;
+            dE_rel = std::fabs((Ef_total - E0_total) / (std::fabs(E0_total) + 1e-30));
+        } else {
+            dE_rel = std::fabs((Ef_norm - E0_norm) / (std::fabs(E0_norm) + 1e-30));
+        }
         h_eerr(s) = dE_rel;
         h_conv(s) = 1;
 

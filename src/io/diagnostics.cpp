@@ -1,5 +1,9 @@
 #include "diagnostics.h"
 #include "constants.h"
+#ifdef ENABLE_COLLISIONAL
+#include "collisional_config.h"
+#include "post_newtonian.h"
+#endif
 #include <Kokkos_Core.hpp>
 #include <cmath>
 #include <cstdio>
@@ -63,6 +67,38 @@ DiagnosticState compute_diagnostics(const Particles& p, double G, double soft2) 
     d.KE = KE; d.PE = PE; d.E_total = KE + PE;
     d.Px = Px; d.Py = Py; d.Pz = Pz;
     d.Lx = Lx; d.Ly = Ly; d.Lz = Lz;
+
+#ifdef ENABLE_COLLISIONAL
+    // Add PN energy corrections when post-Newtonian corrections are active
+    if (g_collisional.enabled && g_collisional.pn_order > 0 && g_collisional.c_code > 0.0) {
+        // Copy positions/velocities/masses to host flat arrays for pn1_energy()
+        auto h_x  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.x);
+        auto h_y  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.y);
+        auto h_z  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.z);
+        auto h_vx = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vx);
+        auto h_vy = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vy);
+        auto h_vz = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vz);
+        auto h_m  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.mass);
+
+        std::vector<double> flat_pos(N * 3), flat_vel(N * 3), flat_mass(N);
+        for (int i = 0; i < N; i++) {
+            flat_pos[i*3+0] = h_x(i);
+            flat_pos[i*3+1] = h_y(i);
+            flat_pos[i*3+2] = h_z(i);
+            flat_vel[i*3+0] = h_vx(i);
+            flat_vel[i*3+1] = h_vy(i);
+            flat_vel[i*3+2] = h_vz(i);
+            flat_mass[i] = h_m(i);
+        }
+
+        if (g_collisional.pn_order & 1) {
+            d.E_pn1 = pn1_energy(flat_pos.data(), flat_vel.data(), flat_mass.data(),
+                                 N, G, g_collisional.c_code);
+        }
+        d.E_total += d.E_pn1 + d.E_pn2;
+    }
+#endif
+
     return d;
 }
 
@@ -73,8 +109,15 @@ static double vec_mag(double x, double y, double z) {
 void compute_errors(const DiagnosticState& cur, const DiagnosticState& ini,
                     const Particles& p, bool is_cluster,
                     double& dE, double& dP, double& dL) {
-    dE = (ini.E_total != 0.0)
-        ? std::fabs((cur.E_total - ini.E_total) / ini.E_total) : 0.0;
+    // When PN2.5 is active, the conserved quantity is E_total + E_gw_cumulative
+    double E_cur = cur.E_total;
+    double E_ini = ini.E_total;
+#ifdef ENABLE_COLLISIONAL
+    if (g_collisional.enabled && (g_collisional.pn_order & 4)) {
+        E_cur += g_energy_books.E_gw;
+    }
+#endif
+    dE = (E_ini != 0.0) ? std::fabs((E_cur - E_ini) / E_ini) : 0.0;
 
     if (is_cluster) {
         // Need total mass from host
@@ -110,8 +153,19 @@ void print_timebin_table(const Particles& p, const std::vector<double>& levels,
 
     const char* p_label = is_cluster ? "|dP|/M [km/s]" : "|dP/P|";
 
+    // Annotate energy label with PN order when active
+    const char* e_label = "|dE/E|";
+#ifdef ENABLE_COLLISIONAL
+    if (g_collisional.enabled && g_collisional.pn_order > 0 && g_collisional.c_code > 0.0) {
+        int pno = g_collisional.pn_order;
+        if (pno & 4)      e_label = "|dE/E| (PN2.5)";
+        else if (pno & 2) e_label = "|dE/E| (PN2)";
+        else if (pno & 1) e_label = "|dE/E| (PN1)";
+    }
+#endif
+
     std::printf("  %-6s %14s %6s   %12s %14s %12s %14s %8s\n",
-                "Level", "dt [Myr]", "count", "|dE/E|", p_label, "|dL/L|", "Time [Myr]", "Step");
+                "Level", "dt [Myr]", "count", e_label, p_label, "|dL/L|", "Time [Myr]", "Step");
     std::printf("----------------------------------------------------------------------------------------------------\n");
 
     for (int l = 0; l < nl; l++) {
@@ -137,13 +191,31 @@ void print_final(const DiagnosticState& cur, const DiagnosticState& ini,
     std::printf("RESULTS\n");
     std::printf("============================================================\n");
 
-    std::printf("|dE/E0| = %.15e\n", dE);
+    // Annotate energy with PN order when active
+    const char* e_tag = "";
+#ifdef ENABLE_COLLISIONAL
+    if (g_collisional.enabled && g_collisional.pn_order > 0 && g_collisional.c_code > 0.0) {
+        int pno = g_collisional.pn_order;
+        if (pno & 4)      e_tag = " (incl. PN2.5)";
+        else if (pno & 2) e_tag = " (incl. PN2)";
+        else if (pno & 1) e_tag = " (incl. PN1)";
+    }
+#endif
+    std::printf("|dE/E0| = %.15e%s\n", dE, e_tag);
     if (is_cluster) {
         std::printf("|dP|/M  = %.15e km/s\n", dP);
     } else {
         std::printf("|dP/P0| = %.15e\n", dP);
     }
     std::printf("|dL/L0| = %.15e\n", dL);
+#ifdef ENABLE_COLLISIONAL
+    if (g_collisional.enabled && g_collisional.pn_order > 0) {
+        std::printf("E_pn1   = %.15e\n", cur.E_pn1);
+        if (g_collisional.pn_order & 4) {
+            std::printf("E_gw    = %.15e (cumulative GW losses)\n", g_energy_books.E_gw);
+        }
+    }
+#endif
 
     std::printf("\nWall: %.4fs, Steps: %d", wall_sec, steps);
     if (steps > 0) std::printf(", %.4fms/step", wall_sec / steps * 1000.0);

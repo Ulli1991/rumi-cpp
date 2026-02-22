@@ -49,8 +49,12 @@ struct BinaryTracker {
         orbits_cumul = 0.0;
 
         // Analytic PN1 precession: dw/orbit = 6*pi*G*M / (a*c^2*(1-e^2))
+        // Sign: prograde (same direction as orbital motion).
+        // Lz > 0 (CCW) → dw > 0;  Lz < 0 (CW) → dw < 0.
         double c2 = C_CODE * C_CODE;
-        omega_gr_per_orbit = 6.0 * M_PI * mu / (oe.a * c2 * (1.0 - oe.e * oe.e));
+        double Lz = r[0]*v[1] - r[1]*v[0];
+        double sign = (Lz >= 0) ? 1.0 : -1.0;
+        omega_gr_per_orbit = sign * 6.0 * M_PI * mu / (oe.a * c2 * (1.0 - oe.e * oe.e));
 
         std::printf("BinaryTracker: a=%.4e pc (%.4f AU), e=%.4f, P=%.4e yr\n",
                     oe.a, oe.a / AU_TO_PC, oe.e, oe.period * TIME_UNIT_YR);

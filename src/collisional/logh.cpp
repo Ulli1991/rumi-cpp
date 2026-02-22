@@ -215,20 +215,17 @@ static void compute_pn_all_pairs(const LogHState& state, const double* eval_vel,
     std::memset(pn_out, 0, n * 3 * sizeof(double));
     for (int i = 0; i < n; i++) {
         for (int j = i + 1; j < n; j++) {
-            double r[3] = { state.pos[j*3] - state.pos[i*3],
-                           state.pos[j*3+1] - state.pos[i*3+1],
-                           state.pos[j*3+2] - state.pos[i*3+2] };
-            double M_ij = state.mass[i] + state.mass[j];
-            double fi = state.mass[j] / M_ij;
-            double fj = state.mass[i] / M_ij;
-            double vrel[3] = { eval_vel[j*3] - eval_vel[i*3],
-                              eval_vel[j*3+1] - eval_vel[i*3+1],
-                              eval_vel[j*3+2] - eval_vel[i*3+2] };
-            double a_rel[3];
-            pn_acceleration(r, vrel, state.mass[i], state.mass[j], G, c_code, a_rel, pn_order);
+            // EIH: compute individual PN accelerations directly
+            double a_pn_i[3], a_pn_j[3];
+            eih_pn_acceleration(&state.pos[i*3], &eval_vel[i*3], state.mass[i],
+                                &state.pos[j*3], &eval_vel[j*3], state.mass[j],
+                                G, c_code, a_pn_i, pn_order);
+            eih_pn_acceleration(&state.pos[j*3], &eval_vel[j*3], state.mass[j],
+                                &state.pos[i*3], &eval_vel[i*3], state.mass[i],
+                                G, c_code, a_pn_j, pn_order);
             for (int k = 0; k < 3; k++) {
-                pn_out[i*3+k] -= fi * a_rel[k];
-                pn_out[j*3+k] += fj * a_rel[k];
+                pn_out[i*3+k] += a_pn_i[k];
+                pn_out[j*3+k] += a_pn_j[k];
             }
         }
     }
