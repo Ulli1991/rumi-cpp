@@ -3,7 +3,7 @@
 # =============================================================================
 
 # Test case: binary_test, outer_planets, plummer
-TEST_CASE = plummer
+TEST_CASE = binary_test
 
 # Integrator: fsi (global timestep) or hhs (adaptive HHS-FSI per Algorithm 4 of FROST paper)
 INTEGRATOR = hhs
@@ -11,9 +11,9 @@ INTEGRATOR = hhs
 # =============================================================================
 # Simulation parameters
 # =============================================================================
-TOTAL_TIME_MYR = 0.23                      	# ~1 crossing time for M=3.91e5, r_half=3.5 pc
-DT_MAX_MYR = 1.0e-3                       	# ≈ 1000 yr
-DT_MIN_MYR = 1.0e-9                       	# ≈ 1e-3 yr
+TOTAL_TIME_MYR = 2.5e-7                    	# ~1000 orbits for BH binary at 0.01 AU
+DT_MAX_MYR = 1.0e-9                       	# Must be small initially; LogH takes over after detection
+DT_MIN_MYR = 1.0e-14                      	# Needs to resolve periapsis before subsystem detected
 ETA = 0.2					# Integrator accuracy eta
 SOFTENING_PC = 1e-3                        	# Softening length in pc (= 206 AU)
 SERIAL_N2_GPU = 16384                      	# Full N² on GPU without MPI or tree below this count
@@ -45,7 +45,7 @@ R_NGB_MAX = 0.1                     		# Max distance for orbital element check (
 ETA_GBS = 1e-10                     		# GBS extrapolation accuracy for LogH integrator
 N_ORB_SECULAR = 3                   		# Orbits/timestep threshold for secular evolution
 M_PN = 5.0                          		# Minimum mass (M_sun) for PN corrections
-PN_ORDER = 7                        		# PN bitmask: 1=PN1, 2=PN2, 4=PN2.5 (7=all up to PN2.5)
+PN_ORDER = 0                        		# PN bitmask: 1=PN1, 2=PN2, 4=PN2.5 (7=all up to PN2.5)
 R_ESCAPE_RH = 100.0                 		# Escape radius in half-mass radii
 MSTAR_THRESHOLD = 8                 		# N-body threshold: MSTAR (>=) vs LogH (<)
 SSE_ENABLED = true                  		# Runtime single stellar evolution
@@ -53,12 +53,13 @@ SSE_METALLICITY = 0.02              		# Metallicity Z for SSE
 
 # =============================================================================
 # Binary test parameters (only used if TEST_CASE = binary_test)
-# Two bodies at periapsis. Period ~ 1.5 yr for 10+10 M_sun at 10 AU.
+# BH binary for PN precession test (BIFROST Fig. 2).
+# Period ~ 2.24e-4 yr at 0.01 AU. PN1 precession ~ 2e-3 rad/orbit.
 # =============================================================================
-BINARY_A_PC = 4.848e-5				# Semi-major axis in pc (= 10 AU)
-BINARY_E = 0.0					# Eccentricity (try 0.0, 0.9, 0.99)
-BINARY_M1 = 10.0				# Primary mass in M_sun
-BINARY_M2 = 10.0				# Secondary mass in M_sun
+BINARY_A_PC = 4.848e-8				# Semi-major axis in pc (= 0.01 AU)
+BINARY_E = 0.9					# Eccentricity (high for visible precession)
+BINARY_M1 = 10.0				# Primary mass in M_sun (BH)
+BINARY_M2 = 10.0				# Secondary mass in M_sun (BH)
 
 # =============================================================================
 # Plummer cluster parameters (only used if TEST_CASE = plummer)

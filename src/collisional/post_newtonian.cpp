@@ -39,7 +39,7 @@ void pn_acceleration(const double r[3], const double v[3],
     if (pn_order & 1) {
         double A1 = (1.0 + 3.0*eta) * v2 - 2.0*(2.0 + eta) * Gm_r
                     - 1.5 * eta * n_dot_v * n_dot_v;
-        double B1 = 2.0 * (2.0 - eta) * n_dot_v;
+        double B1 = -2.0 * (2.0 - eta) * n_dot_v;
 
         for (int k = 0; k < 3; k++) {
             a_pn[k] += inv_c2 * mu * inv_r2 * (A1 * r[k] * inv_r + B1 * v[k]);
