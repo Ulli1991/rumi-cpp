@@ -2,6 +2,7 @@
 
 #include "particles.h"
 #include "kepler.h"
+#include "logh.h"
 #include <Kokkos_Core.hpp>
 #include <vector>
 #include <cmath>
@@ -41,6 +42,13 @@ struct Subsystem {
     // NAN = not yet initialized (compute from -(T+U) on first LogH call).
     // Carried across LogH calls to properly track PN energy exchange.
     double B_phys = NAN;
+
+    // Persistent auxiliary velocities for PN (code units, including CM).
+    // The Hellström & Mikkola extended phase space method requires w ≠ v
+    // after the first integration step. Re-initializing w = v each call
+    // discards this divergence and causes O(v²/c²) energy errors.
+    double aux_vel_phys[LOGH_MAX_BODIES * 3] = {};
+    bool has_aux_vel = false;
 
     // Hierarchy info (for triples)
     int inner_binary_id;                 // -1 if not hierarchical

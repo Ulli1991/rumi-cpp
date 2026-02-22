@@ -258,6 +258,17 @@ static void compute_pn_all_pairs(const LogHState& state, const double* eval_vel,
 //   accel[] = Newtonian acceleration (constant during K_phys)
 //   pn[]    = PN acceleration g(w) from auxiliary velocity (constant during K_phys)
 //   eps     = K_phys step size in fictitious time s
+//
+// Uses Ω = T(v_mid) + B_mid (implicit midpoint in BOTH v and B).
+// This ensures exact time-reversibility, which is required for GBS's
+// even-power error expansion. The T(v_mid) terms (C, D) are essential:
+// without them, the kick loses time-reversibility and GBS convergence degrades.
+//
+// Cubic: Ω³ - Ω₀·Ω² - C'·Ω - D' = 0
+//   Ω₀ = T(v_old) + B_old
+//   C' = C - (eps/2)*W_old,  D' = D - (eps/4)*P
+//   C = ½ Σ mᵢ vᵢ·Δᵢ, D = ⅛ Σ mᵢ|Δᵢ|², Δ = eps*(a+g(w))
+//   W_old = Σ mᵢ vᵢ·gᵢ(w), P = Σ mᵢ Δᵢ·gᵢ(w)
 static void k_phys_cubic(LogHState& state, const double* accel, const double* pn,
                           double eps, double G) {
     int n = state.n_bodies;
@@ -329,8 +340,10 @@ void logh_leapfrog_step_pn(LogHState& state, double ds, double G,
     double pn[LOGH_MAX_BODIES * 3];
 
     // ============ FIRST HALF-KICK: K(ds/2) = K_aux(ds/4) · K_phys(ds/2) · K_aux(ds/4) ============
+    // BIFROST Eq. (5): dw/ds = (1/Ω)[a + f + g(v)],  dv/ds = (1/Ω)[a + f + g(w)]
+    // K_aux kicks w by [a + g(v)],  K_phys kicks v by [a + g(w)]
 
-    // K_aux(ds/4): w += (ds/4) * [a + g(v)] / Omega   [EXPLICIT]
+    // K_aux(ds/4): w += (ds/4) * [a + g(v)] / Omega   [EXPLICIT: v,B unchanged → Ω constant]
     {
         double Omega = logh_kinetic_energy(state) + state.B;
         double inv_Omega = 1.0 / Omega;

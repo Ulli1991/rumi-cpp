@@ -67,10 +67,18 @@ void SubsystemBatch::pack(const SubsystemManager& mgr, const Particles& p,
     auto h_mass = Kokkos::create_mirror_view(flat_mass);
     auto h_ext  = Kokkos::create_mirror_view(flat_ext_accel);
 
-    // Copy persistent B values from subsystems
+    // Copy persistent B values and auxiliary velocities from subsystems
     stored_B.resize(n_sub);
+    stored_aux_vel.resize(n_sub);
+    has_stored_aux_vel.resize(n_sub);
     for (int s = 0; s < n_sub; s++) {
         stored_B[s] = mgr.active[s].B_phys;
+        has_stored_aux_vel[s] = mgr.active[s].has_aux_vel;
+        stored_aux_vel[s].resize(mgr.active[s].n_bodies * 3);
+        if (mgr.active[s].has_aux_vel) {
+            std::memcpy(stored_aux_vel[s].data(), mgr.active[s].aux_vel_phys,
+                        mgr.active[s].n_bodies * 3 * sizeof(double));
+        }
     }
 
     int off = 0;
@@ -155,9 +163,14 @@ void SubsystemBatch::unpack(SubsystemManager& mgr, Particles& p) {
     Kokkos::deep_copy(p.vy, h_vy);
     Kokkos::deep_copy(p.vz, h_vz);
 
-    // Write persistent B back to subsystems
+    // Write persistent B and auxiliary velocities back to subsystems
     for (int s = 0; s < n_sub; s++) {
         mgr.active[s].B_phys = stored_B[s];
+        mgr.active[s].has_aux_vel = has_stored_aux_vel[s];
+        if (has_stored_aux_vel[s]) {
+            std::memcpy(mgr.active[s].aux_vel_phys, stored_aux_vel[s].data(),
+                        mgr.active[s].n_bodies * 3 * sizeof(double));
+        }
     }
 }
 
@@ -290,10 +303,23 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
             // Not using L_mag for now, just omega_before
         }
 
-        // Enable auxiliary velocity for PN when compact objects present
+        // Enable auxiliary velocity for PN when compact objects present.
+        // Restore persistent aux_vel if available (H&M extended phase space
+        // requires w ≠ v after first step; re-initializing w = v each call
+        // discards this and causes O(v²/c²) energy errors).
         if (any_compact && pn_order > 0 && c_code > 0.0) {
             state.use_aux_vel = true;
-            std::memcpy(state.aux_vel, state.vel, nb * 3 * sizeof(double));
+            if (batch.has_stored_aux_vel[s]) {
+                // Restore from previous call: same normalization as vel
+                for (int b = 0; b < nb; b++) {
+                    state.aux_vel[b*3+0] = (batch.stored_aux_vel[s][b*3+0] - cm_vx) / V_scale;
+                    state.aux_vel[b*3+1] = (batch.stored_aux_vel[s][b*3+1] - cm_vy) / V_scale;
+                    state.aux_vel[b*3+2] = (batch.stored_aux_vel[s][b*3+2] - cm_vz) / V_scale;
+                }
+            } else {
+                // First call: initialize w = v
+                std::memcpy(state.aux_vel, state.vel, nb * 3 * sizeof(double));
+            }
         } else {
             state.use_aux_vel = false;
             pn_order = 0;
@@ -309,14 +335,24 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
         double E_scale = M_total * V_scale_sq;  // energy normalization factor
 
         if (std::isnan(batch.stored_B[s])) {
-            // First call for this subsystem: B = -(T+U) in normalized units
-            state.B = -U_norm - T_norm;
+            // First call for this subsystem: B = -(T+U+E_pn1) in normalized units.
+            // Must include PN1 energy correction so that the first LogH integration
+            // starts with the correct binding energy. Without this, B is wrong by
+            // E_pn1/E ~ O(v²/c²) and the first call produces a ~0.3% energy error
+            // that persists as a one-time jump (subsequent calls use persistent B).
+            double E_pn1_init = 0.0;
+            if (state.use_aux_vel && pn_order > 0 && c_norm > 0.0 && (pn_order & 1)) {
+                E_pn1_init = pn1_energy(state.pos, state.vel, state.mass,
+                                         nb, G_norm, c_norm);
+            }
+            state.B = -U_norm - T_norm - E_pn1_init;
         } else {
             // Use persistent B from previous call, converted to current normalization
             state.B = batch.stored_B[s] / E_scale;
         }
 
         double E0_norm = T_norm + U_norm;
+        double B_init_norm = state.B;  // save B before integration
         double Omega_norm = T_norm + state.B;
 
         // Save initial state for PN energy comparison after integration
@@ -329,55 +365,14 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
         double dt_norm = dt / T_scale;
 
         // ==================================================================
-        // Step 3: Integrate in normalized units
-        // Sub-cycle if dt_norm exceeds 1/10 of the orbital period.
-        // This prevents the first LogH call (which inherits a large outer
-        // HHS timestep) from cramming many orbits into one GBS integration.
+        // Step 3: Integrate in normalized units via GBS
+        // GBS handles adaptive step size internally — no sub-cycling needed.
         // ==================================================================
-
-        // For 2-body: compute orbital period from relative orbit
-        // eps = v_rel²/2 - G*(m1+m2)/r  (specific orbital energy)
-        // a = -G*(m1+m2)/(2*eps), P = 2π*sqrt(a³/(G*(m1+m2)))
-        double dt_max_norm = dt_norm;  // default: no sub-cycling
-        double P_est = 0.0;
-        if (nb == 2 && E0_norm < 0.0) {
-            double rx = state.pos[1*3+0] - state.pos[0*3+0];
-            double ry = state.pos[1*3+1] - state.pos[0*3+1];
-            double rz = state.pos[1*3+2] - state.pos[0*3+2];
-            double dvx = state.vel[1*3+0] - state.vel[0*3+0];
-            double dvy = state.vel[1*3+1] - state.vel[0*3+1];
-            double dvz = state.vel[1*3+2] - state.vel[0*3+2];
-            double r = std::sqrt(rx*rx + ry*ry + rz*rz);
-            double v2 = dvx*dvx + dvy*dvy + dvz*dvz;
-            double mu = G_norm * (state.mass[0] + state.mass[1]);  // G*(m1+m2)
-            double eps = 0.5 * v2 - mu / r;
-            if (eps < 0.0) {
-                double a_bin = -mu / (2.0 * eps);
-                P_est = 2.0 * M_PI * std::sqrt(a_bin * a_bin * a_bin / mu);
-                dt_max_norm = 0.1 * P_est;
-            }
-        }
-
-        int n_subcycles = 1;
-        if (dt_norm > dt_max_norm && dt_max_norm > 0.0) {
-            n_subcycles = (int)std::ceil(dt_norm / dt_max_norm);
-        }
-        double dt_sub = dt_norm / n_subcycles;
-
-        if (n_subcycles > 1) {
-            std::printf("    LogH: sub-cycling %d x dt_sub=%.4f (dt_norm=%.4f, P=%.4f)\n",
-                        n_subcycles, dt_sub, dt_norm, P_est);
-        }
-
         GBSIntegrator gbs(eta_gbs);
-        int n_gbs_steps = 0;
-        for (int cyc = 0; cyc < n_subcycles; cyc++) {
-            double t_target = (cyc + 1) * dt_sub;  // absolute target time
-            double Omega_cyc = logh_kinetic_energy(state) + state.B;
-            double ds_init = (Omega_cyc > 1e-30) ? dt_sub * Omega_cyc : dt_sub;
-            n_gbs_steps += gbs.integrate_to_time(state, t_target, G_norm, ds_init,
-                                                  c_norm, pn_order);
-        }
+        double Omega_init = logh_kinetic_energy(state) + state.B;
+        double ds_init = (Omega_init > 1e-30) ? dt_norm * Omega_init : dt_norm;
+        int n_gbs_steps = gbs.integrate_to_time(state, dt_norm, G_norm, ds_init,
+                                                 c_norm, pn_order);
 
         // === DEBUG: compute omega after integration ===
         double omega_after = 0.0;
@@ -438,12 +433,23 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
             h_vel_out((off+b)*3+2) = state.vel[b*3+2] * V_scale + cm_vz;
         }
 
-        // Store updated B back to physical units for persistence across calls
+        // Store updated B and auxiliary velocities for persistence across calls
         batch.stored_B[s] = state.B * E_scale;
+        if (state.use_aux_vel) {
+            batch.has_stored_aux_vel[s] = true;
+            for (int b = 0; b < nb; b++) {
+                batch.stored_aux_vel[s][b*3+0] = state.aux_vel[b*3+0] * V_scale + cm_vx;
+                batch.stored_aux_vel[s][b*3+1] = state.aux_vel[b*3+1] * V_scale + cm_vy;
+                batch.stored_aux_vel[s][b*3+2] = state.aux_vel[b*3+2] * V_scale + cm_vz;
+            }
+        }
 
         // Energy error in normalized units (dimensionless)
-        // Include PN1 energy correction when PN is active for meaningful dE
         double Ef_norm = logh_total_energy(state, G_norm);
+        // Check T(v)+U+B conservation
+        double ext_E0 = E0_norm + B_init_norm;  // T0+U0+B0
+        double ext_Ef = Ef_norm + state.B;       // Tf+Uf+Bf
+        double dE_ext = std::fabs((ext_Ef - ext_E0) / (std::fabs(ext_E0) + 1e-30));
         double dE_rel;
         if (any_compact && pn_order > 0 && c_norm > 0.0 && (pn_order & 1)) {
             double E_pn_0 = pn1_energy(state_init_pos, state_init_vel, state.mass,
@@ -455,6 +461,10 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
             dE_rel = std::fabs((Ef_total - E0_total) / (std::fabs(E0_total) + 1e-30));
         } else {
             dE_rel = std::fabs((Ef_norm - E0_norm) / (std::fabs(E0_norm) + 1e-30));
+        }
+        if (any_compact && pn_order > 0) {
+            std::printf("    LogH_energy: dE(T+U+B)=%.2e  dE(T+U+E_pn1)=%.2e  B_init=%.6e  B_final=%.6e\n",
+                        dE_ext, dE_rel, B_init_norm, state.B);
         }
         h_eerr(s) = dE_rel;
         h_conv(s) = 1;

@@ -262,10 +262,11 @@ void init_binary_test(Particles& p, double a_pc, double e,
     double mu = G_CODE * (m1_msun + m2_msun);
     double M_total = m1_msun + m2_msun;
 
-    // At mean anomaly = 0 (periapsis), inc=Omega=omega=0:
-    //   r_rel = (a*(1-e), 0, 0),  v_rel = (0, sqrt(mu/a * (1+e)/(1-e)), 0)
-    double r_peri = a_pc * (1.0 - e);
-    double v_peri = std::sqrt(mu / a_pc * (1.0 + e) / (1.0 - e + 1e-30));
+    // Start at apoapsis (mean anomaly = π): gentler w=v bootstrap for aux_vel.
+    // At periapsis, V_scale is maximal → dt_norm huge → large w=v init error.
+    // At apoapsis: r_rel = (-a*(1+e), 0, 0), v_rel = (0, -sqrt(mu/a*(1-e)/(1+e)), 0)
+    double r_apo_val = a_pc * (1.0 + e);
+    double v_apo = std::sqrt(mu / a_pc * (1.0 - e) / (1.0 + e + 1e-30));
 
     // Split into two particles around COM at origin
     double f1 = m2_msun / M_total;  // particle 0 gets -f1 * r_rel
@@ -279,10 +280,11 @@ void init_binary_test(Particles& p, double a_pc, double e,
     auto h_vz = Kokkos::create_mirror_view(p.vz);
     auto h_mass = Kokkos::create_mirror_view(p.mass);
 
-    h_x(0) = -f1 * r_peri;  h_y(0) = 0.0;  h_z(0) = 0.0;
-    h_x(1) =  f2 * r_peri;  h_y(1) = 0.0;  h_z(1) = 0.0;
-    h_vx(0) = 0.0; h_vy(0) = -f1 * v_peri; h_vz(0) = 0.0;
-    h_vx(1) = 0.0; h_vy(1) =  f2 * v_peri; h_vz(1) = 0.0;
+    // Apoapsis: r along -x, v along -y (CCW orbit)
+    h_x(0) =  f1 * r_apo_val;  h_y(0) = 0.0;  h_z(0) = 0.0;
+    h_x(1) = -f2 * r_apo_val;  h_y(1) = 0.0;  h_z(1) = 0.0;
+    h_vx(0) = 0.0; h_vy(0) =  f1 * v_apo; h_vz(0) = 0.0;
+    h_vx(1) = 0.0; h_vy(1) = -f2 * v_apo; h_vz(1) = 0.0;
     h_mass(0) = m1_msun;
     h_mass(1) = m2_msun;
 
@@ -293,12 +295,11 @@ void init_binary_test(Particles& p, double a_pc, double e,
     // Informational output
     double period_code = 2.0 * M_PI * std::sqrt(a_pc * a_pc * a_pc / mu);
     double period_yr = period_code * TIME_UNIT_YR;
-    double r_apo  = a_pc * (1.0 + e);
+    double r_peri = a_pc * (1.0 - e);
 
     std::printf("Binary test: m1=%.1f m2=%.1f M_sun, a=%.4e pc (%.2f AU)\n",
                 m1_msun, m2_msun, a_pc, a_pc / AU_TO_PC);
     std::printf("  e=%.4f, r_peri=%.4e pc (%.2f AU), r_apo=%.4e pc (%.2f AU)\n",
-                e, r_peri, r_peri / AU_TO_PC, r_apo, r_apo / AU_TO_PC);
-    std::printf("  Period = %.4f yr (%.4e Myr)\n", period_yr, period_yr / 1e6);
-    std::printf("  Separation at periapsis: %.4e pc\n", r_peri);
+                e, r_peri, r_peri / AU_TO_PC, r_apo_val, r_apo_val / AU_TO_PC);
+    std::printf("  Period = %.4f yr (%.4e Myr), starting at APOAPSIS\n", period_yr, period_yr / 1e6);
 }

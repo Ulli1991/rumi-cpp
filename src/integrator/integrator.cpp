@@ -15,6 +15,7 @@
 #include <vector>
 #include <cfloat>
 #include <cmath>
+#include <cstring>
 
 // Global profiler instance
 StepProfiler g_profiler;
@@ -282,9 +283,16 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
     logh_integrate_batch_gpu(g_logh_batch, G, g_collisional.eta_gbs);
     g_logh_batch.unpack(tmp_mgr, p);
 
-    // Propagate persistent B_phys back from tmp_mgr to g_subsystem_mgr
+    // Propagate persistent B_phys and aux_vel back from tmp_mgr to g_subsystem_mgr
     for (int i = 0; i < (int)eligible.size(); i++) {
-        g_subsystem_mgr.active[eligible[i]].B_phys = tmp_mgr.active[i].B_phys;
+        auto& dst = g_subsystem_mgr.active[eligible[i]];
+        const auto& src = tmp_mgr.active[i];
+        dst.B_phys = src.B_phys;
+        dst.has_aux_vel = src.has_aux_vel;
+        if (src.has_aux_vel) {
+            std::memcpy(dst.aux_vel_phys, src.aux_vel_phys,
+                        LOGH_MAX_BODIES * 3 * sizeof(double));
+        }
     }
 }
 #endif

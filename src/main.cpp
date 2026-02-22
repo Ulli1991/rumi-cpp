@@ -24,7 +24,15 @@ struct BinaryTracker {
     double period0;          // initial orbital period
     bool initialized;
 
-    BinaryTracker() : initialized(false) {}
+    // Apoapsis-based measurement (avoids intra-orbit PN oscillation aliasing)
+    double rdot_prev;        // previous r_dot for sign-change detection
+    int n_apo;               // number of apoapsis passages
+    double omega_at_apo_prev;// omega at previous apoapsis
+    double omega_cumul_apo;  // cumulative precession measured at apoapsis
+    double e_at_apo;         // eccentricity at last apoapsis
+
+    BinaryTracker() : initialized(false), rdot_prev(0), n_apo(0),
+                       omega_at_apo_prev(0), omega_cumul_apo(0), e_at_apo(0) {}
 
     void init(Particles& p, double G) {
         if (p.N != 2) return;
@@ -56,6 +64,14 @@ struct BinaryTracker {
         double sign = (Lz >= 0) ? 1.0 : -1.0;
         omega_gr_per_orbit = sign * 6.0 * M_PI * mu / (oe.a * c2 * (1.0 - oe.e * oe.e));
 
+        // Initial r_dot for apoapsis detection
+        double rmag = std::sqrt(r[0]*r[0] + r[1]*r[1] + r[2]*r[2]);
+        rdot_prev = (r[0]*v[0] + r[1]*v[1] + r[2]*v[2]) / rmag;
+        omega_at_apo_prev = oe.omega;
+        omega_cumul_apo = 0.0;
+        n_apo = 0;
+        e_at_apo = oe.e;
+
         std::printf("BinaryTracker: a=%.4e pc (%.4f AU), e=%.4f, P=%.4e yr\n",
                     oe.a, oe.a / AU_TO_PC, oe.e, oe.period * TIME_UNIT_YR);
         std::printf("  PN1 precession: %.4e rad/orbit (%.4f deg/orbit)\n",
@@ -78,24 +94,48 @@ struct BinaryTracker {
         auto oe = cartesian_to_elements(r, v, mu);
 
         // Count orbits from elapsed time / initial period
-        // (mean anomaly unwrapping aliases when multiple orbits per step)
         orbits_cumul = t_code / period0;
 
-        // Unwrap omega to track cumulative precession
+        // Unwrap omega to track cumulative precession (raw, at arbitrary phase)
         double dw = oe.omega - omega_prev;
         if (dw < -M_PI) dw += 2.0 * M_PI;
         if (dw > M_PI) dw -= 2.0 * M_PI;
         omega_cumul += dw;
         omega_prev = oe.omega;
 
-        // Expected GR precession for this many orbits
-        double omega_gr_expected = orbits_cumul * omega_gr_per_orbit;
+        // Apoapsis detection: r_dot changes from positive to negative
+        double rmag = std::sqrt(r[0]*r[0] + r[1]*r[1] + r[2]*r[2]);
+        double rdot = (r[0]*v[0] + r[1]*v[1] + r[2]*v[2]) / rmag;
 
-        std::printf("  Binary: N_orb=%.2f  a=%.4e  e=%.6f  omega=%.4f rad"
-                    "  dw_meas=%.4e  dw_GR=%.4e  ratio=%.4f\n",
-                    orbits_cumul, oe.a, oe.e, oe.omega,
-                    omega_cumul, omega_gr_expected,
-                    omega_gr_expected > 1e-30 ? omega_cumul / omega_gr_expected : 0.0);
+        if (rdot_prev > 0.0 && rdot <= 0.0) {
+            // Passed through apoapsis — measure omega here
+            double dw_apo = oe.omega - omega_at_apo_prev;
+            if (dw_apo < -M_PI) dw_apo += 2.0 * M_PI;
+            if (dw_apo > M_PI) dw_apo -= 2.0 * M_PI;
+            omega_cumul_apo += dw_apo;
+            omega_at_apo_prev = oe.omega;
+            e_at_apo = oe.e;
+            n_apo++;
+        }
+        rdot_prev = rdot;
+
+        // Report: both raw (arbitrary phase) and apoapsis-based measurements
+        double omega_gr_expected = orbits_cumul * omega_gr_per_orbit;
+        double ratio_raw = (std::fabs(omega_gr_expected) > 1e-30)
+                           ? omega_cumul / omega_gr_expected : 0.0;
+
+        // ratio_apo uses omega measured only at apoapsis phases (less aliasing)
+        // but normalized by total orbits from elapsed time (n_apo undercounts
+        // because we only sample once per outer step, missing most apoapsides)
+        double ratio_apo = 0.0;
+        if (n_apo > 0 && std::fabs(omega_gr_expected) > 1e-30) {
+            ratio_apo = omega_cumul_apo / omega_gr_expected;
+        }
+
+        std::printf("  Binary: N_orb=%.2f  a=%.4e  e=%.6f"
+                    "  ratio_raw=%.4f  ratio_apo=%.4f (n_apo=%d, e_apo=%.6f)\n",
+                    orbits_cumul, oe.a, oe.e,
+                    ratio_raw, ratio_apo, n_apo, e_at_apo);
         std::fflush(stdout);
     }
 };

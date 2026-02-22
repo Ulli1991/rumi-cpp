@@ -34,6 +34,11 @@ struct SubsystemBatch {
     // Threaded through pack→integrate→unpack to carry B across LogH calls.
     std::vector<double> stored_B;
 
+    // Persistent auxiliary velocities for PN (code units, including CM).
+    // Flat: stored_aux_vel[s][b*3+c] for subsystem s, body b, component c.
+    std::vector<std::vector<double>> stored_aux_vel;
+    std::vector<bool> has_stored_aux_vel;
+
     // Allocate buffers
     void allocate(int n_sub, int total_bodies);
 
