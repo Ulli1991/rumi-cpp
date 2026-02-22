@@ -352,10 +352,90 @@ bool should_be_secular(const Subsystem& sub, double dt_step, int n_orb_threshold
 }
 
 void secular_to_cartesian(const SecularBinary& bin, double G,
-                          double r[3], double v[3]) {
+                          double mean_anomaly, double r[3], double v[3]) {
     double mu = G * (bin.m1 + bin.m2);
-    // Use a random mean anomaly (uniformly distributed phase)
-    // In practice this is called with the current phase
-    double M = 0.0;  // placeholder — caller should provide
-    elements_to_cartesian(bin.a, bin.e, bin.inc, bin.Omega, bin.omega, M, mu, r, v);
+    elements_to_cartesian(bin.a, bin.e, bin.inc, bin.Omega, bin.omega,
+                          mean_anomaly, mu, r, v);
+}
+
+// ============================================================================
+// Full secular binary integration: Cartesian -> elements -> secular -> Cartesian
+// Works in absolute coordinates (handles CM frame internally)
+// ============================================================================
+
+void integrate_secular_binary(
+    double pos1[3], double vel1[3], double m1,
+    double pos2[3], double vel2[3], double m2,
+    double G, double c_code, int pn_order, double dt) {
+
+    double M_tot = m1 + m2;
+
+    // 1. Compute center of mass
+    double cm_pos[3], cm_vel[3];
+    for (int k = 0; k < 3; k++) {
+        cm_pos[k] = (m1 * pos1[k] + m2 * pos2[k]) / M_tot;
+        cm_vel[k] = (m1 * vel1[k] + m2 * vel2[k]) / M_tot;
+    }
+
+    // 2. Relative coordinates: r = pos1 - pos2, v = vel1 - vel2
+    double r[3], v[3];
+    for (int k = 0; k < 3; k++) {
+        r[k] = pos1[k] - pos2[k];
+        v[k] = vel1[k] - vel2[k];
+    }
+
+    // 3. Cartesian -> orbital elements
+    double mu = G * M_tot;
+    OrbitalElements oe = cartesian_to_elements(r, v, mu);
+
+    // Safety: skip if unbound or degenerate
+    if (oe.a <= 0.0 || oe.e >= 1.0) return;
+
+    // 4. Populate SecularBinary and evolve (a, e, omega)
+    SecularBinary bin;
+    bin.a = oe.a;
+    bin.e = oe.e;
+    bin.omega = oe.omega;
+    bin.inc = oe.inc;
+    bin.Omega = oe.Omega;
+    bin.m1 = m1;
+    bin.m2 = m2;
+    secular_evolve_binary(bin, dt, G, c_code, pn_order);
+
+    // 5. Check for merger (secular_evolve_binary sets a=0 on coalescence)
+    if (bin.a <= 0.0) {
+        printf("  [SEC] WARNING: binary merged during secular evolution "
+               "(pericenter < ISCO)\n");
+        return;  // leave particles at their original positions
+    }
+
+    // Check for unbound after evolution
+    if (bin.e >= 1.0) {
+        printf("  [SEC] WARNING: binary became unbound during secular evolution "
+               "(e=%.6f)\n", bin.e);
+        return;
+    }
+
+    // 6. Advance mean anomaly: M_new = M_old + n * dt
+    double n_mean = std::sqrt(mu / (bin.a * bin.a * bin.a));
+    double M_new = oe.mean_anom + n_mean * dt;
+
+    // 7. Elements -> Cartesian (relative coords)
+    double r_new[3], v_new[3];
+    secular_to_cartesian(bin, G, M_new, r_new, v_new);
+
+    // 8. CM drift (linear, no forces on CM — internal forces only)
+    double cm_pos_new[3];
+    for (int k = 0; k < 3; k++) {
+        cm_pos_new[k] = cm_pos[k] + cm_vel[k] * dt;
+    }
+
+    // 9. Reconstruct absolute positions:
+    //    pos1 = cm + (m2/M)*r_rel, pos2 = cm - (m1/M)*r_rel
+    for (int k = 0; k < 3; k++) {
+        pos1[k] = cm_pos_new[k] + (m2 / M_tot) * r_new[k];
+        vel1[k] = cm_vel[k]     + (m2 / M_tot) * v_new[k];
+        pos2[k] = cm_pos_new[k] - (m1 / M_tot) * r_new[k];
+        vel2[k] = cm_vel[k]     - (m1 / M_tot) * v_new[k];
+    }
 }

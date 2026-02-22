@@ -10,6 +10,7 @@
 #include "subsystem.h"
 #include "logh_gpu.h"
 #include "post_newtonian.h"
+#include "secular.h"
 #endif
 #include <Kokkos_Core.hpp>
 #include <vector>
@@ -272,26 +273,94 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
 
     if (eligible.empty()) return;
 
-    // Build a temporary SubsystemManager with only eligible subsystems
-    SubsystemManager tmp_mgr;
+    // Partition eligible subsystems into secular binaries vs LogH
+    std::vector<int> secular_idx, logh_idx;
     for (int s : eligible) {
-        tmp_mgr.active.push_back(g_subsystem_mgr.active[s]);
+        const auto& sub = g_subsystem_mgr.active[s];
+        if (sub.is_secular && sub.n_bodies == 2) {
+            secular_idx.push_back(s);
+        } else {
+            logh_idx.push_back(s);
+        }
     }
 
-    // Pack, integrate, unpack
-    g_logh_batch.pack(tmp_mgr, p, G, dt);
-    logh_integrate_batch_gpu(g_logh_batch, G, g_collisional.eta_gbs);
-    g_logh_batch.unpack(tmp_mgr, p);
+    // --- Secular binaries: evolve on host ---
+    if (!secular_idx.empty()) {
+        // Copy particle data to host
+        auto h_x  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.x);
+        auto h_y  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.y);
+        auto h_z  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.z);
+        auto h_vx = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vx);
+        auto h_vy = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vy);
+        auto h_vz = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vz);
+        auto h_m  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.mass);
 
-    // Propagate persistent B_phys and aux_vel back from tmp_mgr to g_subsystem_mgr
-    for (int i = 0; i < (int)eligible.size(); i++) {
-        auto& dst = g_subsystem_mgr.active[eligible[i]];
-        const auto& src = tmp_mgr.active[i];
-        dst.B_phys = src.B_phys;
-        dst.has_aux_vel = src.has_aux_vel;
-        if (src.has_aux_vel) {
-            std::memcpy(dst.aux_vel_phys, src.aux_vel_phys,
-                        LOGH_MAX_BODIES * 3 * sizeof(double));
+        for (int s : secular_idx) {
+            const auto& sub = g_subsystem_mgr.active[s];
+            int idx0 = pid_to_idx[sub.particle_ids[0]];
+            int idx1 = pid_to_idx[sub.particle_ids[1]];
+
+            double p1[3] = {h_x(idx0), h_y(idx0), h_z(idx0)};
+            double v1[3] = {h_vx(idx0), h_vy(idx0), h_vz(idx0)};
+            double p2[3] = {h_x(idx1), h_y(idx1), h_z(idx1)};
+            double v2[3] = {h_vx(idx1), h_vy(idx1), h_vz(idx1)};
+
+            printf("  [SEC] pid=%d,%d  a=%.4e  e=%.6f  omega=%.4f  n_orb=%d  dt=%.4e\n",
+                   sub.particle_ids[0], sub.particle_ids[1],
+                   sub.orb.a, sub.orb.e,
+                   sub.orb.omega * 180.0 / M_PI,
+                   sub.n_orb_per_dt, dt);
+
+            integrate_secular_binary(p1, v1, h_m(idx0),
+                                     p2, v2, h_m(idx1),
+                                     G, g_collisional.c_code,
+                                     g_collisional.pn_order, dt);
+
+            // Write back to host mirrors
+            h_x(idx0) = p1[0]; h_y(idx0) = p1[1]; h_z(idx0) = p1[2];
+            h_vx(idx0) = v1[0]; h_vy(idx0) = v1[1]; h_vz(idx0) = v1[2];
+            h_x(idx1) = p2[0]; h_y(idx1) = p2[1]; h_z(idx1) = p2[2];
+            h_vx(idx1) = v2[0]; h_vy(idx1) = v2[1]; h_vz(idx1) = v2[2];
+        }
+
+        // Copy modified host arrays back to device
+        Kokkos::deep_copy(p.x, h_x);
+        Kokkos::deep_copy(p.y, h_y);
+        Kokkos::deep_copy(p.z, h_z);
+        Kokkos::deep_copy(p.vx, h_vx);
+        Kokkos::deep_copy(p.vy, h_vy);
+        Kokkos::deep_copy(p.vz, h_vz);
+
+        // Clear B_phys and aux_vel for secular subsystems (not used by secular path;
+        // if subsystem transitions back to LogH, NAN/false triggers fresh init)
+        for (int s : secular_idx) {
+            auto& dst = g_subsystem_mgr.active[s];
+            dst.B_phys = NAN;
+            dst.has_aux_vel = false;
+        }
+    }
+
+    // --- LogH subsystems: batch integrate as before ---
+    if (!logh_idx.empty()) {
+        SubsystemManager logh_mgr;
+        for (int s : logh_idx) {
+            logh_mgr.active.push_back(g_subsystem_mgr.active[s]);
+        }
+
+        g_logh_batch.pack(logh_mgr, p, G, dt);
+        logh_integrate_batch_gpu(g_logh_batch, G, g_collisional.eta_gbs);
+        g_logh_batch.unpack(logh_mgr, p);
+
+        // Propagate persistent B_phys and aux_vel back from logh_mgr to g_subsystem_mgr
+        for (int i = 0; i < (int)logh_idx.size(); i++) {
+            auto& dst = g_subsystem_mgr.active[logh_idx[i]];
+            const auto& src = logh_mgr.active[i];
+            dst.B_phys = src.B_phys;
+            dst.has_aux_vel = src.has_aux_vel;
+            if (src.has_aux_vel) {
+                std::memcpy(dst.aux_vel_phys, src.aux_vel_phys,
+                            LOGH_MAX_BODIES * 3 * sizeof(double));
+            }
         }
     }
 }

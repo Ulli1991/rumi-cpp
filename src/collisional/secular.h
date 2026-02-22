@@ -36,6 +36,13 @@ void secular_evolve_triple(SecularTriple& tri, double dt, double G, double c_cod
 // Check if a subsystem should transition to secular mode
 bool should_be_secular(const Subsystem& sub, double dt_step, int n_orb_threshold);
 
-// Reconstruct (r, v) from secular elements
+// Reconstruct (r, v) from secular elements (relative coordinates)
 void secular_to_cartesian(const SecularBinary& bin, double G,
-                          double r[3], double v[3]);
+                          double mean_anomaly, double r[3], double v[3]);
+
+// Full secular integration of a binary: Cartesian -> elements -> secular evolve -> advance M -> Cartesian
+// Works in absolute coordinates (handles CM frame internally)
+void integrate_secular_binary(
+    double pos1[3], double vel1[3], double m1,
+    double pos2[3], double vel2[3], double m2,
+    double G, double c_code, int pn_order, double dt);
