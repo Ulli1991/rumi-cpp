@@ -328,15 +328,56 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
         // Normalized time target
         double dt_norm = dt / T_scale;
 
-        // ds estimate in normalized units (BIFROST: ds = dt * Omega)
-        double ds_init = (Omega_norm > 1e-30) ? dt_norm * Omega_norm : dt_norm;
-
         // ==================================================================
         // Step 3: Integrate in normalized units
+        // Sub-cycle if dt_norm exceeds 1/10 of the orbital period.
+        // This prevents the first LogH call (which inherits a large outer
+        // HHS timestep) from cramming many orbits into one GBS integration.
         // ==================================================================
+
+        // For 2-body: compute orbital period from relative orbit
+        // eps = v_rel²/2 - G*(m1+m2)/r  (specific orbital energy)
+        // a = -G*(m1+m2)/(2*eps), P = 2π*sqrt(a³/(G*(m1+m2)))
+        double dt_max_norm = dt_norm;  // default: no sub-cycling
+        double P_est = 0.0;
+        if (nb == 2 && E0_norm < 0.0) {
+            double rx = state.pos[1*3+0] - state.pos[0*3+0];
+            double ry = state.pos[1*3+1] - state.pos[0*3+1];
+            double rz = state.pos[1*3+2] - state.pos[0*3+2];
+            double dvx = state.vel[1*3+0] - state.vel[0*3+0];
+            double dvy = state.vel[1*3+1] - state.vel[0*3+1];
+            double dvz = state.vel[1*3+2] - state.vel[0*3+2];
+            double r = std::sqrt(rx*rx + ry*ry + rz*rz);
+            double v2 = dvx*dvx + dvy*dvy + dvz*dvz;
+            double mu = G_norm * (state.mass[0] + state.mass[1]);  // G*(m1+m2)
+            double eps = 0.5 * v2 - mu / r;
+            if (eps < 0.0) {
+                double a_bin = -mu / (2.0 * eps);
+                P_est = 2.0 * M_PI * std::sqrt(a_bin * a_bin * a_bin / mu);
+                dt_max_norm = 0.1 * P_est;
+            }
+        }
+
+        int n_subcycles = 1;
+        if (dt_norm > dt_max_norm && dt_max_norm > 0.0) {
+            n_subcycles = (int)std::ceil(dt_norm / dt_max_norm);
+        }
+        double dt_sub = dt_norm / n_subcycles;
+
+        if (n_subcycles > 1) {
+            std::printf("    LogH: sub-cycling %d x dt_sub=%.4f (dt_norm=%.4f, P=%.4f)\n",
+                        n_subcycles, dt_sub, dt_norm, P_est);
+        }
+
         GBSIntegrator gbs(eta_gbs);
-        int n_gbs_steps = gbs.integrate_to_time(state, dt_norm, G_norm, ds_init,
-                                                 c_norm, pn_order);
+        int n_gbs_steps = 0;
+        for (int cyc = 0; cyc < n_subcycles; cyc++) {
+            double t_target = (cyc + 1) * dt_sub;  // absolute target time
+            double Omega_cyc = logh_kinetic_energy(state) + state.B;
+            double ds_init = (Omega_cyc > 1e-30) ? dt_sub * Omega_cyc : dt_sub;
+            n_gbs_steps += gbs.integrate_to_time(state, t_target, G_norm, ds_init,
+                                                  c_norm, pn_order);
+        }
 
         // === DEBUG: compute omega after integration ===
         double omega_after = 0.0;
