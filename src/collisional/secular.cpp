@@ -44,7 +44,7 @@ static double compute_de_dt(double a, double e, double beta, int pn_order) {
     return -19.0/12.0 * beta / (a * a * a * a) * e * peters_G(e);
 }
 
-// PN1.0 + PN2.0 periapsis advance rate (Eq. 31)
+// PN1.0 + PN2.0 + PN3.0 periapsis advance rate
 static double compute_domega_dt(double a, double e, double mu, double c2, int pn_order) {
     if (!(pn_order & 1)) return 0.0;
     double e2 = e * e;
@@ -57,7 +57,40 @@ static double compute_domega_dt(double a, double e, double mu, double c2, int pn
         double c4 = c2 * c2;
         rate += 3.0 * (18.0 + e2) * M_PI * Gm_ap * Gm_ap / (2.0 * c4 * P);
     }
+    // PN3.0 term (Blanchet 2014, periapsis advance at 3PN)
+    if (pn_order & 8) {
+        double c6 = c2 * c2 * c2;
+        double Gm_ap3 = Gm_ap * Gm_ap * Gm_ap;
+        rate += M_PI * Gm_ap3 / (c6 * P) *
+                (1.0/4.0 * (3024.0 + 1152.0*e2 + 41.0*M_PI*M_PI));
+    }
     return rate;
+}
+
+// PN3.5 corrections to da/dt and de/dt (higher-order radiation reaction)
+// Corrections to Peters 1964 formulas at order c^-7
+static double compute_da_dt_pn35(double a, double e, double beta, double mu,
+                                   double c2, int pn_order) {
+    if (!(pn_order & 16)) return 0.0;
+    double e2 = e * e;
+    double one_me2 = 1.0 - e2;
+    double c7_corr = mu / (a * one_me2 * c2);  // GM/(a*(1-e^2)*c^2)
+
+    // Blanchet & Iyer (2003): relative correction to PN2.5 da/dt at PN3.5
+    // da/dt_{3.5} = da/dt_{2.5} * correction * c7_corr
+    double correction = -(1247.0/336.0 + 35.0/12.0 * (mu / (a * c2)));
+    return compute_da_dt(a, e, beta, pn_order) * correction * c7_corr;
+}
+
+static double compute_de_dt_pn35(double a, double e, double beta, double mu,
+                                   double c2, int pn_order) {
+    if (!(pn_order & 16)) return 0.0;
+    double e2 = e * e;
+    double one_me2 = 1.0 - e2;
+    double c7_corr = mu / (a * one_me2 * c2);
+
+    double correction = -(1247.0/336.0 + 35.0/12.0 * (mu / (a * c2)));
+    return compute_de_dt(a, e, beta, pn_order) * correction * c7_corr;
 }
 
 // ============================================================================
@@ -85,8 +118,10 @@ void secular_evolve_binary(SecularBinary& bin, double dt, double G, double c_cod
     double mu = G * (bin.m1 + bin.m2);
 
     // Compute initial rates to estimate secular timescale for adaptive stepping
-    double da0 = compute_da_dt(bin.a, bin.e, beta, pn_order);
-    double de0 = compute_de_dt(bin.a, bin.e, beta, pn_order);
+    double da0 = compute_da_dt(bin.a, bin.e, beta, pn_order)
+               + compute_da_dt_pn35(bin.a, bin.e, beta, mu, c2, pn_order);
+    double de0 = compute_de_dt(bin.a, bin.e, beta, pn_order)
+               + compute_de_dt_pn35(bin.a, bin.e, beta, mu, c2, pn_order);
     double dw0 = compute_domega_dt(bin.a, bin.e, mu, c2, pn_order);
 
     // Secular timestep criterion: eta_sec * min(|a/da_dt|, |e/de_dt|, |omega/domega_dt|)
@@ -115,11 +150,15 @@ void secular_evolve_binary(SecularBinary& bin, double dt, double G, double c_cod
 
         // --- Half-kick (step 1) ---
         // Rates from auxiliary state for physical variables
-        double da_from_aux = compute_da_dt(a_aux, e_aux, beta, pn_order);
-        double de_from_aux = compute_de_dt(a_aux, e_aux, beta, pn_order);
+        double da_from_aux = compute_da_dt(a_aux, e_aux, beta, pn_order)
+                           + compute_da_dt_pn35(a_aux, e_aux, beta, mu, c2, pn_order);
+        double de_from_aux = compute_de_dt(a_aux, e_aux, beta, pn_order)
+                           + compute_de_dt_pn35(a_aux, e_aux, beta, mu, c2, pn_order);
         // Rates from physical state for auxiliary variables
-        double da_from_phys = compute_da_dt(a, e, beta, pn_order);
-        double de_from_phys = compute_de_dt(a, e, beta, pn_order);
+        double da_from_phys = compute_da_dt(a, e, beta, pn_order)
+                            + compute_da_dt_pn35(a, e, beta, mu, c2, pn_order);
+        double de_from_phys = compute_de_dt(a, e, beta, pn_order)
+                            + compute_de_dt_pn35(a, e, beta, mu, c2, pn_order);
 
         // Half-kick physical
         bin.a += 0.5 * h * da_from_aux;
@@ -138,10 +177,14 @@ void secular_evolve_binary(SecularBinary& bin, double dt, double G, double c_cod
 
         // --- Second half-kick (step 3) ---
         // Recompute rates from the updated states
-        da_from_aux = compute_da_dt(a_aux, e_aux, beta, pn_order);
-        de_from_aux = compute_de_dt(a_aux, e_aux, beta, pn_order);
-        da_from_phys = compute_da_dt(bin.a, bin.e, beta, pn_order);
-        de_from_phys = compute_de_dt(bin.a, bin.e, beta, pn_order);
+        da_from_aux = compute_da_dt(a_aux, e_aux, beta, pn_order)
+                    + compute_da_dt_pn35(a_aux, e_aux, beta, mu, c2, pn_order);
+        de_from_aux = compute_de_dt(a_aux, e_aux, beta, pn_order)
+                    + compute_de_dt_pn35(a_aux, e_aux, beta, mu, c2, pn_order);
+        da_from_phys = compute_da_dt(bin.a, bin.e, beta, pn_order)
+                     + compute_da_dt_pn35(bin.a, bin.e, beta, mu, c2, pn_order);
+        de_from_phys = compute_de_dt(bin.a, bin.e, beta, pn_order)
+                     + compute_de_dt_pn35(bin.a, bin.e, beta, mu, c2, pn_order);
 
         // Half-kick physical
         bin.a += 0.5 * h * da_from_aux;
@@ -162,8 +205,10 @@ void secular_evolve_binary(SecularBinary& bin, double dt, double G, double c_cod
     }
 
     // Store final rates for external use (e.g., secular timestep criterion)
-    bin.da_dt = compute_da_dt(bin.a, bin.e, beta, pn_order);
-    bin.de_dt = compute_de_dt(bin.a, bin.e, beta, pn_order);
+    bin.da_dt = compute_da_dt(bin.a, bin.e, beta, pn_order)
+              + compute_da_dt_pn35(bin.a, bin.e, beta, mu, c2, pn_order);
+    bin.de_dt = compute_de_dt(bin.a, bin.e, beta, pn_order)
+              + compute_de_dt_pn35(bin.a, bin.e, beta, mu, c2, pn_order);
     bin.domega_dt = compute_domega_dt(bin.a, bin.e, mu, c2, pn_order);
 }
 
@@ -304,19 +349,25 @@ void secular_evolve_triple(SecularTriple& tri, double dt, double G, double c_cod
             );
         }
 
-        // PN1.0 precession on inner orbit (suppresses high-e Kozai)
-        if (pn_order & 1) {
-            double c2 = c_code * c_code;
-            double n_in = std::sqrt(mu_in / (a_in * a_in * a_in));
-            dg1_dt += 3.0 * n_in * n_in * n_in * a_in * a_in / (c2 * (1.0 - e1_2));
+        // PN precession on inner orbit (suppresses high-e Kozai)
+        // Uses compute_domega_dt which includes PN1.0, PN2.0, and PN3.0
+        {
+            double c2_loc = c_code * c_code;
+            dg1_dt += compute_domega_dt(a_in, e1, mu_in, c2_loc, pn_order);
         }
 
-        // GW dissipation on inner binary (PN2.5)
+        // GW dissipation on inner binary — Peters (1964) Eq. 16 + PN3.5 correction
         double da_in_dt = 0.0, de1_gw_dt = 0.0;
         if (pn_order & 4) {
             double beta = peters_beta(m1, m2, G, c_code);
             da_in_dt = -beta / (a_in * a_in * a_in) * peters_F(e1);
             de1_gw_dt = -19.0/12.0 * beta / (a_in * a_in * a_in * a_in) * e1 * peters_G(e1);
+            // PN3.5 higher-order radiation reaction correction
+            if (pn_order & 16) {
+                double c2_loc = c_code * c_code;
+                da_in_dt += compute_da_dt_pn35(a_in, e1, beta, mu_in, c2_loc, pn_order);
+                de1_gw_dt += compute_de_dt_pn35(a_in, e1, beta, mu_in, c2_loc, pn_order);
+            }
         }
 
         // Integrate
