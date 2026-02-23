@@ -445,6 +445,43 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
                 g_energy_books.E_gw += E_orb_pre_tri - E_orb_post_tri;
             }
 
+            // Update inner orbital plane to reflect changed mutual inclination.
+            // The secular integrator evolves cos_i_mut but not (inc, Omega).
+            // Rotate L_in around the node vector (L_out × L_in) by delta_i.
+            {
+                double L_in_hat[3] = {L_in[0]/L_in_mag, L_in[1]/L_in_mag, L_in[2]/L_in_mag};
+                double L_out_hat[3] = {L_out[0]/L_out_mag, L_out[1]/L_out_mag, L_out[2]/L_out_mag};
+
+                // Node vector = L_out × L_in (rotation axis)
+                double nd[3] = {L_out_hat[1]*L_in_hat[2] - L_out_hat[2]*L_in_hat[1],
+                                L_out_hat[2]*L_in_hat[0] - L_out_hat[0]*L_in_hat[2],
+                                L_out_hat[0]*L_in_hat[1] - L_out_hat[1]*L_in_hat[0]};
+                double nd_mag = std::sqrt(nd[0]*nd[0] + nd[1]*nd[1] + nd[2]*nd[2]);
+
+                if (nd_mag > 1e-30) {
+                    nd[0] /= nd_mag; nd[1] /= nd_mag; nd[2] /= nd_mag;
+
+                    double i_old = std::acos(std::max(-1.0, std::min(1.0, cos_i_mut)));
+                    double i_new = std::acos(std::max(-1.0, std::min(1.0, tri.cos_i_mut)));
+                    double delta_i = i_new - i_old;
+
+                    // Rodrigues' rotation: R(v,θ) = v cosθ + (k×v) sinθ + k(k·v)(1-cosθ)
+                    double cd = std::cos(delta_i), sd = std::sin(delta_i);
+                    double kdv = nd[0]*L_in_hat[0] + nd[1]*L_in_hat[1] + nd[2]*L_in_hat[2];
+                    double kcv[3] = {nd[1]*L_in_hat[2] - nd[2]*L_in_hat[1],
+                                     nd[2]*L_in_hat[0] - nd[0]*L_in_hat[2],
+                                     nd[0]*L_in_hat[1] - nd[1]*L_in_hat[0]};
+                    double L_new[3];
+                    for (int k = 0; k < 3; k++)
+                        L_new[k] = L_in_hat[k]*cd + kcv[k]*sd + nd[k]*kdv*(1.0-cd);
+
+                    // Extract new inc, Omega from rotated L_in
+                    double Lz = std::max(-1.0, std::min(1.0, L_new[2]));
+                    tri.inner.inc = std::acos(Lz);
+                    tri.inner.Omega = std::atan2(L_new[0], -L_new[1]);
+                }
+            }
+
             // Convert evolved elements back to Cartesian
             // Inner binary
             double n_in = std::sqrt(mu_in / (tri.inner.a * tri.inner.a * tri.inner.a));
