@@ -2,8 +2,8 @@
 # C++ N-Body Configuration
 # =============================================================================
 
-# Test case: binary_test, binary_test_peri, outer_planets, plummer
-TEST_CASE = binary_test_peri
+# Test case: binary_test, binary_test_peri, triple_test, outer_planets, plummer
+TEST_CASE = triple_test
 
 # Integrator: fsi (global timestep) or hhs (adaptive HHS-FSI per Algorithm 4 of FROST paper)
 INTEGRATOR = hhs
@@ -60,6 +60,24 @@ BINARY_A_PC = 1e-8				# Semi-major axis in pc (= 0.01 AU, 4.848e-8)
 BINARY_E = 0.9					# Eccentricity (high for visible precession)
 BINARY_M1 = 10.0				# Primary mass in M_sun (BH)
 BINARY_M2 = 10.0				# Secondary mass in M_sun (BH)
+
+# =============================================================================
+# Triple test parameters (only used if TEST_CASE = triple_test)
+# Hierarchical triple: inner binary (m1,m2) + outer body m3.
+# Default: 3x10 M_sun BHs, a_out/a_in=20, i=85° for Kozai-Lidov.
+# Kozai-Lidov timescale ~ (M_tot/m3)(a_out/a_in)^3 * P_in / (1-e_out^2)^{3/2}
+# =============================================================================
+TRIPLE_A_IN_PC = 1e-8				# Inner semi-major axis in pc
+TRIPLE_E_IN = 0.1				# Inner eccentricity
+TRIPLE_M1 = 10.0				# Inner primary mass (M_sun)
+TRIPLE_M2 = 10.0				# Inner secondary mass (M_sun)
+TRIPLE_A_OUT_PC = 4e-8				# Outer semi-major axis in pc
+TRIPLE_E_OUT = 0.7				# Outer eccentricity
+TRIPLE_M3 = 10.0				# Outer body mass (M_sun)
+TRIPLE_INCL_DEG = 85.0				# Mutual inclination (degrees); >39 for Kozai-Lidov
+# To test unstable triple (LogH 3-body, no secular): set TRIPLE_A_OUT_PC = 4e-8
+# (a_out/a_in=4) and TRIPLE_E_OUT = 0.7. This fails Mardling → TRI_U → full LogH
+# integration of the chaotic 3-body interaction (much slower, tests close encounters).
 
 # =============================================================================
 # Plummer cluster parameters (only used if TEST_CASE = plummer)
