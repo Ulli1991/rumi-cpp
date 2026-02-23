@@ -32,7 +32,8 @@ std::vector<MergerEvent> detect_mergers(const SubsystemManager& mgr,
 // Execute a merger: replace two particles with one remnant
 // Updates Particles, SubsystemManager, and EnergyBookkeeping
 void execute_merger(const MergerEvent& event, Particles& p,
-                    SubsystemManager& mgr, EnergyBookkeeping& books, double G);
+                    SubsystemManager& mgr, EnergyBookkeeping& books,
+                    double G, double c_code = 0.0);
 
 // BH-BH merger remnant properties (Zlochower+ 2015 fitting formulas)
 void bh_bh_remnant(double m1, double m2, const double chi1[3], const double chi2[3],

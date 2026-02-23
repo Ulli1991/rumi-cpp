@@ -208,7 +208,8 @@ std::vector<MergerEvent> detect_mergers(const SubsystemManager& mgr,
 // ============================================================================
 
 void execute_merger(const MergerEvent& event, Particles& p,
-                    SubsystemManager& mgr, EnergyBookkeeping& books, double G) {
+                    SubsystemManager& mgr, EnergyBookkeeping& books,
+                    double G, double c_code) {
     auto h_x  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.x);
     auto h_y  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.y);
     auto h_z  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.z);
@@ -217,6 +218,8 @@ void execute_merger(const MergerEvent& event, Particles& p,
     auto h_vz = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vz);
     auto h_m  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.mass);
     auto h_pid = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.particle_id);
+    auto h_stype = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.stellar_type);
+    auto h_spin = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.spin_vec);
 
     int max_pid = 0;
     for (int i = 0; i < p.N; i++) max_pid = std::max(max_pid, h_pid(i));
@@ -238,16 +241,42 @@ void execute_merger(const MergerEvent& event, Particles& p,
     double cvy = (m1*h_vy(idx1) + m2*h_vy(idx2)) / M;
     double cvz = (m1*h_vz(idx1) + m2*h_vz(idx2)) / M;
 
-    // Energy dissipated
-    double dm = M - event.m_remnant;
-    books.E_merge += 0.5 * dm * (cvx*cvx + cvy*cvy + cvz*cvz);
+    double m_rem = event.m_remnant;
+    double v_kick[3] = {0, 0, 0};
+    double chi_rem[3] = {0, 0, 0};
+
+    // BH-BH merger: use fitting formulae for remnant mass, spin, kick
+    bool is_bh1 = (h_stype(idx1) == 14), is_bh2 = (h_stype(idx2) == 14);
+    if (is_bh1 && is_bh2 && c_code > 0.0) {
+        // Orbital angular momentum direction
+        double dx = h_x(idx2) - h_x(idx1), dy = h_y(idx2) - h_y(idx1), dz = h_z(idx2) - h_z(idx1);
+        double dvx = h_vx(idx2) - h_vx(idx1), dvy = h_vy(idx2) - h_vy(idx1), dvz = h_vz(idx2) - h_vz(idx1);
+        double L_orb[3] = {dy*dvz - dz*dvy, dz*dvx - dx*dvz, dx*dvy - dy*dvx};
+
+        double chi1[3] = {h_spin(idx1, 0), h_spin(idx1, 1), h_spin(idx1, 2)};
+        double chi2[3] = {h_spin(idx2, 0), h_spin(idx2, 1), h_spin(idx2, 2)};
+
+        bh_bh_remnant(m1, m2, chi1, chi2, L_orb, m_rem, chi_rem, v_kick, G, c_code);
+    }
+
+    // Energy dissipated (mass difference converted to GW energy)
+    double dm = M - m_rem;
+    // Binding energy of the binary + kinetic energy of lost mass
+    double dx = h_x(idx2) - h_x(idx1), dy = h_y(idx2) - h_y(idx1), dz = h_z(idx2) - h_z(idx1);
+    double r = std::sqrt(dx*dx + dy*dy + dz*dz);
+    double E_bind = -G * m1 * m2 / (r > 0 ? r : 1e-30);
+    books.E_merge += E_bind + 0.5 * dm * (cvx*cvx + cvy*cvy + cvz*cvz);
 
     // Place remnant at idx1, mark idx2 for removal
     h_x(idx1) = cx; h_y(idx1) = cy; h_z(idx1) = cz;
-    h_vx(idx1) = cvx + event.v_kick[0];
-    h_vy(idx1) = cvy + event.v_kick[1];
-    h_vz(idx1) = cvz + event.v_kick[2];
-    h_m(idx1) = event.m_remnant;
+    h_vx(idx1) = cvx + v_kick[0];
+    h_vy(idx1) = cvy + v_kick[1];
+    h_vz(idx1) = cvz + v_kick[2];
+    h_m(idx1) = m_rem;
+    h_stype(idx1) = (is_bh1 || is_bh2) ? 14 : h_stype(idx1);
+    h_spin(idx1, 0) = chi_rem[0];
+    h_spin(idx1, 1) = chi_rem[1];
+    h_spin(idx1, 2) = chi_rem[2];
 
     // Mark particle 2 with zero mass (will be compacted later)
     h_m(idx2) = 0.0;
@@ -259,18 +288,129 @@ void execute_merger(const MergerEvent& event, Particles& p,
     Kokkos::deep_copy(p.vy, h_vy);
     Kokkos::deep_copy(p.vz, h_vz);
     Kokkos::deep_copy(p.mass, h_m);
+    Kokkos::deep_copy(p.stellar_type, h_stype);
+    Kokkos::deep_copy(p.spin_vec, h_spin);
 
-    std::printf("MERGER: type=%d, pid %d + %d -> remnant mass=%.4f M_sun\n",
-                (int)event.type, event.pid1, event.pid2, event.m_remnant);
+    // Remove the merged subsystem
+    for (auto it = mgr.active.begin(); it != mgr.active.end(); ) {
+        bool contains_pid2 = false;
+        for (int pid : it->particle_ids) {
+            if (pid == event.pid2) { contains_pid2 = true; break; }
+        }
+        if (contains_pid2) {
+            it = mgr.active.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
+    double v_kick_mag = std::sqrt(v_kick[0]*v_kick[0] + v_kick[1]*v_kick[1] + v_kick[2]*v_kick[2]);
+    std::printf("MERGER: type=%d, pid %d + %d -> m_rem=%.4f M_sun, dm=%.4e, v_kick=%.1f km/s\n",
+                (int)event.type, event.pid1, event.pid2, m_rem, dm, v_kick_mag);
 }
 
 // ============================================================================
 // Escaper removal
 // ============================================================================
 
-int remove_escapers(Particles& p, double G, double R_escape,
+int remove_escapers(Particles& p, double G, double r_escape_rh,
                     SubsystemManager& sm, EnergyBookkeeping& books) {
-    // TODO: Implement deterministic prefix-scan compaction
-    // For now, return 0 (no escapers removed)
-    return 0;
+    if (p.N < 10) return 0;  // too few particles for meaningful escape detection
+
+    // Copy to host
+    auto h_x  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.x);
+    auto h_y  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.y);
+    auto h_z  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.z);
+    auto h_vx = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vx);
+    auto h_vy = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vy);
+    auto h_vz = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vz);
+    auto h_m  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.mass);
+    auto h_sid = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.subsystem_id);
+
+    int N = p.N;
+
+    // Compute center-of-mass position and velocity
+    double M_total = 0;
+    double cm_x = 0, cm_y = 0, cm_z = 0;
+    double cm_vx = 0, cm_vy = 0, cm_vz = 0;
+    for (int i = 0; i < N; i++) {
+        double m = h_m(i);
+        M_total += m;
+        cm_x += m * h_x(i); cm_y += m * h_y(i); cm_z += m * h_z(i);
+        cm_vx += m * h_vx(i); cm_vy += m * h_vy(i); cm_vz += m * h_vz(i);
+    }
+    double inv_M = 1.0 / M_total;
+    cm_x *= inv_M; cm_y *= inv_M; cm_z *= inv_M;
+    cm_vx *= inv_M; cm_vy *= inv_M; cm_vz *= inv_M;
+
+    // Compute radial distances from CM
+    std::vector<double> radii(N);
+    for (int i = 0; i < N; i++) {
+        double dx = h_x(i) - cm_x, dy = h_y(i) - cm_y, dz = h_z(i) - cm_z;
+        radii[i] = std::sqrt(dx*dx + dy*dy + dz*dz);
+    }
+
+    // Estimate half-mass radius
+    std::vector<std::pair<double,double>> r_mass(N);
+    for (int i = 0; i < N; i++) r_mass[i] = {radii[i], h_m(i)};
+    std::sort(r_mass.begin(), r_mass.end());
+    double cum_mass = 0;
+    double r_half = r_mass.back().first;
+    for (auto& rm : r_mass) {
+        cum_mass += rm.second;
+        if (cum_mass >= 0.5 * M_total) {
+            r_half = rm.first;
+            break;
+        }
+    }
+
+    double R_escape = r_escape_rh * r_half;
+    if (R_escape <= 0) return 0;
+
+    int n_escaped = 0;
+    for (int i = 0; i < N; i++) {
+        if (radii[i] < R_escape) continue;
+
+        // Skip particles in subsystems (their CoM should be checked, but that's complex)
+        if (h_sid(i) >= 0) continue;
+
+        // Check if unbound and moving outward
+        double dx = h_x(i) - cm_x, dy = h_y(i) - cm_y, dz = h_z(i) - cm_z;
+        double dvx = h_vx(i) - cm_vx, dvy = h_vy(i) - cm_vy, dvz = h_vz(i) - cm_vz;
+        double r = radii[i];
+        double v2 = dvx*dvx + dvy*dvy + dvz*dvz;
+        double r_dot_v = dx*dvx + dy*dvy + dz*dvz;
+
+        // Moving outward?
+        if (r_dot_v <= 0) continue;
+
+        // Specific energy: E_spec = 0.5*v^2 - G*M_enclosed/r
+        // Approximate M_enclosed ~ M_total for particles at large r
+        double E_spec = 0.5 * v2 - G * M_total / r;
+        if (E_spec <= 0) continue;
+
+        // This particle is escaping
+        // Energy accounting: KE + PE relative to cluster
+        double KE_esc = 0.5 * h_m(i) * v2;
+        // PE with all other particles
+        double PE_esc = 0;
+        for (int j = 0; j < N; j++) {
+            if (j == i || h_m(j) <= 0) continue;
+            double djx = h_x(j) - h_x(i), djy = h_y(j) - h_y(i), djz = h_z(j) - h_z(i);
+            double rij = std::sqrt(djx*djx + djy*djy + djz*djz);
+            PE_esc -= G * h_m(i) * h_m(j) / rij;
+        }
+        books.E_escape += KE_esc + PE_esc;
+
+        h_m(i) = 0.0;  // mark for removal
+        n_escaped++;
+    }
+
+    if (n_escaped > 0) {
+        Kokkos::deep_copy(p.mass, h_m);
+        std::printf("ESCAPER: removed %d particles, E_escape=%.4e, R_half=%.4e, R_escape=%.4e\n",
+                    n_escaped, books.E_escape, r_half, R_escape);
+    }
+
+    return n_escaped;
 }
