@@ -273,6 +273,16 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
                         sub.type = stable ? SubsystemType::TRIPLE_STABLE : SubsystemType::TRIPLE_UNSTABLE;
                         sub.inner_binary_id = inner_i;  // store inner binary info
                         sub.outer_companion_pid = outer_pid;
+
+                        // Secular flag for triples: based on inner binary period
+                        if (stable && a_in > 0) {
+                            double mu_in = G * (m1 + m2);
+                            double P_in = 2.0 * M_PI * std::sqrt(a_in * a_in * a_in / mu_in);
+                            sub.n_orb_per_dt = (int)(dt_step / P_in);
+                            sub.is_secular = (sub.n_orb_per_dt >= n_orb_secular);
+                            sub.orb.a = a_in;
+                            sub.orb.e = e_in;
+                        }
                     } else {
                         sub.type = SubsystemType::TRIPLE_UNSTABLE;
                     }

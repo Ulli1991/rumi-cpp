@@ -11,6 +11,9 @@
 #include "logh_gpu.h"
 #include "post_newtonian.h"
 #include "secular.h"
+#include "mergers.h"
+#include "checkpoint.h"
+#include "diagnostics.h"
 #endif
 #include <Kokkos_Core.hpp>
 #include <vector>
@@ -273,12 +276,14 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
 
     if (eligible.empty()) return;
 
-    // Partition eligible subsystems into secular binaries vs LogH
-    std::vector<int> secular_idx, logh_idx;
+    // Partition eligible subsystems into secular binaries, secular triples, and LogH
+    std::vector<int> secular_idx, secular_triple_idx, logh_idx;
     for (int s : eligible) {
         const auto& sub = g_subsystem_mgr.active[s];
         if (sub.is_secular && sub.n_bodies == 2) {
             secular_idx.push_back(s);
+        } else if (sub.is_secular && sub.type == SubsystemType::TRIPLE_STABLE) {
+            secular_triple_idx.push_back(s);
         } else {
             logh_idx.push_back(s);
         }
@@ -311,10 +316,27 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
                    sub.orb.omega * 180.0 / M_PI,
                    sub.n_orb_per_dt, dt);
 
+            // Compute orbital energy before secular evolution for GW bookkeeping
+            double m1_sec = h_m(idx0), m2_sec = h_m(idx1);
+            double mu_sec = G * (m1_sec + m2_sec);
+            double r_rel_pre[3] = {p2[0]-p1[0], p2[1]-p1[1], p2[2]-p1[2]};
+            double v_rel_pre[3] = {v2[0]-v1[0], v2[1]-v1[1], v2[2]-v1[2]};
+            auto oe_pre = cartesian_to_elements(r_rel_pre, v_rel_pre, mu_sec);
+            double E_orb_pre = -G * m1_sec * m2_sec / (2.0 * oe_pre.a);
+
             integrate_secular_binary(p1, v1, h_m(idx0),
                                      p2, v2, h_m(idx1),
                                      G, g_collisional.c_code,
                                      g_collisional.pn_order, dt);
+
+            // GW energy bookkeeping: energy radiated = E_orb_before - E_orb_after
+            double r_rel_post[3] = {p2[0]-p1[0], p2[1]-p1[1], p2[2]-p1[2]};
+            double v_rel_post[3] = {v2[0]-v1[0], v2[1]-v1[1], v2[2]-v1[2]};
+            auto oe_post = cartesian_to_elements(r_rel_post, v_rel_post, mu_sec);
+            if (oe_post.a > 0.0 && oe_pre.a > 0.0) {
+                double E_orb_post = -G * m1_sec * m2_sec / (2.0 * oe_post.a);
+                g_energy_books.E_gw += E_orb_pre - E_orb_post;
+            }
 
             // Write back to host mirrors
             h_x(idx0) = p1[0]; h_y(idx0) = p1[1]; h_z(idx0) = p1[2];
@@ -334,6 +356,165 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
         // Clear B_phys and aux_vel for secular subsystems (not used by secular path;
         // if subsystem transitions back to LogH, NAN/false triggers fresh init)
         for (int s : secular_idx) {
+            auto& dst = g_subsystem_mgr.active[s];
+            dst.B_phys = NAN;
+            dst.has_aux_vel = false;
+        }
+    }
+
+    // --- Secular triples: Kozai-Lidov + GW dissipation ---
+    if (!secular_triple_idx.empty()) {
+        auto h_x  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.x);
+        auto h_y  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.y);
+        auto h_z  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.z);
+        auto h_vx = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vx);
+        auto h_vy = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vy);
+        auto h_vz = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vz);
+        auto h_m  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.mass);
+
+        for (int s : secular_triple_idx) {
+            const auto& sub = g_subsystem_mgr.active[s];
+            if (sub.n_bodies != 3) continue;
+
+            // Identify inner binary (first two PIDs) and outer companion (third)
+            int idx0 = pid_to_idx[sub.particle_ids[0]];
+            int idx1 = pid_to_idx[sub.particle_ids[1]];
+            int idx2 = pid_to_idx[sub.particle_ids[2]];
+
+            double m1 = h_m(idx0), m2 = h_m(idx1), m3 = h_m(idx2);
+            double mu_in = G * (m1 + m2);
+
+            // Inner binary relative coords
+            double r_in[3] = {h_x(idx1)-h_x(idx0), h_y(idx1)-h_y(idx0), h_z(idx1)-h_z(idx0)};
+            double v_in[3] = {h_vx(idx1)-h_vx(idx0), h_vy(idx1)-h_vy(idx0), h_vz(idx1)-h_vz(idx0)};
+
+            // Inner binary -> elements
+            OrbitalElements oe_in = cartesian_to_elements(r_in, v_in, mu_in);
+
+            // Outer orbit: CM of inner binary vs outer companion
+            double M12 = m1 + m2;
+            double cm_x = (m1*h_x(idx0) + m2*h_x(idx1)) / M12;
+            double cm_y = (m1*h_y(idx0) + m2*h_y(idx1)) / M12;
+            double cm_z = (m1*h_z(idx0) + m2*h_z(idx1)) / M12;
+            double cm_vx = (m1*h_vx(idx0) + m2*h_vx(idx1)) / M12;
+            double cm_vy = (m1*h_vy(idx0) + m2*h_vy(idx1)) / M12;
+            double cm_vz = (m1*h_vz(idx0) + m2*h_vz(idx1)) / M12;
+
+            double r_out[3] = {h_x(idx2)-cm_x, h_y(idx2)-cm_y, h_z(idx2)-cm_z};
+            double v_out[3] = {h_vx(idx2)-cm_vx, h_vy(idx2)-cm_vy, h_vz(idx2)-cm_vz};
+            double mu_out = G * (M12 + m3);
+            OrbitalElements oe_out = cartesian_to_elements(r_out, v_out, mu_out);
+
+            if (oe_in.a <= 0 || oe_out.a <= 0) continue;  // unbound
+
+            // Mutual inclination from angular momentum vectors
+            double L_in[3] = {r_in[1]*v_in[2]-r_in[2]*v_in[1],
+                              r_in[2]*v_in[0]-r_in[0]*v_in[2],
+                              r_in[0]*v_in[1]-r_in[1]*v_in[0]};
+            double L_out[3] = {r_out[1]*v_out[2]-r_out[2]*v_out[1],
+                               r_out[2]*v_out[0]-r_out[0]*v_out[2],
+                               r_out[0]*v_out[1]-r_out[1]*v_out[0]};
+            double L_in_mag = std::sqrt(L_in[0]*L_in[0]+L_in[1]*L_in[1]+L_in[2]*L_in[2]);
+            double L_out_mag = std::sqrt(L_out[0]*L_out[0]+L_out[1]*L_out[1]+L_out[2]*L_out[2]);
+            double cos_i_mut = (L_in_mag > 0 && L_out_mag > 0) ?
+                (L_in[0]*L_out[0]+L_in[1]*L_out[1]+L_in[2]*L_out[2]) / (L_in_mag*L_out_mag) : 1.0;
+
+            // Build SecularTriple and evolve
+            SecularTriple tri{};
+            tri.inner.a = oe_in.a; tri.inner.e = oe_in.e; tri.inner.omega = oe_in.omega;
+            tri.inner.inc = oe_in.inc; tri.inner.Omega = oe_in.Omega;
+            tri.inner.m1 = m1; tri.inner.m2 = m2;
+            tri.inner.pid1 = sub.particle_ids[0]; tri.inner.pid2 = sub.particle_ids[1];
+            tri.a_out = oe_out.a; tri.e_out = oe_out.e;
+            tri.omega_out = oe_out.omega; tri.inc_out = oe_out.inc; tri.Omega_out = oe_out.Omega;
+            tri.m3 = m3; tri.pid3 = sub.particle_ids[2];
+            tri.cos_i_mut = cos_i_mut;
+
+            printf("  [SEC_TRI] pid=%d,%d,%d  a_in=%.4e  e_in=%.6f  a_out=%.4e  cos_i=%.4f  dt=%.4e\n",
+                   sub.particle_ids[0], sub.particle_ids[1], sub.particle_ids[2],
+                   tri.inner.a, tri.inner.e, tri.a_out, cos_i_mut, dt);
+
+            double a_in_pre = tri.inner.a;  // save for GW bookkeeping
+
+            secular_evolve_triple(tri, dt, G, g_collisional.c_code, g_collisional.pn_order);
+
+            // GW energy bookkeeping for inner binary inspiral
+            if (tri.inner.a > 0.0 && a_in_pre > 0.0) {
+                double E_orb_pre_tri = -G * m1 * m2 / (2.0 * a_in_pre);
+                double E_orb_post_tri = -G * m1 * m2 / (2.0 * tri.inner.a);
+                g_energy_books.E_gw += E_orb_pre_tri - E_orb_post_tri;
+            }
+
+            // Convert evolved elements back to Cartesian
+            // Inner binary
+            double n_in = std::sqrt(mu_in / (tri.inner.a * tri.inner.a * tri.inner.a));
+            double M_in_new = oe_in.mean_anom + n_in * dt;
+            double r_in_new[3], v_in_new[3];
+            elements_to_cartesian(tri.inner.a, tri.inner.e, tri.inner.inc,
+                                   tri.inner.Omega, tri.inner.omega, M_in_new, mu_in,
+                                   r_in_new, v_in_new);
+
+            // Outer orbit
+            double n_out = std::sqrt(mu_out / (tri.a_out * tri.a_out * tri.a_out));
+            double M_out_new = oe_out.mean_anom + n_out * dt;
+            double r_out_new[3], v_out_new[3];
+            elements_to_cartesian(tri.a_out, tri.e_out, tri.inc_out,
+                                   tri.Omega_out, tri.omega_out, M_out_new, mu_out,
+                                   r_out_new, v_out_new);
+
+            // Reconstruct absolute coordinates
+            // Total CM
+            double M_tot = M12 + m3;
+            double cm_tot_x = (M12*cm_x + m3*h_x(idx2)) / M_tot;
+            double cm_tot_y = (M12*cm_y + m3*h_y(idx2)) / M_tot;
+            double cm_tot_z = (M12*cm_z + m3*h_z(idx2)) / M_tot;
+            double cm_tot_vx = (M12*cm_vx + m3*h_vx(idx2)) / M_tot;
+            double cm_tot_vy = (M12*cm_vy + m3*h_vy(idx2)) / M_tot;
+            double cm_tot_vz = (M12*cm_vz + m3*h_vz(idx2)) / M_tot;
+
+            // Drift total CM
+            cm_tot_x += cm_tot_vx * dt;
+            cm_tot_y += cm_tot_vy * dt;
+            cm_tot_z += cm_tot_vz * dt;
+
+            // Outer orbit positions: CM_inner and particle 3
+            double cm_in_new[3], v_cm_in_new[3];
+            for (int k = 0; k < 3; k++) {
+                cm_in_new[k] = (&cm_tot_x)[k] - (m3/M_tot) * r_out_new[k];
+                v_cm_in_new[k] = (&cm_tot_vx)[k] - (m3/M_tot) * v_out_new[k];
+            }
+
+            // Inner binary: particle 0 and 1
+            h_x(idx0) = cm_in_new[0] - (m2/M12)*r_in_new[0];
+            h_y(idx0) = cm_in_new[1] - (m2/M12)*r_in_new[1];
+            h_z(idx0) = cm_in_new[2] - (m2/M12)*r_in_new[2];
+            h_vx(idx0) = v_cm_in_new[0] - (m2/M12)*v_in_new[0];
+            h_vy(idx0) = v_cm_in_new[1] - (m2/M12)*v_in_new[1];
+            h_vz(idx0) = v_cm_in_new[2] - (m2/M12)*v_in_new[2];
+
+            h_x(idx1) = cm_in_new[0] + (m1/M12)*r_in_new[0];
+            h_y(idx1) = cm_in_new[1] + (m1/M12)*r_in_new[1];
+            h_z(idx1) = cm_in_new[2] + (m1/M12)*r_in_new[2];
+            h_vx(idx1) = v_cm_in_new[0] + (m1/M12)*v_in_new[0];
+            h_vy(idx1) = v_cm_in_new[1] + (m1/M12)*v_in_new[1];
+            h_vz(idx1) = v_cm_in_new[2] + (m1/M12)*v_in_new[2];
+
+            h_x(idx2) = cm_tot_x + (M12/M_tot)*r_out_new[0];
+            h_y(idx2) = cm_tot_y + (M12/M_tot)*r_out_new[1];
+            h_z(idx2) = cm_tot_z + (M12/M_tot)*r_out_new[2];
+            h_vx(idx2) = cm_tot_vx + (M12/M_tot)*v_out_new[0];
+            h_vy(idx2) = cm_tot_vy + (M12/M_tot)*v_out_new[1];
+            h_vz(idx2) = cm_tot_vz + (M12/M_tot)*v_out_new[2];
+        }
+
+        Kokkos::deep_copy(p.x, h_x);
+        Kokkos::deep_copy(p.y, h_y);
+        Kokkos::deep_copy(p.z, h_z);
+        Kokkos::deep_copy(p.vx, h_vx);
+        Kokkos::deep_copy(p.vy, h_vy);
+        Kokkos::deep_copy(p.vz, h_vz);
+
+        for (int s : secular_triple_idx) {
             auto& dst = g_subsystem_mgr.active[s];
             dst.B_phys = NAN;
             dst.has_aux_vel = false;
@@ -712,6 +893,22 @@ static void hhs_fsi_step_dynamic_impl(Particles& p, int start, int count, double
             g_subsystem_mgr.enforce_shared_timestep(p);
             g_subsystem_mgr.apply_perturbation_timestep(p, G, g_collisional.eta_pert);
             g_subsystem_mgr.accumulate_diagnostics();
+
+            // Merger detection at top level only (depth==0)
+            if (depth == 0 && g_collisional.c_code > 0.0) {
+                auto mergers = detect_mergers(g_subsystem_mgr, p, G,
+                                               g_collisional.c_code, pivot_dt);
+                for (const auto& ev : mergers) {
+                    execute_merger(ev, p, g_subsystem_mgr, g_energy_books,
+                                   G, g_collisional.c_code);
+                }
+                if (!mergers.empty()) {
+                    int n_removed = p.compact_remove_zero_mass();
+                    count -= n_removed;
+                    if (count <= 0) return;
+                    g_subsystem_mgr.update_particle_flags(p);
+                }
+            }
         }
 #endif
     }
