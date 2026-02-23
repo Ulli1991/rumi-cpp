@@ -76,4 +76,8 @@ struct Particles {
     void unpack();  // Copy packed back to SoA (for velocities after kick)
     void pack_pos_range(int start, int count);  // Pack x,y,z,mass into pos_packed for [start, start+count)
     void pack_vel_range(int start, int count);  // Pack vx,vy,vz into vel_packed for [start, start+count)
+
+    // Remove particles with mass==0, compact remaining, update N
+    // Returns number of particles removed
+    int compact_remove_zero_mass();
 };

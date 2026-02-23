@@ -180,6 +180,106 @@ void Particles::pack_vel_range(int start, int count) {
 
 }
 
+int Particles::compact_remove_zero_mass() {
+    // Copy mass to host to find which particles to keep
+    auto h_m = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), mass);
+    int N_old = N;
+
+    // Build keep list (indices of particles with mass > 0)
+    std::vector<int> keep;
+    keep.reserve(N);
+    for (int i = 0; i < N; i++) {
+        if (h_m(i) > 0.0) keep.push_back(i);
+    }
+    int N_new = (int)keep.size();
+    int n_removed = N_old - N_new;
+    if (n_removed == 0) return 0;
+
+    // Mirror all fields to host
+    auto h_x  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), x);
+    auto h_y  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), y);
+    auto h_z  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), z);
+    auto h_vx = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), vx);
+    auto h_vy = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), vy);
+    auto h_vz = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), vz);
+    auto h_ax = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), ax);
+    auto h_ay = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), ay);
+    auto h_az = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), az);
+    auto h_dt = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), dt_adapt);
+    auto h_lev = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), level);
+    auto h_orig = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), orig_index);
+    auto h_ix = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), ix);
+    auto h_iy = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), iy);
+    auto h_iz = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), iz);
+
+    // Compact in-place on host mirrors
+    for (int j = 0; j < N_new; j++) {
+        int src = keep[j];
+        if (src == j) continue;
+        h_x(j) = h_x(src); h_y(j) = h_y(src); h_z(j) = h_z(src);
+        h_vx(j) = h_vx(src); h_vy(j) = h_vy(src); h_vz(j) = h_vz(src);
+        h_ax(j) = h_ax(src); h_ay(j) = h_ay(src); h_az(j) = h_az(src);
+        h_m(j) = h_m(src); h_dt(j) = h_dt(src);
+        h_lev(j) = h_lev(src); h_orig(j) = h_orig(src);
+        h_ix(j) = h_ix(src); h_iy(j) = h_iy(src); h_iz(j) = h_iz(src);
+    }
+
+    // Copy back to device
+    Kokkos::deep_copy(x, h_x); Kokkos::deep_copy(y, h_y); Kokkos::deep_copy(z, h_z);
+    Kokkos::deep_copy(vx, h_vx); Kokkos::deep_copy(vy, h_vy); Kokkos::deep_copy(vz, h_vz);
+    Kokkos::deep_copy(ax, h_ax); Kokkos::deep_copy(ay, h_ay); Kokkos::deep_copy(az, h_az);
+    Kokkos::deep_copy(mass, h_m); Kokkos::deep_copy(dt_adapt, h_dt);
+    Kokkos::deep_copy(level, h_lev); Kokkos::deep_copy(orig_index, h_orig);
+    Kokkos::deep_copy(ix, h_ix); Kokkos::deep_copy(iy, h_iy); Kokkos::deep_copy(iz, h_iz);
+
+    // Collisional fields
+    if (collisional) {
+        auto h_pid = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), particle_id);
+        auto h_sid = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), subsystem_id);
+        auto h_stype = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), stellar_type);
+        auto h_mzams = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), m_zams);
+        auto h_sage = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), stellar_age);
+        auto h_srad = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), stellar_radius);
+        auto h_lum = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), luminosity);
+        auto h_cmass = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), core_mass);
+        auto h_spin = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), spin_vec);
+        auto h_smag = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), spin_mag);
+        auto h_dtl0 = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), dt_level0);
+        auto h_gmag = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), grad_mag);
+
+        for (int j = 0; j < N_new; j++) {
+            int src = keep[j];
+            if (src == j) continue;
+            h_pid(j) = h_pid(src); h_sid(j) = h_sid(src);
+            h_stype(j) = h_stype(src);
+            h_mzams(j) = h_mzams(src); h_sage(j) = h_sage(src);
+            h_srad(j) = h_srad(src); h_lum(j) = h_lum(src);
+            h_cmass(j) = h_cmass(src);
+            h_spin(j, 0) = h_spin(src, 0);
+            h_spin(j, 1) = h_spin(src, 1);
+            h_spin(j, 2) = h_spin(src, 2);
+            h_smag(j) = h_smag(src);
+            h_dtl0(j) = h_dtl0(src); h_gmag(j) = h_gmag(src);
+        }
+
+        Kokkos::deep_copy(particle_id, h_pid);
+        Kokkos::deep_copy(subsystem_id, h_sid);
+        Kokkos::deep_copy(stellar_type, h_stype);
+        Kokkos::deep_copy(m_zams, h_mzams);
+        Kokkos::deep_copy(stellar_age, h_sage);
+        Kokkos::deep_copy(stellar_radius, h_srad);
+        Kokkos::deep_copy(luminosity, h_lum);
+        Kokkos::deep_copy(core_mass, h_cmass);
+        Kokkos::deep_copy(spin_vec, h_spin);
+        Kokkos::deep_copy(spin_mag, h_smag);
+        Kokkos::deep_copy(dt_level0, h_dtl0);
+        Kokkos::deep_copy(grad_mag, h_gmag);
+    }
+
+    N = N_new;
+    return n_removed;
+}
+
 void Particles::partition_by_level() {
     if (N == 0 || n_levels == 0) return;
 
