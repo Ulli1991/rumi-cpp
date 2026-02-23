@@ -123,17 +123,14 @@ void compute_errors(const DiagnosticState& cur, const DiagnosticState& ini,
 #endif
     dE = (E_ini != 0.0) ? std::fabs((E_cur - E_ini) / E_ini) : 0.0;
 
-    if (is_cluster) {
-        // Need total mass from host
+    // For systems initialized in the COM frame (binary/triple tests), P0 ≈ 0
+    // and |dP/P0| is meaningless. Use |dP|/M (absolute drift per unit mass) instead.
+    {
         auto h_mass = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.mass);
         double M_total = 0;
         for (int i = 0; i < p.N; i++) M_total += h_mass(i);
         double dpx = cur.Px - ini.Px, dpy = cur.Py - ini.Py, dpz = cur.Pz - ini.Pz;
         dP = vec_mag(dpx, dpy, dpz) / M_total;
-    } else {
-        double P0_mag = vec_mag(ini.Px, ini.Py, ini.Pz);
-        double P_mag  = vec_mag(cur.Px, cur.Py, cur.Pz);
-        dP = (P0_mag > 0.0) ? std::fabs((P_mag - P0_mag) / P0_mag) : 0.0;
     }
 
     double L0_mag = vec_mag(ini.Lx, ini.Ly, ini.Lz);
@@ -155,7 +152,7 @@ void print_timebin_table(const Particles& p, const std::vector<double>& levels,
             counts[h_level(i)]++;
     }
 
-    const char* p_label = is_cluster ? "|dP|/M [km/s]" : "|dP/P|";
+    const char* p_label = "|dP|/M [km/s]";
 
     const char* e_label = "|dE/E|";
 
@@ -328,17 +325,11 @@ void print_final(const DiagnosticState& cur, const DiagnosticState& ini,
     std::printf("============================================================\n");
 
     std::printf("|dE/E0| = %.15e\n", dE);
-    if (is_cluster) {
-        std::printf("|dP|/M  = %.15e km/s\n", dP);
-    } else {
-        std::printf("|dP/P0| = %.15e\n", dP);
-    }
+    std::printf("|dP|/M  = %.15e km/s\n", dP);
     std::printf("|dL/L0| = %.15e\n", dL);
 #ifdef ENABLE_COLLISIONAL
     if (g_collisional.enabled) {
-        if (g_collisional.pn_order > 0) {
-            std::printf("E_pn1   = %.15e\n", cur.E_pn1);
-        }
+        // E_pn1 computed but not printed (Newtonian E_total only)
         if (g_energy_books.E_gw != 0.0)
             std::printf("E_gw    = %.15e (cumulative GW losses)\n", g_energy_books.E_gw);
         if (g_energy_books.E_merge != 0.0)
