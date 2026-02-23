@@ -147,6 +147,99 @@ void eih_pn_acceleration(const double x_A[3], const double v_A[3], double m_A,
             a_pn_A[k] += prefactor * (-A25 * n[k] * fA + B25 * (-dv[k]) * fA);
         }
     }
+
+    // PN3.0 (conservative, c^-6) — Blanchet 2014 / Blanchet & Iyer 2003
+    // Two-body only, using relative-coordinate formulation mapped to body A.
+    if (pn_order & 8) {
+        double M = m_A + m_B;
+        double mu_rel = G * M;
+        double eta = m_A * m_B / (M * M);
+        double inv_c6 = inv_c2 * inv_c2 * inv_c2;
+        double Gm_r = mu_rel * inv_r;
+        double dv2 = dv[0]*dv[0] + dv[1]*dv[1] + dv[2]*dv[2];
+        double r_dot_v = r_AB[0]*dv[0] + r_AB[1]*dv[1] + r_AB[2]*dv[2];
+        double n_dot_v = r_dot_v * inv_r;
+
+        double Gm_r2 = Gm_r * Gm_r;
+        double Gm_r3 = Gm_r2 * Gm_r * inv_r;
+        double v4 = dv2 * dv2;
+        double v6 = v4 * dv2;
+        double ndv2 = n_dot_v * n_dot_v;
+        double ndv4 = ndv2 * ndv2;
+
+        // Coefficient of n (radial): from Blanchet 2014 Eq. (203)
+        double A3 =
+            + eta * (3.0 - 6.0*eta + 3.0*eta*eta) * v6 / 16.0
+            + eta * Gm_r * (
+                - (13.5 - 5.0*eta + 21.75*eta*eta) * v4
+                + eta * (6.0 - 22.5*eta) * dv2 * ndv2
+                + (7.5*eta*eta) * ndv4
+            )
+            + Gm_r2 * inv_r * (
+                + (16.0 + 35.0/6.0*eta - 203.0/12.0*eta*eta) * dv2
+                + eta * (-31.5 + 22.5*eta) * ndv2
+            )
+            + Gm_r3 * (
+                + (227.0/12.0 - 53.0/4.0*eta + 41.0/64.0*M_PI*M_PI*eta)
+            );
+
+        // Coefficient of v (tangential)
+        double B3 =
+            + eta * Gm_r * n_dot_v * (
+                (13.5 - 15.75*eta + 2.0*eta*eta) * dv2
+                - eta * (3.0 - 7.5*eta) * ndv2
+            )
+            + Gm_r2 * inv_r * n_dot_v * (
+                + (-16.0 + 13.0*eta + 4.5*eta*eta)
+            );
+
+        double fA = m_B / M;
+        double prefactor = mu_rel * inv_r2 * inv_c6;
+        for (int k = 0; k < 3; k++) {
+            // Map relative acceleration to body A: a_A = (m_B/M) * a_rel
+            a_pn_A[k] += prefactor * (A3 * n[k] + B3 * dv[k]) * fA;
+        }
+    }
+
+    // PN3.5 (dissipative, c^-7) — Blanchet 2014 / Iyer & Will 1995
+    // Higher-order radiation reaction beyond PN2.5
+    if (pn_order & 16) {
+        double M = m_A + m_B;
+        double mu_rel = G * M;
+        double eta = m_A * m_B / (M * M);
+        double inv_c7 = inv_c2 * inv_c2 * inv_c2 / c_code;
+        double Gm_r = mu_rel * inv_r;
+        double dv2 = dv[0]*dv[0] + dv[1]*dv[1] + dv[2]*dv[2];
+        double r_dot_v = r_AB[0]*dv[0] + r_AB[1]*dv[1] + r_AB[2]*dv[2];
+        double n_dot_v = r_dot_v * inv_r;
+
+        double Gm_r2 = Gm_r * Gm_r;
+        double ndv2 = n_dot_v * n_dot_v;
+
+        // Coefficient of n (radial) — Iyer & Will 1995 / Blanchet 2014 Eq. (205)
+        double A35 = n_dot_v * eta * (
+            + (8.0/5.0) * Gm_r * (
+                + (23.0/14.0 - 295.0/14.0*eta) * dv2 * dv2
+                + Gm_r * (-(1690.0/21.0 + 15.0*eta) * dv2 + (326.0/21.0 + 536.0/7.0*eta) * ndv2)
+                + Gm_r2 * inv_r * (12404.0/105.0 + 1816.0/21.0*eta)
+            )
+        );
+
+        // Coefficient of v (tangential)
+        double B35 = eta * (
+            + (8.0/5.0) * Gm_r * (
+                + (-3.0/14.0 + 55.0/14.0*eta) * dv2 * dv2
+                + Gm_r * ((454.0/21.0 - 3.0*eta) * dv2 + (-74.0/21.0 - 148.0/7.0*eta) * ndv2)
+                + Gm_r2 * inv_r * (-4538.0/105.0 - 344.0/21.0*eta)
+            )
+        );
+
+        double fA = m_B / M;
+        double prefactor = mu_rel * inv_r2 * inv_c7;
+        for (int k = 0; k < 3; k++) {
+            a_pn_A[k] += prefactor * (A35 * n[k] + B35 * dv[k]) * fA;
+        }
+    }
 }
 
 // ============================================================================
@@ -312,6 +405,72 @@ void pn_acceleration_relative(const double r[3], const double v[3],
 
         for (int k = 0; k < 3; k++) {
             a_pn[k] += inv_c5 * mu * inv_r2 * (A25 * r[k] * inv_r + B25 * v[k]);
+        }
+    }
+
+    // PN3.0 (conservative, c^-6) — Blanchet 2014
+    if (pn_order & 8) {
+        double inv_c6 = inv_c4 * inv_c2;
+        double Gm_r2 = Gm_r * Gm_r;
+        double Gm_r3 = Gm_r2 * Gm_r * inv_r;
+        double v4 = v2 * v2;
+        double v6 = v4 * v2;
+        double ndv2 = n_dot_v * n_dot_v;
+        double ndv4 = ndv2 * ndv2;
+
+        double A3 =
+            + eta * (3.0 - 6.0*eta + 3.0*eta*eta) * v6 / 16.0
+            + eta * Gm_r * (
+                - (13.5 - 5.0*eta + 21.75*eta*eta) * v4
+                + eta * (6.0 - 22.5*eta) * v2 * ndv2
+                + (7.5*eta*eta) * ndv4
+            )
+            + Gm_r2 * inv_r * (
+                + (16.0 + 35.0/6.0*eta - 203.0/12.0*eta*eta) * v2
+                + eta * (-31.5 + 22.5*eta) * ndv2
+            )
+            + Gm_r3 * (
+                + (227.0/12.0 - 53.0/4.0*eta + 41.0/64.0*M_PI*M_PI*eta)
+            );
+
+        double B3 =
+            + eta * Gm_r * n_dot_v * (
+                (13.5 - 15.75*eta + 2.0*eta*eta) * v2
+                - eta * (3.0 - 7.5*eta) * ndv2
+            )
+            + Gm_r2 * inv_r * n_dot_v * (
+                + (-16.0 + 13.0*eta + 4.5*eta*eta)
+            );
+
+        for (int k = 0; k < 3; k++) {
+            a_pn[k] += inv_c6 * mu * inv_r2 * (A3 * r[k] * inv_r + B3 * v[k]);
+        }
+    }
+
+    // PN3.5 (dissipative, c^-7) — Iyer & Will 1995 / Blanchet 2014
+    if (pn_order & 16) {
+        double inv_c7 = inv_c4 * inv_c2 / c_code;
+        double Gm_r2 = Gm_r * Gm_r;
+        double ndv2 = n_dot_v * n_dot_v;
+
+        double A35 = n_dot_v * eta * (
+            (8.0/5.0) * Gm_r * (
+                (23.0/14.0 - 295.0/14.0*eta) * v2 * v2
+                + Gm_r * (-(1690.0/21.0 + 15.0*eta) * v2 + (326.0/21.0 + 536.0/7.0*eta) * ndv2)
+                + Gm_r2 * inv_r * (12404.0/105.0 + 1816.0/21.0*eta)
+            )
+        );
+
+        double B35 = eta * (
+            (8.0/5.0) * Gm_r * (
+                (-3.0/14.0 + 55.0/14.0*eta) * v2 * v2
+                + Gm_r * ((454.0/21.0 - 3.0*eta) * v2 + (-74.0/21.0 - 148.0/7.0*eta) * ndv2)
+                + Gm_r2 * inv_r * (-4538.0/105.0 - 344.0/21.0*eta)
+            )
+        );
+
+        for (int k = 0; k < 3; k++) {
+            a_pn[k] += inv_c7 * mu * inv_r2 * (A35 * r[k] * inv_r + B35 * v[k]);
         }
     }
 }
