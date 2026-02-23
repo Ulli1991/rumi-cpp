@@ -3,7 +3,6 @@
 #ifdef ENABLE_COLLISIONAL
 #include "collisional_config.h"
 #include "post_newtonian.h"
-#include "subsystem.h"
 #endif
 #include <Kokkos_Core.hpp>
 #include <cmath>
@@ -96,16 +95,8 @@ DiagnosticState compute_diagnostics(const Particles& p, double G, double soft2) 
             d.E_pn1 = pn1_energy(flat_pos.data(), flat_vel.data(), flat_mass.data(),
                                  N, G, g_collisional.c_code);
         }
-        // Don't include PN1 in E_total when secular binaries are active:
-        // the secular integrator is orbit-averaged, so the instantaneous PN1
-        // energy oscillates at the percent level between peri/apo.
-        bool is_secular = false;
-        for (const auto& sub : g_subsystem_mgr.active) {
-            if (sub.is_secular) { is_secular = true; break; }
-        }
-        if (!is_secular) {
-            d.E_total += d.E_pn1 + d.E_pn2;
-        }
+        // E_total stays Newtonian (T+U). PN corrections are tracked
+        // separately in E_pn1/E_pn2 for diagnostics only.
     }
 #endif
 
@@ -163,16 +154,7 @@ void print_timebin_table(const Particles& p, const std::vector<double>& levels,
 
     const char* p_label = is_cluster ? "|dP|/M [km/s]" : "|dP/P|";
 
-    // Annotate energy label with PN order when active
     const char* e_label = "|dE/E|";
-#ifdef ENABLE_COLLISIONAL
-    if (g_collisional.enabled && g_collisional.pn_order > 0 && g_collisional.c_code > 0.0) {
-        int pno = g_collisional.pn_order;
-        if (pno & 4)      e_label = "|dE/E| (PN2.5)";
-        else if (pno & 2) e_label = "|dE/E| (PN2)";
-        else if (pno & 1) e_label = "|dE/E| (PN1)";
-    }
-#endif
 
     std::printf("  %-6s %14s %6s   %12s %14s %12s %14s %8s\n",
                 "Level", "dt [Myr]", "count", e_label, p_label, "|dL/L|", "Time [Myr]", "Step");
@@ -201,17 +183,7 @@ void print_final(const DiagnosticState& cur, const DiagnosticState& ini,
     std::printf("RESULTS\n");
     std::printf("============================================================\n");
 
-    // Annotate energy with PN order when active
-    const char* e_tag = "";
-#ifdef ENABLE_COLLISIONAL
-    if (g_collisional.enabled && g_collisional.pn_order > 0 && g_collisional.c_code > 0.0) {
-        int pno = g_collisional.pn_order;
-        if (pno & 4)      e_tag = " (incl. PN2.5)";
-        else if (pno & 2) e_tag = " (incl. PN2)";
-        else if (pno & 1) e_tag = " (incl. PN1)";
-    }
-#endif
-    std::printf("|dE/E0| = %.15e%s\n", dE, e_tag);
+    std::printf("|dE/E0| = %.15e\n", dE);
     if (is_cluster) {
         std::printf("|dP|/M  = %.15e km/s\n", dP);
     } else {
