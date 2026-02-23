@@ -1962,11 +1962,11 @@ SSEResult SSEContext::evolve(double m_zams, double age_myr) const {
 
         // Check for type change / end condition
         if (kw == 15) {
-            return {15, 0.0, 0.0};
+            return {15, 0.0, 0.0, 0.0, 0.0};
         }
 
         if (tphys >= tphysf) {
-            return {kw, mt, mc};
+            return {kw, mt, mc, r, lum};
         }
 
         // Record radius and age
@@ -2051,5 +2051,5 @@ SSEResult SSEContext::evolve(double m_zams, double age_myr) const {
     }
 
     // If we get here, max iterations reached
-    return {kw, mt, mc};
+    return {kw, mt, mc, r, lum};
 }

@@ -93,6 +93,20 @@ PLUMMER_MASS_DIST = kroupa_evolved  		# equal, kroupa, or kroupa_evolved
 PLUMMER_AGE_GYR = 1.0               		# Cluster age in Gyr (for kroupa_evolved)
 PLUMMER_METALLICITY = 0.02          		# Stellar metallicity Z (solar)
 
+# Plummer binary population
+REMOVE_BH = false                   		# Strip BHs from ICs (for pure stellar cluster)
+BINARY_FRAC = 0.0                   		# Primordial binary fraction (0-1)
+BINARY_A_MIN_AU = 0.01              		# Min semi-major axis for binaries (AU)
+BINARY_A_MAX_AU = 100.0             		# Max semi-major axis for binaries (AU)
+
+# IMBH binary injection
+ADD_IMBH = false                    		# Inject IMBH binary at cluster center
+IMBH_M1 = 500.0                    		# Primary IMBH mass (M_sun)
+IMBH_M2 = 500.0                    		# Secondary IMBH mass (M_sun)
+IMBH_A_PC = 1e-4                   		# IMBH binary semi-major axis (pc)
+IMBH_E = 0.5                       		# IMBH binary eccentricity
+IMBH_SPIN = 0.0                    		# Dimensionless spin (both BHs)
+
 # =============================================================================
 # Output
 # =============================================================================

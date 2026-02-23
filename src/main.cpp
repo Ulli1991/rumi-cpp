@@ -398,6 +398,16 @@ int main(int argc, char** argv) {
         std::string mass_dist = cfg.get_str("PLUMMER_MASS_DIST", "equal");
         double age_gyr      = cfg.get_double("PLUMMER_AGE_GYR", 1.0);
         double metallicity  = cfg.get_double("PLUMMER_METALLICITY", 0.02);
+        bool remove_bh      = (cfg.get_str("REMOVE_BH", "false") == "true");
+        double binary_frac  = cfg.get_double("BINARY_FRAC", 0.0);
+        double bin_a_min_au = cfg.get_double("BINARY_A_MIN_AU", 0.01);
+        double bin_a_max_au = cfg.get_double("BINARY_A_MAX_AU", 100.0);
+        bool add_imbh       = (cfg.get_str("ADD_IMBH", "false") == "true");
+        double imbh_m1      = cfg.get_double("IMBH_M1", 500.0);
+        double imbh_m2      = cfg.get_double("IMBH_M2", 500.0);
+        double imbh_a_pc    = cfg.get_double("IMBH_A_PC", 1e-4);
+        double imbh_e       = cfg.get_double("IMBH_E", 0.5);
+        double imbh_spin    = cfg.get_double("IMBH_SPIN", 0.0);
 
         bool profiling_enabled = (cfg.get_str("PROFILING", "true") == "true");
         serial_n2_gpu = std::stoi(cfg.get_str("SERIAL_N2_GPU", "0"));
@@ -489,7 +499,9 @@ int main(int argc, char** argv) {
                 init_outer_planets(p);
                 names = outer_planet_names;
             } else if (test == "plummer") {
-                init_plummer(p, N_plummer, M_total_msun, r_half_pc, seed, mass_dist, age_gyr, metallicity);
+                init_plummer(p, N_plummer, M_total_msun, r_half_pc, seed, mass_dist, age_gyr, metallicity,
+                             remove_bh, binary_frac, bin_a_min_au, bin_a_max_au,
+                             add_imbh, imbh_m1, imbh_m2, imbh_a_pc, imbh_e, imbh_spin);
             } else if (test == "binary_test") {
                 init_binary_test(p, binary_a_pc, binary_e, binary_m1, binary_m2);
             } else if (test == "binary_test_peri") {

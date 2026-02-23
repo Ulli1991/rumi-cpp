@@ -4,6 +4,8 @@ struct SSEResult {
     int kw;           // Stellar type (0-15)
     double mass;      // Final mass (M_sun)
     double mass_core; // Core mass (M_sun)
+    double radius;    // Stellar radius (R_sun)
+    double luminosity;// Luminosity (L_sun)
 };
 
 class SSEContext {

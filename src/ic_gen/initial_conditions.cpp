@@ -117,34 +117,53 @@ static std::vector<double> sample_kroupa_imf(int N, std::mt19937_64& rng,
 // =========================================================================
 
 void init_plummer(Particles& p, int N, double M_total_msun, double r_half_pc, int seed,
-                  const std::string& mass_distribution, double age_gyr, double metallicity) {
-    p.allocate(N, COLL_ENABLED);
-
-    double M_total = M_total_msun;            // M_sun = code mass unit
+                  const std::string& mass_distribution, double age_gyr, double metallicity,
+                  bool remove_bh, double binary_frac,
+                  double bin_a_min_au, double bin_a_max_au,
+                  bool add_imbh, double imbh_m1, double imbh_m2,
+                  double imbh_a_pc, double imbh_e, double imbh_spin) {
+    // Use host-side std::vectors so we can resize for REMOVE_BH / ADD_IMBH
+    double M_total = M_total_msun;
     double a_pc = r_half_pc / PLUMMER_SCALE_FACTOR;
-    double a = a_pc;                          // pc = code length unit
+    double a = a_pc;
 
     std::mt19937_64 rng(seed);
     std::uniform_real_distribution<double> uni(0.0, 1.0);
 
-    auto h_x = Kokkos::create_mirror_view(p.x);
-    auto h_y = Kokkos::create_mirror_view(p.y);
-    auto h_z = Kokkos::create_mirror_view(p.z);
-    auto h_vx = Kokkos::create_mirror_view(p.vx);
-    auto h_vy = Kokkos::create_mirror_view(p.vy);
-    auto h_vz = Kokkos::create_mirror_view(p.vz);
-    auto h_mass = Kokkos::create_mirror_view(p.mass);
+    std::vector<double> hx(N), hy(N), hz(N);
+    std::vector<double> hvx(N), hvy(N), hvz(N);
+    std::vector<double> hmass(N);
 
+    // Collisional fields (populated for all mass distributions)
+    std::vector<int>    h_kw(N, 1);         // stellar type (default: MS)
+    std::vector<double> h_mzams(N, 0.0);    // ZAMS mass
+    std::vector<double> h_sage(N, 0.0);     // stellar age (Myr)
+    std::vector<double> h_srad(N, 0.0);     // radius (R_sun)
+    std::vector<double> h_lum(N, 0.0);      // luminosity (L_sun)
+    std::vector<double> h_mcore(N, 0.0);    // core mass
+
+    // =====================================================================
     // Generate masses
+    // =====================================================================
     if (mass_distribution == "equal") {
         double m_per = M_total / N;
-        for (int i = 0; i < N; i++) h_mass(i) = m_per;
+        for (int i = 0; i < N; i++) {
+            hmass[i] = m_per;
+            h_mzams[i] = m_per;
+            h_srad[i] = std::pow(m_per, 0.8);  // ZAMS R ~ M^0.8
+            h_lum[i] = std::pow(m_per, 3.5);   // ZAMS L ~ M^3.5
+        }
         std::printf("  Equal mass: %.4f M_sun per particle\n", M_total_msun / N);
     } else if (mass_distribution == "kroupa") {
         auto masses = sample_kroupa_imf(N, rng);
         double sum = 0;
         for (int i = 0; i < N; i++) sum += masses[i];
-        for (int i = 0; i < N; i++) h_mass(i) = masses[i] * (M_total / sum);
+        for (int i = 0; i < N; i++) {
+            hmass[i] = masses[i] * (M_total / sum);
+            h_mzams[i] = hmass[i];
+            h_srad[i] = std::pow(hmass[i], 0.8);
+            h_lum[i] = std::pow(hmass[i], 3.5);
+        }
         double mn = *std::min_element(masses.begin(), masses.end()) * (M_total_msun / sum);
         double mx = *std::max_element(masses.begin(), masses.end()) * (M_total_msun / sum);
         std::printf("  Raw Kroupa IMF (not evolved)\n");
@@ -154,12 +173,15 @@ void init_plummer(Particles& p, int N, double M_total_msun, double r_half_pc, in
         double age_myr = age_gyr * 1000.0;
         auto m_initial = sample_kroupa_imf(N, rng);
         int n_ms = 0, n_evolved = 0, n_wd = 0, n_ns = 0, n_bh = 0;
-        std::vector<double> masses(N);
-        std::vector<int> kw_types(N);
         for (int i = 0; i < N; i++) {
             SSEResult res = sse.evolve(m_initial[i], age_myr);
-            masses[i] = res.mass;
-            kw_types[i] = res.kw;
+            hmass[i]   = res.mass;
+            h_kw[i]    = res.kw;
+            h_mzams[i] = m_initial[i];
+            h_sage[i]  = age_myr;
+            h_srad[i]  = res.radius;
+            h_lum[i]   = res.luminosity;
+            h_mcore[i] = res.mass_core;
             if (res.kw <= 1) n_ms++;
             else if (res.kw >= 2 && res.kw <= 9) n_evolved++;
             else if (res.kw >= 10 && res.kw <= 12) n_wd++;
@@ -167,11 +189,9 @@ void init_plummer(Particles& p, int N, double M_total_msun, double r_half_pc, in
             else if (res.kw == 14) n_bh++;
         }
         // Use physical SSE masses directly (no rescaling)
-        // M_total is determined by the IMF sampling + SSE, not prescribed
         M_total_msun = 0;
-        for (int i = 0; i < N; i++) M_total_msun += masses[i];
+        for (int i = 0; i < N; i++) M_total_msun += hmass[i];
         M_total = M_total_msun;
-        for (int i = 0; i < N; i++) h_mass(i) = masses[i];
 
         double m_to = turnoff_mass(age_gyr, metallicity);
         std::printf("  Stellar population at %.1f Gyr (Z=%.4f, full SSE):\n", age_gyr, metallicity);
@@ -182,27 +202,28 @@ void init_plummer(Particles& p, int N, double M_total_msun, double r_half_pc, in
         std::printf("    White dwarfs:  %d (%.1f%%)\n", n_wd, 100.0 * n_wd / N);
         std::printf("    Neutron stars: %d (%.1f%%)\n", n_ns, 100.0 * n_ns / N);
         std::printf("    Black holes:   %d (%.1f%%)\n", n_bh, 100.0 * n_bh / N);
-        double mn = *std::min_element(masses.begin(), masses.end());
-        double mx = *std::max_element(masses.begin(), masses.end());
+        double mn = *std::min_element(hmass.begin(), hmass.end());
+        double mx = *std::max_element(hmass.begin(), hmass.end());
         std::printf("    Mass range: %.4f - %.4f M_sun\n", mn, mx);
-        // Per-type mass ranges
         double wd_mn = 1e30, wd_mx = 0, ns_mn = 1e30, ns_mx = 0, bh_mn = 1e30, bh_mx = 0;
         for (int i = 0; i < N; i++) {
-            if (kw_types[i] >= 10 && kw_types[i] <= 12) { wd_mn = std::min(wd_mn, masses[i]); wd_mx = std::max(wd_mx, masses[i]); }
-            else if (kw_types[i] == 13) { ns_mn = std::min(ns_mn, masses[i]); ns_mx = std::max(ns_mx, masses[i]); }
-            else if (kw_types[i] == 14) { bh_mn = std::min(bh_mn, masses[i]); bh_mx = std::max(bh_mx, masses[i]); }
+            if (h_kw[i] >= 10 && h_kw[i] <= 12) { wd_mn = std::min(wd_mn, hmass[i]); wd_mx = std::max(wd_mx, hmass[i]); }
+            else if (h_kw[i] == 13) { ns_mn = std::min(ns_mn, hmass[i]); ns_mx = std::max(ns_mx, hmass[i]); }
+            else if (h_kw[i] == 14) { bh_mn = std::min(bh_mn, hmass[i]); bh_mx = std::max(bh_mx, hmass[i]); }
         }
         if (n_wd > 0) std::printf("    WD masses:  %.4f - %.4f M_sun\n", wd_mn, wd_mx);
         if (n_ns > 0) std::printf("    NS masses:  %.4f - %.4f M_sun\n", ns_mn, ns_mx);
         if (n_bh > 0) std::printf("    BH masses:  %.4f - %.4f M_sun\n", bh_mn, bh_mx);
     }
 
-    // Crossing time: t_cr = sqrt(R_h^3 / (G * M)) in code TU, then convert to Myr
+    // Crossing time
     double t_cr_code = std::sqrt(r_half_pc * r_half_pc * r_half_pc / (G_CODE * M_total_msun));
     double t_cr_myr = t_cr_code * TIME_UNIT_MYR;
     std::printf("  Crossing time: %.3f Myr\n", t_cr_myr);
 
-    // Sample positions and velocities
+    // =====================================================================
+    // Sample Plummer positions and velocities
+    // =====================================================================
     for (int i = 0; i < N; i++) {
         double U = std::clamp(uni(rng), 1e-10, 1.0 - 1e-10);
         double r = a / std::sqrt(std::pow(U, -2.0/3.0) - 1.0);
@@ -211,9 +232,9 @@ void init_plummer(Particles& p, int N, double M_total_msun, double r_half_pc, in
         double sin_theta = std::sqrt(1.0 - cos_theta * cos_theta);
         double phi = 2.0 * M_PI * uni(rng);
 
-        h_x(i) = r * sin_theta * std::cos(phi);
-        h_y(i) = r * sin_theta * std::sin(phi);
-        h_z(i) = r * cos_theta;
+        hx[i] = r * sin_theta * std::cos(phi);
+        hy[i] = r * sin_theta * std::sin(phi);
+        hz[i] = r * cos_theta;
 
         double v_escape = std::sqrt(2.0 * G_CODE * M_total / std::sqrt(r*r + a*a));
         while (true) {
@@ -224,31 +245,256 @@ void init_plummer(Particles& p, int N, double M_total_msun, double r_half_pc, in
                 double vcos = 2.0 * uni(rng) - 1.0;
                 double vsin = std::sqrt(1.0 - vcos * vcos);
                 double vphi = 2.0 * M_PI * uni(rng);
-                h_vx(i) = v_mag * vsin * std::cos(vphi);
-                h_vy(i) = v_mag * vsin * std::sin(vphi);
-                h_vz(i) = v_mag * vcos;
+                hvx[i] = v_mag * vsin * std::cos(vphi);
+                hvy[i] = v_mag * vsin * std::sin(vphi);
+                hvz[i] = v_mag * vcos;
                 break;
             }
         }
     }
 
     // Center of mass correction
-    double com_x = 0, com_y = 0, com_z = 0;
-    double com_vx = 0, com_vy = 0, com_vz = 0;
-    for (int i = 0; i < N; i++) {
-        com_x += h_mass(i) * h_x(i);   com_y += h_mass(i) * h_y(i);   com_z += h_mass(i) * h_z(i);
-        com_vx += h_mass(i) * h_vx(i); com_vy += h_mass(i) * h_vy(i); com_vz += h_mass(i) * h_vz(i);
-    }
-    com_x /= M_total; com_y /= M_total; com_z /= M_total;
-    com_vx /= M_total; com_vy /= M_total; com_vz /= M_total;
-    for (int i = 0; i < N; i++) {
-        h_x(i) -= com_x; h_y(i) -= com_y; h_z(i) -= com_z;
-        h_vx(i) -= com_vx; h_vy(i) -= com_vy; h_vz(i) -= com_vz;
+    {
+        double com_x = 0, com_y = 0, com_z = 0;
+        double com_vx = 0, com_vy = 0, com_vz = 0;
+        for (int i = 0; i < N; i++) {
+            com_x += hmass[i] * hx[i];   com_y += hmass[i] * hy[i];   com_z += hmass[i] * hz[i];
+            com_vx += hmass[i] * hvx[i]; com_vy += hmass[i] * hvy[i]; com_vz += hmass[i] * hvz[i];
+        }
+        com_x /= M_total; com_y /= M_total; com_z /= M_total;
+        com_vx /= M_total; com_vy /= M_total; com_vz /= M_total;
+        for (int i = 0; i < N; i++) {
+            hx[i] -= com_x; hy[i] -= com_y; hz[i] -= com_z;
+            hvx[i] -= com_vx; hvy[i] -= com_vy; hvz[i] -= com_vz;
+        }
     }
 
-    Kokkos::deep_copy(p.x, h_x);   Kokkos::deep_copy(p.y, h_y);   Kokkos::deep_copy(p.z, h_z);
-    Kokkos::deep_copy(p.vx, h_vx); Kokkos::deep_copy(p.vy, h_vy); Kokkos::deep_copy(p.vz, h_vz);
-    Kokkos::deep_copy(p.mass, h_mass);
+    // =====================================================================
+    // REMOVE_BH: strip black holes (kw=14) from ICs
+    // =====================================================================
+    if (remove_bh) {
+        int n_removed = 0;
+        int j = 0;
+        for (int i = 0; i < N; i++) {
+            if (h_kw[i] == 14) { n_removed++; continue; }
+            hx[j] = hx[i]; hy[j] = hy[i]; hz[j] = hz[i];
+            hvx[j] = hvx[i]; hvy[j] = hvy[i]; hvz[j] = hvz[i];
+            hmass[j] = hmass[i];
+            h_kw[j] = h_kw[i]; h_mzams[j] = h_mzams[i]; h_sage[j] = h_sage[i];
+            h_srad[j] = h_srad[i]; h_lum[j] = h_lum[i]; h_mcore[j] = h_mcore[i];
+            j++;
+        }
+        N = j;
+        hx.resize(N); hy.resize(N); hz.resize(N);
+        hvx.resize(N); hvy.resize(N); hvz.resize(N);
+        hmass.resize(N);
+        h_kw.resize(N); h_mzams.resize(N); h_sage.resize(N);
+        h_srad.resize(N); h_lum.resize(N); h_mcore.resize(N);
+        M_total = 0;
+        for (int i = 0; i < N; i++) M_total += hmass[i];
+        M_total_msun = M_total;
+        std::printf("  REMOVE_BH: removed %d black holes, N=%d, M_total=%.0f M_sun\n",
+                    n_removed, N, M_total_msun);
+    }
+
+    // =====================================================================
+    // BINARY_FRAC: pair primordial binaries
+    // =====================================================================
+#ifdef ENABLE_COLLISIONAL
+    if (binary_frac > 0.0 && N >= 2) {
+        int N_bin = static_cast<int>(binary_frac * N / 2);
+        if (2 * N_bin > N) N_bin = N / 2;
+
+        // Sort indices by mass (heaviest first) for mass-segregated pairing
+        std::vector<int> idx(N);
+        for (int i = 0; i < N; i++) idx[i] = i;
+        std::sort(idx.begin(), idx.end(), [&](int a, int b) { return hmass[a] > hmass[b]; });
+
+        double bin_a_min_pc = bin_a_min_au * AU_TO_PC;
+        double bin_a_max_pc = bin_a_max_au * AU_TO_PC;
+        double log_a_min = std::log(bin_a_min_pc);
+        double log_a_max = std::log(bin_a_max_pc);
+
+        std::printf("  BINARY_FRAC: pairing %d binaries (%.0f%% of %d particles)\n",
+                    N_bin, 100.0 * 2.0 * N_bin / N, N);
+
+        for (int b = 0; b < N_bin; b++) {
+            int i = idx[2 * b];      // primary (heavier)
+            int j = idx[2 * b + 1];  // secondary
+
+            double m_i = hmass[i], m_j = hmass[j];
+            double M_bin = m_i + m_j;
+            double mu = G_CODE * M_bin;
+
+            // Log-uniform semi-major axis
+            double a_bin = std::exp(log_a_min + uni(rng) * (log_a_max - log_a_min));
+            // Thermal eccentricity: e = sqrt(U)
+            double e_bin = std::sqrt(uni(rng));
+            // Isotropic orientation
+            double inc = std::acos(2.0 * uni(rng) - 1.0);
+            double Omega = 2.0 * M_PI * uni(rng);
+            double omega = 2.0 * M_PI * uni(rng);
+            double M_anom = 2.0 * M_PI * uni(rng);
+
+            double r_rel[3], v_rel[3];
+            elements_to_cartesian(a_bin, e_bin, inc, Omega, omega, M_anom, mu, r_rel, v_rel);
+
+            // COM position/velocity = particle i's Plummer values
+            double cx = hx[i], cy = hy[i], cz = hz[i];
+            // COM velocity = average of both particles' Plummer velocities
+            double cvx = (m_i * hvx[i] + m_j * hvx[j]) / M_bin;
+            double cvy = (m_i * hvy[i] + m_j * hvy[j]) / M_bin;
+            double cvz = (m_i * hvz[i] + m_j * hvz[j]) / M_bin;
+
+            // Split binary around COM
+            hx[i]  = cx - (m_j / M_bin) * r_rel[0];
+            hy[i]  = cy - (m_j / M_bin) * r_rel[1];
+            hz[i]  = cz - (m_j / M_bin) * r_rel[2];
+            hx[j]  = cx + (m_i / M_bin) * r_rel[0];
+            hy[j]  = cy + (m_i / M_bin) * r_rel[1];
+            hz[j]  = cz + (m_i / M_bin) * r_rel[2];
+
+            hvx[i] = cvx - (m_j / M_bin) * v_rel[0];
+            hvy[i] = cvy - (m_j / M_bin) * v_rel[1];
+            hvz[i] = cvz - (m_j / M_bin) * v_rel[2];
+            hvx[j] = cvx + (m_i / M_bin) * v_rel[0];
+            hvy[j] = cvy + (m_i / M_bin) * v_rel[1];
+            hvz[j] = cvz + (m_i / M_bin) * v_rel[2];
+        }
+
+        // Re-center COM after binary placement
+        double com_x = 0, com_y = 0, com_z = 0;
+        double com_vx = 0, com_vy = 0, com_vz = 0;
+        for (int i = 0; i < N; i++) {
+            com_x += hmass[i] * hx[i];   com_y += hmass[i] * hy[i];   com_z += hmass[i] * hz[i];
+            com_vx += hmass[i] * hvx[i]; com_vy += hmass[i] * hvy[i]; com_vz += hmass[i] * hvz[i];
+        }
+        com_x /= M_total; com_y /= M_total; com_z /= M_total;
+        com_vx /= M_total; com_vy /= M_total; com_vz /= M_total;
+        for (int i = 0; i < N; i++) {
+            hx[i] -= com_x; hy[i] -= com_y; hz[i] -= com_z;
+            hvx[i] -= com_vx; hvy[i] -= com_vy; hvz[i] -= com_vz;
+        }
+    }
+#endif
+
+    // =====================================================================
+    // ADD_IMBH: inject IMBH binary at cluster center
+    // =====================================================================
+#ifdef ENABLE_COLLISIONAL
+    if (add_imbh) {
+        int i0 = N, i1 = N + 1;
+        N += 2;
+        hx.resize(N); hy.resize(N); hz.resize(N);
+        hvx.resize(N); hvy.resize(N); hvz.resize(N);
+        hmass.resize(N);
+        h_kw.resize(N); h_mzams.resize(N); h_sage.resize(N);
+        h_srad.resize(N); h_lum.resize(N); h_mcore.resize(N);
+
+        double M_imbh = imbh_m1 + imbh_m2;
+        double mu = G_CODE * M_imbh;
+
+        // Place at apoapsis (same convention as init_binary_test)
+        double r_apo = imbh_a_pc * (1.0 + imbh_e);
+        double v_apo = std::sqrt(mu / imbh_a_pc * (1.0 - imbh_e) / (1.0 + imbh_e + 1e-30));
+
+        double f1 = imbh_m2 / M_imbh;
+        double f2 = imbh_m1 / M_imbh;
+
+        hx[i0] =  f1 * r_apo; hy[i0] = 0; hz[i0] = 0;
+        hx[i1] = -f2 * r_apo; hy[i1] = 0; hz[i1] = 0;
+        hvx[i0] = 0; hvy[i0] =  f1 * v_apo; hvz[i0] = 0;
+        hvx[i1] = 0; hvy[i1] = -f2 * v_apo; hvz[i1] = 0;
+        hmass[i0] = imbh_m1;
+        hmass[i1] = imbh_m2;
+
+        h_kw[i0] = 14; h_kw[i1] = 14;  // BH
+        h_mzams[i0] = imbh_m1; h_mzams[i1] = imbh_m2;
+        h_sage[i0] = 0; h_sage[i1] = 0;
+        h_srad[i0] = 0; h_srad[i1] = 0;  // BH has no stellar radius
+        h_lum[i0] = 0; h_lum[i1] = 0;
+        h_mcore[i0] = imbh_m1; h_mcore[i1] = imbh_m2;
+
+        M_total += M_imbh;
+        M_total_msun = M_total;
+
+        double period_code = 2.0 * M_PI * std::sqrt(imbh_a_pc * imbh_a_pc * imbh_a_pc / mu);
+        double period_yr = period_code * TIME_UNIT_YR;
+        std::printf("  ADD_IMBH: injected %.0f+%.0f M_sun BH binary at center\n", imbh_m1, imbh_m2);
+        std::printf("    a=%.4e pc (%.2f AU), e=%.4f, P=%.4f yr, spin=%.2f\n",
+                    imbh_a_pc, imbh_a_pc / AU_TO_PC, imbh_e, period_yr, imbh_spin);
+    }
+#endif
+
+    // =====================================================================
+    // Allocate Particles and deep_copy from host vectors
+    // =====================================================================
+    p.allocate(N, COLL_ENABLED);
+
+    auto dk_x  = Kokkos::create_mirror_view(p.x);
+    auto dk_y  = Kokkos::create_mirror_view(p.y);
+    auto dk_z  = Kokkos::create_mirror_view(p.z);
+    auto dk_vx = Kokkos::create_mirror_view(p.vx);
+    auto dk_vy = Kokkos::create_mirror_view(p.vy);
+    auto dk_vz = Kokkos::create_mirror_view(p.vz);
+    auto dk_m  = Kokkos::create_mirror_view(p.mass);
+
+    for (int i = 0; i < N; i++) {
+        dk_x(i) = hx[i]; dk_y(i) = hy[i]; dk_z(i) = hz[i];
+        dk_vx(i) = hvx[i]; dk_vy(i) = hvy[i]; dk_vz(i) = hvz[i];
+        dk_m(i) = hmass[i];
+    }
+
+    Kokkos::deep_copy(p.x, dk_x);   Kokkos::deep_copy(p.y, dk_y);   Kokkos::deep_copy(p.z, dk_z);
+    Kokkos::deep_copy(p.vx, dk_vx); Kokkos::deep_copy(p.vy, dk_vy); Kokkos::deep_copy(p.vz, dk_vz);
+    Kokkos::deep_copy(p.mass, dk_m);
+
+    // =====================================================================
+    // Collisional field initialization
+    // =====================================================================
+#ifdef ENABLE_COLLISIONAL
+    if (COLL_ENABLED) {
+        auto dk_pid   = Kokkos::create_mirror_view(p.particle_id);
+        auto dk_stype = Kokkos::create_mirror_view(p.stellar_type);
+        auto dk_mzams = Kokkos::create_mirror_view(p.m_zams);
+        auto dk_sage  = Kokkos::create_mirror_view(p.stellar_age);
+        auto dk_srad  = Kokkos::create_mirror_view(p.stellar_radius);
+        auto dk_lum   = Kokkos::create_mirror_view(p.luminosity);
+        auto dk_mcore = Kokkos::create_mirror_view(p.core_mass);
+        for (int i = 0; i < N; i++) {
+            dk_pid(i)   = i;
+            dk_stype(i) = h_kw[i];
+            dk_mzams(i) = h_mzams[i];
+            dk_sage(i)  = h_sage[i];
+            dk_srad(i)  = h_srad[i];
+            dk_lum(i)   = h_lum[i];
+            dk_mcore(i) = h_mcore[i];
+        }
+        Kokkos::deep_copy(p.particle_id, dk_pid);
+        Kokkos::deep_copy(p.stellar_type, dk_stype);
+        Kokkos::deep_copy(p.m_zams, dk_mzams);
+        Kokkos::deep_copy(p.stellar_age, dk_sage);
+        Kokkos::deep_copy(p.stellar_radius, dk_srad);
+        Kokkos::deep_copy(p.luminosity, dk_lum);
+        Kokkos::deep_copy(p.core_mass, dk_mcore);
+
+        // Initialize spin vectors for IMBH if requested
+        if (add_imbh && imbh_spin > 0.0) {
+            auto dk_spin = Kokkos::create_mirror_view(p.spin_vec);
+            auto dk_smag = Kokkos::create_mirror_view(p.spin_mag);
+            // Spins aligned with z-axis (orbital angular momentum direction)
+            int i0 = N - 2, i1 = N - 1;
+            dk_spin(i0, 0) = 0; dk_spin(i0, 1) = 0; dk_spin(i0, 2) = imbh_spin;
+            dk_spin(i1, 0) = 0; dk_spin(i1, 1) = 0; dk_spin(i1, 2) = imbh_spin;
+            dk_smag(i0) = imbh_spin;
+            dk_smag(i1) = imbh_spin;
+            Kokkos::deep_copy(p.spin_vec, dk_spin);
+            Kokkos::deep_copy(p.spin_mag, dk_smag);
+        }
+    }
+#endif
+
+    std::printf("  Final N=%d, M_total=%.0f M_sun\n", N, M_total_msun);
 }
 
 // =========================================================================
