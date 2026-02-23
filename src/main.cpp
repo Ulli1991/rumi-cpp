@@ -142,6 +142,131 @@ struct BinaryTracker {
         std::fflush(stdout);
     }
 };
+
+// Triple orbit tracker for Kozai-Lidov validation
+// Tracks inner binary (a, e, omega) and mutual inclination at each print step.
+// Conserved Kozai integral: C_K = (1 - e_in^2) * cos^2(i_mut) = const.
+struct TripleTracker {
+    double mu_in;            // G*(m1+m2)
+    double mu_out;           // G*(m1+m2+m3)
+    double m1, m2, m3;
+    double C_K0;             // initial Kozai integral
+    double a_in0, e_in0;     // initial inner orbital elements
+    double i_mut0;           // initial mutual inclination (rad)
+    bool initialized;
+
+    TripleTracker() : initialized(false) {}
+
+    // Find array index of particle with given permanent ID
+    static int find_by_pid(Particles& p, int target_pid) {
+        auto h_pid = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.particle_id);
+        for (int i = 0; i < p.N; i++) {
+            if (h_pid(i) == target_pid) return i;
+        }
+        return -1;
+    }
+
+    // Compute inner binary relative state and outer relative state
+    // (outer body relative to inner COM) using particle_id lookup.
+    void compute_elements(Particles& p, double G,
+                          OrbitalElements& oe_in, OrbitalElements& oe_out,
+                          double& i_mut, double& C_K) {
+        // Look up particles by permanent ID (survives partition_by_level reordering)
+        int i0 = find_by_pid(p, 0);  // inner body 1
+        int i1 = find_by_pid(p, 1);  // inner body 2
+        int i2 = find_by_pid(p, 2);  // outer body
+        if (i0 < 0 || i1 < 0 || i2 < 0) return;
+
+        auto h_x  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.x);
+        auto h_y  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.y);
+        auto h_z  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.z);
+        auto h_vx = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vx);
+        auto h_vy = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vy);
+        auto h_vz = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vz);
+        auto h_m  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.mass);
+
+        // Inner binary: relative vector
+        double r_in[3] = { h_x(i1)-h_x(i0),  h_y(i1)-h_y(i0),  h_z(i1)-h_z(i0)  };
+        double v_in[3] = { h_vx(i1)-h_vx(i0), h_vy(i1)-h_vy(i0), h_vz(i1)-h_vz(i0) };
+        oe_in = cartesian_to_elements(r_in, v_in, mu_in);
+
+        // Inner COM
+        double M_in = m1 + m2;
+        double cx  = (m1*h_x(i0)  + m2*h_x(i1))  / M_in;
+        double cy  = (m1*h_y(i0)  + m2*h_y(i1))  / M_in;
+        double cz  = (m1*h_z(i0)  + m2*h_z(i1))  / M_in;
+        double cvx = (m1*h_vx(i0) + m2*h_vx(i1)) / M_in;
+        double cvy = (m1*h_vy(i0) + m2*h_vy(i1)) / M_in;
+        double cvz = (m1*h_vz(i0) + m2*h_vz(i1)) / M_in;
+
+        // Outer orbit: outer body relative to inner COM
+        double r_out[3] = { h_x(i2)-cx,  h_y(i2)-cy,  h_z(i2)-cz  };
+        double v_out[3] = { h_vx(i2)-cvx, h_vy(i2)-cvy, h_vz(i2)-cvz };
+        oe_out = cartesian_to_elements(r_out, v_out, mu_out);
+
+        // Angular momentum vectors
+        double L_in[3]  = { r_in[1]*v_in[2]  - r_in[2]*v_in[1],
+                            r_in[2]*v_in[0]  - r_in[0]*v_in[2],
+                            r_in[0]*v_in[1]  - r_in[1]*v_in[0] };
+        double L_out[3] = { r_out[1]*v_out[2] - r_out[2]*v_out[1],
+                            r_out[2]*v_out[0] - r_out[0]*v_out[2],
+                            r_out[0]*v_out[1] - r_out[1]*v_out[0] };
+
+        double L_in_mag  = std::sqrt(L_in[0]*L_in[0]  + L_in[1]*L_in[1]  + L_in[2]*L_in[2]);
+        double L_out_mag = std::sqrt(L_out[0]*L_out[0] + L_out[1]*L_out[1] + L_out[2]*L_out[2]);
+
+        double cos_i = (L_in[0]*L_out[0] + L_in[1]*L_out[1] + L_in[2]*L_out[2])
+                       / (L_in_mag * L_out_mag + 1e-30);
+        cos_i = std::max(-1.0, std::min(1.0, cos_i));
+        i_mut = std::acos(cos_i);
+        C_K = (1.0 - oe_in.e * oe_in.e) * cos_i * cos_i;
+    }
+
+    void init(Particles& p, double G) {
+        if (p.N != 3) return;
+        int i0 = find_by_pid(p, 0);
+        int i1 = find_by_pid(p, 1);
+        int i2 = find_by_pid(p, 2);
+        if (i0 < 0 || i1 < 0 || i2 < 0) return;
+        auto h_m = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.mass);
+        m1 = h_m(i0); m2 = h_m(i1); m3 = h_m(i2);
+        mu_in  = G * (m1 + m2);
+        mu_out = G * (m1 + m2 + m3);
+
+        OrbitalElements oe_in, oe_out;
+        double i_mut;
+        compute_elements(p, G, oe_in, oe_out, i_mut, C_K0);
+        a_in0  = oe_in.a;
+        e_in0  = oe_in.e;
+        i_mut0 = i_mut;
+
+        std::printf("TripleTracker: inner a=%.4e pc (%.4f AU), e=%.6f, P=%.4e yr\n",
+                    oe_in.a, oe_in.a / AU_TO_PC, oe_in.e, oe_in.period * TIME_UNIT_YR);
+        std::printf("  outer a=%.4e pc (%.4f AU), e=%.6f, P=%.4e yr\n",
+                    oe_out.a, oe_out.a / AU_TO_PC, oe_out.e, oe_out.period * TIME_UNIT_YR);
+        std::printf("  i_mut=%.2f deg, Kozai C_K=%.8f\n",
+                    i_mut * 180.0 / M_PI, C_K0);
+        std::fflush(stdout);
+        initialized = true;
+    }
+
+    void update(Particles& p, double G, double t_code) {
+        if (!initialized || p.N != 3) return;
+
+        OrbitalElements oe_in, oe_out;
+        double i_mut, C_K;
+        compute_elements(p, G, oe_in, oe_out, i_mut, C_K);
+
+        double dC = (std::fabs(C_K0) > 1e-30) ? (C_K - C_K0) / C_K0 : C_K - C_K0;
+        double t_yr = t_code * TIME_UNIT_YR;
+
+        std::printf("  Triple: t=%.4f yr  a_in=%.4e  e_in=%.6f  i_mut=%.2f deg"
+                    "  a_out=%.4e  e_out=%.6f  C_K=%.8f  dC/C0=%.2e\n",
+                    t_yr, oe_in.a, oe_in.e, i_mut * 180.0 / M_PI,
+                    oe_out.a, oe_out.e, C_K, dC);
+        std::fflush(stdout);
+    }
+};
 #endif
 
 #include <Kokkos_Core.hpp>
@@ -349,6 +474,16 @@ int main(int argc, char** argv) {
         double binary_m1    = cfg.get_double("BINARY_M1", 10.0);
         double binary_m2    = cfg.get_double("BINARY_M2", 10.0);
 
+        // Triple test parameters
+        double triple_a_in  = cfg.get_double("TRIPLE_A_IN_PC", 1e-8);
+        double triple_e_in  = cfg.get_double("TRIPLE_E_IN", 0.1);
+        double triple_m1    = cfg.get_double("TRIPLE_M1", 10.0);
+        double triple_m2    = cfg.get_double("TRIPLE_M2", 10.0);
+        double triple_a_out = cfg.get_double("TRIPLE_A_OUT_PC", 2e-7);
+        double triple_e_out = cfg.get_double("TRIPLE_E_OUT", 0.3);
+        double triple_m3    = cfg.get_double("TRIPLE_M3", 10.0);
+        double triple_incl  = cfg.get_double("TRIPLE_INCL_DEG", 85.0);
+
         if (my_rank == 0 || !use_distributed) {
             if (test == "outer_planets") {
                 init_outer_planets(p);
@@ -359,6 +494,9 @@ int main(int argc, char** argv) {
                 init_binary_test(p, binary_a_pc, binary_e, binary_m1, binary_m2);
             } else if (test == "binary_test_peri") {
                 init_binary_test_peri(p, binary_a_pc, binary_e, binary_m1, binary_m2);
+            } else if (test == "triple_test") {
+                init_triple_test(p, triple_a_in, triple_e_in, triple_m1, triple_m2,
+                                 triple_a_out, triple_e_out, triple_m3, triple_incl);
             } else {
                 std::fprintf(stderr, "Unknown test case: %s\n", test.c_str());
                 MPIComm::finalize();
@@ -534,6 +672,10 @@ int main(int argc, char** argv) {
         if ((test == "binary_test" || test == "binary_test_peri") && g_collisional.enabled && my_rank == 0) {
             bin_tracker.init(work_p, G);
         }
+        TripleTracker triple_tracker;
+        if (test == "triple_test" && g_collisional.enabled && my_rank == 0) {
+            triple_tracker.init(work_p, G);
+        }
 #endif
 
         auto diag0 = compute_diagnostics(work_p, G, soft2);
@@ -556,6 +698,9 @@ int main(int argc, char** argv) {
 #ifdef ENABLE_COLLISIONAL
                 if (bin_tracker.initialized) {
                     bin_tracker.update(work_p, G, t_now);
+                }
+                if (triple_tracker.initialized) {
+                    triple_tracker.update(work_p, G, t_now);
                 }
                 if (g_collisional.enabled && !g_subsystem_mgr.active.empty()) {
                     print_subsystem_diagnostics(work_p, G);
