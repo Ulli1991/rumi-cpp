@@ -11,6 +11,9 @@
 #include "collisional_config.h"
 #include "subsystem.h"
 #include "kepler.h"
+#include "checkpoint.h"
+#include "mergers.h"
+#include "runtime_sse.h"
 CollisionalConfig g_collisional;
 
 // Binary orbit tracker for PN precession validation
@@ -464,6 +467,12 @@ int main(int argc, char** argv) {
                 std::fflush(stdout);
             }
         }
+
+        // Initialize SSE context for runtime stellar evolution
+        SSEContext* g_sse_ctx = nullptr;
+        if (g_collisional.enabled && g_collisional.sse_enabled) {
+            g_sse_ctx = new SSEContext(g_collisional.sse_metallicity);
+        }
 #endif
 
         // Initial force computation + adaptive timestep
@@ -548,6 +557,9 @@ int main(int argc, char** argv) {
                 if (bin_tracker.initialized) {
                     bin_tracker.update(work_p, G, t_now);
                 }
+                if (g_collisional.enabled && !g_subsystem_mgr.active.empty()) {
+                    print_subsystem_diagnostics(work_p, G);
+                }
 #endif
             }
         };
@@ -582,14 +594,53 @@ int main(int argc, char** argv) {
             // diagnostics. HHS recomputes adaptive timesteps at the start of each step from
             // the same state, so skipping it for non-diagnostic steps saves a
             // full O(N^2) pass per step.
+#ifdef ENABLE_COLLISIONAL
+            Checkpoint checkpoint;
+            double eta_gbs_orig = g_collisional.eta_gbs;
+            double r_ngb_orig = g_collisional.r_ngb;
+#endif
             while (t < t_final) {
                 auto step_t0 = std::chrono::high_resolution_clock::now();
+
+#ifdef ENABLE_COLLISIONAL
+                // Runtime stellar evolution before each step
+                if (g_collisional.enabled && g_collisional.sse_enabled && g_sse_ctx) {
+                    double dt_sse_myr = dt_max * TIME_UNIT_MYR;
+                    advance_stellar_evolution(work_p, *g_sse_ctx, dt_sse_myr,
+                                              g_energy_books, G);
+                }
+
+                // Save checkpoint before step for adaptive restart
+                if (g_collisional.enabled && g_collisional.eta_restart > 0.0) {
+                    checkpoint.save(work_p, g_subsystem_mgr, g_energy_books);
+                }
+#endif
 
                 if (use_distributed) {
                     hhs_fsi_step_distributed(dp, dt_max, G, soft2, dt_min, eta, 2);
                 } else {
                     hhs_fsi_step_dynamic(p, 0, p.N, dt_max, G, soft2, dt_min, eta);
                 }
+
+#ifdef ENABLE_COLLISIONAL
+                // Adaptive restart check: if energy error too large, restore and retry
+                if (g_collisional.enabled && g_collisional.eta_restart > 0.0 && checkpoint.valid) {
+                    bool accepted = adaptive_restart_check(
+                        work_p, g_subsystem_mgr, g_energy_books, checkpoint,
+                        diag0.E_total, G, soft2, g_collisional.eta_restart);
+                    if (!accepted) {
+                        // Retry the step (checkpoint already restored)
+                        if (use_distributed) {
+                            hhs_fsi_step_distributed(dp, dt_max, G, soft2, dt_min, eta, 2);
+                        } else {
+                            hhs_fsi_step_dynamic(p, 0, p.N, dt_max, G, soft2, dt_min, eta);
+                        }
+                        // Restore original eta values after retry
+                        g_collisional.eta_gbs = eta_gbs_orig;
+                        g_collisional.r_ngb = r_ngb_orig;
+                    }
+                }
+#endif
 
                 t += dt_max;
                 step++;
@@ -615,6 +666,14 @@ int main(int argc, char** argv) {
                     assign_levels(work_p, levels);
                     work_p.partition_by_level();
                     print_progress(t, step);
+#ifdef ENABLE_COLLISIONAL
+                    // Periodic escaper removal
+                    if (g_collisional.enabled && is_cluster && g_collisional.r_escape_rh > 0) {
+                        int n_esc = remove_escapers(work_p, G, g_collisional.r_escape_rh,
+                                                     g_subsystem_mgr, g_energy_books);
+                        if (n_esc > 0) work_p.compact_remove_zero_mass();
+                    }
+#endif
                     if (my_rank == 0 && profiling_enabled) {
                         g_profiler.print_report(N_display, n_ranks);
                     }
@@ -654,6 +713,9 @@ int main(int argc, char** argv) {
         } else {
             p.deallocate();
         }
+#ifdef ENABLE_COLLISIONAL
+        delete g_sse_ctx;
+#endif
     }
     Kokkos::finalize();
     MPIComm::finalize();
