@@ -741,8 +741,6 @@ int main(int argc, char** argv) {
             // full O(N^2) pass per step.
 #ifdef ENABLE_COLLISIONAL
             Checkpoint checkpoint;
-            double eta_gbs_orig = g_collisional.eta_gbs;
-            double r_ngb_orig = g_collisional.r_ngb;
 #endif
             while (t < t_final) {
                 auto step_t0 = std::chrono::high_resolution_clock::now();
@@ -755,35 +753,95 @@ int main(int argc, char** argv) {
                                               g_energy_books, G);
                 }
 
-                // Save checkpoint before step for adaptive restart
+                // ============================================================
+                // Adaptive restart loop (BIFROST §3.19)
+                // If energy error is too large, restore checkpoint, reduce all
+                // eta parameters by 50%, increase r_ngb by 15%, and retry.
+                // Escape valves: max retries exhausted, or error not decreasing.
+                // ============================================================
                 if (g_collisional.enabled && g_collisional.eta_restart > 0.0) {
-                    checkpoint.save(work_p, g_subsystem_mgr, g_energy_books);
-                }
-#endif
+                    // Save originals ONCE before the loop
+                    double eta_orig      = eta;
+                    double eta_gbs_orig  = g_collisional.eta_gbs;
+                    double eta_grad_orig = g_collisional.eta_grad;
+                    double eta_jerk_orig = g_collisional.eta_jerk;
+                    double eta_pert_orig = g_collisional.eta_pert;
+                    double r_ngb_orig    = g_collisional.r_ngb;
 
-                if (use_distributed) {
-                    hhs_fsi_step_distributed(dp, dt_max, G, soft2, dt_min, eta, 2);
-                } else {
-                    hhs_fsi_step_dynamic(p, 0, p.N, dt_max, G, soft2, dt_min, eta);
-                }
+                    constexpr int max_restarts = 10;
+                    double prev_dE = 1e30;
 
-#ifdef ENABLE_COLLISIONAL
-                // Adaptive restart check: if energy error too large, restore and retry
-                if (g_collisional.enabled && g_collisional.eta_restart > 0.0 && checkpoint.valid) {
-                    bool accepted = adaptive_restart_check(
-                        work_p, g_subsystem_mgr, g_energy_books, checkpoint,
-                        diag0.E_total, G, soft2, g_collisional.eta_restart);
-                    if (!accepted) {
-                        // Retry the step (checkpoint already restored)
+                    for (int restart = 0; restart <= max_restarts; restart++) {
+                        // Save checkpoint
+                        checkpoint.save(work_p, g_subsystem_mgr, g_energy_books);
+
+                        // Run HHS step
                         if (use_distributed) {
                             hhs_fsi_step_distributed(dp, dt_max, G, soft2, dt_min, eta, 2);
                         } else {
                             hhs_fsi_step_dynamic(p, 0, p.N, dt_max, G, soft2, dt_min, eta);
                         }
-                        // Restore original eta values after retry
-                        g_collisional.eta_gbs = eta_gbs_orig;
-                        g_collisional.r_ngb = r_ngb_orig;
+
+                        // Check energy error
+                        double dE = compute_energy_error(work_p, g_energy_books,
+                                                          diag0.E_total, G, soft2);
+
+                        if (dE < g_collisional.eta_restart) {
+                            // Accepted
+                            break;
+                        }
+
+                        if (restart == max_restarts) {
+                            // Max retries exhausted — accept and continue (BIFROST escape valve)
+                            std::printf("RESTART: max retries (%d) reached, accepting |dE/E|=%.2e\n",
+                                        max_restarts, dE);
+                            break;
+                        }
+
+                        if (restart > 0 && dE >= prev_dE) {
+                            // Error not decreasing — accept (BIFROST: "if error starts to increase again")
+                            std::printf("RESTART: dE not decreasing (%.2e >= %.2e), accepting\n",
+                                        dE, prev_dE);
+                            break;
+                        }
+
+                        prev_dE = dE;
+
+                        // Restore checkpoint
+                        checkpoint.restore(work_p, g_subsystem_mgr, g_energy_books);
+
+                        // Reduce ALL eta parameters by 50% (BIFROST §3.19)
+                        eta *= 0.5;
+                        g_collisional.eta_gbs  *= 0.5;
+                        g_collisional.eta_grad *= 0.5;
+                        g_collisional.eta_jerk *= 0.5;
+                        g_collisional.eta_pert *= 0.5;
+
+                        // Increase r_ngb by 15%
+                        g_collisional.r_ngb *= 1.15;
+                        g_collisional.r_ngb_sq = g_collisional.r_ngb * g_collisional.r_ngb;
+
+                        std::printf("RESTART[%d]: |dE/E|=%.2e, reducing etas by 50%%, r_ngb=%.4e\n",
+                                    restart + 1, dE, g_collisional.r_ngb);
                     }
+
+                    // Restore original parameters after step (BIFROST: "original parameters are restored")
+                    eta = eta_orig;
+                    g_collisional.eta_gbs  = eta_gbs_orig;
+                    g_collisional.eta_grad = eta_grad_orig;
+                    g_collisional.eta_jerk = eta_jerk_orig;
+                    g_collisional.eta_pert = eta_pert_orig;
+                    g_collisional.r_ngb    = r_ngb_orig;
+                    g_collisional.r_ngb_sq = r_ngb_orig * r_ngb_orig;
+                } else {
+#endif
+                    // Non-collisional or eta_restart disabled: single step, no restart
+                    if (use_distributed) {
+                        hhs_fsi_step_distributed(dp, dt_max, G, soft2, dt_min, eta, 2);
+                    } else {
+                        hhs_fsi_step_dynamic(p, 0, p.N, dt_max, G, soft2, dt_min, eta);
+                    }
+#ifdef ENABLE_COLLISIONAL
                 }
 #endif
 

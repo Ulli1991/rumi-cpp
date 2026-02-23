@@ -28,6 +28,7 @@ struct LogHState {
     double spin1[3], spin2[3];
     bool has_spins;                          // true for 2-body BH binaries with spins
     double c_code;                           // speed of light (normalized units)
+
 };
 
 // Compute internal accelerations for LogH system

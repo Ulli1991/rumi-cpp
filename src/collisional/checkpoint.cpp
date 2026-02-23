@@ -192,15 +192,12 @@ void Checkpoint::restore(Particles& p, SubsystemManager& mgr,
 }
 
 // ============================================================================
-// Adaptive restart check
+// Compute energy error for adaptive restart check (BIFROST §3.19)
+// Pure function — no side effects.
 // ============================================================================
 
-bool adaptive_restart_check(Particles& p, SubsystemManager& mgr,
-                            EnergyBookkeeping& books,
-                            const Checkpoint& checkpoint,
-                            double E_initial, double G, double soft2,
-                            double eta_restart, int max_retries) {
-    // Compute current energy
+double compute_energy_error(const Particles& p, const EnergyBookkeeping& books,
+                            double E_initial, double G, double soft2) {
     double KE = 0;
     auto pvx = p.vx; auto pvy = p.vy; auto pvz = p.vz;
     auto pm = p.mass;
@@ -228,20 +225,5 @@ bool adaptive_restart_check(Particles& p, SubsystemManager& mgr,
         }, PE);
 
     double E_total = KE + PE + books.total_sink();
-    double dE = std::fabs((E_total - E_initial) / (std::fabs(E_initial) + 1e-30));
-
-    if (dE < eta_restart) {
-        return true;  // step accepted
-    }
-
-    std::printf("RESTART: |dE/E|=%.2e > eta=%.2e, restoring checkpoint\n", dE, eta_restart);
-
-    // Restore and retry with tighter parameters
-    checkpoint.restore(p, mgr, books);
-
-    // Reduce eta parameters by 50%
-    g_collisional.eta_gbs *= 0.5;
-    g_collisional.r_ngb *= 1.15;
-
-    return false;  // step rejected, caller should retry
+    return std::fabs((E_total - E_initial) / (std::fabs(E_initial) + 1e-30));
 }

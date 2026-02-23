@@ -43,6 +43,7 @@ COLLISIONAL = true 				# Master switch to enable proper collional treatment of t
 R_NGB = 1e-3                        		# Neighbor search radius (pc) for subsystem detection
 R_NGB_MAX = 0.1                     		# Max distance for orbital element check (pc)
 ETA_GBS = 1e-10                     		# GBS extrapolation accuracy for LogH integrator
+ETA_RESTART = 1e-4				# Energy error threshold for adaptive restart (BIFROST §3.19)
 N_ORB_SECULAR = 3                   		# Orbits/timestep threshold for secular evolution
 M_PN = 5.0                          		# Minimum mass (M_sun) for PN corrections
 PN_ORDER = 31                        		# PN bitmask: 1=PN1, 2=PN2, 4=PN2.5 (7=all up to PN2.5)
@@ -71,13 +72,15 @@ TRIPLE_A_IN_PC = 1e-8				# Inner semi-major axis in pc
 TRIPLE_E_IN = 0.1				# Inner eccentricity
 TRIPLE_M1 = 10.0				# Inner primary mass (M_sun)
 TRIPLE_M2 = 10.0				# Inner secondary mass (M_sun)
-TRIPLE_A_OUT_PC = 4e-8				# Outer semi-major axis in pc
-TRIPLE_E_OUT = 0.7				# Outer eccentricity
+TRIPLE_A_OUT_PC = 5e-8				# Outer semi-major axis in pc (a_out/a_in=5)
+TRIPLE_E_OUT = 0.1				# Outer eccentricity
 TRIPLE_M3 = 10.0				# Outer body mass (M_sun)
-TRIPLE_INCL_DEG = 85.0				# Mutual inclination (degrees); >39 for Kozai-Lidov
-# To test unstable triple (LogH 3-body, no secular): set TRIPLE_A_OUT_PC = 4e-8
-# (a_out/a_in=4) and TRIPLE_E_OUT = 0.7. This fails Mardling → TRI_U → full LogH
-# integration of the chaotic 3-body interaction (much slower, tests close encounters).
+TRIPLE_INCL_DEG = 45.0				# Mutual inclination (degrees); >39 for Kozai-Lidov
+# Clean unstable triple: a_out/a_in=5, e_out=0.1, i=45°. Clearly Mardling-unstable
+# but mild Kozai (e_max~0.47) — tests LogH 3-body without PN blowup.
+#
+# Hard case (Kozai-driven PN blowup): TRIPLE_A_OUT_PC=4e-8, TRIPLE_E_OUT=0.7,
+# TRIPLE_INCL_DEG=85.0 → a_out/a_in=4, near-resonant Kozai, drives e→1 and B→0.
 
 # =============================================================================
 # Plummer cluster parameters (only used if TEST_CASE = plummer)

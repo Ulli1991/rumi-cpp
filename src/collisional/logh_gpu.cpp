@@ -158,7 +158,11 @@ void SubsystemBatch::unpack(SubsystemManager& mgr, Particles& p) {
     auto h_vx = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vx);
     auto h_vy = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vy);
     auto h_vz = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vz);
+    auto h_m  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.mass);
     auto h_pid = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.particle_id);
+
+    // Also get flat_mass host mirror (has updated masses after mergers)
+    auto h_mass_flat = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), flat_mass);
 
     int max_pid = 0;
     for (int i = 0; i < p.N; i++) max_pid = std::max(max_pid, h_pid(i));
@@ -179,6 +183,7 @@ void SubsystemBatch::unpack(SubsystemManager& mgr, Particles& p) {
             h_vx(idx) = h_vel_out((off + b) * 3 + 0);
             h_vy(idx) = h_vel_out((off + b) * 3 + 1);
             h_vz(idx) = h_vel_out((off + b) * 3 + 2);
+            h_m(idx) = h_mass_flat(off + b);
         }
     }
 
@@ -188,6 +193,7 @@ void SubsystemBatch::unpack(SubsystemManager& mgr, Particles& p) {
     Kokkos::deep_copy(p.vx, h_vx);
     Kokkos::deep_copy(p.vy, h_vy);
     Kokkos::deep_copy(p.vz, h_vz);
+    Kokkos::deep_copy(p.mass, h_m);
 
     // Write persistent B and auxiliary velocities back to subsystems
     for (int s = 0; s < n_sub; s++) {
@@ -433,7 +439,7 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
             double Omega_cur = logh_kinetic_energy(state) + state.B;
             double ds_est = (Omega_cur > 1e-30) ? dt_norm * Omega_cur : dt_norm;
             n_gbs_steps = gbs.integrate_to_time(state, dt_norm, G_norm, ds_est,
-                                                 c_norm, pn_order);
+                                                 c_norm, pn_order, 100000);
         }
 
         // === DEBUG: compute omega after integration ===
@@ -482,9 +488,10 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
         // Step 4: Denormalize and store results
         // CM drifts uniformly: x_CM(t) = x_CM(0) + v_CM * dt
         // ==================================================================
-        double cm_x_final = cm_x + cm_vx * dt;
-        double cm_y_final = cm_y + cm_vy * dt;
-        double cm_z_final = cm_z + cm_vz * dt;
+        double dt_actual = dt;
+        double cm_x_final = cm_x + cm_vx * dt_actual;
+        double cm_y_final = cm_y + cm_vy * dt_actual;
+        double cm_z_final = cm_z + cm_vz * dt_actual;
 
         for (int b = 0; b < nb; b++) {
             h_pos_out((off+b)*3+0) = state.pos[b*3+0] * R_scale + cm_x_final;
@@ -493,6 +500,7 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
             h_vel_out((off+b)*3+0) = state.vel[b*3+0] * V_scale + cm_vx;
             h_vel_out((off+b)*3+1) = state.vel[b*3+1] * V_scale + cm_vy;
             h_vel_out((off+b)*3+2) = state.vel[b*3+2] * V_scale + cm_vz;
+            h_mass(off + b) = state.mass[b] * M_total;
         }
 
         // Store updated B and auxiliary velocities for persistence across calls
@@ -554,6 +562,7 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
 
     Kokkos::deep_copy(batch.flat_pos_out, h_pos_out);
     Kokkos::deep_copy(batch.flat_vel_out, h_vel_out);
+    Kokkos::deep_copy(batch.flat_mass, h_mass);
     Kokkos::deep_copy(batch.energy_error, h_eerr);
     Kokkos::deep_copy(batch.converged, h_conv);
 }

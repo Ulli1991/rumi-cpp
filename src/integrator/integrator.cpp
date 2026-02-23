@@ -931,8 +931,8 @@ static void hhs_fsi_step_dynamic_impl(Particles& p, int start, int count, double
             g_subsystem_mgr.apply_perturbation_timestep(p, G, g_collisional.eta_pert);
             g_subsystem_mgr.accumulate_diagnostics();
 
-            // Merger detection at top level only (depth==0)
-            if (depth == 0 && g_collisional.c_code > 0.0) {
+            // Merger detection at every HHS level (BIFROST §3.14)
+            if (g_collisional.c_code > 0.0) {
                 auto mergers = detect_mergers(g_subsystem_mgr, p, G,
                                                g_collisional.c_code, pivot_dt);
                 for (const auto& ev : mergers) {
@@ -4068,6 +4068,22 @@ static void hhs_fsi_recursive_distributed(
             g_subsystem_mgr.enforce_shared_timestep(dp.local);
             g_subsystem_mgr.apply_perturbation_timestep(dp.local, G, g_collisional.eta_pert);
             g_subsystem_mgr.accumulate_diagnostics();
+
+            // Merger detection at every HHS level (BIFROST §3.14)
+            if (g_collisional.c_code > 0.0) {
+                auto mergers = detect_mergers(g_subsystem_mgr, dp.local, G,
+                                               g_collisional.c_code, pivot_dt);
+                for (const auto& ev : mergers) {
+                    execute_merger(ev, dp.local, g_subsystem_mgr, g_energy_books,
+                                   G, g_collisional.c_code);
+                }
+                if (!mergers.empty()) {
+                    int n_removed = dp.local.compact_remove_zero_mass();
+                    count -= n_removed;
+                    if (count <= 0) return;
+                    g_subsystem_mgr.update_particle_flags(dp.local);
+                }
+            }
         }
 #endif
     }

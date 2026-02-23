@@ -110,8 +110,9 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
     auto h_pb = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
                     Kokkos::subview(ngb_pair_bound, std::make_pair(0, n_pairs)));
 
-    // Get particle IDs on host
+    // Get particle IDs and adaptive timesteps on host
     auto h_pid = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.particle_id);
+    auto h_dt  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.dt_adapt);
 
     // Build mapping from particle_id to array index
     int max_pid = 0;
@@ -221,7 +222,15 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
             }
 
             sub.type = pair_bound ? SubsystemType::BINARY : SubsystemType::FLYBY;
-            sub.dt_sub = dt_step;
+            // Record min(dt_adapt) at detection — before exclusion strips internal pairs
+            {
+                double dt_detect = 1e30;
+                for (int pid : sub.particle_ids) {
+                    int idx = pid_to_idx[pid];
+                    if (idx >= 0) dt_detect = std::min(dt_detect, h_dt(idx));
+                }
+                sub.dt_sub = dt_detect;
+            }
         } else if (sub.n_bodies == 3) {
             // Triple — check stability
             // Find the tightest pair (inner binary)
@@ -287,20 +296,25 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
                     double a_out = oe_out.a;
                     double e_out = oe_out.e;
 
+                    // Always store inner binary elements for triples
+                    // (needed for timestep clamping in enforce_shared_timestep)
+                    if (a_in > 0) {
+                        sub.orb.a = a_in;
+                        sub.orb.e = e_in;
+                    }
+
                     if (a_out > 0) {
                         bool stable = mardling_stability(a_in, e_in, a_out, e_out, m1, m2, m3);
                         sub.type = stable ? SubsystemType::TRIPLE_STABLE : SubsystemType::TRIPLE_UNSTABLE;
                         sub.inner_binary_id = inner_i;  // store inner binary info
                         sub.outer_companion_pid = outer_pid;
 
-                        // Secular flag for triples: based on inner binary period
+                        // Secular flag for stable triples: based on inner binary period
                         if (stable && a_in > 0) {
                             double mu_in = G * (m1 + m2);
                             double P_in = 2.0 * M_PI * std::sqrt(a_in * a_in * a_in / mu_in);
                             sub.n_orb_per_dt = (int)(dt_step / P_in);
                             sub.is_secular = (sub.n_orb_per_dt >= n_orb_secular);
-                            sub.orb.a = a_in;
-                            sub.orb.e = e_in;
                         }
                     } else {
                         sub.type = SubsystemType::TRIPLE_UNSTABLE;
@@ -309,10 +323,26 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
             } else {
                 sub.type = SubsystemType::TRIPLE_UNSTABLE;
             }
-            sub.dt_sub = dt_step;
+            // Record min(dt_adapt) at detection — before exclusion strips internal pairs
+            {
+                double dt_detect = 1e30;
+                for (int pid : sub.particle_ids) {
+                    int idx = pid_to_idx[pid];
+                    if (idx >= 0) dt_detect = std::min(dt_detect, h_dt(idx));
+                }
+                sub.dt_sub = dt_detect;
+            }
         } else {
             sub.type = SubsystemType::MULTIPLET;
-            sub.dt_sub = dt_step;
+            // Record min(dt_adapt) at detection — before exclusion strips internal pairs
+            {
+                double dt_detect = 1e30;
+                for (int pid : sub.particle_ids) {
+                    int idx = pid_to_idx[pid];
+                    if (idx >= 0) dt_detect = std::min(dt_detect, h_dt(idx));
+                }
+                sub.dt_sub = dt_detect;
+            }
         }
 
         active.push_back(sub);
@@ -411,7 +441,6 @@ void SubsystemManager::enforce_shared_timestep(Particles& p) const {
 
     auto h_dt = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.dt_adapt);
     auto h_pid = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.particle_id);
-    auto h_m  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.mass);
 
     // Build pid->idx mapping
     int max_pid = 0;
@@ -427,22 +456,11 @@ void SubsystemManager::enforce_shared_timestep(Particles& p) const {
             if (idx >= 0) dt_min = std::min(dt_min, h_dt(idx));
         }
 
-        // For LogH-integrated multi-body subsystems (triples, multiplets),
-        // also clamp dt by inner orbital period.  GBS extrapolation can't
-        // converge over many orbits of chaotic 3-body dynamics — limit to
-        // a few inner orbits per LogH call.
-        if (!sub.is_secular && sub.n_bodies >= 3 && sub.orb.a > 0.0) {
-            constexpr int N_ORB_LOGH = 5;
-            int idx0 = pid_to_idx[sub.particle_ids[0]];
-            int idx1 = pid_to_idx[sub.particle_ids[1]];
-            if (idx0 >= 0 && idx1 >= 0) {
-                double M_inner = h_m(idx0) + h_m(idx1);
-                double a3 = sub.orb.a * sub.orb.a * sub.orb.a;
-                double P_inner = 2.0 * M_PI * std::sqrt(a3 / (G_CODE * M_inner));
-                double dt_orb = N_ORB_LOGH * P_inner;
-                dt_min = std::min(dt_min, dt_orb);
-            }
-        }
+        // dt_sub clamp DISABLED for testing — see if natural timestep criteria
+        // handle this case without needing the detection-time floor.
+        // if (sub.dt_sub > 0.0 && sub.dt_sub < 1e30) {
+        //     dt_min = std::min(dt_min, sub.dt_sub);
+        // }
 
         for (int pid : sub.particle_ids) {
             int idx = pid_to_idx[pid];

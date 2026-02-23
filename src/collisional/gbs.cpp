@@ -269,7 +269,8 @@ int GBSIntegrator::integrate_to_time(LogHState& state, double t_target, double G
                 double dx = state.pos[j*3] - state.pos[i*3];
                 double dy = state.pos[j*3+1] - state.pos[i*3+1];
                 double dz = state.pos[j*3+2] - state.pos[i*3+2];
-                r_min_now_sq = std::min(r_min_now_sq, dx*dx + dy*dy + dz*dz);
+                double r2 = dx*dx + dy*dy + dz*dz;
+                if (r2 < r_min_now_sq) r_min_now_sq = r2;
             }
         }
         double r_min_now = std::sqrt(r_min_now_sq);

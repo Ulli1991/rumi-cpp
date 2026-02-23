@@ -292,6 +292,14 @@ void init_binary_test(Particles& p, double a_pc, double e,
     Kokkos::deep_copy(p.vx, h_vx); Kokkos::deep_copy(p.vy, h_vy); Kokkos::deep_copy(p.vz, h_vz);
     Kokkos::deep_copy(p.mass, h_mass);
 
+    // Set stellar types: BH (type 14) for masses above M_PN threshold
+    {
+        auto h_stype = Kokkos::create_mirror_view(p.stellar_type);
+        h_stype(0) = (m1_msun >= 5.0) ? 14 : 0;
+        h_stype(1) = (m2_msun >= 5.0) ? 14 : 0;
+        Kokkos::deep_copy(p.stellar_type, h_stype);
+    }
+
     // Informational output
     double period_code = 2.0 * M_PI * std::sqrt(a_pc * a_pc * a_pc / mu);
     double period_yr = period_code * TIME_UNIT_YR;
@@ -337,6 +345,14 @@ void init_binary_test_peri(Particles& p, double a_pc, double e,
     Kokkos::deep_copy(p.x, h_x);   Kokkos::deep_copy(p.y, h_y);   Kokkos::deep_copy(p.z, h_z);
     Kokkos::deep_copy(p.vx, h_vx); Kokkos::deep_copy(p.vy, h_vy); Kokkos::deep_copy(p.vz, h_vz);
     Kokkos::deep_copy(p.mass, h_mass);
+
+    // Set stellar types: BH (type 14) for masses above M_PN threshold
+    {
+        auto h_stype = Kokkos::create_mirror_view(p.stellar_type);
+        h_stype(0) = (m1_msun >= 5.0) ? 14 : 0;
+        h_stype(1) = (m2_msun >= 5.0) ? 14 : 0;
+        Kokkos::deep_copy(p.stellar_type, h_stype);
+    }
 
     double period_code = 2.0 * M_PI * std::sqrt(a_pc * a_pc * a_pc / mu);
     double period_yr = period_code * TIME_UNIT_YR;
@@ -419,6 +435,15 @@ void init_triple_test(Particles& p,
     Kokkos::deep_copy(p.x, h_x);   Kokkos::deep_copy(p.y, h_y);   Kokkos::deep_copy(p.z, h_z);
     Kokkos::deep_copy(p.vx, h_vx); Kokkos::deep_copy(p.vy, h_vy); Kokkos::deep_copy(p.vz, h_vz);
     Kokkos::deep_copy(p.mass, h_mass);
+
+    // Set stellar types: BH (type 14) for masses above M_PN threshold
+    {
+        auto h_stype = Kokkos::create_mirror_view(p.stellar_type);
+        h_stype(0) = (m1_msun >= 5.0) ? 14 : 0;
+        h_stype(1) = (m2_msun >= 5.0) ? 14 : 0;
+        h_stype(2) = (m3_msun >= 5.0) ? 14 : 0;
+        Kokkos::deep_copy(p.stellar_type, h_stype);
+    }
 
     // Informational output
     double P_in_code = 2.0 * M_PI * std::sqrt(a_in_pc * a_in_pc * a_in_pc / mu_in);

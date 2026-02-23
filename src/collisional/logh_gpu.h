@@ -2,6 +2,7 @@
 
 #include "particles.h"
 #include "subsystem.h"
+#include "logh.h"
 #include <Kokkos_Core.hpp>
 #include <vector>
 
@@ -43,7 +44,8 @@ struct SubsystemBatch {
     // stored_spins[s] = {chi1[3], chi2[3]} for subsystem s
     std::vector<double> stored_spins;  // flat: [n_sub * 6]
     std::vector<bool> has_stored_spins;
-    std::vector<int> stored_stellar_type;  // flat: [n_sub * 2] for 2-body
+    std::vector<int> stored_stellar_type;  // flat: [n_sub * 2] for 2-body (spins)
+
 
     // Allocate buffers
     void allocate(int n_sub, int total_bodies);

@@ -41,10 +41,7 @@ struct Checkpoint {
                  EnergyBookkeeping& books) const;
 };
 
-// Check energy error and potentially rollback + retry
-// Returns true if the step was accepted (possibly after retries)
-bool adaptive_restart_check(Particles& p, SubsystemManager& mgr,
-                            EnergyBookkeeping& books,
-                            const Checkpoint& checkpoint,
-                            double E_initial, double G, double soft2,
-                            double eta_restart, int max_retries = 5);
+// Compute relative energy error |dE/E| for adaptive restart check (BIFROST §3.19).
+// Pure function — no side effects. Caller handles restart logic.
+double compute_energy_error(const Particles& p, const EnergyBookkeeping& books,
+                            double E_initial, double G, double soft2);
