@@ -348,3 +348,97 @@ void init_binary_test_peri(Particles& p, double a_pc, double e,
                 e, r_peri, r_peri / AU_TO_PC, r_apo, r_apo / AU_TO_PC);
     std::printf("  Period = %.4f yr (%.4e Myr), starting at PERIAPSIS\n", period_yr, period_yr / 1e6);
 }
+
+// =========================================================================
+// Hierarchical triple test case
+// =========================================================================
+
+void init_triple_test(Particles& p,
+                      double a_in_pc, double e_in, double m1_msun, double m2_msun,
+                      double a_out_pc, double e_out, double m3_msun,
+                      double i_deg) {
+    p.allocate(3, COLL_ENABLED);
+
+    double M_in  = m1_msun + m2_msun;
+    double M_tot = M_in + m3_msun;
+    double mu_in  = G_CODE * M_in;
+    double mu_out = G_CODE * M_tot;
+    double i_rad  = i_deg * M_PI / 180.0;
+
+    // --- Inner binary at apoapsis (in x-y plane) ---
+    double r_apo_in = a_in_pc * (1.0 + e_in);
+    double v_apo_in = std::sqrt(mu_in / a_in_pc * (1.0 - e_in) / (1.0 + e_in + 1e-30));
+    double f1 = m2_msun / M_in;   // particle 0 fraction
+    double f2 = m1_msun / M_in;   // particle 1 fraction
+
+    // Inner binary positions/velocities relative to inner COM
+    // Apoapsis along +x, velocity along +y (CCW orbit, L along +z)
+    double x0 =  f1 * r_apo_in,  vy0 =  f1 * v_apo_in;
+    double x1 = -f2 * r_apo_in,  vy1 = -f2 * v_apo_in;
+
+    // --- Outer orbit at apoapsis ---
+    // Outer angular momentum direction: L_out = (0, sin(i), cos(i))
+    // At apoapsis: position along +x, velocity along (0, cos(i), -sin(i))
+    double r_apo_out = a_out_pc * (1.0 + e_out);
+    double v_apo_out = std::sqrt(mu_out / a_out_pc * (1.0 - e_out) / (1.0 + e_out + 1e-30));
+
+    // Outer relative position and velocity (m3 relative to inner COM)
+    double r3_x = r_apo_out;
+    double v3_y =  v_apo_out * std::cos(i_rad);
+    double v3_z = -v_apo_out * std::sin(i_rad);
+
+    // Shift to total COM frame:
+    // inner COM offset = -(m3/M_tot) * r3_vec
+    // m3 offset = (M_in/M_tot) * r3_vec
+    double f_in  = -m3_msun / M_tot;   // inner COM shift fraction
+    double f_out =  M_in / M_tot;      // outer body shift fraction
+
+    auto h_x  = Kokkos::create_mirror_view(p.x);
+    auto h_y  = Kokkos::create_mirror_view(p.y);
+    auto h_z  = Kokkos::create_mirror_view(p.z);
+    auto h_vx = Kokkos::create_mirror_view(p.vx);
+    auto h_vy = Kokkos::create_mirror_view(p.vy);
+    auto h_vz = Kokkos::create_mirror_view(p.vz);
+    auto h_mass = Kokkos::create_mirror_view(p.mass);
+
+    // Particle 0 (m1): inner binary + COM shift
+    h_x(0) = x0 + f_in * r3_x;  h_y(0) = 0.0;                    h_z(0) = 0.0;
+    h_vx(0) = 0.0;               h_vy(0) = vy0 + f_in * v3_y;     h_vz(0) = f_in * v3_z;
+    h_mass(0) = m1_msun;
+
+    // Particle 1 (m2): inner binary + COM shift
+    h_x(1) = x1 + f_in * r3_x;  h_y(1) = 0.0;                    h_z(1) = 0.0;
+    h_vx(1) = 0.0;               h_vy(1) = vy1 + f_in * v3_y;     h_vz(1) = f_in * v3_z;
+    h_mass(1) = m2_msun;
+
+    // Particle 2 (m3): outer body
+    h_x(2) = f_out * r3_x;      h_y(2) = 0.0;                    h_z(2) = 0.0;
+    h_vx(2) = 0.0;               h_vy(2) = f_out * v3_y;          h_vz(2) = f_out * v3_z;
+    h_mass(2) = m3_msun;
+
+    Kokkos::deep_copy(p.x, h_x);   Kokkos::deep_copy(p.y, h_y);   Kokkos::deep_copy(p.z, h_z);
+    Kokkos::deep_copy(p.vx, h_vx); Kokkos::deep_copy(p.vy, h_vy); Kokkos::deep_copy(p.vz, h_vz);
+    Kokkos::deep_copy(p.mass, h_mass);
+
+    // Informational output
+    double P_in_code = 2.0 * M_PI * std::sqrt(a_in_pc * a_in_pc * a_in_pc / mu_in);
+    double P_out_code = 2.0 * M_PI * std::sqrt(a_out_pc * a_out_pc * a_out_pc / mu_out);
+    double P_in_yr = P_in_code * TIME_UNIT_YR;
+    double P_out_yr = P_out_code * TIME_UNIT_YR;
+    double ratio = a_out_pc / a_in_pc;
+
+    // Kozai-Lidov timescale estimate: T_KL ~ (M_tot/m3) * (a_out/a_in)^3 * P_in / (1-e_out^2)^{3/2}
+    double T_KL_yr = (M_tot / m3_msun) * ratio * ratio * ratio * P_in_yr
+                     / std::pow(1.0 - e_out * e_out, 1.5);
+
+    std::printf("Triple test (hierarchical):\n");
+    std::printf("  Inner: m1=%.1f m2=%.1f M_sun, a=%.4e pc (%.4f AU), e=%.4f\n",
+                m1_msun, m2_msun, a_in_pc, a_in_pc / AU_TO_PC, e_in);
+    std::printf("  Outer: m3=%.1f M_sun, a=%.4e pc (%.4f AU), e=%.4f\n",
+                m3_msun, a_out_pc, a_out_pc / AU_TO_PC, e_out);
+    std::printf("  Mutual inclination: %.1f deg\n", i_deg);
+    std::printf("  a_out/a_in = %.1f\n", ratio);
+    std::printf("  P_inner = %.6f yr, P_outer = %.6f yr\n", P_in_yr, P_out_yr);
+    std::printf("  Kozai-Lidov timescale ~ %.2f yr (%.4e Myr)\n", T_KL_yr, T_KL_yr / 1e6);
+    std::printf("  Starting both orbits at APOAPSIS\n");
+}

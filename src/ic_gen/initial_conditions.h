@@ -15,3 +15,12 @@ void init_binary_test(Particles& p, double a_pc, double e,
                       double m1_msun, double m2_msun);
 void init_binary_test_peri(Particles& p, double a_pc, double e,
                            double m1_msun, double m2_msun);
+
+// Hierarchical triple test case (3 particles):
+// Inner binary (m1, m2) with semi-major axis a_in, eccentricity e_in in x-y plane.
+// Outer body m3 orbits inner COM with semi-major axis a_out, eccentricity e_out,
+// tilted by inclination i_deg (degrees) for Kozai-Lidov oscillations.
+void init_triple_test(Particles& p,
+                      double a_in_pc, double e_in, double m1_msun, double m2_msun,
+                      double a_out_pc, double e_out, double m3_msun,
+                      double i_deg);
