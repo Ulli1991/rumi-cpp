@@ -3,6 +3,7 @@
 #ifdef ENABLE_COLLISIONAL
 #include "collisional_config.h"
 #include "post_newtonian.h"
+#include "subsystem.h"
 #endif
 #include <Kokkos_Core.hpp>
 #include <cmath>
@@ -95,7 +96,16 @@ DiagnosticState compute_diagnostics(const Particles& p, double G, double soft2) 
             d.E_pn1 = pn1_energy(flat_pos.data(), flat_vel.data(), flat_mass.data(),
                                  N, G, g_collisional.c_code);
         }
-        d.E_total += d.E_pn1 + d.E_pn2;
+        // Don't include PN1 in E_total when secular binaries are active:
+        // the secular integrator is orbit-averaged, so the instantaneous PN1
+        // energy oscillates at the percent level between peri/apo.
+        bool is_secular = false;
+        for (const auto& sub : g_subsystem_mgr.active) {
+            if (sub.is_secular) { is_secular = true; break; }
+        }
+        if (!is_secular) {
+            d.E_total += d.E_pn1 + d.E_pn2;
+        }
     }
 #endif
 
