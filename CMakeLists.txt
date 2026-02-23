@@ -45,6 +45,7 @@ if(ENABLE_COLLISIONAL)
         ${SRC_DIR}/collisional/mergers.cpp
         ${SRC_DIR}/collisional/mstar.cpp
         ${SRC_DIR}/collisional/checkpoint.cpp
+        ${SRC_DIR}/collisional/runtime_sse.cpp
     )
 endif()
 

@@ -45,10 +45,10 @@ R_NGB_MAX = 0.1                     		# Max distance for orbital element check (
 ETA_GBS = 1e-10                     		# GBS extrapolation accuracy for LogH integrator
 N_ORB_SECULAR = 3                   		# Orbits/timestep threshold for secular evolution
 M_PN = 5.0                          		# Minimum mass (M_sun) for PN corrections
-PN_ORDER = 1                        		# PN bitmask: 1=PN1, 2=PN2, 4=PN2.5 (7=all up to PN2.5)
+PN_ORDER = 31                        		# PN bitmask: 1=PN1, 2=PN2, 4=PN2.5 (7=all up to PN2.5)
 R_ESCAPE_RH = 100.0                 		# Escape radius in half-mass radii
 MSTAR_THRESHOLD = 8                 		# N-body threshold: MSTAR (>=) vs LogH (<)
-SSE_ENABLED = true                  		# Runtime single stellar evolution
+SSE_ENABLED = false                  		# Runtime single stellar evolution
 SSE_METALLICITY = 0.02              		# Metallicity Z for SSE
 
 # =============================================================================
@@ -56,7 +56,7 @@ SSE_METALLICITY = 0.02              		# Metallicity Z for SSE
 # BH binary for PN precession test (BIFROST Fig. 2).
 # Period ~ 2.24e-4 yr at 0.01 AU. PN1 precession ~ 2e-3 rad/orbit.
 # =============================================================================
-BINARY_A_PC = 4.848e-8				# Semi-major axis in pc (= 0.01 AU)
+BINARY_A_PC = 1e-8				# Semi-major axis in pc (= 0.01 AU, 4.848e-8)
 BINARY_E = 0.9					# Eccentricity (high for visible precession)
 BINARY_M1 = 10.0				# Primary mass in M_sun (BH)
 BINARY_M2 = 10.0				# Secondary mass in M_sun (BH)
