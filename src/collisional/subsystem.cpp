@@ -1,5 +1,6 @@
 #include "subsystem.h"
 #include "collisional_config.h"
+#include "constants.h"
 #include <algorithm>
 #include <numeric>
 #include <cmath>
@@ -175,6 +176,14 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
     // Create subsystems
     active.clear();
     auto h_mass = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.mass);
+    // Position/velocity mirrors created lazily (only for triples, avoids N-sized D2H for binaries)
+    bool have_pos = false;
+    auto h_x  = Kokkos::create_mirror_view(Kokkos::HostSpace(), p.x);
+    auto h_y  = Kokkos::create_mirror_view(Kokkos::HostSpace(), p.y);
+    auto h_z  = Kokkos::create_mirror_view(Kokkos::HostSpace(), p.z);
+    auto h_vx = Kokkos::create_mirror_view(Kokkos::HostSpace(), p.vx);
+    auto h_vy = Kokkos::create_mirror_view(Kokkos::HostSpace(), p.vy);
+    auto h_vz = Kokkos::create_mirror_view(Kokkos::HostSpace(), p.vz);
 
     for (auto& [root, members] : components) {
         Subsystem sub{};
@@ -256,17 +265,27 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
                         }
                     }
 
-                    // Approximate outer semi-major axis from CoM
-                    // (simplified — use pair between outer and inner CoM)
-                    double a_out = 0.0, e_out = 0.0;
-                    for (auto& pr : pairs) {
-                        if ((pr.pid_lo == outer_pid || pr.pid_hi == outer_pid) &&
-                            pr.bound && pr.a > a_in) {
-                            a_out = pr.a;
-                            e_out = pr.e;
-                            break;
-                        }
+                    // Compute outer orbit relative to inner binary COM
+                    // (pairwise elements use wrong mu and wrong relative vector)
+                    if (!have_pos) {
+                        Kokkos::deep_copy(h_x, p.x);   Kokkos::deep_copy(h_y, p.y);
+                        Kokkos::deep_copy(h_z, p.z);   Kokkos::deep_copy(h_vx, p.vx);
+                        Kokkos::deep_copy(h_vy, p.vy);  Kokkos::deep_copy(h_vz, p.vz);
+                        have_pos = true;
                     }
+                    double M_in = m1 + m2;
+                    double mu_out = G * (M_in + m3);
+                    double cx  = (m1*h_x(idx_i)  + m2*h_x(idx_j))  / M_in;
+                    double cy  = (m1*h_y(idx_i)  + m2*h_y(idx_j))  / M_in;
+                    double cz  = (m1*h_z(idx_i)  + m2*h_z(idx_j))  / M_in;
+                    double cvx = (m1*h_vx(idx_i) + m2*h_vx(idx_j)) / M_in;
+                    double cvy = (m1*h_vy(idx_i) + m2*h_vy(idx_j)) / M_in;
+                    double cvz = (m1*h_vz(idx_i) + m2*h_vz(idx_j)) / M_in;
+                    double r_out[3] = { h_x(idx_o)-cx,  h_y(idx_o)-cy,  h_z(idx_o)-cz };
+                    double v_out[3] = { h_vx(idx_o)-cvx, h_vy(idx_o)-cvy, h_vz(idx_o)-cvz };
+                    auto oe_out = cartesian_to_elements(r_out, v_out, mu_out);
+                    double a_out = oe_out.a;
+                    double e_out = oe_out.e;
 
                     if (a_out > 0) {
                         bool stable = mardling_stability(a_in, e_in, a_out, e_out, m1, m2, m3);
@@ -392,6 +411,7 @@ void SubsystemManager::enforce_shared_timestep(Particles& p) const {
 
     auto h_dt = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.dt_adapt);
     auto h_pid = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.particle_id);
+    auto h_m  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.mass);
 
     // Build pid->idx mapping
     int max_pid = 0;
@@ -406,6 +426,24 @@ void SubsystemManager::enforce_shared_timestep(Particles& p) const {
             int idx = pid_to_idx[pid];
             if (idx >= 0) dt_min = std::min(dt_min, h_dt(idx));
         }
+
+        // For LogH-integrated multi-body subsystems (triples, multiplets),
+        // also clamp dt by inner orbital period.  GBS extrapolation can't
+        // converge over many orbits of chaotic 3-body dynamics — limit to
+        // a few inner orbits per LogH call.
+        if (!sub.is_secular && sub.n_bodies >= 3 && sub.orb.a > 0.0) {
+            constexpr int N_ORB_LOGH = 5;
+            int idx0 = pid_to_idx[sub.particle_ids[0]];
+            int idx1 = pid_to_idx[sub.particle_ids[1]];
+            if (idx0 >= 0 && idx1 >= 0) {
+                double M_inner = h_m(idx0) + h_m(idx1);
+                double a3 = sub.orb.a * sub.orb.a * sub.orb.a;
+                double P_inner = 2.0 * M_PI * std::sqrt(a3 / (G_CODE * M_inner));
+                double dt_orb = N_ORB_LOGH * P_inner;
+                dt_min = std::min(dt_min, dt_orb);
+            }
+        }
+
         for (int pid : sub.particle_ids) {
             int idx = pid_to_idx[pid];
             if (idx >= 0) h_dt(idx) = dt_min;
