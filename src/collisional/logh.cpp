@@ -269,6 +269,29 @@ static void compute_pn_all_pairs(const LogHState& state, const double* eval_vel,
 //   C' = C - (eps/2)*W_old,  D' = D - (eps/4)*P
 //   C = ½ Σ mᵢ vᵢ·Δᵢ, D = ⅛ Σ mᵢ|Δᵢ|², Δ = eps*(a+g(w))
 //   W_old = Σ mᵢ vᵢ·gᵢ(w), P = Σ mᵢ Δᵢ·gᵢ(w)
+// Helper: evolve spins for a 2-body BH binary during a K_phys step
+static void evolve_spins_in_kphys(LogHState& state, double dt_phys, double G) {
+    if (!state.has_spins || state.n_bodies != 2 || state.c_code <= 0.0) return;
+
+    // Relative position and velocity
+    double r[3] = {state.pos[1*3+0]-state.pos[0*3+0],
+                   state.pos[1*3+1]-state.pos[0*3+1],
+                   state.pos[1*3+2]-state.pos[0*3+2]};
+    double v[3] = {state.vel[1*3+0]-state.vel[0*3+0],
+                   state.vel[1*3+1]-state.vel[0*3+1],
+                   state.vel[1*3+2]-state.vel[0*3+2]};
+
+    double m1 = state.mass[0], m2 = state.mass[1];
+
+    // Compute precession rates
+    double Omega1[3], Omega2[3];
+    spin_precession(r, v, m1, m2, state.spin1, state.spin2,
+                    G, state.c_code, Omega1, Omega2);
+
+    // Evolve spins by dt_phys
+    evolve_spins(state.spin1, state.spin2, Omega1, Omega2, dt_phys);
+}
+
 static void k_phys_cubic(LogHState& state, const double* accel, const double* pn,
                           double eps, double G) {
     int n = state.n_bodies;
@@ -324,6 +347,12 @@ static void k_phys_cubic(LogHState& state, const double* accel, const double* pn
     // W_mid = W_old + P/(2Ω) = Σ m_i v_mid · g(w)
     double W_mid = W_old + P / (2.0 * Omega);
     state.B -= eps * W_mid * inv_Omega;
+
+    // Evolve spins: physical time elapsed in this K_phys step = eps / Ω
+    if (state.has_spins) {
+        double dt_phys = eps * inv_Omega;
+        evolve_spins_in_kphys(state, dt_phys, G);
+    }
 }
 
 void logh_leapfrog_step_pn(LogHState& state, double ds, double G,

@@ -71,6 +71,9 @@ void SubsystemBatch::pack(const SubsystemManager& mgr, const Particles& p,
     stored_B.resize(n_sub);
     stored_aux_vel.resize(n_sub);
     has_stored_aux_vel.resize(n_sub);
+    stored_spins.resize(n_sub * 6, 0.0);
+    has_stored_spins.resize(n_sub, false);
+    stored_stellar_type.resize(n_sub * 2, 0);
     for (int s = 0; s < n_sub; s++) {
         stored_B[s] = mgr.active[s].B_phys;
         has_stored_aux_vel[s] = mgr.active[s].has_aux_vel;
@@ -78,6 +81,29 @@ void SubsystemBatch::pack(const SubsystemManager& mgr, const Particles& p,
         if (mgr.active[s].has_aux_vel) {
             std::memcpy(stored_aux_vel[s].data(), mgr.active[s].aux_vel_phys,
                         mgr.active[s].n_bodies * 3 * sizeof(double));
+        }
+    }
+
+    // Read spin vectors and stellar types for 2-body BH binaries
+    auto h_spin = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.spin_vec);
+    auto h_stype = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.stellar_type);
+    for (int s = 0; s < n_sub; s++) {
+        const auto& sub = mgr.active[s];
+        if (sub.n_bodies == 2) {
+            int idx0 = pid_to_idx[sub.particle_ids[0]];
+            int idx1 = pid_to_idx[sub.particle_ids[1]];
+            stored_stellar_type[s*2+0] = h_stype(idx0);
+            stored_stellar_type[s*2+1] = h_stype(idx1);
+            bool bh0 = (h_stype(idx0) == 14), bh1 = (h_stype(idx1) == 14);
+            if (bh0 || bh1) {
+                has_stored_spins[s] = true;
+                stored_spins[s*6+0] = h_spin(idx0, 0);
+                stored_spins[s*6+1] = h_spin(idx0, 1);
+                stored_spins[s*6+2] = h_spin(idx0, 2);
+                stored_spins[s*6+3] = h_spin(idx1, 0);
+                stored_spins[s*6+4] = h_spin(idx1, 1);
+                stored_spins[s*6+5] = h_spin(idx1, 2);
+            }
         }
     }
 
@@ -171,6 +197,26 @@ void SubsystemBatch::unpack(SubsystemManager& mgr, Particles& p) {
             std::memcpy(mgr.active[s].aux_vel_phys, stored_aux_vel[s].data(),
                         mgr.active[s].n_bodies * 3 * sizeof(double));
         }
+    }
+
+    // Write evolved spins back to particles
+    auto h_spin = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.spin_vec);
+    bool spins_changed = false;
+    for (int s = 0; s < n_sub; s++) {
+        if (!has_stored_spins[s] || mgr.active[s].n_bodies != 2) continue;
+        const auto& sub = mgr.active[s];
+        int idx0 = pid_to_idx[sub.particle_ids[0]];
+        int idx1 = pid_to_idx[sub.particle_ids[1]];
+        h_spin(idx0, 0) = stored_spins[s*6+0];
+        h_spin(idx0, 1) = stored_spins[s*6+1];
+        h_spin(idx0, 2) = stored_spins[s*6+2];
+        h_spin(idx1, 0) = stored_spins[s*6+3];
+        h_spin(idx1, 1) = stored_spins[s*6+4];
+        h_spin(idx1, 2) = stored_spins[s*6+5];
+        spins_changed = true;
+    }
+    if (spins_changed) {
+        Kokkos::deep_copy(p.spin_vec, h_spin);
     }
 }
 
@@ -325,6 +371,20 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
             pn_order = 0;
         }
 
+        // Load spin vectors for 2-body BH binaries
+        state.has_spins = false;
+        state.c_code = c_norm;
+        if (nb == 2 && batch.has_stored_spins[s]) {
+            // Spins are dimensionless chi vectors — no normalization needed
+            state.has_spins = true;
+            state.spin1[0] = batch.stored_spins[s*6+0];
+            state.spin1[1] = batch.stored_spins[s*6+1];
+            state.spin1[2] = batch.stored_spins[s*6+2];
+            state.spin2[0] = batch.stored_spins[s*6+3];
+            state.spin2[1] = batch.stored_spins[s*6+4];
+            state.spin2[2] = batch.stored_spins[s*6+5];
+        }
+
         // Initialize B in normalized units.
         // If we have a stored B from a previous LogH call, convert from physical
         // to normalized units. Otherwise compute from scratch: B = -(T + U).
@@ -444,6 +504,16 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
                 batch.stored_aux_vel[s][b*3+1] = state.aux_vel[b*3+1] * V_scale + cm_vy;
                 batch.stored_aux_vel[s][b*3+2] = state.aux_vel[b*3+2] * V_scale + cm_vz;
             }
+        }
+
+        // Store evolved spins back (dimensionless, no normalization needed)
+        if (state.has_spins) {
+            batch.stored_spins[s*6+0] = state.spin1[0];
+            batch.stored_spins[s*6+1] = state.spin1[1];
+            batch.stored_spins[s*6+2] = state.spin1[2];
+            batch.stored_spins[s*6+3] = state.spin2[0];
+            batch.stored_spins[s*6+4] = state.spin2[1];
+            batch.stored_spins[s*6+5] = state.spin2[2];
         }
 
         // Energy error in normalized units (dimensionless)

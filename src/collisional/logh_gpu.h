@@ -39,6 +39,12 @@ struct SubsystemBatch {
     std::vector<std::vector<double>> stored_aux_vel;
     std::vector<bool> has_stored_aux_vel;
 
+    // Persistent spin vectors for BH binaries (2-body only, code units)
+    // stored_spins[s] = {chi1[3], chi2[3]} for subsystem s
+    std::vector<double> stored_spins;  // flat: [n_sub * 6]
+    std::vector<bool> has_stored_spins;
+    std::vector<int> stored_stellar_type;  // flat: [n_sub * 2] for 2-body
+
     // Allocate buffers
     void allocate(int n_sub, int total_bodies);
 

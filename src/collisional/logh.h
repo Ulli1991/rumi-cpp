@@ -23,6 +23,11 @@ struct LogHState {
     // Auxiliary velocities for velocity-dependent forces (PN)
     double aux_vel[LOGH_MAX_BODIES * 3];
     bool use_aux_vel;                       // whether PN is active
+
+    // Spin vectors for BH binaries (dimensionless chi vectors)
+    double spin1[3], spin2[3];
+    bool has_spins;                          // true for 2-body BH binaries with spins
+    double c_code;                           // speed of light (normalized units)
 };
 
 // Compute internal accelerations for LogH system
