@@ -40,3 +40,7 @@ void print_final(const DiagnosticState& cur, const DiagnosticState& ini,
                  const Particles& p, const std::vector<double>& levels,
                  bool is_cluster, double wall_sec, int steps,
                  const char* const* names);
+
+#ifdef ENABLE_COLLISIONAL
+void print_subsystem_diagnostics(const Particles& p, double G);
+#endif
