@@ -89,6 +89,15 @@ void compute_acceleration_and_timestep_distributed(DistributedParticles& dp,
     RawView pax{dp.local.ax.data()}, pay{dp.local.ay.data()}, paz{dp.local.az.data()};
     RawView dt_f{dp.local.dt_adapt.data()};
 
+    // Capture eta_ff²/eta_fb² for per-criterion timestep scaling
+#ifdef ENABLE_COLLISIONAL
+    double eta_ff_sq = g_collisional.eta_ff * g_collisional.eta_ff;
+    double eta_fb_sq = g_collisional.eta_fb * g_collisional.eta_fb;
+#else
+    double eta_ff_sq = eta * eta;
+    double eta_fb_sq = eta * eta;
+#endif
+
     // Tiled GPU kernel: each team handles TILE_SIZE i-particles from my slice
     using team_policy = Kokkos::TeamPolicy<>;
     using member_type = team_policy::member_type;
@@ -161,7 +170,7 @@ void compute_acceleration_and_timestep_distributed(DistributedParticles& dp,
                         double r3 = r2s * r2s * inv_r;
                         double t_ff_sq = r3 / (G * mass_sum + EPS);
                         double t_fb_sq = r2s / (v_sq + EPS);
-                        double t_min_sq_pair = Kokkos::fmin(t_ff_sq, t_fb_sq);
+                        double t_min_sq_pair = Kokkos::fmin(eta_ff_sq * t_ff_sq, eta_fb_sq * t_fb_sq);
                         t_min_i = Kokkos::fmin(t_min_i, t_min_sq_pair);
                     }
                 }
@@ -172,7 +181,7 @@ void compute_acceleration_and_timestep_distributed(DistributedParticles& dp,
                 pax(i) = axi;
                 pay(i) = ayi;
                 paz(i) = azi;
-                dt_f(i) = Kokkos::sqrt(t_min_i) * eta;
+                dt_f(i) = Kokkos::sqrt(t_min_i);
             }
         });
     Kokkos::fence();
@@ -1986,6 +1995,15 @@ static void self_acceleration_and_timestep_ring(DistributedParticles& dp, int st
     bool coll = dp.local.collisional;
 #endif
 
+    // Capture eta_ff/eta_fb for per-criterion timestep scaling
+#ifdef ENABLE_COLLISIONAL
+    double eta_ff_v = g_collisional.eta_ff;
+    double eta_fb_v = g_collisional.eta_fb;
+#else
+    double eta_ff_v = eta;
+    double eta_fb_v = eta;
+#endif
+
     using team_policy = Kokkos::TeamPolicy<>;
     using member_type = team_policy::member_type;
     using scratch_space = Kokkos::DefaultExecutionSpace::scratch_memory_space;
@@ -2094,7 +2112,7 @@ static void self_acceleration_and_timestep_ring(DistributedParticles& dp, int st
                         double u_fb = s_fb * fast_rsqrt(s_fb);
                         double t_sym_fb = t_fb + ct_fb / (u_fb + 1.0);
 
-                        t_min_i = Kokkos::fmin(t_min_i, Kokkos::fmin(t_sym_ff, t_sym_fb));
+                        t_min_i = Kokkos::fmin(t_min_i, Kokkos::fmin(eta_ff_v * t_sym_ff, eta_fb_v * t_sym_fb));
                     }
                 }
                 team.team_barrier();
@@ -2104,7 +2122,7 @@ static void self_acceleration_and_timestep_ring(DistributedParticles& dp, int st
                 pax(i) = axi;
                 pay(i) = ayi;
                 paz(i) = azi;
-                dt_f(i) = t_min_i * eta;
+                dt_f(i) = t_min_i;
             }
         });
     Kokkos::fence();
@@ -2144,6 +2162,17 @@ static void compute_timestep_ring(DistributedParticles& dp, int start, int count
     double r_ngb_max_sq_val = coll ? g_collisional.r_ngb_max_sq : 0.0;
     double r_ngb_val = coll ? g_collisional.r_ngb : 0.0;
 #endif
+
+    // Capture eta_ff/eta_fb for per-criterion timestep scaling
+#ifdef ENABLE_COLLISIONAL
+    double eta_ff_v = g_collisional.eta_ff;
+    double eta_fb_v = g_collisional.eta_fb;
+#else
+    double eta_ff_v = eta;
+    double eta_fb_v = eta;
+#endif
+    double eta_ff_sq = eta_ff_v * eta_ff_v;
+    double eta_fb_sq = eta_fb_v * eta_fb_v;
 
     using team_policy = Kokkos::TeamPolicy<>;
     using member_type = team_policy::member_type;
@@ -2250,11 +2279,11 @@ static void compute_timestep_ring(DistributedParticles& dp, int start, int count
                             double u_fb = s_fb * fast_rsqrt(s_fb);
                             double t_sym_fb = t_fb + ct_fb / (u_fb + 1.0);
 
-                            t_min_i = Kokkos::fmin(t_min_i, Kokkos::fmin(t_sym_ff, t_sym_fb));
+                            t_min_i = Kokkos::fmin(t_min_i, Kokkos::fmin(eta_ff_v * t_sym_ff, eta_fb_v * t_sym_fb));
                         } else {
                             double t_ff_sq = r3 / (G * mass_sum + EPS);
                             double t_fb_sq = r2s / (v_sq + EPS);
-                            double t_min_sq_pair = Kokkos::fmin(t_ff_sq, t_fb_sq);
+                            double t_min_sq_pair = Kokkos::fmin(eta_ff_sq * t_ff_sq, eta_fb_sq * t_fb_sq);
                             t_min_sq = Kokkos::fmin(t_min_sq, t_min_sq_pair);
                         }
 
@@ -2304,7 +2333,7 @@ static void compute_timestep_ring(DistributedParticles& dp, int start, int count
             }
 
             if (ii < icnt) {
-                dt_f(i) = symmetrize ? (t_min_i * eta) : (Kokkos::sqrt(t_min_sq) * eta);
+                dt_f(i) = symmetrize ? t_min_i : Kokkos::sqrt(t_min_sq);
 #ifdef ENABLE_COLLISIONAL
                 // Jerk timestep
                 if (coll && eta_jerk_val > 0.0) {
@@ -3116,6 +3145,17 @@ static void compute_timestep_distributed(DistributedParticles& dp, int start, in
     double r_ngb_val = coll ? g_collisional.r_ngb : 0.0;
 #endif
 
+    // Capture eta_ff/eta_fb for per-criterion timestep scaling
+#ifdef ENABLE_COLLISIONAL
+    double eta_ff_v = g_collisional.eta_ff;
+    double eta_fb_v = g_collisional.eta_fb;
+#else
+    double eta_ff_v = eta;
+    double eta_fb_v = eta;
+#endif
+    double eta_ff_sq = eta_ff_v * eta_ff_v;
+    double eta_fb_sq = eta_fb_v * eta_fb_v;
+
     const int j_start = start;
     const int j_end = start + count;
 
@@ -3220,11 +3260,11 @@ static void compute_timestep_distributed(DistributedParticles& dp, int start, in
                             double u_fb = s_fb * fast_rsqrt(s_fb);
                             double t_sym_fb = t_fb + ct_fb / (u_fb + 1.0);
 
-                            t_min_i = Kokkos::fmin(t_min_i, Kokkos::fmin(t_sym_ff, t_sym_fb));
+                            t_min_i = Kokkos::fmin(t_min_i, Kokkos::fmin(eta_ff_v * t_sym_ff, eta_fb_v * t_sym_fb));
                         } else {
                             double t_ff_sq = r3 / (G * mass_sum + EPS);
                             double t_fb_sq = r2s / (v_sq + EPS);
-                            double t_min_sq_pair = Kokkos::fmin(t_ff_sq, t_fb_sq);
+                            double t_min_sq_pair = Kokkos::fmin(eta_ff_sq * t_ff_sq, eta_fb_sq * t_fb_sq);
                             t_min_sq = Kokkos::fmin(t_min_sq, t_min_sq_pair);
                         }
 
@@ -3274,7 +3314,7 @@ static void compute_timestep_distributed(DistributedParticles& dp, int start, in
             }
 
             if (ii < slice_count) {
-                dt_f(i) = symmetrize ? (t_min_i * eta) : (Kokkos::sqrt(t_min_sq) * eta);
+                dt_f(i) = symmetrize ? t_min_i : Kokkos::sqrt(t_min_sq);
 #ifdef ENABLE_COLLISIONAL
                 // Jerk timestep
                 if (coll && eta_jerk_val > 0.0) {
@@ -3595,6 +3635,13 @@ static void cpu_kick(CpuSubset& s, int start, int count, double kick_dt) {
 // CPU timestep computation (N3L: upper triangle, squared-space)
 static void cpu_compute_timestep(CpuSubset& s, int start, int count,
                                  double G, double soft2, double eta) {
+#ifdef ENABLE_COLLISIONAL
+    double eta_ff_sq = g_collisional.eta_ff * g_collisional.eta_ff;
+    double eta_fb_sq = g_collisional.eta_fb * g_collisional.eta_fb;
+#else
+    double eta_ff_sq = eta * eta;
+    double eta_fb_sq = eta * eta;
+#endif
     const int end = start + count;
     for (int i = start; i < end; i++) s.dt_adapt[i] = 1e60;
     for (int i = start; i < end; i++) {
@@ -3613,13 +3660,13 @@ static void cpu_compute_timestep(CpuSubset& s, int start, int count,
             double mass_sum = s.mass[i] + s.mass[j];
             double t_ff_sq = r2_eps * r_norm / (G * mass_sum + EPS);
             double t_fb_sq = r2_eps / (v_sq + EPS);
-            double t_min_sq_pair = std::min(t_ff_sq, t_fb_sq);
+            double t_min_sq_pair = std::min(eta_ff_sq * t_ff_sq, eta_fb_sq * t_fb_sq);
             s.dt_adapt[i] = std::min(s.dt_adapt[i], t_min_sq_pair);
             s.dt_adapt[j] = std::min(s.dt_adapt[j], t_min_sq_pair);
         }
     }
     for (int i = start; i < end; i++) {
-        s.dt_adapt[i] = std::sqrt(s.dt_adapt[i]) * eta;
+        s.dt_adapt[i] = std::sqrt(s.dt_adapt[i]);
     }
 }
 

@@ -45,6 +45,15 @@ static void compute_acceleration_and_timestep_impl(Particles& p, double G, doubl
     double pivot_dt_val = 0.0;
 #endif
 
+    // Capture eta_ff²/eta_fb² for per-criterion timestep scaling
+#ifdef ENABLE_COLLISIONAL
+    double eta_ff_sq = g_collisional.eta_ff * g_collisional.eta_ff;
+    double eta_fb_sq = g_collisional.eta_fb * g_collisional.eta_fb;
+#else
+    double eta_ff_sq = eta * eta;
+    double eta_fb_sq = eta * eta;
+#endif
+
     // Tiled version using shared memory with packed vector loads
     // Each team of TILE_SIZE threads handles TILE_SIZE particles (i)
     // All threads collaborate to load tiles of j particles
@@ -131,7 +140,7 @@ static void compute_acceleration_and_timestep_impl(Particles& p, double G, doubl
                         double r3 = r2s * r2s * inv_r;
                         double t_ff_sq = r3 / (G * mass_sum + EPS);
                         double t_fb_sq = r2s / (v_sq + EPS);
-                        double t_min_sq_pair = Kokkos::fmin(t_ff_sq, t_fb_sq);
+                        double t_min_sq_pair = Kokkos::fmin(eta_ff_sq * t_ff_sq, eta_fb_sq * t_fb_sq);
                         t_min_i = Kokkos::fmin(t_min_i, t_min_sq_pair);
 
                         // Neighbor detection: identify bound/close pairs and unbound fly-bys
@@ -192,12 +201,6 @@ static void compute_acceleration_and_timestep_impl(Particles& p, double G, doubl
                 dt_f(i) = Kokkos::sqrt(t_min_i);
             }
         });
-
-
-    // Apply eta (tiled path already applied sqrt)
-    Kokkos::parallel_for("apply_eta", N, KOKKOS_LAMBDA(int i) {
-        dt_f(i) *= eta;
-    });
 
 }
 
@@ -714,6 +717,17 @@ static void compute_timestep_subset_impl(Particles& p, int start, int count,
     });
 
 
+    // Capture eta_ff/eta_fb for per-criterion timestep scaling
+#ifdef ENABLE_COLLISIONAL
+    double eta_ff_v = g_collisional.eta_ff;
+    double eta_fb_v = g_collisional.eta_fb;
+#else
+    double eta_ff_v = eta;
+    double eta_fb_v = eta;
+#endif
+    double eta_ff_sq = eta_ff_v * eta_ff_v;
+    double eta_fb_sq = eta_fb_v * eta_fb_v;
+
     // Full N^2 within subset - tiled with shared memory, squared-space timestep
     using team_policy = Kokkos::TeamPolicy<>;
     using member_type = team_policy::member_type;
@@ -812,11 +826,11 @@ static void compute_timestep_subset_impl(Particles& p, int start, int count,
                             double u_fb = s_fb * fast_rsqrt(s_fb);
                             double t_sym_fb = t_fb + ct_fb / (u_fb + 1.0);
 
-                            t_min_i = Kokkos::fmin(t_min_i, Kokkos::fmin(t_sym_ff, t_sym_fb));
+                            t_min_i = Kokkos::fmin(t_min_i, Kokkos::fmin(eta_ff_v * t_sym_ff, eta_fb_v * t_sym_fb));
                         } else {
                             double t_ff_sq = r3 / (G * mass_sum + EPS);
                             double t_fb_sq = r2s / (v_sq + EPS);
-                            double t_min_sq_pair = Kokkos::fmin(t_ff_sq, t_fb_sq);
+                            double t_min_sq_pair = Kokkos::fmin(eta_ff_sq * t_ff_sq, eta_fb_sq * t_fb_sq);
                             t_min_sq = Kokkos::fmin(t_min_sq, t_min_sq_pair);
                         }
 
@@ -882,7 +896,7 @@ static void compute_timestep_subset_impl(Particles& p, int start, int count,
             }
 
             if (ii < count) {
-                double dt_val = symmetrize ? (t_min_i * eta) : (Kokkos::sqrt(t_min_sq) * eta);
+                double dt_val = symmetrize ? t_min_i : Kokkos::sqrt(t_min_sq);
 
                 // Jerk timestep: dt_jerk = eta_j * |a| / |j| (collisional only)
                 if (COLL && eta_jerk_val > 0.0) {
@@ -945,6 +959,15 @@ static void self_acceleration_and_timestep_impl(Particles& p, int start, int cou
     double pivot_dt_val = 0.0;
 #endif
     const int end = start + count;
+
+    // Capture eta_ff/eta_fb for per-criterion timestep scaling
+#ifdef ENABLE_COLLISIONAL
+    double eta_ff_v = g_collisional.eta_ff;
+    double eta_fb_v = g_collisional.eta_fb;
+#else
+    double eta_ff_v = eta;
+    double eta_fb_v = eta;
+#endif
 
     using team_policy = Kokkos::TeamPolicy<>;
     using member_type = team_policy::member_type;
@@ -1034,7 +1057,7 @@ static void self_acceleration_and_timestep_impl(Particles& p, int start, int cou
                         double u_fb = s_fb * fast_rsqrt(s_fb);
                         double t_sym_fb = t_fb + ct_fb / (u_fb + 1.0);
 
-                        t_min_i = Kokkos::fmin(t_min_i, Kokkos::fmin(t_sym_ff, t_sym_fb));
+                        t_min_i = Kokkos::fmin(t_min_i, Kokkos::fmin(eta_ff_v * t_sym_ff, eta_fb_v * t_sym_fb));
 
                         // Neighbor detection: identify bound/close pairs and unbound fly-bys
                         if (COLL) {
@@ -1087,7 +1110,7 @@ static void self_acceleration_and_timestep_impl(Particles& p, int start, int cou
             }
             if (ii < count) {
                 pax(i) = axi; pay(i) = ayi; paz(i) = azi;
-                dt_f(i) = t_min_i * eta;
+                dt_f(i) = t_min_i;
             }
         });
 

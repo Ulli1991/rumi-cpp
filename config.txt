@@ -3,7 +3,7 @@
 # =============================================================================
 
 # Test case: binary_test, binary_test_peri, triple_test, outer_planets, plummer
-TEST_CASE = triple_test
+TEST_CASE = plummer
 
 # Integrator: fsi (global timestep) or hhs (adaptive HHS-FSI per Algorithm 4 of FROST paper)
 INTEGRATOR = hhs
@@ -11,10 +11,11 @@ INTEGRATOR = hhs
 # =============================================================================
 # Simulation parameters
 # =============================================================================
-TOTAL_TIME_MYR = 2.5e-7                    	# ~1000 orbits for BH binary at 0.01 AU
-DT_MAX_MYR = 1.0e-9                       	# Must be small initially; LogH takes over after detection
-DT_MIN_MYR = 1.0e-14                      	# Needs to resolve periapsis before subsystem detected
-ETA = 0.2					# Integrator accuracy eta
+TOTAL_TIME_MYR = 5.0                       	# BIFROST Fig. 9: 5 Myr evolved Kroupa cluster
+DT_MAX_MYR = 1.0e-3                       	# BIFROST uses 1e-3 Myr for cluster runs
+DT_MIN_MYR = 1.0e-14                      	# Needs to resolve compact binary encounters
+ETA_FF = 0.2					# Free-fall timestep eta
+ETA_FB = 0.2					# Fly-by timestep eta
 SOFTENING_PC = 1e-3                        	# Softening length in pc (= 206 AU)
 SERIAL_N2_GPU = 16384                      	# Full N² on GPU without MPI or tree below this count
 SERIAL_N2_CPU = 256                        	# Full N² on CPU below this count (avoids kernel launch overhead)
@@ -49,7 +50,7 @@ PN_ORDER = 31                        		# PN bitmask: 1=PN1, 2=PN2, 4=PN2.5 (7=al
 R_ESCAPE_RH = 100.0                 		# Escape radius in half-mass radii
 MSTAR_THRESHOLD = 8                 		# N-body threshold: MSTAR (>=) vs LogH (<)
 SSE_ENABLED = false                  		# Runtime single stellar evolution
-SSE_METALLICITY = 0.02              		# Metallicity Z for SSE
+SSE_METALLICITY = 0.0002            		# Metallicity Z for SSE (0.01 Z_sun)
 
 # =============================================================================
 # Binary test parameters (only used if TEST_CASE = binary_test)
@@ -84,13 +85,13 @@ TRIPLE_INCL_DEG = 45.0				# Mutual inclination (degrees); >39 for Kozai-Lidov
 # =============================================================================
 # Plummer cluster parameters (only used if TEST_CASE = plummer)
 # =============================================================================
-PLUMMER_N = 1000000
-PLUMMER_M_TOTAL = 3.91e5            		# Total mass in solar masses (not used when kroupa_evolved)
-PLUMMER_R_HALF = 3.5                		# Half-mass radius in parsecs
+PLUMMER_N = 200000
+PLUMMER_M_TOTAL = 8.1e4            		# Total mass in solar masses (not used when kroupa_evolved)
+PLUMMER_R_HALF = 3.1                		# Half-mass radius in parsecs
 PLUMMER_SEED = 42                               # random seed for the mass sampling (I like 42)
 PLUMMER_MASS_DIST = kroupa_evolved  		# equal, kroupa, or kroupa_evolved
 PLUMMER_AGE_GYR = 1.0               		# Cluster age in Gyr (for kroupa_evolved)
-PLUMMER_METALLICITY = 0.02          		# Stellar metallicity Z (solar)
+PLUMMER_METALLICITY = 0.0002        		# Stellar metallicity Z (0.01 Z_sun, BIFROST Fig. 9)
 
 # Plummer binary population
 REMOVE_BH = false                   		# Strip BHs from ICs (for pure stellar cluster)

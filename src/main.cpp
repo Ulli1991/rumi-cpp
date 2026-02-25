@@ -388,7 +388,7 @@ int main(int argc, char** argv) {
         double t_final_myr  = cfg.get_double("TOTAL_TIME_MYR", 0.23);
         double dt_max_myr   = cfg.get_double("DT_MAX_MYR", 1.6e-3);
         double dt_min_myr   = cfg.get_double("DT_MIN_MYR", 1.0e-9);
-        double eta          = cfg.get_double("ETA", 0.02);
+        double eta          = cfg.get_double("ETA", 0.2);
         double soft_pc      = cfg.get_double("SOFTENING_PC", 1e-3);
         int print_interval  = cfg.get_int("PRINT_INTERVAL", 1000);
         int N_plummer       = cfg.get_int("PLUMMER_N", 1000);
@@ -426,13 +426,15 @@ int main(int argc, char** argv) {
         gadget4_cross = (cfg.get_str("GADGET4_CROSS", "false") == "true");
 
 #ifdef ENABLE_COLLISIONAL
+        // ETA_FF/ETA_FB always parsed (used by force kernels even without subsystems)
+        g_collisional.eta_ff          = cfg.get_double("ETA_FF", 0.2);
+        g_collisional.eta_fb          = cfg.get_double("ETA_FB", 0.2);
+
         // Collisional (unsoftened direct N-body) configuration
         g_collisional.enabled = (cfg.get_str("COLLISIONAL", "false") == "true");
         if (g_collisional.enabled) {
             g_collisional.r_ngb           = cfg.get_double("R_NGB", 1e-3);
             g_collisional.r_ngb_max       = cfg.get_double("R_NGB_MAX", 0.1);
-            g_collisional.eta_ff          = cfg.get_double("ETA_FF", 0.2);
-            g_collisional.eta_fb          = cfg.get_double("ETA_FB", 0.2);
             g_collisional.eta_grad        = cfg.get_double("ETA_GRAD", 0.1);
             g_collisional.eta_jerk        = cfg.get_double("ETA_JERK", 0.1);
             g_collisional.eta_gbs         = cfg.get_double("ETA_GBS", 1e-10);
@@ -568,8 +570,14 @@ int main(int argc, char** argv) {
                             n_ranks, dp.N_local);
             }
             std::fflush(stdout);
-            std::printf("G=%.4e  soft=%.4e pc  dt_max=%.4e Myr  dt_min=%.4e Myr  eta=%.4f\n",
-                        G, soft_pc, dt_max_myr, dt_min_myr, eta);
+            std::printf("G=%.4e  soft=%.4e pc  dt_max=%.4e Myr  dt_min=%.4e Myr",
+                        G, soft_pc, dt_max_myr, dt_min_myr);
+#ifdef ENABLE_COLLISIONAL
+            std::printf("  eta_ff=%.4f  eta_fb=%.4f\n",
+                        g_collisional.eta_ff, g_collisional.eta_fb);
+#else
+            std::printf("  eta=%.4f\n", eta);
+#endif
             std::printf("t_final=%.4e Myr  print_interval=%d  profiling=%s\n",
                         t_final_myr, print_interval,
                         profiling_enabled ? "true" : "false");
@@ -773,7 +781,8 @@ int main(int argc, char** argv) {
                 // ============================================================
                 if (g_collisional.enabled && g_collisional.eta_restart > 0.0) {
                     // Save originals ONCE before the loop
-                    double eta_orig      = eta;
+                    double eta_ff_orig   = g_collisional.eta_ff;
+                    double eta_fb_orig   = g_collisional.eta_fb;
                     double eta_gbs_orig  = g_collisional.eta_gbs;
                     double eta_grad_orig = g_collisional.eta_grad;
                     double eta_jerk_orig = g_collisional.eta_jerk;
@@ -823,7 +832,8 @@ int main(int argc, char** argv) {
                         checkpoint.restore(work_p, g_subsystem_mgr, g_energy_books);
 
                         // Reduce ALL eta parameters by 50% (BIFROST §3.19)
-                        eta *= 0.5;
+                        g_collisional.eta_ff   *= 0.5;
+                        g_collisional.eta_fb   *= 0.5;
                         g_collisional.eta_gbs  *= 0.5;
                         g_collisional.eta_grad *= 0.5;
                         g_collisional.eta_jerk *= 0.5;
@@ -838,7 +848,8 @@ int main(int argc, char** argv) {
                     }
 
                     // Restore original parameters after step (BIFROST: "original parameters are restored")
-                    eta = eta_orig;
+                    g_collisional.eta_ff   = eta_ff_orig;
+                    g_collisional.eta_fb   = eta_fb_orig;
                     g_collisional.eta_gbs  = eta_gbs_orig;
                     g_collisional.eta_grad = eta_grad_orig;
                     g_collisional.eta_jerk = eta_jerk_orig;

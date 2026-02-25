@@ -1,6 +1,9 @@
 #include "tree.h"
 #include "integrator.h"
 #include "constants.h"
+#ifdef ENABLE_COLLISIONAL
+#include "collisional_config.h"
+#endif
 #include <Kokkos_Core.hpp>
 #include <cfloat>
 
@@ -231,6 +234,15 @@ void tree_self_acceleration_and_timestep(Particles& p, const Octree& tree,
     RawView pvx{p.vx.data()}, pvy{p.vy.data()}, pvz{p.vz.data()};
     RawView pm{p.mass.data()};
 
+    // Capture eta_ff²/eta_fb² for per-criterion timestep scaling
+#ifdef ENABLE_COLLISIONAL
+    double eta_ff_sq = g_collisional.eta_ff * g_collisional.eta_ff;
+    double eta_fb_sq = g_collisional.eta_fb * g_collisional.eta_fb;
+#else
+    double eta_ff_sq = eta * eta;
+    double eta_fb_sq = eta * eta;
+#endif
+
     using team_policy = Kokkos::TeamPolicy<>;
     using member_type = team_policy::member_type;
     using scratch_space = Kokkos::DefaultExecutionSpace::scratch_memory_space;
@@ -347,7 +359,7 @@ void tree_self_acceleration_and_timestep(Particles& p, const Octree& tree,
                         double t_sym_fb = t_fb + ct_fb / (u_fb + 1.0);
 
                         t_min_sq = Kokkos::fmin(t_min_sq,
-                                   Kokkos::fmin(t_sym_ff * t_sym_ff, t_sym_fb * t_sym_fb));
+                                   Kokkos::fmin(eta_ff_sq * t_sym_ff * t_sym_ff, eta_fb_sq * t_sym_fb * t_sym_fb));
                     }
                 } else if (is_leaf) {
                     int lpbeg = cell_pbeg(node);
@@ -402,7 +414,7 @@ void tree_self_acceleration_and_timestep(Particles& p, const Octree& tree,
                             double t_sym_fb = t_fb + ct_fb / (u_fb + 1.0);
 
                             t_min_sq = Kokkos::fmin(t_min_sq,
-                                       Kokkos::fmin(t_sym_ff * t_sym_ff, t_sym_fb * t_sym_fb));
+                                       Kokkos::fmin(eta_ff_sq * t_sym_ff * t_sym_ff, eta_fb_sq * t_sym_fb * t_sym_fb));
                         }
                     }
                 } else {
@@ -427,7 +439,7 @@ void tree_self_acceleration_and_timestep(Particles& p, const Octree& tree,
                 pax(my_orig_idx) = axi;
                 pay(my_orig_idx) = ayi;
                 paz(my_orig_idx) = azi;
-                dt_f(my_orig_idx) = Kokkos::sqrt(t_min_sq) * eta;
+                dt_f(my_orig_idx) = Kokkos::sqrt(t_min_sq);
             }
         });
 
@@ -1715,6 +1727,15 @@ void tree_global_self_acceleration_and_timestep(Particles& p, const Octree& tree
     RawView pvx{p.vx.data()}, pvy{p.vy.data()}, pvz{p.vz.data()};
     RawView pm{p.mass.data()};
 
+    // Capture eta_ff²/eta_fb² for per-criterion timestep scaling
+#ifdef ENABLE_COLLISIONAL
+    double eta_ff_sq = g_collisional.eta_ff * g_collisional.eta_ff;
+    double eta_fb_sq = g_collisional.eta_fb * g_collisional.eta_fb;
+#else
+    double eta_ff_sq = eta * eta;
+    double eta_fb_sq = eta * eta;
+#endif
+
     using team_policy = Kokkos::TeamPolicy<>;
     using member_type = team_policy::member_type;
     using scratch_space = Kokkos::DefaultExecutionSpace::scratch_memory_space;
@@ -1843,7 +1864,7 @@ void tree_global_self_acceleration_and_timestep(Particles& p, const Octree& tree
                         double t_sym_fb = t_fb + ct_fb / (u_fb + 1.0);
 
                         t_min_sq = Kokkos::fmin(t_min_sq,
-                                   Kokkos::fmin(t_sym_ff * t_sym_ff, t_sym_fb * t_sym_fb));
+                                   Kokkos::fmin(eta_ff_sq * t_sym_ff * t_sym_ff, eta_fb_sq * t_sym_fb * t_sym_fb));
                     }
                 } else if (is_leaf) {
                     if (is_target) {
@@ -1898,7 +1919,7 @@ void tree_global_self_acceleration_and_timestep(Particles& p, const Octree& tree
                             double t_sym_fb = t_fb + ct_fb / (u_fb + 1.0);
 
                             t_min_sq = Kokkos::fmin(t_min_sq,
-                                       Kokkos::fmin(t_sym_ff * t_sym_ff, t_sym_fb * t_sym_fb));
+                                       Kokkos::fmin(eta_ff_sq * t_sym_ff * t_sym_ff, eta_fb_sq * t_sym_fb * t_sym_fb));
                         }
                     }
                 } else {
@@ -1923,7 +1944,7 @@ void tree_global_self_acceleration_and_timestep(Particles& p, const Octree& tree
                 pax(my_orig_idx) = axi;
                 pay(my_orig_idx) = ayi;
                 paz(my_orig_idx) = azi;
-                dt_f(my_orig_idx) = Kokkos::sqrt(t_min_sq) * eta;
+                dt_f(my_orig_idx) = Kokkos::sqrt(t_min_sq);
             }
         });
 
@@ -2357,6 +2378,15 @@ void tree_all_forces_and_timestep_on_subset(Particles& p, const Octree& tree,
     RawView pvx{p.vx.data()}, pvy{p.vy.data()}, pvz{p.vz.data()};
     RawView pm{p.mass.data()};
 
+    // Capture eta_ff²/eta_fb² for per-criterion timestep scaling
+#ifdef ENABLE_COLLISIONAL
+    double eta_ff_sq = g_collisional.eta_ff * g_collisional.eta_ff;
+    double eta_fb_sq = g_collisional.eta_fb * g_collisional.eta_fb;
+#else
+    double eta_ff_sq = eta * eta;
+    double eta_fb_sq = eta * eta;
+#endif
+
     using team_policy = Kokkos::TeamPolicy<>;
     using member_type = team_policy::member_type;
     using scratch_space = Kokkos::DefaultExecutionSpace::scratch_memory_space;
@@ -2484,7 +2514,7 @@ void tree_all_forces_and_timestep_on_subset(Particles& p, const Octree& tree,
                         double t_sym_fb = t_fb + ct_fb / (u_fb + 1.0);
 
                         t_min_sq = Kokkos::fmin(t_min_sq,
-                                   Kokkos::fmin(t_sym_ff * t_sym_ff, t_sym_fb * t_sym_fb));
+                                   Kokkos::fmin(eta_ff_sq * t_sym_ff * t_sym_ff, eta_fb_sq * t_sym_fb * t_sym_fb));
                     }
                 } else if (is_leaf) {
                     if (is_target) {
@@ -2539,7 +2569,7 @@ void tree_all_forces_and_timestep_on_subset(Particles& p, const Octree& tree,
                             double t_sym_fb = t_fb + ct_fb / (u_fb + 1.0);
 
                             t_min_sq = Kokkos::fmin(t_min_sq,
-                                       Kokkos::fmin(t_sym_ff * t_sym_ff, t_sym_fb * t_sym_fb));
+                                       Kokkos::fmin(eta_ff_sq * t_sym_ff * t_sym_ff, eta_fb_sq * t_sym_fb * t_sym_fb));
                         }
                     }
                 } else {
@@ -2564,7 +2594,7 @@ void tree_all_forces_and_timestep_on_subset(Particles& p, const Octree& tree,
                 pax(my_orig_idx) = axi;
                 pay(my_orig_idx) = ayi;
                 paz(my_orig_idx) = azi;
-                dt_f(my_orig_idx) = Kokkos::sqrt(t_min_sq) * eta;
+                dt_f(my_orig_idx) = Kokkos::sqrt(t_min_sq);
             }
         });
 }
