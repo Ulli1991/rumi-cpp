@@ -18,7 +18,6 @@ ETA = 0.2					# Integrator accuracy eta
 SOFTENING_PC = 1e-3                        	# Softening length in pc (= 206 AU)
 SERIAL_N2_GPU = 16384                      	# Full N² on GPU without MPI or tree below this count
 SERIAL_N2_CPU = 256                        	# Full N² on CPU below this count (avoids kernel launch overhead)
-FUSE_GRADIENT = false                      	# Fuse force+gradient into single N^2 pass using stale accelerations (saves ~30% gradient time, O(dt^3) accuracy trade-off)
 INTEGER_POSITIONS = false                  	# Use int64 positions (exact drift, MPI-safe)
 DOMAIN_HALFSIZE_PC = 200                   	# Integer position domain half-size in pc
 MPI_NON_BLOCKING = false                    	# Use MPI_Iallgatherv for overlapped transfers

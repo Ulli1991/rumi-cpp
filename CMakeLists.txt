@@ -5,7 +5,6 @@ project(nbody-kokkos LANGUAGES CXX)
 option(USE_MPI "Enable MPI for multi-node support" OFF)
 option(USE_GPU_AWARE_MPI "Enable GPU-aware MPI (CUDA-aware/ROCm-aware)" OFF)
 option(MPI_TOPOLOGY_RING "Use ring/j-partitioned MPI topology (allreduce instead of allgatherv)" OFF)
-option(MIXED_PRECISION "FP32 rsqrt seed + FP64 Newton-Raphson (~1e-14 precision)" OFF)
 option(ENABLE_COLLISIONAL "Compile collisional (unsoftened) support" OFF)
 
 # Find Kokkos (set Kokkos_ROOT or CMAKE_PREFIX_PATH)
@@ -63,12 +62,6 @@ if(ENABLE_COLLISIONAL)
 endif()
 target_link_libraries(nbody-kokkos Kokkos::kokkos)
 target_compile_options(nbody-kokkos PRIVATE -O3)
-
-# Mixed precision rsqrt (compile-time flag for zero register overhead)
-if(MIXED_PRECISION)
-    target_compile_definitions(nbody-kokkos PRIVATE MIXED_PRECISION)
-    message(STATUS "Mixed precision rsqrt enabled (FP32 seed + FP64 Newton-Raphson)")
-endif()
 
 # Add MPI support if enabled
 if(USE_MPI)

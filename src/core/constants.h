@@ -26,28 +26,10 @@ constexpr double FSI_MOD_KICK = 2.0 / 3.0;
 // Gradient correction coefficient: G * dt² / 24 (from Eq. 29 of Rantala+2020: factor 2 in g_i × 1/48 = 1/24)
 constexpr double GRAD_COEFF = 1.0 / 24.0;
 
-// Portable reciprocal square root: uses hardware rsqrt when available.
-// With -DMIXED_PRECISION: FP32 seed from hardware SFU + one Newton-Raphson
-// iteration in FP64. ~1e-14 relative precision, saves FP64 SFU ops per pair.
-// Requires pc unit system (r2 ~ O(1-100), well within float range).
-// Without -DMIXED_PRECISION: full FP64 hardware rsqrt.
+// Portable reciprocal square root: hardware rsqrt on GPU, std::sqrt on CPU.
 KOKKOS_INLINE_FUNCTION double fast_rsqrt(double x) {
-#if defined(__CUDA_ARCH__)
-#ifdef MIXED_PRECISION
-    float xf = (float)x;
-    double y = (double)__frsqrt_rn(xf);
-    return y * (1.5 - 0.5 * x * y * y);
-#else
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     return rsqrt(x);
-#endif
-#elif defined(__HIP_DEVICE_COMPILE__)
-#ifdef MIXED_PRECISION
-    float xf = (float)x;
-    double y = (double)__frsqrt_rn(xf);
-    return y * (1.5 - 0.5 * x * y * y);
-#else
-    return rsqrt(x);
-#endif
 #else
     return 1.0 / std::sqrt(x);
 #endif
