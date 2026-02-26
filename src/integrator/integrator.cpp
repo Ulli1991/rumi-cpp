@@ -20,6 +20,7 @@
 #include <cfloat>
 #include <cmath>
 #include <cstring>
+#include <chrono>
 
 // Global profiler instance
 StepProfiler g_profiler;
@@ -36,6 +37,23 @@ static int dbg_hhs_max_depth = 0;
 static constexpr int DBG_MAX_DEPTH = 40;
 static int dbg_local_depth_calls[DBG_MAX_DEPTH] = {};
 static long long dbg_local_depth_count[DBG_MAX_DEPTH] = {};  // sum of 'count' at each depth
+static double dbg_local_depth_time[DBG_MAX_DEPTH] = {};      // inclusive wall time per local depth
+static int dbg_dist_depth_calls[DBG_MAX_DEPTH] = {};         // per-depth call count (distributed)
+static long long dbg_dist_depth_count[DBG_MAX_DEPTH] = {};   // sum of 'count' at each depth (distributed)
+static int dbg_dist_depth_ngb_pairs[DBG_MAX_DEPTH] = {};     // neighbor pairs found per depth (distributed)
+static int dbg_dist_depth_l0_clamped[DBG_MAX_DEPTH] = {};    // particles clamped by level-0 per depth
+
+// RAII timer for per-depth inclusive wall time in local path
+struct ScopedDepthTimer {
+    int depth;
+    std::chrono::high_resolution_clock::time_point t0;
+    ScopedDepthTimer(int d) : depth(d), t0(std::chrono::high_resolution_clock::now()) {}
+    ~ScopedDepthTimer() {
+        auto t1 = std::chrono::high_resolution_clock::now();
+        if (depth < DBG_MAX_DEPTH)
+            dbg_local_depth_time[depth] += std::chrono::duration<double>(t1 - t0).count();
+    }
+};
 
 // Serial N² GPU threshold: skip MPI, compute full N² locally (no tree)
 int serial_n2_gpu = 0;
@@ -51,7 +69,7 @@ double int_pos_inv_scale = 0.0;
 
 bool use_nonblocking_mpi = false;
 
-bool symmetric_timesteps = false;
+// symmetric_timesteps removed — always enabled (hardcoded true)
 
 // Barnes-Hut tree configuration
 bool use_tree = false;
@@ -895,8 +913,7 @@ static void hhs_fsi_step_dynamic_impl(Particles& p, int start, int count, double
         }
 #endif
         g_profiler.start();
-        compute_timestep_subset(p, start, count, G, soft2, eta, symmetric_timesteps);
-        g_profiler.stop(StepProfiler::ADAPTIVE_DT);
+        compute_timestep_subset(p, start, count, G, soft2, eta, true);
 #ifdef ENABLE_COLLISIONAL
         // Gradient timestep criteria (BIFROST Section 3.4.4):
         // (1) dt = eta_grad * (|v| / |g'|)^{1/3}
@@ -943,7 +960,9 @@ static void hhs_fsi_step_dynamic_impl(Particles& p, int start, int count, double
                 });
             }
         }
-
+#endif
+        g_profiler.stop(StepProfiler::ADAPTIVE_DT);
+#ifdef ENABLE_COLLISIONAL
         // Subsystem detection at this HHS level (after timestep found neighbor pairs,
         // before partition reorders particles). Uses level-appropriate pivot_dt.
         if (p.collisional) {
@@ -990,6 +1009,17 @@ static void hhs_fsi_step_dynamic_impl(Particles& p, int start, int count, double
     // Base case: no fast particles or at minimum timestep
     if (fast_count == 0 || pivot_dt * 0.5 < dt_min) {
         fsi_step(p, start, count, G, soft2, pivot_dt);
+        return;
+    }
+
+    // Base case: all particles are fast (no slow particles)
+    // Partition was a no-op, so dt_adapt values are still valid.
+    if (slow_count == 0) {
+        double sub_pivot = pivot_dt * 0.5;
+        hhs_fsi_step_dynamic_impl(p, start, count, sub_pivot,
+                                  G, soft2, dt_min, eta, true, depth + 1);
+        hhs_fsi_step_dynamic_impl(p, start, count, sub_pivot,
+                                  G, soft2, dt_min, eta, false, depth + 1);
         return;
     }
 
@@ -3392,10 +3422,14 @@ struct CpuSubset {
     std::vector<int> sid;  // subsystem_id (collisional mode)
 #ifdef ENABLE_COLLISIONAL
     bool collisional = false;
+    std::vector<double> grad_mag;     // gradient magnitude (stale from previous step)
+    std::vector<double> dt_level0;    // level-0 timestep for clamping
+    std::vector<int> particle_id;     // unique particle IDs for neighbor pair output
 #else
     static constexpr bool collisional = false;
 #endif
     int count;
+    int device_start = 0;  // offset into device Particles arrays
 
     void resize(int n) {
         count = n;
@@ -3406,6 +3440,9 @@ struct CpuSubset {
         ix.resize(n); iy.resize(n); iz.resize(n);
 #ifdef ENABLE_COLLISIONAL
         sid.resize(n, -1);
+        grad_mag.resize(n, 0.0);
+        dt_level0.resize(n, 1e60);
+        particle_id.resize(n, 0);
 #endif
     }
 
@@ -3442,11 +3479,23 @@ struct CpuSubset {
         }
 #ifdef ENABLE_COLLISIONAL
         collisional = p.collisional;
+        device_start = start;
         if (collisional) {
             auto h_sid = Kokkos::create_mirror_view(Kokkos::subview(p.subsystem_id, Kokkos::pair<int,int>(start, start+count)));
+            auto h_gm  = Kokkos::create_mirror_view(Kokkos::subview(p.grad_mag, Kokkos::pair<int,int>(start, start+count)));
+            auto h_dl0 = Kokkos::create_mirror_view(Kokkos::subview(p.dt_level0, Kokkos::pair<int,int>(start, start+count)));
+            auto h_pid = Kokkos::create_mirror_view(Kokkos::subview(p.particle_id, Kokkos::pair<int,int>(start, start+count)));
             Kokkos::deep_copy(h_sid, Kokkos::subview(p.subsystem_id, Kokkos::pair<int,int>(start, start+count)));
+            Kokkos::deep_copy(h_gm, Kokkos::subview(p.grad_mag, Kokkos::pair<int,int>(start, start+count)));
+            Kokkos::deep_copy(h_dl0, Kokkos::subview(p.dt_level0, Kokkos::pair<int,int>(start, start+count)));
+            Kokkos::deep_copy(h_pid, Kokkos::subview(p.particle_id, Kokkos::pair<int,int>(start, start+count)));
             Kokkos::fence();
-            for (int i = 0; i < count; i++) sid[i] = h_sid(i);
+            for (int i = 0; i < count; i++) {
+                sid[i] = h_sid(i);
+                grad_mag[i] = h_gm(i);
+                dt_level0[i] = h_dl0(i);
+                particle_id[i] = h_pid(i);
+            }
         }
 #endif
     }
@@ -3485,8 +3534,13 @@ struct CpuSubset {
 #ifdef ENABLE_COLLISIONAL
         if (collisional) {
             auto h_sid = Kokkos::create_mirror_view(Kokkos::subview(p.subsystem_id, Kokkos::pair<int,int>(start, start+count)));
-            for (int i = 0; i < count; i++) h_sid(i) = sid[i];
+            auto h_dl0 = Kokkos::create_mirror_view(Kokkos::subview(p.dt_level0, Kokkos::pair<int,int>(start, start+count)));
+            for (int i = 0; i < count; i++) {
+                h_sid(i) = sid[i];
+                h_dl0(i) = dt_level0[i];
+            }
             Kokkos::deep_copy(Kokkos::subview(p.subsystem_id, Kokkos::pair<int,int>(start, start+count)), h_sid);
+            Kokkos::deep_copy(Kokkos::subview(p.dt_level0, Kokkos::pair<int,int>(start, start+count)), h_dl0);
         }
 #endif
         Kokkos::fence();
@@ -3682,14 +3736,23 @@ static void cpu_kick(CpuSubset& s, int start, int count, double kick_dt) {
 static void cpu_compute_timestep(CpuSubset& s, int start, int count,
                                  double G, double soft2, double eta) {
 #ifdef ENABLE_COLLISIONAL
-    double eta_ff_sq = g_collisional.eta_ff * g_collisional.eta_ff;
-    double eta_fb_sq = g_collisional.eta_fb * g_collisional.eta_fb;
+    double eta_ff_v = g_collisional.eta_ff;
+    double eta_fb_v = g_collisional.eta_fb;
+    double r_ngb_val = s.collisional ? g_collisional.r_ngb : 0.0;
+    double r_ngb_max_sq = s.collisional ? g_collisional.r_ngb_max_sq : 0.0;
+    double pivot_dt_val = s.collisional ? g_collisional.flyby_pivot_dt : 0.0;
+    double eta_jerk_val = s.collisional ? g_collisional.eta_jerk : 0.0;
 #else
-    double eta_ff_sq = eta * eta;
-    double eta_fb_sq = eta * eta;
+    double eta_ff_v = eta;
+    double eta_fb_v = eta;
+    double eta_jerk_val = 0.0;
 #endif
     const int end = start + count;
-    for (int i = start; i < end; i++) s.dt_adapt[i] = 1e60;
+
+    // Initialize timesteps and jerk accumulators
+    for (int i = start; i < end; i++) s.dt_adapt[i] = 1e30;
+    std::vector<double> jerk_x(count, 0), jerk_y(count, 0), jerk_z(count, 0);
+
     for (int i = start; i < end; i++) {
         for (int j = i + 1; j < end; j++) {
             if (s.collisional && s.sid[i] >= 0 && s.sid[j] == s.sid[i]) continue;
@@ -3701,19 +3764,128 @@ static void cpu_compute_timestep(CpuSubset& s, int start, int count,
             double dvz = s.vz[j] - s.vz[i];
             double r2 = dx*dx + dy*dy + dz*dz;
             double v_sq = dvx*dvx + dvy*dvy + dvz*dvz;
-            double r2_eps = r2 + EPS;
-            double r_norm = std::sqrt(r2_eps);
+            double r2s = r2 + EPS;
+            double inv_r = 1.0 / std::sqrt(r2s);
             double mass_sum = s.mass[i] + s.mass[j];
-            double t_ff_sq = r2_eps * r_norm / (G * mass_sum + EPS);
-            double t_fb_sq = r2_eps / (v_sq + EPS);
-            double t_min_sq_pair = std::min(eta_ff_sq * t_ff_sq, eta_fb_sq * t_fb_sq);
-            s.dt_adapt[i] = std::min(s.dt_adapt[i], t_min_sq_pair);
-            s.dt_adapt[j] = std::min(s.dt_adapt[j], t_min_sq_pair);
+            double r3 = r2s * r2s * inv_r;
+
+            // Symmetric timestep (always on): compute actual timescales per pair
+            double inv_Gm = 1.0 / (G * mass_sum + EPS);
+            double inv_vsq = 1.0 / (v_sq + EPS);
+            double t_ff_sq = r3 * inv_Gm;
+            double t_fb_sq = r2s * inv_vsq;
+            double t_ff = t_ff_sq * (1.0 / std::sqrt(t_ff_sq + EPS));
+            double t_fb = t_fb_sq * (1.0 / std::sqrt(t_fb_sq + EPS));
+
+            double inv_r2 = inv_r * inv_r;
+            double r_dot_v = dx*dvx + dy*dvy + dz*dvz;
+
+            double c_ff = 1.5 * r_dot_v * inv_r2;
+            double c_fb = r_dot_v * inv_r2 * (1.0 + G * mass_sum * inv_r * inv_vsq);
+
+            double ct_ff = c_ff * t_ff_sq;
+            double s_ff = 1.0 + c_ff * ct_ff;
+            double u_ff = s_ff * (1.0 / std::sqrt(s_ff));
+            double t_sym_ff = t_ff + ct_ff / (u_ff + 1.0);
+
+            double ct_fb = c_fb * t_fb_sq;
+            double s_fb = 1.0 + c_fb * ct_fb;
+            double u_fb = s_fb * (1.0 / std::sqrt(s_fb));
+            double t_sym_fb = t_fb + ct_fb / (u_fb + 1.0);
+
+            double t_pair = std::min(eta_ff_v * t_sym_ff, eta_fb_v * t_sym_fb);
+            s.dt_adapt[i] = std::min(s.dt_adapt[i], t_pair);
+            s.dt_adapt[j] = std::min(s.dt_adapt[j], t_pair);
+
+#ifdef ENABLE_COLLISIONAL
+            // Jerk accumulation (collisional only)
+            if (s.collisional) {
+                double inv_r3 = inv_r * inv_r * inv_r;
+                double rdotv = dx*dvx + dy*dvy + dz*dvz;
+                double fac1_j = G * s.mass[j] * inv_r3;
+                double fac1_i = G * s.mass[i] * inv_r3;
+                double fac2 = 3.0 * rdotv * inv_r * inv_r;
+                jerk_x[i - start] += fac1_j * (dvx - fac2 * dx);
+                jerk_y[i - start] += fac1_j * (dvy - fac2 * dy);
+                jerk_z[i - start] += fac1_j * (dvz - fac2 * dz);
+                jerk_x[j - start] -= fac1_i * (dvx - fac2 * dx);
+                jerk_y[j - start] -= fac1_i * (dvy - fac2 * dy);
+                jerk_z[j - start] -= fac1_i * (dvz - fac2 * dz);
+            }
+
+            // Neighbor pair detection (collisional only)
+            if (s.collisional && r2 < r_ngb_max_sq) {
+                double mu = G * mass_sum;
+                double r_val = std::sqrt(r2);
+                double E_orb = 0.5 * v_sq - mu / (r_val + EPS);
+                bool is_bound = (E_orb < 0);
+                double a_val = -mu / (2.0 * E_orb + EPS);
+                double Lx = dy*dvz - dz*dvy, Ly = dz*dvx - dx*dvz, Lz = dx*dvy - dy*dvx;
+                double L2 = Lx*Lx + Ly*Ly + Lz*Lz;
+                double e_val;
+                if (is_bound) {
+                    e_val = std::sqrt(std::max(0.0, 1.0 + 2.0*E_orb*L2/(mu*mu + EPS)));
+                } else {
+                    e_val = std::sqrt(std::max(1.0, 1.0 + 2.0*E_orb*L2/(mu*mu + EPS)));
+                }
+
+                bool is_neighbor = false;
+                if (is_bound) {
+                    is_neighbor = (a_val < r_ngb_val || r_val < r_ngb_val);
+                } else {
+                    double r_peri = std::abs(a_val) * (e_val - 1.0);
+                    if (r_val < r_ngb_val) {
+                        is_neighbor = true;
+                    } else if (r_peri < r_ngb_val && v_sq > EPS) {
+                        double t_approach = 0.5 * r_val / std::sqrt(v_sq);
+                        is_neighbor = (t_approach < pivot_dt_val);
+                    }
+                }
+
+                if (is_neighbor) {
+                    // Write to device ngb buffers via host mirror
+                    auto& mgr = g_subsystem_mgr;
+                    auto h_cnt = Kokkos::create_mirror_view(mgr.ngb_count);
+                    Kokkos::deep_copy(h_cnt, mgr.ngb_count);
+                    int idx = h_cnt(0);
+                    if (idx < mgr.max_ngb_pairs) {
+                        h_cnt(0) = idx + 1;
+                        Kokkos::deep_copy(mgr.ngb_count, h_cnt);
+                        // Use global indices (device_start + local)
+                        int gi = s.device_start + i;
+                        int gj = s.device_start + j;
+                        auto write_one = [&](auto view, int pos, auto val) {
+                            auto h = Kokkos::create_mirror_view(Kokkos::subview(view, std::make_pair(pos, pos+1)));
+                            h(0) = val;
+                            Kokkos::deep_copy(Kokkos::subview(view, std::make_pair(pos, pos+1)), h);
+                        };
+                        write_one(mgr.ngb_pair_i, idx, gi);
+                        write_one(mgr.ngb_pair_j, idx, gj);
+                        write_one(mgr.ngb_pair_a, idx, a_val);
+                        write_one(mgr.ngb_pair_e, idx, e_val);
+                        write_one(mgr.ngb_pair_E, idx, E_orb);
+                        write_one(mgr.ngb_pair_bound, idx, is_bound ? 1 : 0);
+                    }
+                }
+            }
+#endif
         }
     }
-    for (int i = start; i < end; i++) {
-        s.dt_adapt[i] = std::sqrt(s.dt_adapt[i]);
+
+    // Jerk timestep criterion (collisional only)
+#ifdef ENABLE_COLLISIONAL
+    if (s.collisional && eta_jerk_val > 0.0) {
+        for (int i = start; i < end; i++) {
+            double a_mag = std::sqrt(s.ax[i]*s.ax[i] + s.ay[i]*s.ay[i] + s.az[i]*s.az[i]);
+            int ii = i - start;
+            double j_mag = std::sqrt(jerk_x[ii]*jerk_x[ii] + jerk_y[ii]*jerk_y[ii] + jerk_z[ii]*jerk_z[ii]);
+            if (j_mag > EPS) {
+                double dt_jerk = eta_jerk_val * a_mag / j_mag;
+                s.dt_adapt[i] = std::min(s.dt_adapt[i], dt_jerk);
+            }
+        }
     }
+#endif
 }
 
 // CPU partition by pivot (returns slow count, reorders data in-place)
@@ -3734,6 +3906,8 @@ static int cpu_partition_by_pivot(CpuSubset& s, int start, int count, double piv
     std::vector<int64_t> tix(count), tiy(count), tiz(count);
 #ifdef ENABLE_COLLISIONAL
     std::vector<int> tsid(count);
+    std::vector<double> tgm(count), tdl0(count);
+    std::vector<int> tpid(count);
 #endif
     int si = 0, fi = slow_count;
     for (int i = 0; i < count; i++) {
@@ -3746,6 +3920,8 @@ static int cpu_partition_by_pivot(CpuSubset& s, int start, int count, double piv
         tix[dst] = s.ix[src]; tiy[dst] = s.iy[src]; tiz[dst] = s.iz[src];
 #ifdef ENABLE_COLLISIONAL
         tsid[dst] = s.sid[src];
+        tgm[dst] = s.grad_mag[src]; tdl0[dst] = s.dt_level0[src];
+        tpid[dst] = s.particle_id[src];
 #endif
     }
     for (int i = 0; i < count; i++) {
@@ -3757,13 +3933,77 @@ static int cpu_partition_by_pivot(CpuSubset& s, int start, int count, double piv
         s.ix[dst] = tix[i]; s.iy[dst] = tiy[i]; s.iz[dst] = tiz[i];
 #ifdef ENABLE_COLLISIONAL
         s.sid[dst] = tsid[i];
+        s.grad_mag[dst] = tgm[i]; s.dt_level0[dst] = tdl0[i];
+        s.particle_id[dst] = tpid[i];
 #endif
     }
     return slow_count;
 }
 
+// Sync CpuSubset state to device Particles for subsystem detection/integration
+// cpu_start: offset within CpuSubset arrays; dev_start: offset within device Particles
+#ifdef ENABLE_COLLISIONAL
+static void cpu_sync_to_device(CpuSubset& s, Particles& p, int cpu_start, int dev_start, int count) {
+    auto h_x = Kokkos::create_mirror_view(Kokkos::subview(p.x, Kokkos::pair<int,int>(dev_start, dev_start+count)));
+    auto h_y = Kokkos::create_mirror_view(Kokkos::subview(p.y, Kokkos::pair<int,int>(dev_start, dev_start+count)));
+    auto h_z = Kokkos::create_mirror_view(Kokkos::subview(p.z, Kokkos::pair<int,int>(dev_start, dev_start+count)));
+    auto h_vx = Kokkos::create_mirror_view(Kokkos::subview(p.vx, Kokkos::pair<int,int>(dev_start, dev_start+count)));
+    auto h_vy = Kokkos::create_mirror_view(Kokkos::subview(p.vy, Kokkos::pair<int,int>(dev_start, dev_start+count)));
+    auto h_vz = Kokkos::create_mirror_view(Kokkos::subview(p.vz, Kokkos::pair<int,int>(dev_start, dev_start+count)));
+    auto h_m  = Kokkos::create_mirror_view(Kokkos::subview(p.mass, Kokkos::pair<int,int>(dev_start, dev_start+count)));
+    auto h_dt = Kokkos::create_mirror_view(Kokkos::subview(p.dt_adapt, Kokkos::pair<int,int>(dev_start, dev_start+count)));
+    auto h_sid = Kokkos::create_mirror_view(Kokkos::subview(p.subsystem_id, Kokkos::pair<int,int>(dev_start, dev_start+count)));
+    for (int i = 0; i < count; i++) {
+        h_x(i) = s.x[cpu_start + i]; h_y(i) = s.y[cpu_start + i]; h_z(i) = s.z[cpu_start + i];
+        h_vx(i) = s.vx[cpu_start + i]; h_vy(i) = s.vy[cpu_start + i]; h_vz(i) = s.vz[cpu_start + i];
+        h_m(i) = s.mass[cpu_start + i]; h_dt(i) = s.dt_adapt[cpu_start + i];
+        h_sid(i) = s.sid[cpu_start + i];
+    }
+    Kokkos::deep_copy(Kokkos::subview(p.x, Kokkos::pair<int,int>(dev_start, dev_start+count)), h_x);
+    Kokkos::deep_copy(Kokkos::subview(p.y, Kokkos::pair<int,int>(dev_start, dev_start+count)), h_y);
+    Kokkos::deep_copy(Kokkos::subview(p.z, Kokkos::pair<int,int>(dev_start, dev_start+count)), h_z);
+    Kokkos::deep_copy(Kokkos::subview(p.vx, Kokkos::pair<int,int>(dev_start, dev_start+count)), h_vx);
+    Kokkos::deep_copy(Kokkos::subview(p.vy, Kokkos::pair<int,int>(dev_start, dev_start+count)), h_vy);
+    Kokkos::deep_copy(Kokkos::subview(p.vz, Kokkos::pair<int,int>(dev_start, dev_start+count)), h_vz);
+    Kokkos::deep_copy(Kokkos::subview(p.mass, Kokkos::pair<int,int>(dev_start, dev_start+count)), h_m);
+    Kokkos::deep_copy(Kokkos::subview(p.dt_adapt, Kokkos::pair<int,int>(dev_start, dev_start+count)), h_dt);
+    Kokkos::deep_copy(Kokkos::subview(p.subsystem_id, Kokkos::pair<int,int>(dev_start, dev_start+count)), h_sid);
+    Kokkos::fence();
+}
+
+// Sync subsystem_id back from device to CpuSubset after detection
+static void cpu_sync_sid_from_device(CpuSubset& s, Particles& p, int cpu_start, int dev_start, int count) {
+    auto h_sid = Kokkos::create_mirror_view(Kokkos::subview(p.subsystem_id, Kokkos::pair<int,int>(dev_start, dev_start+count)));
+    Kokkos::deep_copy(h_sid, Kokkos::subview(p.subsystem_id, Kokkos::pair<int,int>(dev_start, dev_start+count)));
+    Kokkos::fence();
+    for (int i = 0; i < count; i++) s.sid[cpu_start + i] = h_sid(i);
+}
+
+// Sync positions and velocities from device back to CpuSubset
+// (after advance_subsystems_in_range modifies subsystem member positions on device)
+static void cpu_sync_pos_vel_from_device(CpuSubset& s, Particles& p, int cpu_start, int dev_start, int count) {
+    auto h_x  = Kokkos::create_mirror_view(Kokkos::subview(p.x, Kokkos::pair<int,int>(dev_start, dev_start+count)));
+    auto h_y  = Kokkos::create_mirror_view(Kokkos::subview(p.y, Kokkos::pair<int,int>(dev_start, dev_start+count)));
+    auto h_z  = Kokkos::create_mirror_view(Kokkos::subview(p.z, Kokkos::pair<int,int>(dev_start, dev_start+count)));
+    auto h_vx = Kokkos::create_mirror_view(Kokkos::subview(p.vx, Kokkos::pair<int,int>(dev_start, dev_start+count)));
+    auto h_vy = Kokkos::create_mirror_view(Kokkos::subview(p.vy, Kokkos::pair<int,int>(dev_start, dev_start+count)));
+    auto h_vz = Kokkos::create_mirror_view(Kokkos::subview(p.vz, Kokkos::pair<int,int>(dev_start, dev_start+count)));
+    Kokkos::deep_copy(h_x, Kokkos::subview(p.x, Kokkos::pair<int,int>(dev_start, dev_start+count)));
+    Kokkos::deep_copy(h_y, Kokkos::subview(p.y, Kokkos::pair<int,int>(dev_start, dev_start+count)));
+    Kokkos::deep_copy(h_z, Kokkos::subview(p.z, Kokkos::pair<int,int>(dev_start, dev_start+count)));
+    Kokkos::deep_copy(h_vx, Kokkos::subview(p.vx, Kokkos::pair<int,int>(dev_start, dev_start+count)));
+    Kokkos::deep_copy(h_vy, Kokkos::subview(p.vy, Kokkos::pair<int,int>(dev_start, dev_start+count)));
+    Kokkos::deep_copy(h_vz, Kokkos::subview(p.vz, Kokkos::pair<int,int>(dev_start, dev_start+count)));
+    Kokkos::fence();
+    for (int i = 0; i < count; i++) {
+        s.x[cpu_start + i] = h_x(i); s.y[cpu_start + i] = h_y(i); s.z[cpu_start + i] = h_z(i);
+        s.vx[cpu_start + i] = h_vx(i); s.vy[cpu_start + i] = h_vy(i); s.vz[cpu_start + i] = h_vz(i);
+    }
+}
+#endif
+
 // CPU FSI step
-static void cpu_fsi_step(CpuSubset& s, int start, int count,
+static void cpu_fsi_step(CpuSubset& s, Particles& p, int start, int count,
                          double G, double soft2, double dt,
                          bool forces_valid = false) {
     if (!forces_valid) {
@@ -3772,6 +4012,13 @@ static void cpu_fsi_step(CpuSubset& s, int start, int count,
     cpu_kick(s, start, count, dt * FSI_KICK);
 #ifdef ENABLE_COLLISIONAL
     cpu_drift_field_only(s, start, count, dt * FSI_DRIFT);
+    // Advance subsystems (LogH/GBS/secular) for members in this range
+    if (s.collisional && !g_subsystem_mgr.active.empty()) {
+        int dev_start = s.device_start + start;
+        cpu_sync_to_device(s, p, start, dev_start, count);
+        advance_subsystems_in_range(p, dev_start, count, G, dt * FSI_DRIFT);
+        cpu_sync_pos_vel_from_device(s, p, start, dev_start, count);
+    }
 #else
     cpu_drift(s, start, count, dt * FSI_DRIFT);
 #endif
@@ -3780,6 +4027,13 @@ static void cpu_fsi_step(CpuSubset& s, int start, int count,
     cpu_kick(s, start, count, dt * FSI_MOD_KICK);
 #ifdef ENABLE_COLLISIONAL
     cpu_drift_field_only(s, start, count, dt * FSI_DRIFT);
+    // Advance subsystems (LogH/GBS/secular) for members in this range
+    if (s.collisional && !g_subsystem_mgr.active.empty()) {
+        int dev_start = s.device_start + start;
+        cpu_sync_to_device(s, p, start, dev_start, count);
+        advance_subsystems_in_range(p, dev_start, count, G, dt * FSI_DRIFT);
+        cpu_sync_pos_vel_from_device(s, p, start, dev_start, count);
+    }
 #else
     cpu_drift(s, start, count, dt * FSI_DRIFT);
 #endif
@@ -3788,18 +4042,95 @@ static void cpu_fsi_step(CpuSubset& s, int start, int count,
 }
 
 // CPU HHS-FSI recursion
-static void cpu_hhs_recursive(CpuSubset& s, int start, int count,
+static void cpu_hhs_recursive(CpuSubset& s, Particles& p, int start, int count,
                               double pivot_dt, double G, double soft2,
-                              double dt_min, double eta, bool dt_valid) {
+                              double dt_min, double eta, bool dt_valid, int depth = 0) {
     if (count == 0) return;
 
     if (pivot_dt * 0.5 < dt_min) {
-        cpu_fsi_step(s, start, count, G, soft2, pivot_dt);
+        cpu_fsi_step(s, p, start, count, G, soft2, pivot_dt);
         return;
     }
 
+    // Global device offset for this subset
+    int dev_start = s.device_start + start;
+
     if (!dt_valid && count > 1) {
+#ifdef ENABLE_COLLISIONAL
+        if (s.collisional) {
+            g_subsystem_mgr.reset_ngb_count();
+            g_collisional.flyby_pivot_dt = pivot_dt;
+        }
+#endif
         cpu_compute_timestep(s, start, count, G, soft2, eta);
+#ifdef ENABLE_COLLISIONAL
+        // Gradient timestep criteria (BIFROST Section 3.4.4)
+        if (s.collisional && g_collisional.eta_grad > 0.0) {
+            double eta_g = g_collisional.eta_grad;
+            for (int i = start; i < start + count; i++) {
+                double g = s.grad_mag[i];
+                if (g > EPS) {
+                    double a_mag = std::sqrt(s.ax[i]*s.ax[i] + s.ay[i]*s.ay[i] + s.az[i]*s.az[i]);
+                    double v_mag = std::sqrt(s.vx[i]*s.vx[i] + s.vy[i]*s.vy[i] + s.vz[i]*s.vz[i]);
+                    double dt_g2 = eta_g * std::sqrt(a_mag / g);
+                    if (dt_g2 < s.dt_adapt[i]) s.dt_adapt[i] = dt_g2;
+                    if (v_mag > EPS) {
+                        double dt_g1 = eta_g * std::cbrt(v_mag / g);
+                        if (dt_g1 < s.dt_adapt[i]) s.dt_adapt[i] = dt_g1;
+                    }
+                }
+            }
+        }
+        // Level-0 clamping (BIFROST Section 3.4.1)
+        if (s.collisional) {
+            if (depth == 0) {
+                for (int i = start; i < start + count; i++)
+                    s.dt_level0[i] = s.dt_adapt[i];
+            } else {
+                for (int i = start; i < start + count; i++)
+                    if (s.dt_adapt[i] > s.dt_level0[i]) s.dt_adapt[i] = s.dt_level0[i];
+            }
+        }
+
+        // Subsystem detection: sync to device, run detection, sync back
+        if (s.collisional) {
+            cpu_sync_to_device(s, p, start, dev_start, count);
+            g_subsystem_mgr.detect_from_pairs(p, G, pivot_dt,
+                                               g_collisional.r_ngb, g_collisional.r_ngb_max,
+                                               g_collisional.n_orb_secular);
+            g_subsystem_mgr.update_particle_flags(p);
+            g_subsystem_mgr.prune(p, G);
+            g_subsystem_mgr.update_particle_flags(p);
+            g_subsystem_mgr.enforce_shared_timestep(p);
+            g_subsystem_mgr.apply_perturbation_timestep(p, G, g_collisional.eta_pert);
+            g_subsystem_mgr.accumulate_diagnostics();
+
+            // Merger detection (BIFROST §3.14)
+            if (g_collisional.c_code > 0.0) {
+                auto mergers = detect_mergers(g_subsystem_mgr, p, G,
+                                               g_collisional.c_code, pivot_dt);
+                for (const auto& ev : mergers) {
+                    execute_merger(ev, p, g_subsystem_mgr, g_energy_books,
+                                   G, g_collisional.c_code);
+                }
+                if (!mergers.empty()) {
+                    int n_removed = p.compact_remove_zero_mass();
+                    count -= n_removed;
+                    if (count <= 0) return;
+                }
+            }
+
+            // Sync subsystem_id and dt_adapt back from device
+            cpu_sync_sid_from_device(s, p, start, dev_start, count);
+            // Also sync dt_adapt back (enforce_shared_timestep may have changed it)
+            {
+                auto h_dt = Kokkos::create_mirror_view(Kokkos::subview(p.dt_adapt, Kokkos::pair<int,int>(dev_start, dev_start+count)));
+                Kokkos::deep_copy(h_dt, Kokkos::subview(p.dt_adapt, Kokkos::pair<int,int>(dev_start, dev_start+count)));
+                Kokkos::fence();
+                for (int i = 0; i < count; i++) s.dt_adapt[start + i] = h_dt(i);
+            }
+        }
+#endif
     }
 
     int slow_count = cpu_partition_by_pivot(s, start, count, pivot_dt);
@@ -3808,15 +4139,15 @@ static void cpu_hhs_recursive(CpuSubset& s, int start, int count,
     int fast_count = count - slow_count;
 
     if (fast_count == 0) {
-        cpu_fsi_step(s, start, count, G, soft2, pivot_dt);
+        cpu_fsi_step(s, p, start, count, G, soft2, pivot_dt);
         return;
     }
 
     // Partition was a no-op when slow_count==0, so dt_adapt still valid
     if (slow_count == 0) {
         double sub_pivot = pivot_dt * 0.5;
-        cpu_hhs_recursive(s, start, count, sub_pivot, G, soft2, dt_min, eta, true);
-        cpu_hhs_recursive(s, start, count, sub_pivot, G, soft2, dt_min, eta, false);
+        cpu_hhs_recursive(s, p, start, count, sub_pivot, G, soft2, dt_min, eta, true, depth + 1);
+        cpu_hhs_recursive(s, p, start, count, sub_pivot, G, soft2, dt_min, eta, false, depth + 1);
         return;
     }
 
@@ -3826,10 +4157,10 @@ static void cpu_hhs_recursive(CpuSubset& s, int start, int count,
     cpu_kick(s, fast_start, fast_count, pivot_dt * FSI_KICK);
 
     // Step 2: FSI half-step on slow
-    cpu_fsi_step(s, slow_start, slow_count, G, soft2, pivot_dt * 0.5);
+    cpu_fsi_step(s, p, slow_start, slow_count, G, soft2, pivot_dt * 0.5);
 
     // Step 3: Recurse on fast (first half)
-    cpu_hhs_recursive(s, fast_start, fast_count, pivot_dt * 0.5, G, soft2, dt_min, eta, false);
+    cpu_hhs_recursive(s, p, fast_start, fast_count, pivot_dt * 0.5, G, soft2, dt_min, eta, false, depth + 1);
 
     // Step 4: Cross-gradient kick (2dt/3)
     cpu_cross_acc(s, slow_start, slow_count, fast_start, fast_count, G, soft2);
@@ -3838,10 +4169,10 @@ static void cpu_hhs_recursive(CpuSubset& s, int start, int count,
     cpu_kick(s, fast_start, fast_count, pivot_dt * FSI_MOD_KICK);
 
     // Step 5: Recurse on fast (second half)
-    cpu_hhs_recursive(s, fast_start, fast_count, pivot_dt * 0.5, G, soft2, dt_min, eta, false);
+    cpu_hhs_recursive(s, p, fast_start, fast_count, pivot_dt * 0.5, G, soft2, dt_min, eta, false, depth + 1);
 
     // Step 6: FSI half-step on slow
-    cpu_fsi_step(s, slow_start, slow_count, G, soft2, pivot_dt * 0.5);
+    cpu_fsi_step(s, p, slow_start, slow_count, G, soft2, pivot_dt * 0.5);
 
     // Step 7: Cross-kick (dt/6)
     cpu_cross_acc(s, slow_start, slow_count, fast_start, fast_count, G, soft2);
@@ -3857,7 +4188,7 @@ static void hhs_fsi_recursive_cpu(Particles& p, int start, int count,
     CpuSubset s;
     s.resize(count);
     s.copy_from_device(p, start);
-    cpu_hhs_recursive(s, 0, count, pivot_dt, G, soft2, dt_min, eta, dt_valid);
+    cpu_hhs_recursive(s, p, 0, count, pivot_dt, G, soft2, dt_min, eta, dt_valid);
     s.copy_to_device(p, start);
 }
 
@@ -3876,6 +4207,7 @@ static void hhs_fsi_recursive_local(
     int local_depth = 0) {
 
     if (count == 0) return;
+    ScopedDepthTimer _depth_timer(local_depth);
     dbg_hhs_local++;
     if (local_depth < DBG_MAX_DEPTH) {
         dbg_local_depth_calls[local_depth]++;
@@ -3898,9 +4230,83 @@ static void hhs_fsi_recursive_local(
 
     // Compute adaptive timesteps for this subset (always direct N² in serial path)
     if (!dt_valid && count > 1) {
+#ifdef ENABLE_COLLISIONAL
+        if (p.collisional) {
+            g_subsystem_mgr.reset_ngb_count();
+            g_collisional.flyby_pivot_dt = pivot_dt;
+        }
+#endif
         g_profiler.start();
-        compute_timestep_subset(p, start, count, G, soft2, eta, symmetric_timesteps);
+        compute_timestep_subset(p, start, count, G, soft2, eta, true);
+#ifdef ENABLE_COLLISIONAL
+        // Gradient timestep criteria (BIFROST Section 3.4.4)
+        if (p.collisional && g_collisional.eta_grad > 0.0) {
+            auto dt_f = p.dt_adapt;
+            auto gm = p.grad_mag;
+            RawView agx{p.ax.data()}, agy{p.ay.data()}, agz{p.az.data()};
+            RawView vvx{p.vx.data()}, vvy{p.vy.data()}, vvz{p.vz.data()};
+            double eta_g = g_collisional.eta_grad;
+            Kokkos::parallel_for("dt_grad_local", count, KOKKOS_LAMBDA(int ii) {
+                int i = start + ii;
+                double g = gm(i);
+                if (g > EPS) {
+                    double a_mag = Kokkos::sqrt(agx(i)*agx(i) + agy(i)*agy(i) + agz(i)*agz(i));
+                    double v_mag = Kokkos::sqrt(vvx(i)*vvx(i) + vvy(i)*vvy(i) + vvz(i)*vvz(i));
+                    double dt_g2 = eta_g * Kokkos::sqrt(a_mag / g);
+                    if (dt_g2 < dt_f(i)) dt_f(i) = dt_g2;
+                    if (v_mag > EPS) {
+                        double dt_g1 = eta_g * Kokkos::cbrt(v_mag / g);
+                        if (dt_g1 < dt_f(i)) dt_f(i) = dt_g1;
+                    }
+                }
+            });
+        }
+        // Level-0 clamping (BIFROST Section 3.4.1)
+        if (p.collisional) {
+            auto dt_f = p.dt_adapt;
+            auto dt_l0 = p.dt_level0;
+            // Local path is always at depth > 0 (entered from distributed path),
+            // so always clamp, never copy.
+            Kokkos::parallel_for("clamp_dt_level0_local", count, KOKKOS_LAMBDA(int ii) {
+                int i = start + ii;
+                if (dt_f(i) > dt_l0(i)) dt_f(i) = dt_l0(i);
+            });
+        }
+#endif
         g_profiler.stop(StepProfiler::ADAPTIVE_DT);
+#ifdef ENABLE_COLLISIONAL
+        // Subsystem detection at this HHS level
+        if (p.collisional) {
+            g_profiler.start();
+            Kokkos::fence();
+            g_subsystem_mgr.detect_from_pairs(p, G, pivot_dt,
+                                               g_collisional.r_ngb, g_collisional.r_ngb_max,
+                                               g_collisional.n_orb_secular);
+            g_subsystem_mgr.update_particle_flags(p);
+            g_subsystem_mgr.prune(p, G);
+            g_subsystem_mgr.update_particle_flags(p);
+            g_subsystem_mgr.enforce_shared_timestep(p);
+            g_subsystem_mgr.apply_perturbation_timestep(p, G, g_collisional.eta_pert);
+            g_subsystem_mgr.accumulate_diagnostics();
+
+            // Merger detection (BIFROST §3.14)
+            if (g_collisional.c_code > 0.0) {
+                auto mergers = detect_mergers(g_subsystem_mgr, p, G,
+                                               g_collisional.c_code, pivot_dt);
+                for (const auto& ev : mergers) {
+                    execute_merger(ev, p, g_subsystem_mgr, g_energy_books,
+                                   G, g_collisional.c_code);
+                }
+                if (!mergers.empty()) {
+                    int n_removed = p.compact_remove_zero_mass();
+                    count -= n_removed;
+                    if (count <= 0) return;
+                    g_subsystem_mgr.update_particle_flags(p);
+                }
+            }
+            g_profiler.stop(StepProfiler::SUBSYSTEM_DETECT);
+        }
+#endif
     }
 
     // Partition into slow (dt >= pivot) and fast (dt < pivot)
@@ -4040,6 +4446,10 @@ static void hhs_fsi_recursive_distributed(
     if (count == 0) return;
     dbg_hhs_distributed++;
     if (depth > dbg_hhs_max_depth) dbg_hhs_max_depth = depth;
+    if (depth < DBG_MAX_DEPTH) {
+        dbg_dist_depth_calls[depth]++;
+        dbg_dist_depth_count[depth] += count;
+    }
     g_subset_hist.record(SubsetHistogram::DISTRIBUTED, count);
 
     // Below threshold: skip MPI, all ranks compute full N² locally
@@ -4113,12 +4523,11 @@ static void hhs_fsi_recursive_distributed(
             dp.local.pack_pos_range(start, count);
             dp.local.pack_vel_range(start, count);
 #ifdef MPI_TOPOLOGY_RING
-                compute_timestep_ring(dp, start, count, G, soft2, eta, symmetric_timesteps);
+                compute_timestep_ring(dp, start, count, G, soft2, eta, true);
 #else
-                compute_timestep_distributed(dp, start, count, G, soft2, eta, symmetric_timesteps);
+                compute_timestep_distributed(dp, start, count, G, soft2, eta, true);
 #endif
         }
-        g_profiler.stop(StepProfiler::ADAPTIVE_DT, (long long)count * count);
 #ifdef ENABLE_COLLISIONAL
         // Gradient timestep criterion (BIFROST Section 3.4.4)
         if (dp.local.collisional && g_collisional.eta_grad > 0.0) {
@@ -4152,13 +4561,21 @@ static void hhs_fsi_recursive_distributed(
                     dt_l0(i) = dt_f(i);
                 });
             } else {
-                Kokkos::parallel_for("clamp_dt_level0_dist", count, KOKKOS_LAMBDA(int ii) {
-                    int i = start + ii;
-                    if (dt_f(i) > dt_l0(i)) dt_f(i) = dt_l0(i);
-                });
+                int n_clamped = 0;
+                Kokkos::parallel_reduce("clamp_dt_level0_dist", count,
+                    KOKKOS_LAMBDA(int ii, int& cnt) {
+                        int i = start + ii;
+                        if (dt_f(i) > dt_l0(i)) {
+                            dt_f(i) = dt_l0(i);
+                            cnt++;
+                        }
+                    }, n_clamped);
+                if (depth < DBG_MAX_DEPTH) dbg_dist_depth_l0_clamped[depth] += n_clamped;
             }
         }
-
+#endif
+        g_profiler.stop(StepProfiler::ADAPTIVE_DT, (long long)count * count);
+#ifdef ENABLE_COLLISIONAL
         // Subsystem detection at this HHS level (after timestep found neighbor pairs,
         // before partition reorders particles). Uses level-appropriate pivot_dt.
         if (dp.local.collisional) {
@@ -4173,6 +4590,8 @@ static void hhs_fsi_recursive_distributed(
             g_subsystem_mgr.enforce_shared_timestep(dp.local);
             g_subsystem_mgr.apply_perturbation_timestep(dp.local, G, g_collisional.eta_pert);
             g_subsystem_mgr.accumulate_diagnostics();
+            if (depth < DBG_MAX_DEPTH)
+                dbg_dist_depth_ngb_pairs[depth] += g_subsystem_mgr.last_level_pairs;
 
             // Merger detection at every HHS level (BIFROST §3.14)
             if (g_collisional.c_code > 0.0) {
@@ -4680,6 +5099,11 @@ void hhs_fsi_step_distributed(DistributedParticles& dp, double pivot_dt,
     dbg_hhs_max_depth = 0;
     std::memset(dbg_local_depth_calls, 0, sizeof(dbg_local_depth_calls));
     std::memset(dbg_local_depth_count, 0, sizeof(dbg_local_depth_count));
+    std::memset(dbg_local_depth_time, 0, sizeof(dbg_local_depth_time));
+    std::memset(dbg_dist_depth_calls, 0, sizeof(dbg_dist_depth_calls));
+    std::memset(dbg_dist_depth_count, 0, sizeof(dbg_dist_depth_count));
+    std::memset(dbg_dist_depth_ngb_pairs, 0, sizeof(dbg_dist_depth_ngb_pairs));
+    std::memset(dbg_dist_depth_l0_clamped, 0, sizeof(dbg_dist_depth_l0_clamped));
 
 #ifdef ENABLE_COLLISIONAL
     if (dp.local.collisional) g_subsystem_mgr.reset_step_diagnostics();
@@ -4740,12 +5164,22 @@ void hhs_fsi_step_distributed(DistributedParticles& dp, double pivot_dt,
                     "slow0_dist=%d, slow0_local=%d, max_depth_dist=%d\n",
                     dbg_hhs_distributed, dbg_hhs_local, dbg_hhs_cpu,
                     dbg_hhs_slow0_dist, dbg_hhs_slow0_local, dbg_hhs_max_depth);
-        std::printf("  Local depth histogram (depth: calls, avg_count):\n");
+        std::printf("  Distributed depth histogram (depth: calls, avg_count, ngb_pairs, l0_clamped):\n");
+        for (int d = 0; d < DBG_MAX_DEPTH; d++) {
+            if (dbg_dist_depth_calls[d] == 0) break;
+            std::printf("    D%2d: %6d calls, avg_count=%lld, ngb_pairs=%d, l0_clamped=%d\n",
+                        d, dbg_dist_depth_calls[d],
+                        dbg_dist_depth_count[d] / dbg_dist_depth_calls[d],
+                        dbg_dist_depth_ngb_pairs[d],
+                        dbg_dist_depth_l0_clamped[d]);
+        }
+        std::printf("  Local depth histogram (depth: calls, avg_count, time_s):\n");
         for (int d = 0; d < DBG_MAX_DEPTH; d++) {
             if (dbg_local_depth_calls[d] == 0) break;
-            std::printf("    D%2d: %6d calls, avg_count=%lld\n",
+            std::printf("    D%2d: %6d calls, avg_count=%lld, time=%.3fs (inclusive)\n",
                         d, dbg_local_depth_calls[d],
-                        dbg_local_depth_count[d] / dbg_local_depth_calls[d]);
+                        dbg_local_depth_count[d] / dbg_local_depth_calls[d],
+                        dbg_local_depth_time[d]);
         }
     }
 }

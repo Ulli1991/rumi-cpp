@@ -110,6 +110,7 @@ std::vector<MergerEvent> detect_mergers(const SubsystemManager& mgr,
                                          const Particles& p,
                                          double G, double c_code, double dt) {
     std::vector<MergerEvent> events;
+    if (mgr.active.empty()) return events;
 
     auto h_x  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.x);
     auto h_y  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.y);

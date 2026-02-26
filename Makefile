@@ -60,7 +60,7 @@ EQUALS = =
 CMAKE_SOURCE_DIR = /u/uli/cpp-nbody
 
 # The top-level build directory on which CMake was run.
-CMAKE_BINARY_DIR = /raven/u/uli/cpp-nbody
+CMAKE_BINARY_DIR = /u/uli/cpp-nbody
 
 #=============================================================================
 # Targets provided globally by CMake.
@@ -87,9 +87,9 @@ rebuild_cache/fast: rebuild_cache
 
 # The main all target
 all: cmake_check_build_system
-	$(CMAKE_COMMAND) -E cmake_progress_start /raven/u/uli/cpp-nbody/CMakeFiles /raven/u/uli/cpp-nbody//CMakeFiles/progress.marks
+	$(CMAKE_COMMAND) -E cmake_progress_start /u/uli/cpp-nbody/CMakeFiles /u/uli/cpp-nbody//CMakeFiles/progress.marks
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 all
-	$(CMAKE_COMMAND) -E cmake_progress_start /raven/u/uli/cpp-nbody/CMakeFiles 0
+	$(CMAKE_COMMAND) -E cmake_progress_start /u/uli/cpp-nbody/CMakeFiles 0
 .PHONY : all
 
 # The main clean target
@@ -129,221 +129,269 @@ nbody-kokkos/fast:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/nbody-kokkos.dir/build.make CMakeFiles/nbody-kokkos.dir/build
 .PHONY : nbody-kokkos/fast
 
-initial_conditions/sse.o: initial_conditions/sse.cpp.o
-.PHONY : initial_conditions/sse.o
+src/core/mpi_comm.o: src/core/mpi_comm.cpp.o
+.PHONY : src/core/mpi_comm.o
 
 # target to build an object file
-initial_conditions/sse.cpp.o:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/nbody-kokkos.dir/build.make CMakeFiles/nbody-kokkos.dir/initial_conditions/sse.cpp.o
-.PHONY : initial_conditions/sse.cpp.o
+src/core/mpi_comm.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/nbody-kokkos.dir/build.make CMakeFiles/nbody-kokkos.dir/src/core/mpi_comm.cpp.o
+.PHONY : src/core/mpi_comm.cpp.o
 
-initial_conditions/sse.i: initial_conditions/sse.cpp.i
-.PHONY : initial_conditions/sse.i
+src/core/mpi_comm.i: src/core/mpi_comm.cpp.i
+.PHONY : src/core/mpi_comm.i
 
 # target to preprocess a source file
-initial_conditions/sse.cpp.i:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/nbody-kokkos.dir/build.make CMakeFiles/nbody-kokkos.dir/initial_conditions/sse.cpp.i
-.PHONY : initial_conditions/sse.cpp.i
+src/core/mpi_comm.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/nbody-kokkos.dir/build.make CMakeFiles/nbody-kokkos.dir/src/core/mpi_comm.cpp.i
+.PHONY : src/core/mpi_comm.cpp.i
 
-initial_conditions/sse.s: initial_conditions/sse.cpp.s
-.PHONY : initial_conditions/sse.s
+src/core/mpi_comm.s: src/core/mpi_comm.cpp.s
+.PHONY : src/core/mpi_comm.s
 
 # target to generate assembly for a file
-initial_conditions/sse.cpp.s:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/nbody-kokkos.dir/build.make CMakeFiles/nbody-kokkos.dir/initial_conditions/sse.cpp.s
-.PHONY : initial_conditions/sse.cpp.s
+src/core/mpi_comm.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/nbody-kokkos.dir/build.make CMakeFiles/nbody-kokkos.dir/src/core/mpi_comm.cpp.s
+.PHONY : src/core/mpi_comm.cpp.s
 
-src-kokkos/diagnostics.o: src-kokkos/diagnostics.cpp.o
-.PHONY : src-kokkos/diagnostics.o
+src/core/particles.o: src/core/particles.cpp.o
+.PHONY : src/core/particles.o
 
 # target to build an object file
-src-kokkos/diagnostics.cpp.o:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/nbody-kokkos.dir/build.make CMakeFiles/nbody-kokkos.dir/src-kokkos/diagnostics.cpp.o
-.PHONY : src-kokkos/diagnostics.cpp.o
+src/core/particles.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/nbody-kokkos.dir/build.make CMakeFiles/nbody-kokkos.dir/src/core/particles.cpp.o
+.PHONY : src/core/particles.cpp.o
 
-src-kokkos/diagnostics.i: src-kokkos/diagnostics.cpp.i
-.PHONY : src-kokkos/diagnostics.i
+src/core/particles.i: src/core/particles.cpp.i
+.PHONY : src/core/particles.i
 
 # target to preprocess a source file
-src-kokkos/diagnostics.cpp.i:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/nbody-kokkos.dir/build.make CMakeFiles/nbody-kokkos.dir/src-kokkos/diagnostics.cpp.i
-.PHONY : src-kokkos/diagnostics.cpp.i
+src/core/particles.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/nbody-kokkos.dir/build.make CMakeFiles/nbody-kokkos.dir/src/core/particles.cpp.i
+.PHONY : src/core/particles.cpp.i
 
-src-kokkos/diagnostics.s: src-kokkos/diagnostics.cpp.s
-.PHONY : src-kokkos/diagnostics.s
+src/core/particles.s: src/core/particles.cpp.s
+.PHONY : src/core/particles.s
 
 # target to generate assembly for a file
-src-kokkos/diagnostics.cpp.s:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/nbody-kokkos.dir/build.make CMakeFiles/nbody-kokkos.dir/src-kokkos/diagnostics.cpp.s
-.PHONY : src-kokkos/diagnostics.cpp.s
+src/core/particles.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/nbody-kokkos.dir/build.make CMakeFiles/nbody-kokkos.dir/src/core/particles.cpp.s
+.PHONY : src/core/particles.cpp.s
 
-src-kokkos/forces.o: src-kokkos/forces.cpp.o
-.PHONY : src-kokkos/forces.o
+src/gravity/forces.o: src/gravity/forces.cpp.o
+.PHONY : src/gravity/forces.o
 
 # target to build an object file
-src-kokkos/forces.cpp.o:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/nbody-kokkos.dir/build.make CMakeFiles/nbody-kokkos.dir/src-kokkos/forces.cpp.o
-.PHONY : src-kokkos/forces.cpp.o
+src/gravity/forces.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/nbody-kokkos.dir/build.make CMakeFiles/nbody-kokkos.dir/src/gravity/forces.cpp.o
+.PHONY : src/gravity/forces.cpp.o
 
-src-kokkos/forces.i: src-kokkos/forces.cpp.i
-.PHONY : src-kokkos/forces.i
+src/gravity/forces.i: src/gravity/forces.cpp.i
+.PHONY : src/gravity/forces.i
 
 # target to preprocess a source file
-src-kokkos/forces.cpp.i:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/nbody-kokkos.dir/build.make CMakeFiles/nbody-kokkos.dir/src-kokkos/forces.cpp.i
-.PHONY : src-kokkos/forces.cpp.i
+src/gravity/forces.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/nbody-kokkos.dir/build.make CMakeFiles/nbody-kokkos.dir/src/gravity/forces.cpp.i
+.PHONY : src/gravity/forces.cpp.i
 
-src-kokkos/forces.s: src-kokkos/forces.cpp.s
-.PHONY : src-kokkos/forces.s
+src/gravity/forces.s: src/gravity/forces.cpp.s
+.PHONY : src/gravity/forces.s
 
 # target to generate assembly for a file
-src-kokkos/forces.cpp.s:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/nbody-kokkos.dir/build.make CMakeFiles/nbody-kokkos.dir/src-kokkos/forces.cpp.s
-.PHONY : src-kokkos/forces.cpp.s
+src/gravity/forces.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/nbody-kokkos.dir/build.make CMakeFiles/nbody-kokkos.dir/src/gravity/forces.cpp.s
+.PHONY : src/gravity/forces.cpp.s
 
-src-kokkos/initial_conditions.o: src-kokkos/initial_conditions.cpp.o
-.PHONY : src-kokkos/initial_conditions.o
+src/gravity/tree.o: src/gravity/tree.cpp.o
+.PHONY : src/gravity/tree.o
 
 # target to build an object file
-src-kokkos/initial_conditions.cpp.o:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/nbody-kokkos.dir/build.make CMakeFiles/nbody-kokkos.dir/src-kokkos/initial_conditions.cpp.o
-.PHONY : src-kokkos/initial_conditions.cpp.o
+src/gravity/tree.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/nbody-kokkos.dir/build.make CMakeFiles/nbody-kokkos.dir/src/gravity/tree.cpp.o
+.PHONY : src/gravity/tree.cpp.o
 
-src-kokkos/initial_conditions.i: src-kokkos/initial_conditions.cpp.i
-.PHONY : src-kokkos/initial_conditions.i
+src/gravity/tree.i: src/gravity/tree.cpp.i
+.PHONY : src/gravity/tree.i
 
 # target to preprocess a source file
-src-kokkos/initial_conditions.cpp.i:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/nbody-kokkos.dir/build.make CMakeFiles/nbody-kokkos.dir/src-kokkos/initial_conditions.cpp.i
-.PHONY : src-kokkos/initial_conditions.cpp.i
+src/gravity/tree.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/nbody-kokkos.dir/build.make CMakeFiles/nbody-kokkos.dir/src/gravity/tree.cpp.i
+.PHONY : src/gravity/tree.cpp.i
 
-src-kokkos/initial_conditions.s: src-kokkos/initial_conditions.cpp.s
-.PHONY : src-kokkos/initial_conditions.s
+src/gravity/tree.s: src/gravity/tree.cpp.s
+.PHONY : src/gravity/tree.s
 
 # target to generate assembly for a file
-src-kokkos/initial_conditions.cpp.s:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/nbody-kokkos.dir/build.make CMakeFiles/nbody-kokkos.dir/src-kokkos/initial_conditions.cpp.s
-.PHONY : src-kokkos/initial_conditions.cpp.s
+src/gravity/tree.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/nbody-kokkos.dir/build.make CMakeFiles/nbody-kokkos.dir/src/gravity/tree.cpp.s
+.PHONY : src/gravity/tree.cpp.s
 
-src-kokkos/integrator.o: src-kokkos/integrator.cpp.o
-.PHONY : src-kokkos/integrator.o
+src/gravity/tree_forces.o: src/gravity/tree_forces.cpp.o
+.PHONY : src/gravity/tree_forces.o
 
 # target to build an object file
-src-kokkos/integrator.cpp.o:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/nbody-kokkos.dir/build.make CMakeFiles/nbody-kokkos.dir/src-kokkos/integrator.cpp.o
-.PHONY : src-kokkos/integrator.cpp.o
+src/gravity/tree_forces.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/nbody-kokkos.dir/build.make CMakeFiles/nbody-kokkos.dir/src/gravity/tree_forces.cpp.o
+.PHONY : src/gravity/tree_forces.cpp.o
 
-src-kokkos/integrator.i: src-kokkos/integrator.cpp.i
-.PHONY : src-kokkos/integrator.i
+src/gravity/tree_forces.i: src/gravity/tree_forces.cpp.i
+.PHONY : src/gravity/tree_forces.i
 
 # target to preprocess a source file
-src-kokkos/integrator.cpp.i:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/nbody-kokkos.dir/build.make CMakeFiles/nbody-kokkos.dir/src-kokkos/integrator.cpp.i
-.PHONY : src-kokkos/integrator.cpp.i
+src/gravity/tree_forces.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/nbody-kokkos.dir/build.make CMakeFiles/nbody-kokkos.dir/src/gravity/tree_forces.cpp.i
+.PHONY : src/gravity/tree_forces.cpp.i
 
-src-kokkos/integrator.s: src-kokkos/integrator.cpp.s
-.PHONY : src-kokkos/integrator.s
+src/gravity/tree_forces.s: src/gravity/tree_forces.cpp.s
+.PHONY : src/gravity/tree_forces.s
 
 # target to generate assembly for a file
-src-kokkos/integrator.cpp.s:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/nbody-kokkos.dir/build.make CMakeFiles/nbody-kokkos.dir/src-kokkos/integrator.cpp.s
-.PHONY : src-kokkos/integrator.cpp.s
+src/gravity/tree_forces.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/nbody-kokkos.dir/build.make CMakeFiles/nbody-kokkos.dir/src/gravity/tree_forces.cpp.s
+.PHONY : src/gravity/tree_forces.cpp.s
 
-src-kokkos/main.o: src-kokkos/main.cpp.o
-.PHONY : src-kokkos/main.o
+src/ic_gen/initial_conditions.o: src/ic_gen/initial_conditions.cpp.o
+.PHONY : src/ic_gen/initial_conditions.o
 
 # target to build an object file
-src-kokkos/main.cpp.o:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/nbody-kokkos.dir/build.make CMakeFiles/nbody-kokkos.dir/src-kokkos/main.cpp.o
-.PHONY : src-kokkos/main.cpp.o
+src/ic_gen/initial_conditions.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/nbody-kokkos.dir/build.make CMakeFiles/nbody-kokkos.dir/src/ic_gen/initial_conditions.cpp.o
+.PHONY : src/ic_gen/initial_conditions.cpp.o
 
-src-kokkos/main.i: src-kokkos/main.cpp.i
-.PHONY : src-kokkos/main.i
+src/ic_gen/initial_conditions.i: src/ic_gen/initial_conditions.cpp.i
+.PHONY : src/ic_gen/initial_conditions.i
 
 # target to preprocess a source file
-src-kokkos/main.cpp.i:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/nbody-kokkos.dir/build.make CMakeFiles/nbody-kokkos.dir/src-kokkos/main.cpp.i
-.PHONY : src-kokkos/main.cpp.i
+src/ic_gen/initial_conditions.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/nbody-kokkos.dir/build.make CMakeFiles/nbody-kokkos.dir/src/ic_gen/initial_conditions.cpp.i
+.PHONY : src/ic_gen/initial_conditions.cpp.i
 
-src-kokkos/main.s: src-kokkos/main.cpp.s
-.PHONY : src-kokkos/main.s
+src/ic_gen/initial_conditions.s: src/ic_gen/initial_conditions.cpp.s
+.PHONY : src/ic_gen/initial_conditions.s
 
 # target to generate assembly for a file
-src-kokkos/main.cpp.s:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/nbody-kokkos.dir/build.make CMakeFiles/nbody-kokkos.dir/src-kokkos/main.cpp.s
-.PHONY : src-kokkos/main.cpp.s
+src/ic_gen/initial_conditions.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/nbody-kokkos.dir/build.make CMakeFiles/nbody-kokkos.dir/src/ic_gen/initial_conditions.cpp.s
+.PHONY : src/ic_gen/initial_conditions.cpp.s
 
-src-kokkos/mpi_comm.o: src-kokkos/mpi_comm.cpp.o
-.PHONY : src-kokkos/mpi_comm.o
+src/ic_gen/sse.o: src/ic_gen/sse.cpp.o
+.PHONY : src/ic_gen/sse.o
 
 # target to build an object file
-src-kokkos/mpi_comm.cpp.o:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/nbody-kokkos.dir/build.make CMakeFiles/nbody-kokkos.dir/src-kokkos/mpi_comm.cpp.o
-.PHONY : src-kokkos/mpi_comm.cpp.o
+src/ic_gen/sse.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/nbody-kokkos.dir/build.make CMakeFiles/nbody-kokkos.dir/src/ic_gen/sse.cpp.o
+.PHONY : src/ic_gen/sse.cpp.o
 
-src-kokkos/mpi_comm.i: src-kokkos/mpi_comm.cpp.i
-.PHONY : src-kokkos/mpi_comm.i
+src/ic_gen/sse.i: src/ic_gen/sse.cpp.i
+.PHONY : src/ic_gen/sse.i
 
 # target to preprocess a source file
-src-kokkos/mpi_comm.cpp.i:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/nbody-kokkos.dir/build.make CMakeFiles/nbody-kokkos.dir/src-kokkos/mpi_comm.cpp.i
-.PHONY : src-kokkos/mpi_comm.cpp.i
+src/ic_gen/sse.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/nbody-kokkos.dir/build.make CMakeFiles/nbody-kokkos.dir/src/ic_gen/sse.cpp.i
+.PHONY : src/ic_gen/sse.cpp.i
 
-src-kokkos/mpi_comm.s: src-kokkos/mpi_comm.cpp.s
-.PHONY : src-kokkos/mpi_comm.s
+src/ic_gen/sse.s: src/ic_gen/sse.cpp.s
+.PHONY : src/ic_gen/sse.s
 
 # target to generate assembly for a file
-src-kokkos/mpi_comm.cpp.s:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/nbody-kokkos.dir/build.make CMakeFiles/nbody-kokkos.dir/src-kokkos/mpi_comm.cpp.s
-.PHONY : src-kokkos/mpi_comm.cpp.s
+src/ic_gen/sse.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/nbody-kokkos.dir/build.make CMakeFiles/nbody-kokkos.dir/src/ic_gen/sse.cpp.s
+.PHONY : src/ic_gen/sse.cpp.s
 
-src-kokkos/particles.o: src-kokkos/particles.cpp.o
-.PHONY : src-kokkos/particles.o
+src/integrator/integrator.o: src/integrator/integrator.cpp.o
+.PHONY : src/integrator/integrator.o
 
 # target to build an object file
-src-kokkos/particles.cpp.o:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/nbody-kokkos.dir/build.make CMakeFiles/nbody-kokkos.dir/src-kokkos/particles.cpp.o
-.PHONY : src-kokkos/particles.cpp.o
+src/integrator/integrator.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/nbody-kokkos.dir/build.make CMakeFiles/nbody-kokkos.dir/src/integrator/integrator.cpp.o
+.PHONY : src/integrator/integrator.cpp.o
 
-src-kokkos/particles.i: src-kokkos/particles.cpp.i
-.PHONY : src-kokkos/particles.i
+src/integrator/integrator.i: src/integrator/integrator.cpp.i
+.PHONY : src/integrator/integrator.i
 
 # target to preprocess a source file
-src-kokkos/particles.cpp.i:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/nbody-kokkos.dir/build.make CMakeFiles/nbody-kokkos.dir/src-kokkos/particles.cpp.i
-.PHONY : src-kokkos/particles.cpp.i
+src/integrator/integrator.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/nbody-kokkos.dir/build.make CMakeFiles/nbody-kokkos.dir/src/integrator/integrator.cpp.i
+.PHONY : src/integrator/integrator.cpp.i
 
-src-kokkos/particles.s: src-kokkos/particles.cpp.s
-.PHONY : src-kokkos/particles.s
+src/integrator/integrator.s: src/integrator/integrator.cpp.s
+.PHONY : src/integrator/integrator.s
 
 # target to generate assembly for a file
-src-kokkos/particles.cpp.s:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/nbody-kokkos.dir/build.make CMakeFiles/nbody-kokkos.dir/src-kokkos/particles.cpp.s
-.PHONY : src-kokkos/particles.cpp.s
+src/integrator/integrator.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/nbody-kokkos.dir/build.make CMakeFiles/nbody-kokkos.dir/src/integrator/integrator.cpp.s
+.PHONY : src/integrator/integrator.cpp.s
 
-src-kokkos/timestep.o: src-kokkos/timestep.cpp.o
-.PHONY : src-kokkos/timestep.o
+src/integrator/timestep.o: src/integrator/timestep.cpp.o
+.PHONY : src/integrator/timestep.o
 
 # target to build an object file
-src-kokkos/timestep.cpp.o:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/nbody-kokkos.dir/build.make CMakeFiles/nbody-kokkos.dir/src-kokkos/timestep.cpp.o
-.PHONY : src-kokkos/timestep.cpp.o
+src/integrator/timestep.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/nbody-kokkos.dir/build.make CMakeFiles/nbody-kokkos.dir/src/integrator/timestep.cpp.o
+.PHONY : src/integrator/timestep.cpp.o
 
-src-kokkos/timestep.i: src-kokkos/timestep.cpp.i
-.PHONY : src-kokkos/timestep.i
+src/integrator/timestep.i: src/integrator/timestep.cpp.i
+.PHONY : src/integrator/timestep.i
 
 # target to preprocess a source file
-src-kokkos/timestep.cpp.i:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/nbody-kokkos.dir/build.make CMakeFiles/nbody-kokkos.dir/src-kokkos/timestep.cpp.i
-.PHONY : src-kokkos/timestep.cpp.i
+src/integrator/timestep.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/nbody-kokkos.dir/build.make CMakeFiles/nbody-kokkos.dir/src/integrator/timestep.cpp.i
+.PHONY : src/integrator/timestep.cpp.i
 
-src-kokkos/timestep.s: src-kokkos/timestep.cpp.s
-.PHONY : src-kokkos/timestep.s
+src/integrator/timestep.s: src/integrator/timestep.cpp.s
+.PHONY : src/integrator/timestep.s
 
 # target to generate assembly for a file
-src-kokkos/timestep.cpp.s:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/nbody-kokkos.dir/build.make CMakeFiles/nbody-kokkos.dir/src-kokkos/timestep.cpp.s
-.PHONY : src-kokkos/timestep.cpp.s
+src/integrator/timestep.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/nbody-kokkos.dir/build.make CMakeFiles/nbody-kokkos.dir/src/integrator/timestep.cpp.s
+.PHONY : src/integrator/timestep.cpp.s
+
+src/io/diagnostics.o: src/io/diagnostics.cpp.o
+.PHONY : src/io/diagnostics.o
+
+# target to build an object file
+src/io/diagnostics.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/nbody-kokkos.dir/build.make CMakeFiles/nbody-kokkos.dir/src/io/diagnostics.cpp.o
+.PHONY : src/io/diagnostics.cpp.o
+
+src/io/diagnostics.i: src/io/diagnostics.cpp.i
+.PHONY : src/io/diagnostics.i
+
+# target to preprocess a source file
+src/io/diagnostics.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/nbody-kokkos.dir/build.make CMakeFiles/nbody-kokkos.dir/src/io/diagnostics.cpp.i
+.PHONY : src/io/diagnostics.cpp.i
+
+src/io/diagnostics.s: src/io/diagnostics.cpp.s
+.PHONY : src/io/diagnostics.s
+
+# target to generate assembly for a file
+src/io/diagnostics.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/nbody-kokkos.dir/build.make CMakeFiles/nbody-kokkos.dir/src/io/diagnostics.cpp.s
+.PHONY : src/io/diagnostics.cpp.s
+
+src/main.o: src/main.cpp.o
+.PHONY : src/main.o
+
+# target to build an object file
+src/main.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/nbody-kokkos.dir/build.make CMakeFiles/nbody-kokkos.dir/src/main.cpp.o
+.PHONY : src/main.cpp.o
+
+src/main.i: src/main.cpp.i
+.PHONY : src/main.i
+
+# target to preprocess a source file
+src/main.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/nbody-kokkos.dir/build.make CMakeFiles/nbody-kokkos.dir/src/main.cpp.i
+.PHONY : src/main.cpp.i
+
+src/main.s: src/main.cpp.s
+.PHONY : src/main.s
+
+# target to generate assembly for a file
+src/main.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/nbody-kokkos.dir/build.make CMakeFiles/nbody-kokkos.dir/src/main.cpp.s
+.PHONY : src/main.cpp.s
 
 # Help Target
 help:
@@ -354,33 +402,39 @@ help:
 	@echo "... edit_cache"
 	@echo "... rebuild_cache"
 	@echo "... nbody-kokkos"
-	@echo "... initial_conditions/sse.o"
-	@echo "... initial_conditions/sse.i"
-	@echo "... initial_conditions/sse.s"
-	@echo "... src-kokkos/diagnostics.o"
-	@echo "... src-kokkos/diagnostics.i"
-	@echo "... src-kokkos/diagnostics.s"
-	@echo "... src-kokkos/forces.o"
-	@echo "... src-kokkos/forces.i"
-	@echo "... src-kokkos/forces.s"
-	@echo "... src-kokkos/initial_conditions.o"
-	@echo "... src-kokkos/initial_conditions.i"
-	@echo "... src-kokkos/initial_conditions.s"
-	@echo "... src-kokkos/integrator.o"
-	@echo "... src-kokkos/integrator.i"
-	@echo "... src-kokkos/integrator.s"
-	@echo "... src-kokkos/main.o"
-	@echo "... src-kokkos/main.i"
-	@echo "... src-kokkos/main.s"
-	@echo "... src-kokkos/mpi_comm.o"
-	@echo "... src-kokkos/mpi_comm.i"
-	@echo "... src-kokkos/mpi_comm.s"
-	@echo "... src-kokkos/particles.o"
-	@echo "... src-kokkos/particles.i"
-	@echo "... src-kokkos/particles.s"
-	@echo "... src-kokkos/timestep.o"
-	@echo "... src-kokkos/timestep.i"
-	@echo "... src-kokkos/timestep.s"
+	@echo "... src/core/mpi_comm.o"
+	@echo "... src/core/mpi_comm.i"
+	@echo "... src/core/mpi_comm.s"
+	@echo "... src/core/particles.o"
+	@echo "... src/core/particles.i"
+	@echo "... src/core/particles.s"
+	@echo "... src/gravity/forces.o"
+	@echo "... src/gravity/forces.i"
+	@echo "... src/gravity/forces.s"
+	@echo "... src/gravity/tree.o"
+	@echo "... src/gravity/tree.i"
+	@echo "... src/gravity/tree.s"
+	@echo "... src/gravity/tree_forces.o"
+	@echo "... src/gravity/tree_forces.i"
+	@echo "... src/gravity/tree_forces.s"
+	@echo "... src/ic_gen/initial_conditions.o"
+	@echo "... src/ic_gen/initial_conditions.i"
+	@echo "... src/ic_gen/initial_conditions.s"
+	@echo "... src/ic_gen/sse.o"
+	@echo "... src/ic_gen/sse.i"
+	@echo "... src/ic_gen/sse.s"
+	@echo "... src/integrator/integrator.o"
+	@echo "... src/integrator/integrator.i"
+	@echo "... src/integrator/integrator.s"
+	@echo "... src/integrator/timestep.o"
+	@echo "... src/integrator/timestep.i"
+	@echo "... src/integrator/timestep.s"
+	@echo "... src/io/diagnostics.o"
+	@echo "... src/io/diagnostics.i"
+	@echo "... src/io/diagnostics.s"
+	@echo "... src/main.o"
+	@echo "... src/main.i"
+	@echo "... src/main.s"
 .PHONY : help
 
 

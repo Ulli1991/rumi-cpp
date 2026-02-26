@@ -92,9 +92,12 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
         // Same-subsystem pairs are excluded by the force/timestep kernel,
         // so they won't appear in the neighbor buffer. Clearing here would
         // destroy active subsystems every time re-detection runs.
+        last_level_pairs = 0;
+        last_level_bound = 0;
         return;
     }
     n_pairs = std::min(n_pairs, max_ngb_pairs);
+    last_level_pairs = n_pairs;
 
     // Copy neighbor pairs to host
     auto h_pi = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
@@ -109,6 +112,13 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
                     Kokkos::subview(ngb_pair_E, std::make_pair(0, n_pairs)));
     auto h_pb = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
                     Kokkos::subview(ngb_pair_bound, std::make_pair(0, n_pairs)));
+
+    // Count bound pairs for diagnostics
+    {
+        int nb = 0;
+        for (int k = 0; k < n_pairs; k++) { if (h_pb(k)) nb++; }
+        last_level_bound = nb;
+    }
 
     // Get particle IDs and adaptive timesteps on host
     auto h_pid = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.particle_id);
@@ -354,12 +364,12 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
 // ============================================================================
 
 void SubsystemManager::update_particle_flags(Particles& p) const {
+    if (active.empty()) return;
+
     // Reset all to -1
     auto sid = p.subsystem_id;
     int N = p.N;
     Kokkos::parallel_for("reset_sid", N, KOKKOS_LAMBDA(int i) { sid(i) = -1; });
-
-    if (active.empty()) return;
 
     // Build mapping on host: particle_id -> subsystem_id
     auto h_pid = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.particle_id);
@@ -393,6 +403,8 @@ void SubsystemManager::remap_indices(const Particles& p) {
 // ============================================================================
 
 void SubsystemManager::prune(Particles& p, double G) {
+    if (active.empty()) return;
+
     auto h_x  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.x);
     auto h_y  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.y);
     auto h_z  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.z);
@@ -554,16 +566,19 @@ void SubsystemManager::apply_perturbation_timestep(Particles& p, double G, doubl
 
 void SubsystemManager::reset_step_diagnostics() {
     step_total_pairs = 0;
+    step_total_bound = 0;
     step_total_subsystems = 0;
     step_n_bin = 0; step_n_fly = 0; step_n_trip_s = 0; step_n_trip_u = 0; step_n_multi = 0;
     step_n_secular = 0;
     step_total_members = 0;
+    last_level_pairs = 0;
+    last_level_bound = 0;
 }
 
 void SubsystemManager::accumulate_diagnostics() {
-    // Read neighbor pair count from device
-    auto h_count = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), ngb_count);
-    step_total_pairs += h_count(0);
+    // Use pair counts already computed by detect_from_pairs
+    step_total_pairs += last_level_pairs;
+    step_total_bound += last_level_bound;
     step_total_subsystems += (int)active.size();
     for (const auto& sub : active) {
         step_total_members += sub.n_bodies;
@@ -579,8 +594,8 @@ void SubsystemManager::accumulate_diagnostics() {
 }
 
 void SubsystemManager::print_step_summary() const {
-    std::printf("  Subsystems: %d pairs found, %d subsystems (%d particles)",
-                step_total_pairs, step_total_subsystems, step_total_members);
+    std::printf("  Subsystems: %d pairs found (%d bound), %d subsystems (%d particles)",
+                step_total_pairs, step_total_bound, step_total_subsystems, step_total_members);
     if (step_total_subsystems > 0) {
         std::printf(" [");
         bool first = true;

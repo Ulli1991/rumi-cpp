@@ -18,9 +18,7 @@ extern double int_pos_inv_scale;        // 1.0 / scale (for drift)
 
 extern bool use_nonblocking_mpi;        // MPI_NON_BLOCKING config toggle
 
-extern bool symmetric_timesteps;        // SYMMETRIC_TIMESTEPS config toggle
-                                        // When true: fused force+timestep with harmonic symmetrization
-                                        // When false: separate timestep kernel, no symmetrization
+// symmetric_timesteps removed — always enabled (hardcoded true)
 
 // Barnes-Hut tree configuration
 extern bool use_tree;                   // USE_TREE config toggle

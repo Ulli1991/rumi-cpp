@@ -416,7 +416,6 @@ int main(int argc, char** argv) {
         use_integer_positions = (cfg.get_str("INTEGER_POSITIONS", "false") == "true");
         double domain_halfsize = cfg.get_double("DOMAIN_HALFSIZE_PC", 200.0);
         use_nonblocking_mpi = (cfg.get_str("MPI_NON_BLOCKING", "false") == "true");
-        symmetric_timesteps = (cfg.get_str("SYMMETRIC_TIMESTEPS", "false") == "true");
 
         // Barnes-Hut tree configuration
         use_tree = (cfg.get_str("USE_TREE", "false") == "true");
