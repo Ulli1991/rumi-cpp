@@ -760,6 +760,7 @@ static void compute_timestep_subset_impl(Particles& p, int start, int count,
             double t_min_sq = 1e60;   // non-symmetrized path
             double t_min_i = 1e30;    // symmetrized path
             double jerk_x = 0, jerk_y = 0, jerk_z = 0;  // jerk accumulators (collisional only)
+            double acc_xi = 0, acc_yi = 0, acc_zi = 0;  // fresh subset acceleration for jerk criterion
 
             for (int tile_st = start; tile_st < end; tile_st += TILE_SIZE) {
                 int tile_end_idx = (tile_st + TILE_SIZE < end) ? tile_st + TILE_SIZE : end;
@@ -834,7 +835,7 @@ static void compute_timestep_subset_impl(Particles& p, int start, int count,
                             t_min_sq = Kokkos::fmin(t_min_sq, t_min_sq_pair);
                         }
 
-                        // Jerk accumulation (collisional only)
+                        // Jerk + acceleration accumulation (collisional only)
                         // j_ij = G*m_j * (v_ij/r³ - 3*(r·v)/(r^5) * r_ij)
                         if (COLL) {
                             double inv_r3 = inv_r * inv_r * inv_r;
@@ -844,6 +845,10 @@ static void compute_timestep_subset_impl(Particles& p, int start, int count,
                             jerk_x += fac1 * (dvx - fac2 * dx);
                             jerk_y += fac1 * (dvy - fac2 * dy);
                             jerk_z += fac1 * (dvz - fac2 * dz);
+                            // Fresh subset acceleration for jerk criterion (BIFROST §3.4.5)
+                            acc_xi += fac1 * dx;
+                            acc_yi += fac1 * dy;
+                            acc_zi += fac1 * dz;
                         }
 
                         // Neighbor detection: identify bound/close pairs and unbound fly-bys
@@ -898,11 +903,12 @@ static void compute_timestep_subset_impl(Particles& p, int start, int count,
             if (ii < count) {
                 double dt_val = symmetrize ? t_min_i : Kokkos::sqrt(t_min_sq);
 
-                // Jerk timestep: dt_jerk = eta_j * |a| / |j| (collisional only)
+                // Jerk timestep: dt_jerk = eta_j * |a| / |j| (BIFROST §3.4.5)
+                // Uses freshly accumulated subset acceleration, not stale p.ax/ay/az
                 if (COLL && eta_jerk_val > 0.0) {
-                    double a_mag = Kokkos::sqrt(pax(i)*pax(i) + pay(i)*pay(i) + paz(i)*paz(i));
+                    double a_mag = Kokkos::sqrt(acc_xi*acc_xi + acc_yi*acc_yi + acc_zi*acc_zi);
                     double j_mag = Kokkos::sqrt(jerk_x*jerk_x + jerk_y*jerk_y + jerk_z*jerk_z);
-                    if (j_mag > EPS) {
+                    if (j_mag > EPS && a_mag > EPS) {
                         double dt_jerk = eta_jerk_val * a_mag / j_mag;
                         dt_val = Kokkos::fmin(dt_val, dt_jerk);
                     }

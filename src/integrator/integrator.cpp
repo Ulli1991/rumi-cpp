@@ -931,9 +931,11 @@ static void hhs_fsi_step_dynamic_impl(Particles& p, int start, int count, double
                 if (g > EPS) {
                     double a_mag = Kokkos::sqrt(agx(i)*agx(i) + agy(i)*agy(i) + agz(i)*agz(i));
                     double v_mag = Kokkos::sqrt(vvx(i)*vvx(i) + vvy(i)*vvy(i) + vvz(i)*vvz(i));
-                    // Criterion (2): sqrt(|a|/|g'|)
-                    double dt_g2 = eta_g * Kokkos::sqrt(a_mag / g);
-                    if (dt_g2 < dt_f(i)) dt_f(i) = dt_g2;
+                    // Criterion (2): sqrt(|a|/|g'|) — skip if stale acceleration is ~0
+                    if (a_mag > EPS) {
+                        double dt_g2 = eta_g * Kokkos::sqrt(a_mag / g);
+                        if (dt_g2 < dt_f(i)) dt_f(i) = dt_g2;
+                    }
                     // Criterion (1): (|v|/|g'|)^{1/3}
                     if (v_mag > EPS) {
                         double dt_g1 = eta_g * Kokkos::cbrt(v_mag / g);
@@ -2263,6 +2265,7 @@ static void compute_timestep_ring(DistributedParticles& dp, int start, int count
             double t_min_i = 1e30;    // symmetrized path
 #ifdef ENABLE_COLLISIONAL
             double jerk_x = 0, jerk_y = 0, jerk_z = 0;
+            double acc_xi = 0, acc_yi = 0, acc_zi = 0;  // fresh subset acceleration for jerk criterion
 #endif
 
             for (int tile_st = js; tile_st < je; tile_st += TILE_SIZE) {
@@ -2338,7 +2341,7 @@ static void compute_timestep_ring(DistributedParticles& dp, int start, int count
                         }
 
 #ifdef ENABLE_COLLISIONAL
-                        // Jerk accumulation
+                        // Jerk + acceleration accumulation (collisional only)
                         if (coll) {
                             double inv_r3 = inv_r * inv_r * inv_r;
                             double rdotv = dx*dvx + dy*dvy + dz*dvz;
@@ -2347,6 +2350,10 @@ static void compute_timestep_ring(DistributedParticles& dp, int start, int count
                             jerk_x += fac1 * (dvx - fac2 * dx);
                             jerk_y += fac1 * (dvy - fac2 * dy);
                             jerk_z += fac1 * (dvz - fac2 * dz);
+                            // Fresh subset acceleration for jerk criterion (BIFROST §3.4.5)
+                            acc_xi += fac1 * dx;
+                            acc_yi += fac1 * dy;
+                            acc_zi += fac1 * dz;
                         }
 #endif
 
@@ -2385,11 +2392,12 @@ static void compute_timestep_ring(DistributedParticles& dp, int start, int count
             if (ii < icnt) {
                 dt_f(i) = symmetrize ? t_min_i : Kokkos::sqrt(t_min_sq);
 #ifdef ENABLE_COLLISIONAL
-                // Jerk timestep
+                // Jerk timestep: dt_jerk = eta_j * |a| / |j| (BIFROST §3.4.5)
+                // Uses freshly accumulated subset acceleration, not stale p.ax/ay/az
                 if (coll && eta_jerk_val > 0.0) {
-                    double a_mag = Kokkos::sqrt(pax_dt(i)*pax_dt(i) + pay_dt(i)*pay_dt(i) + paz_dt(i)*paz_dt(i));
+                    double a_mag = Kokkos::sqrt(acc_xi*acc_xi + acc_yi*acc_yi + acc_zi*acc_zi);
                     double j_mag = Kokkos::sqrt(jerk_x*jerk_x + jerk_y*jerk_y + jerk_z*jerk_z);
-                    if (j_mag > EPS) {
+                    if (j_mag > EPS && a_mag > EPS) {
                         double dt_jerk = eta_jerk_val * a_mag / j_mag;
                         dt_f(i) = Kokkos::fmin(dt_f(i), dt_jerk);
                     }
@@ -3271,6 +3279,7 @@ static void compute_timestep_distributed(DistributedParticles& dp, int start, in
             double t_min_i = 1e30;    // symmetrized path
 #ifdef ENABLE_COLLISIONAL
             double jerk_x = 0, jerk_y = 0, jerk_z = 0;
+            double acc_xi = 0, acc_yi = 0, acc_zi = 0;  // fresh subset acceleration for jerk criterion
 #endif
 
             for (int tile_st = j_start; tile_st < j_end; tile_st += TILE_SIZE) {
@@ -3345,7 +3354,7 @@ static void compute_timestep_distributed(DistributedParticles& dp, int start, in
                         }
 
 #ifdef ENABLE_COLLISIONAL
-                        // Jerk accumulation
+                        // Jerk + acceleration accumulation (collisional only)
                         if (coll) {
                             double inv_r3 = inv_r * inv_r * inv_r;
                             double rdotv = dx*dvx + dy*dvy + dz*dvz;
@@ -3354,6 +3363,10 @@ static void compute_timestep_distributed(DistributedParticles& dp, int start, in
                             jerk_x += fac1 * (dvx - fac2 * dx);
                             jerk_y += fac1 * (dvy - fac2 * dy);
                             jerk_z += fac1 * (dvz - fac2 * dz);
+                            // Fresh subset acceleration for jerk criterion (BIFROST §3.4.5)
+                            acc_xi += fac1 * dx;
+                            acc_yi += fac1 * dy;
+                            acc_zi += fac1 * dz;
                         }
 #endif
 
@@ -3392,11 +3405,12 @@ static void compute_timestep_distributed(DistributedParticles& dp, int start, in
             if (ii < slice_count) {
                 dt_f(i) = symmetrize ? t_min_i : Kokkos::sqrt(t_min_sq);
 #ifdef ENABLE_COLLISIONAL
-                // Jerk timestep
+                // Jerk timestep: dt_jerk = eta_j * |a| / |j| (BIFROST §3.4.5)
+                // Uses freshly accumulated subset acceleration, not stale p.ax/ay/az
                 if (coll && eta_jerk_val > 0.0) {
-                    double a_mag = Kokkos::sqrt(pax_dt(i)*pax_dt(i) + pay_dt(i)*pay_dt(i) + paz_dt(i)*paz_dt(i));
+                    double a_mag = Kokkos::sqrt(acc_xi*acc_xi + acc_yi*acc_yi + acc_zi*acc_zi);
                     double j_mag = Kokkos::sqrt(jerk_x*jerk_x + jerk_y*jerk_y + jerk_z*jerk_z);
-                    if (j_mag > EPS) {
+                    if (j_mag > EPS && a_mag > EPS) {
                         double dt_jerk = eta_jerk_val * a_mag / j_mag;
                         dt_f(i) = Kokkos::fmin(dt_f(i), dt_jerk);
                     }
@@ -3749,9 +3763,10 @@ static void cpu_compute_timestep(CpuSubset& s, int start, int count,
 #endif
     const int end = start + count;
 
-    // Initialize timesteps and jerk accumulators
+    // Initialize timesteps, jerk and acceleration accumulators
     for (int i = start; i < end; i++) s.dt_adapt[i] = 1e30;
     std::vector<double> jerk_x(count, 0), jerk_y(count, 0), jerk_z(count, 0);
+    std::vector<double> acc_x(count, 0), acc_y(count, 0), acc_z(count, 0);
 
     for (int i = start; i < end; i++) {
         for (int j = i + 1; j < end; j++) {
@@ -3798,7 +3813,7 @@ static void cpu_compute_timestep(CpuSubset& s, int start, int count,
             s.dt_adapt[j] = std::min(s.dt_adapt[j], t_pair);
 
 #ifdef ENABLE_COLLISIONAL
-            // Jerk accumulation (collisional only)
+            // Jerk and acceleration accumulation (collisional only)
             if (s.collisional) {
                 double inv_r3 = inv_r * inv_r * inv_r;
                 double rdotv = dx*dvx + dy*dvy + dz*dvz;
@@ -3811,6 +3826,13 @@ static void cpu_compute_timestep(CpuSubset& s, int start, int count,
                 jerk_x[j - start] -= fac1_i * (dvx - fac2 * dx);
                 jerk_y[j - start] -= fac1_i * (dvy - fac2 * dy);
                 jerk_z[j - start] -= fac1_i * (dvz - fac2 * dz);
+                // Fresh subset acceleration for jerk criterion (BIFROST §3.4.5)
+                acc_x[i - start] += fac1_j * dx;
+                acc_y[i - start] += fac1_j * dy;
+                acc_z[i - start] += fac1_j * dz;
+                acc_x[j - start] -= fac1_i * dx;
+                acc_y[j - start] -= fac1_i * dy;
+                acc_z[j - start] -= fac1_i * dz;
             }
 
             // Neighbor pair detection (collisional only)
@@ -3873,13 +3895,15 @@ static void cpu_compute_timestep(CpuSubset& s, int start, int count,
     }
 
     // Jerk timestep criterion (collisional only)
+    // Uses freshly accumulated subset acceleration, not stale p.ax/ay/az
+    // (BIFROST §3.4.5: ε_jerk = η_j * |a_i| / |j_i|)
 #ifdef ENABLE_COLLISIONAL
     if (s.collisional && eta_jerk_val > 0.0) {
         for (int i = start; i < end; i++) {
-            double a_mag = std::sqrt(s.ax[i]*s.ax[i] + s.ay[i]*s.ay[i] + s.az[i]*s.az[i]);
             int ii = i - start;
+            double a_mag = std::sqrt(acc_x[ii]*acc_x[ii] + acc_y[ii]*acc_y[ii] + acc_z[ii]*acc_z[ii]);
             double j_mag = std::sqrt(jerk_x[ii]*jerk_x[ii] + jerk_y[ii]*jerk_y[ii] + jerk_z[ii]*jerk_z[ii]);
-            if (j_mag > EPS) {
+            if (j_mag > EPS && a_mag > EPS) {
                 double dt_jerk = eta_jerk_val * a_mag / j_mag;
                 s.dt_adapt[i] = std::min(s.dt_adapt[i], dt_jerk);
             }
@@ -4072,8 +4096,11 @@ static void cpu_hhs_recursive(CpuSubset& s, Particles& p, int start, int count,
                 if (g > EPS) {
                     double a_mag = std::sqrt(s.ax[i]*s.ax[i] + s.ay[i]*s.ay[i] + s.az[i]*s.az[i]);
                     double v_mag = std::sqrt(s.vx[i]*s.vx[i] + s.vy[i]*s.vy[i] + s.vz[i]*s.vz[i]);
-                    double dt_g2 = eta_g * std::sqrt(a_mag / g);
-                    if (dt_g2 < s.dt_adapt[i]) s.dt_adapt[i] = dt_g2;
+                    // Criterion (2): sqrt(|a|/|g'|) — skip if stale acceleration is ~0
+                    if (a_mag > EPS) {
+                        double dt_g2 = eta_g * std::sqrt(a_mag / g);
+                        if (dt_g2 < s.dt_adapt[i]) s.dt_adapt[i] = dt_g2;
+                    }
                     if (v_mag > EPS) {
                         double dt_g1 = eta_g * std::cbrt(v_mag / g);
                         if (dt_g1 < s.dt_adapt[i]) s.dt_adapt[i] = dt_g1;
@@ -4137,6 +4164,20 @@ static void cpu_hhs_recursive(CpuSubset& s, Particles& p, int start, int count,
     int slow_start = start;
     int fast_start = start + slow_count;
     int fast_count = count - slow_count;
+
+    // Diagnostic: print dt range and partition at each CPU recursion level
+#ifdef USE_MPI
+    if (MPIComm::rank() == 0 && count > 16) {
+        double min_dt = 1e30, max_dt = -1e30;
+        for (int i = start; i < start + count; i++) {
+            min_dt = std::min(min_dt, s.dt_adapt[i]);
+            max_dt = std::max(max_dt, s.dt_adapt[i]);
+        }
+        std::printf("[CPU-HHS] depth=%d count=%d pivot=%.3e slow=%d fast=%d dt=[%.3e, %.3e]\n",
+                    depth, count, pivot_dt, slow_count, fast_count, min_dt, max_dt);
+        std::fflush(stdout);
+    }
+#endif
 
     if (fast_count == 0) {
         cpu_fsi_step(s, p, start, count, G, soft2, pivot_dt);
@@ -4215,6 +4256,14 @@ static void hhs_fsi_recursive_local(
     }
     g_subset_hist.record(SubsetHistogram::LOCAL_GPU, count);
 
+#ifdef USE_MPI
+    if (MPIComm::rank() == 0 && count > 16) {
+        std::printf("[HHS-LOCAL] ld=%d count=%d start=%d pivot=%.3e dt_valid=%d\n",
+                    local_depth, count, start, pivot_dt, (int)dt_valid);
+        std::fflush(stdout);
+    }
+#endif
+
     // CPU serial path for very small subsets
     if (serial_n2_cpu > 0 && count <= serial_n2_cpu) {
         dbg_hhs_cpu++;
@@ -4252,8 +4301,11 @@ static void hhs_fsi_recursive_local(
                 if (g > EPS) {
                     double a_mag = Kokkos::sqrt(agx(i)*agx(i) + agy(i)*agy(i) + agz(i)*agz(i));
                     double v_mag = Kokkos::sqrt(vvx(i)*vvx(i) + vvy(i)*vvy(i) + vvz(i)*vvz(i));
-                    double dt_g2 = eta_g * Kokkos::sqrt(a_mag / g);
-                    if (dt_g2 < dt_f(i)) dt_f(i) = dt_g2;
+                    // Criterion (2): sqrt(|a|/|g'|) — skip if stale acceleration is ~0
+                    if (a_mag > EPS) {
+                        double dt_g2 = eta_g * Kokkos::sqrt(a_mag / g);
+                        if (dt_g2 < dt_f(i)) dt_f(i) = dt_g2;
+                    }
                     if (v_mag > EPS) {
                         double dt_g1 = eta_g * Kokkos::cbrt(v_mag / g);
                         if (dt_g1 < dt_f(i)) dt_f(i) = dt_g1;
@@ -4319,6 +4371,12 @@ static void hhs_fsi_recursive_local(
 
     // Base case: all particles are slow
     if (fast_count == 0) {
+#ifdef USE_MPI
+        if (MPIComm::rank() == 0 && count > 16) {
+            std::printf("[HHS-LOCAL] ld=%d all-slow base case count=%d\n", local_depth, count);
+            std::fflush(stdout);
+        }
+#endif
         fsi_step(p, start, count, G, soft2, pivot_dt, false, /*force_direct_n2=*/true);
         return;
     }
@@ -4328,6 +4386,13 @@ static void hhs_fsi_recursive_local(
     // First call reuses parent timesteps; second call recomputes (particles evolved).
     if (slow_count == 0) {
         dbg_hhs_slow0_local++;
+#ifdef USE_MPI
+        if (MPIComm::rank() == 0 && count > 16) {
+            std::printf("[HHS-LOCAL] ld=%d all-fast (slow0) count=%d sub_pivot=%.3e\n",
+                        local_depth, count, pivot_dt * 0.5);
+            std::fflush(stdout);
+        }
+#endif
         double sub_pivot = pivot_dt * 0.5;
         hhs_fsi_recursive_local(p, start, count, sub_pivot,
                                 G, soft2, dt_min, eta, true, local_depth + 1);
@@ -4452,8 +4517,23 @@ static void hhs_fsi_recursive_distributed(
     }
     g_subset_hist.record(SubsetHistogram::DISTRIBUTED, count);
 
+#ifdef USE_MPI
+    if (MPIComm::rank() == 0) {
+        std::printf("[HHS-DIST] depth=%d count=%d start=%d pivot=%.3e dt_valid=%d\n",
+                    depth, count, start, pivot_dt, (int)dt_valid);
+        std::fflush(stdout);
+    }
+#endif
+
     // Below threshold: skip MPI, all ranks compute full N² locally
     if (serial_n2_gpu > 0 && count <= serial_n2_gpu) {
+#ifdef USE_MPI
+        if (MPIComm::rank() == 0) {
+            std::printf("[HHS-DIST] depth=%d -> LOCAL (count=%d <= %d)\n",
+                        depth, count, serial_n2_gpu);
+            std::fflush(stdout);
+        }
+#endif
         hhs_fsi_recursive_local(dp.local, start, count, pivot_dt,
                                 G, soft2, dt_min, eta, dt_valid);
         // Re-sync packed views: local path modifies SoA directly without updating pos_packed
@@ -4542,8 +4622,11 @@ static void hhs_fsi_recursive_distributed(
                 if (g > EPS) {
                     double a_mag = Kokkos::sqrt(agx(i)*agx(i) + agy(i)*agy(i) + agz(i)*agz(i));
                     double v_mag = Kokkos::sqrt(vvx(i)*vvx(i) + vvy(i)*vvy(i) + vvz(i)*vvz(i));
-                    double dt_g2 = eta_g * Kokkos::sqrt(a_mag / g);
-                    if (dt_g2 < dt_f(i)) dt_f(i) = dt_g2;
+                    // Criterion (2): sqrt(|a|/|g'|) — skip if stale acceleration is ~0
+                    if (a_mag > EPS) {
+                        double dt_g2 = eta_g * Kokkos::sqrt(a_mag / g);
+                        if (dt_g2 < dt_f(i)) dt_f(i) = dt_g2;
+                    }
                     if (v_mag > EPS) {
                         double dt_g1 = eta_g * Kokkos::cbrt(v_mag / g);
                         if (dt_g1 < dt_f(i)) dt_f(i) = dt_g1;
@@ -4621,6 +4704,14 @@ static void hhs_fsi_recursive_distributed(
     int slow_start = start;
     int fast_start = start + slow_count;
     int fast_count = count - slow_count;
+
+#ifdef USE_MPI
+    if (MPIComm::rank() == 0) {
+        std::printf("[HHS-DIST] depth=%d partition: slow=%d fast=%d (forces_valid=%d)\n",
+                    depth, slow_count, fast_count, (int)forces_valid);
+        std::fflush(stdout);
+    }
+#endif
 
     // Global tree available for sub-calls (either built here or inherited)
     bool tree_for_subs = global_tree_available || tree_built_for_subset;
@@ -4742,6 +4833,9 @@ static void hhs_fsi_recursive_distributed(
     }
 
     // Step 1: Cross-force S<->F then kick (dt/6)
+#ifdef USE_MPI
+    if (MPIComm::rank() == 0) { std::printf("[HHS-DIST] d=%d step1: cross-kick\n", depth); std::fflush(stdout); }
+#endif
     g_profiler.start();
     if (use_tree_cross) {
         cross_acceleration_global_tree(dp.local, slow_start, slow_count,
@@ -4757,6 +4851,9 @@ static void hhs_fsi_recursive_distributed(
     g_profiler.stop(StepProfiler::DRIFT_KICK);
 
     // Step 2: FSI half-step on slow
+#ifdef USE_MPI
+    if (MPIComm::rank() == 0) { std::printf("[HHS-DIST] d=%d step2: FSI-slow(%d)\n", depth, slow_count); std::fflush(stdout); }
+#endif
     // flag=0 = slow (from update_subsets above), so global_tree_subset=0 is correct
     if (use_tree_self || use_tree_cross) {
         fsi_step_distributed(dp, slow_start, slow_count, G, soft2, pivot_dt * 0.5,
@@ -4766,6 +4863,9 @@ static void hhs_fsi_recursive_distributed(
     }
 
     // Step 3: Recurse on fast (first half) — always compute fresh timesteps
+#ifdef USE_MPI
+    if (MPIComm::rank() == 0) { std::printf("[HHS-DIST] d=%d step3: recurse-fast(%d)\n", depth, fast_count); std::fflush(stdout); }
+#endif
     hhs_fsi_recursive_distributed(dp, fast_start, fast_count, pivot_dt * 0.5,
                                   G, soft2, dt_min, eta, false,
                                   tree_for_subs, depth + 1);
@@ -4782,6 +4882,9 @@ static void hhs_fsi_recursive_distributed(
     }
 
     // Step 4: Cross-kick S<->F with gradient (2dt/3)
+#ifdef USE_MPI
+    if (MPIComm::rank() == 0) { std::printf("[HHS-DIST] d=%d step4: cross-grad\n", depth); std::fflush(stdout); }
+#endif
     g_profiler.start();
     if (use_tree_cross) {
         cross_acceleration_and_gradient_global_tree(dp.local, slow_start, slow_count,
@@ -4798,6 +4901,9 @@ static void hhs_fsi_recursive_distributed(
     g_profiler.stop(StepProfiler::DRIFT_KICK);
 
     // Step 5: Recurse on fast (second half)
+#ifdef USE_MPI
+    if (MPIComm::rank() == 0) { std::printf("[HHS-DIST] d=%d step5: recurse-fast-2(%d)\n", depth, fast_count); std::fflush(stdout); }
+#endif
     {
         double sub_pivot = pivot_dt * 0.5;
         hhs_fsi_recursive_distributed(dp, fast_start, fast_count, sub_pivot,
@@ -4817,6 +4923,9 @@ static void hhs_fsi_recursive_distributed(
     }
 
     // Step 6: FSI half-step on slow
+#ifdef USE_MPI
+    if (MPIComm::rank() == 0) { std::printf("[HHS-DIST] d=%d step6: FSI-slow(%d)\n", depth, slow_count); std::fflush(stdout); }
+#endif
     if (use_tree_self || use_tree_cross) {
         fsi_step_distributed(dp, slow_start, slow_count, G, soft2, pivot_dt * 0.5,
                              false, false, 0);
@@ -4832,6 +4941,9 @@ static void hhs_fsi_recursive_distributed(
     }
 
     // Step 7: Cross-force S<->F then kick (dt/6)
+#ifdef USE_MPI
+    if (MPIComm::rank() == 0) { std::printf("[HHS-DIST] d=%d step7: cross-kick\n", depth); std::fflush(stdout); }
+#endif
     g_profiler.start();
     if (use_tree_cross) {
         cross_acceleration_global_tree(dp.local, slow_start, slow_count,
@@ -4845,6 +4957,9 @@ static void hhs_fsi_recursive_distributed(
     kick_velocities(dp.local, slow_start, slow_count, pivot_dt * FSI_KICK);
     kick_velocities(dp.local, fast_start, fast_count, pivot_dt * FSI_KICK);
     g_profiler.stop(StepProfiler::DRIFT_KICK);
+#ifdef USE_MPI
+    if (MPIComm::rank() == 0) { std::printf("[HHS-DIST] d=%d DONE\n", depth); std::fflush(stdout); }
+#endif
 #endif // MPI_TOPOLOGY_RING
 }
 
