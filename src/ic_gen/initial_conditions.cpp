@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <vector>
 #include <string>
+#include <unordered_map>
 
 void init_outer_planets(Particles& p) {
     p.allocate(5, COLL_ENABLED);
@@ -88,7 +89,7 @@ static double turnoff_mass(double age_gyr, double Z) {
 }
 
 static std::vector<double> sample_kroupa_imf(int N, std::mt19937_64& rng,
-                                              double m_min = 0.08, double m_max = 100.0) {
+                                              double m_min = 0.08, double m_max = 150.0) {
     const double m_break = 0.5, alpha1 = 1.3, alpha2 = 2.3;
     std::uniform_real_distribution<double> uni(0.0, 1.0);
 
@@ -121,7 +122,8 @@ void init_plummer(Particles& p, int N, double M_total_msun, double r_half_pc, in
                   bool remove_bh, double binary_frac,
                   double bin_a_min_au, double bin_a_max_au,
                   bool add_imbh, double imbh_m1, double imbh_m2,
-                  double imbh_a_pc, double imbh_e, double imbh_spin) {
+                  double imbh_a_pc, double imbh_e, double imbh_spin,
+                  double r_break_au) {
     // Use host-side std::vectors so we can resize for REMOVE_BH / ADD_IMBH
     double M_total = M_total_msun;
     double a_pc = r_half_pc / PLUMMER_SCALE_FACTOR;
@@ -266,6 +268,173 @@ void init_plummer(Particles& p, int N, double M_total_msun, double r_half_pc, in
         for (int i = 0; i < N; i++) {
             hx[i] -= com_x; hy[i] -= com_y; hz[i] -= com_z;
             hvx[i] -= com_vx; hvy[i] -= com_vy; hvz[i] -= com_vz;
+        }
+    }
+
+    // =====================================================================
+    // Artificial binary removal: find and break spurious close bound pairs
+    // =====================================================================
+    if (r_break_au > 0.0) {
+        double r_break_pc = r_break_au * AU_TO_PC;
+        double search_r = 2.0 * r_break_pc;  // max separation for a < r_break
+        double cell_size = search_r;
+
+        // Spatial hash cell key
+        struct CellKey {
+            int ix, iy, iz;
+            bool operator==(const CellKey& o) const {
+                return ix == o.ix && iy == o.iy && iz == o.iz;
+            }
+        };
+        struct CellHash {
+            size_t operator()(const CellKey& k) const {
+                size_t h = std::hash<int>()(k.ix);
+                h ^= std::hash<int>()(k.iy) + 0x9e3779b9 + (h << 6) + (h >> 2);
+                h ^= std::hash<int>()(k.iz) + 0x9e3779b9 + (h << 6) + (h >> 2);
+                return h;
+            }
+        };
+        auto to_cell = [&](double x, double y, double z) -> CellKey {
+            return { static_cast<int>(std::floor(x / cell_size)),
+                     static_cast<int>(std::floor(y / cell_size)),
+                     static_cast<int>(std::floor(z / cell_size)) };
+        };
+
+        constexpr int max_angular_iter = 10;
+        constexpr int max_full_iter = 5;
+        int total_removed = 0;
+
+        std::printf("  Artificial binary removal (r_break=%.1f AU = %.3e pc):\n",
+                    r_break_au, r_break_pc);
+
+        for (int iter = 0; iter < max_angular_iter + max_full_iter; iter++) {
+            // Build spatial hash
+            std::unordered_map<CellKey, std::vector<int>, CellHash> grid;
+            grid.reserve(N);
+            for (int i = 0; i < N; i++) {
+                grid[to_cell(hx[i], hy[i], hz[i])].push_back(i);
+            }
+
+            // Find artificial binaries
+            int n_found = 0;
+            std::vector<bool> flagged(N, false);
+            double search_r2 = search_r * search_r;
+
+            for (int i = 0; i < N; i++) {
+                if (flagged[i]) continue;
+                CellKey ci = to_cell(hx[i], hy[i], hz[i]);
+
+                for (int di = -1; di <= 1; di++)
+                for (int dj = -1; dj <= 1; dj++)
+                for (int dk = -1; dk <= 1; dk++) {
+                    CellKey cn = { ci.ix + di, ci.iy + dj, ci.iz + dk };
+                    auto it = grid.find(cn);
+                    if (it == grid.end()) continue;
+
+                    for (int j : it->second) {
+                        if (j <= i || flagged[j]) continue;
+                        double dx = hx[i] - hx[j], dy = hy[i] - hy[j], dz = hz[i] - hz[j];
+                        double r2 = dx*dx + dy*dy + dz*dz;
+                        if (r2 > search_r2 || r2 == 0.0) continue;
+
+                        double dvx = hvx[i] - hvx[j], dvy = hvy[i] - hvy[j], dvz = hvz[i] - hvz[j];
+                        double v2 = dvx*dvx + dvy*dvy + dvz*dvz;
+                        double r_sep = std::sqrt(r2);
+                        double M_pair = hmass[i] + hmass[j];
+                        double E_spec = 0.5 * v2 - G_CODE * M_pair / r_sep;
+
+                        if (E_spec < 0.0) {
+                            double a_pair = -G_CODE * M_pair / (2.0 * E_spec);
+                            if (a_pair < r_break_pc) {
+                                flagged[i] = true;
+                                flagged[j] = true;
+                                n_found++;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (n_found == 0) {
+                std::printf("    Iter %d: clean — no artificial binaries found\n", iter + 1);
+                break;
+            }
+
+            total_removed += n_found;
+
+            // Resample flagged particles
+            int n_resampled = 0;
+            for (int i = 0; i < N; i++) {
+                if (!flagged[i]) continue;
+                n_resampled++;
+
+                if (iter < max_angular_iter) {
+                    // Angular-only: preserve |r| and |v|, resample directions
+                    double r = std::sqrt(hx[i]*hx[i] + hy[i]*hy[i] + hz[i]*hz[i]);
+                    double v = std::sqrt(hvx[i]*hvx[i] + hvy[i]*hvy[i] + hvz[i]*hvz[i]);
+
+                    double ct = 2.0 * uni(rng) - 1.0;
+                    double st = std::sqrt(1.0 - ct * ct);
+                    double ph = 2.0 * M_PI * uni(rng);
+                    hx[i] = r * st * std::cos(ph);
+                    hy[i] = r * st * std::sin(ph);
+                    hz[i] = r * ct;
+
+                    double vct = 2.0 * uni(rng) - 1.0;
+                    double vst = std::sqrt(1.0 - vct * vct);
+                    double vph = 2.0 * M_PI * uni(rng);
+                    hvx[i] = v * vst * std::cos(vph);
+                    hvy[i] = v * vst * std::sin(vph);
+                    hvz[i] = v * vct;
+                } else {
+                    // Full resampling: new Plummer position + velocity
+                    double U = std::clamp(uni(rng), 1e-10, 1.0 - 1e-10);
+                    double r_new = a / std::sqrt(std::pow(U, -2.0/3.0) - 1.0);
+
+                    double ct = 2.0 * uni(rng) - 1.0;
+                    double st = std::sqrt(1.0 - ct * ct);
+                    double ph = 2.0 * M_PI * uni(rng);
+                    hx[i] = r_new * st * std::cos(ph);
+                    hy[i] = r_new * st * std::sin(ph);
+                    hz[i] = r_new * ct;
+
+                    double v_esc = std::sqrt(2.0 * G_CODE * M_total / std::sqrt(r_new*r_new + a*a));
+                    while (true) {
+                        double q = uni(rng);
+                        double g_q = q * q * std::pow(1.0 - q * q, 3.5);
+                        if (uni(rng) * 0.1 < g_q) {
+                            double v_mag = q * v_esc;
+                            double vct = 2.0 * uni(rng) - 1.0;
+                            double vst = std::sqrt(1.0 - vct * vct);
+                            double vph = 2.0 * M_PI * uni(rng);
+                            hvx[i] = v_mag * vst * std::cos(vph);
+                            hvy[i] = v_mag * vst * std::sin(vph);
+                            hvz[i] = v_mag * vct;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            std::printf("    Iter %d: %d pairs (resampled %d particles, %s)\n",
+                        iter + 1, n_found, n_resampled,
+                        iter < max_angular_iter ? "angular" : "full");
+        }
+
+        if (total_removed > 0) {
+            // Re-center COM after resampling
+            double com_x = 0, com_y = 0, com_z = 0;
+            double com_vx = 0, com_vy = 0, com_vz = 0;
+            for (int i = 0; i < N; i++) {
+                com_x += hmass[i] * hx[i];   com_y += hmass[i] * hy[i];   com_z += hmass[i] * hz[i];
+                com_vx += hmass[i] * hvx[i]; com_vy += hmass[i] * hvy[i]; com_vz += hmass[i] * hvz[i];
+            }
+            com_x /= M_total; com_y /= M_total; com_z /= M_total;
+            com_vx /= M_total; com_vy /= M_total; com_vz /= M_total;
+            for (int i = 0; i < N; i++) {
+                hx[i] -= com_x; hy[i] -= com_y; hz[i] -= com_z;
+                hvx[i] -= com_vx; hvy[i] -= com_vy; hvz[i] -= com_vz;
+            }
         }
     }
 

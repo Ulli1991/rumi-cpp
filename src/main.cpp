@@ -408,6 +408,7 @@ int main(int argc, char** argv) {
         double imbh_a_pc    = cfg.get_double("IMBH_A_PC", 1e-4);
         double imbh_e       = cfg.get_double("IMBH_E", 0.5);
         double imbh_spin    = cfg.get_double("IMBH_SPIN", 0.0);
+        double r_break_au   = cfg.get_double("R_BREAK_AU", 0.0);
 
         bool profiling_enabled = (cfg.get_str("PROFILING", "true") == "true");
         serial_n2_gpu = std::stoi(cfg.get_str("SERIAL_N2_GPU", "0"));
@@ -503,7 +504,8 @@ int main(int argc, char** argv) {
             } else if (test == "plummer") {
                 init_plummer(p, N_plummer, M_total_msun, r_half_pc, seed, mass_dist, age_gyr, metallicity,
                              remove_bh, binary_frac, bin_a_min_au, bin_a_max_au,
-                             add_imbh, imbh_m1, imbh_m2, imbh_a_pc, imbh_e, imbh_spin);
+                             add_imbh, imbh_m1, imbh_m2, imbh_a_pc, imbh_e, imbh_spin,
+                             r_break_au);
             } else if (test == "binary_test") {
                 init_binary_test(p, binary_a_pc, binary_e, binary_m1, binary_m2);
             } else if (test == "binary_test_peri") {

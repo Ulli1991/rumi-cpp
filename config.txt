@@ -97,6 +97,7 @@ PLUMMER_METALLICITY = 0.0002        		# Stellar metallicity Z (0.01 Z_sun, BIFRO
 
 # Plummer binary population
 REMOVE_BH = false                   		# Strip BHs from ICs (for pure stellar cluster)
+R_BREAK_AU = 1000.0                 		# Remove artificial binaries with a < r_break (0=off)
 BINARY_FRAC = 0.0                   		# Primordial binary fraction (0-1)
 BINARY_A_MIN_AU = 0.01              		# Min semi-major axis for binaries (AU)
 BINARY_A_MAX_AU = 100.0             		# Max semi-major axis for binaries (AU)

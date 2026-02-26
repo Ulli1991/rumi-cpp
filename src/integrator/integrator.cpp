@@ -25,6 +25,18 @@
 StepProfiler g_profiler;
 SubsetHistogram g_subset_hist;
 
+// Debug: HHS recursion call counters (per outer step)
+static int dbg_hhs_distributed = 0;
+static int dbg_hhs_local = 0;
+static int dbg_hhs_cpu = 0;
+static int dbg_hhs_slow0_dist = 0;
+static int dbg_hhs_slow0_local = 0;
+static int dbg_hhs_max_depth = 0;
+// Per-depth histogram for local path (max 40 depths)
+static constexpr int DBG_MAX_DEPTH = 40;
+static int dbg_local_depth_calls[DBG_MAX_DEPTH] = {};
+static long long dbg_local_depth_count[DBG_MAX_DEPTH] = {};  // sum of 'count' at each depth
+
 // Serial N² GPU threshold: skip MPI, compute full N² locally (no tree)
 int serial_n2_gpu = 0;
 
@@ -3826,13 +3838,20 @@ static void hhs_fsi_recursive_local(
     double pivot_dt,
     double G, double soft2,
     double dt_min, double eta,
-    bool dt_valid) {
+    bool dt_valid,
+    int local_depth = 0) {
 
     if (count == 0) return;
+    dbg_hhs_local++;
+    if (local_depth < DBG_MAX_DEPTH) {
+        dbg_local_depth_calls[local_depth]++;
+        dbg_local_depth_count[local_depth] += count;
+    }
     g_subset_hist.record(SubsetHistogram::LOCAL_GPU, count);
 
     // CPU serial path for very small subsets
     if (serial_n2_cpu > 0 && count <= serial_n2_cpu) {
+        dbg_hhs_cpu++;
         hhs_fsi_recursive_cpu(p, start, count, pivot_dt, G, soft2, dt_min, eta, dt_valid);
         return;
     }
@@ -3867,11 +3886,12 @@ static void hhs_fsi_recursive_local(
     // Base case: all particles are fast
     // Forces discarded: partition reordered particles, invalidating ax/ay/az correspondence
     if (slow_count == 0) {
+        dbg_hhs_slow0_local++;
         double sub_pivot = pivot_dt * 0.5;
         hhs_fsi_recursive_local(p, start, count, sub_pivot,
-                                G, soft2, dt_min, eta, false);
+                                G, soft2, dt_min, eta, false, local_depth + 1);
         hhs_fsi_recursive_local(p, start, count, sub_pivot,
-                                G, soft2, dt_min, eta, false);
+                                G, soft2, dt_min, eta, false, local_depth + 1);
         return;
     }
 
@@ -3889,7 +3909,7 @@ static void hhs_fsi_recursive_local(
 
     // Step 3: Recurse on fast (first half)
     hhs_fsi_recursive_local(p, fast_start, fast_count, pivot_dt * 0.5,
-                            G, soft2, dt_min, eta, false);
+                            G, soft2, dt_min, eta, false, local_depth + 1);
 
     // Step 4: Cross-gradient kick (2dt/3)
     g_profiler.start();
@@ -3905,7 +3925,7 @@ static void hhs_fsi_recursive_local(
 
     // Step 5: Recurse on fast (second half)
     hhs_fsi_recursive_local(p, fast_start, fast_count, pivot_dt * 0.5,
-                            G, soft2, dt_min, eta, false);
+                            G, soft2, dt_min, eta, false, local_depth + 1);
 
     // Step 6: FSI half-step on slow (force N² — no tree in serial path)
     fsi_step(p, slow_start, slow_count, G, soft2, pivot_dt * 0.5, false, /*force_direct_n2=*/true);
@@ -3983,6 +4003,8 @@ static void hhs_fsi_recursive_distributed(
     int depth = 0) {
 
     if (count == 0) return;
+    dbg_hhs_distributed++;
+    if (depth > dbg_hhs_max_depth) dbg_hhs_max_depth = depth;
     g_subset_hist.record(SubsetHistogram::DISTRIBUTED, count);
 
     // Below threshold: skip MPI, all ranks compute full N² locally
@@ -4169,6 +4191,7 @@ static void hhs_fsi_recursive_distributed(
     // Base case: all particles are fast (no slow particles)
     // Forces discarded: partition reordered particles, invalidating ax/ay/az correspondence
     if (slow_count == 0) {
+        dbg_hhs_slow0_dist++;
         double sub_pivot = pivot_dt * 0.5;
         hhs_fsi_recursive_distributed(dp, start, count, sub_pivot,
                                       G, soft2, dt_min, eta, false,
@@ -4610,6 +4633,16 @@ void hhs_fsi_step_distributed(DistributedParticles& dp, double pivot_dt,
 
     (void)global_levels;  // Not used in new implementation
 
+    // Reset debug counters
+    dbg_hhs_distributed = 0;
+    dbg_hhs_local = 0;
+    dbg_hhs_cpu = 0;
+    dbg_hhs_slow0_dist = 0;
+    dbg_hhs_slow0_local = 0;
+    dbg_hhs_max_depth = 0;
+    std::memset(dbg_local_depth_calls, 0, sizeof(dbg_local_depth_calls));
+    std::memset(dbg_local_depth_count, 0, sizeof(dbg_local_depth_count));
+
 #ifdef ENABLE_COLLISIONAL
     if (dp.local.collisional) g_subsystem_mgr.reset_step_diagnostics();
 #endif
@@ -4659,5 +4692,23 @@ void hhs_fsi_step_distributed(DistributedParticles& dp, double pivot_dt,
     }
     if (dp.local.collisional) g_subsystem_mgr.print_step_summary();
 #endif
+
+    // Print debug recursion counters
+#ifdef USE_MPI
+    if (MPIComm::rank() == 0)
+#endif
+    {
+        std::printf("  HHS recursion: distributed=%d, local_gpu=%d (cpu_dispatch=%d), "
+                    "slow0_dist=%d, slow0_local=%d, max_depth_dist=%d\n",
+                    dbg_hhs_distributed, dbg_hhs_local, dbg_hhs_cpu,
+                    dbg_hhs_slow0_dist, dbg_hhs_slow0_local, dbg_hhs_max_depth);
+        std::printf("  Local depth histogram (depth: calls, avg_count):\n");
+        for (int d = 0; d < DBG_MAX_DEPTH; d++) {
+            if (dbg_local_depth_calls[d] == 0) break;
+            std::printf("    D%2d: %6d calls, avg_count=%lld\n",
+                        d, dbg_local_depth_calls[d],
+                        dbg_local_depth_count[d] / dbg_local_depth_calls[d]);
+        }
+    }
 }
 
