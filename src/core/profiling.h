@@ -19,6 +19,9 @@ struct StepProfiler {
         PARTITION,
         DRIFT_KICK,
         TREE_MAINT,
+        SUBSYSTEM_DETECT,
+        SUBSYSTEM_INTEG,
+        PACK_DATA,
         NUM_TIMERS
     };
 
@@ -31,7 +34,10 @@ struct StepProfiler {
             "Gradient (cross)",
             "Partition",
             "Drift/Kick",
-            "Tree maintenance"
+            "Tree maintenance",
+            "Subsystem detect",
+            "Subsystem integ",
+            "Pack data"
         };
         return names[i];
     }

@@ -643,13 +643,16 @@ void fsi_step(Particles& p, int start, int count,
 #ifdef ENABLE_COLLISIONAL
     if (p.collisional && !g_subsystem_mgr.active.empty()) {
         drift_field_only(p, start, count, dt * FSI_DRIFT);
+        g_profiler.stop(StepProfiler::DRIFT_KICK);
+        g_profiler.start();
         advance_subsystems_in_range(p, start, count, G, dt * FSI_DRIFT);
+        g_profiler.stop(StepProfiler::SUBSYSTEM_INTEG);
     } else
 #endif
     {
         drift(p, start, count, dt * FSI_DRIFT);
+        g_profiler.stop(StepProfiler::DRIFT_KICK);
     }
-    g_profiler.stop(StepProfiler::DRIFT_KICK);
 
     // U-tilde kick (2dt/3)
     if (tree_mode) {
@@ -685,13 +688,16 @@ void fsi_step(Particles& p, int start, int count,
 #ifdef ENABLE_COLLISIONAL
     if (p.collisional && !g_subsystem_mgr.active.empty()) {
         drift_field_only(p, start, count, dt * FSI_DRIFT);
+        g_profiler.stop(StepProfiler::DRIFT_KICK);
+        g_profiler.start();
         advance_subsystems_in_range(p, start, count, G, dt * FSI_DRIFT);
+        g_profiler.stop(StepProfiler::SUBSYSTEM_INTEG);
     } else
 #endif
     {
         drift(p, start, count, dt * FSI_DRIFT);
+        g_profiler.stop(StepProfiler::DRIFT_KICK);
     }
-    g_profiler.stop(StepProfiler::DRIFT_KICK);
 
     // U kick (dt/6)
     if (tree_mode) {
@@ -941,6 +947,7 @@ static void hhs_fsi_step_dynamic_impl(Particles& p, int start, int count, double
         // Subsystem detection at this HHS level (after timestep found neighbor pairs,
         // before partition reorders particles). Uses level-appropriate pivot_dt.
         if (p.collisional) {
+            g_profiler.start();
             Kokkos::fence();
             g_subsystem_mgr.detect_from_pairs(p, G, pivot_dt,
                                                g_collisional.r_ngb, g_collisional.r_ngb_max,
@@ -967,6 +974,7 @@ static void hhs_fsi_step_dynamic_impl(Particles& p, int start, int count, double
                     g_subsystem_mgr.update_particle_flags(p);
                 }
             }
+            g_profiler.stop(StepProfiler::SUBSYSTEM_DETECT);
         }
 #endif
     }
@@ -2394,15 +2402,20 @@ static void fsi_step_ring(DistributedParticles& dp, int start, int count,
 #ifdef ENABLE_COLLISIONAL
     if (dp.local.collisional && !g_subsystem_mgr.active.empty()) {
         drift_field_only(dp.local, start, count, dt * FSI_DRIFT);
+        g_profiler.stop(StepProfiler::DRIFT_KICK);
+        g_profiler.start();
         advance_subsystems_in_range(dp.local, start, count, G, dt * FSI_DRIFT);
+        g_profiler.stop(StepProfiler::SUBSYSTEM_INTEG);
     } else
 #endif
     {
         drift(dp.local, start, count, dt * FSI_DRIFT);
+        g_profiler.stop(StepProfiler::DRIFT_KICK);
     }
-    g_profiler.stop(StepProfiler::DRIFT_KICK);
 
+    g_profiler.start();
     dp.local.pack_pos_range(start, count);
+    g_profiler.stop(StepProfiler::PACK_DATA);
 
     // U-tilde kick (2dt/3) with gradient correction
     g_profiler.start();
@@ -2420,15 +2433,20 @@ static void fsi_step_ring(DistributedParticles& dp, int start, int count,
 #ifdef ENABLE_COLLISIONAL
     if (dp.local.collisional && !g_subsystem_mgr.active.empty()) {
         drift_field_only(dp.local, start, count, dt * FSI_DRIFT);
+        g_profiler.stop(StepProfiler::DRIFT_KICK);
+        g_profiler.start();
         advance_subsystems_in_range(dp.local, start, count, G, dt * FSI_DRIFT);
+        g_profiler.stop(StepProfiler::SUBSYSTEM_INTEG);
     } else
 #endif
     {
         drift(dp.local, start, count, dt * FSI_DRIFT);
+        g_profiler.stop(StepProfiler::DRIFT_KICK);
     }
-    g_profiler.stop(StepProfiler::DRIFT_KICK);
 
+    g_profiler.start();
     dp.local.pack_pos_range(start, count);
+    g_profiler.stop(StepProfiler::PACK_DATA);
 
     // U kick (dt/6): force + allreduce + kick
     g_profiler.start();
@@ -2510,13 +2528,16 @@ static void fsi_step_distributed(DistributedParticles& dp, int start, int count,
 #ifdef ENABLE_COLLISIONAL
         if (dp.local.collisional && !g_subsystem_mgr.active.empty()) {
             drift_field_only(dp.local, start, count, dt * FSI_DRIFT);
+            g_profiler.stop(StepProfiler::DRIFT_KICK);
+            g_profiler.start();
             advance_subsystems_in_range(dp.local, start, count, G, dt * FSI_DRIFT);
+            g_profiler.stop(StepProfiler::SUBSYSTEM_INTEG);
         } else
 #endif
         {
             drift(dp.local, start, count, dt * FSI_DRIFT);
+            g_profiler.stop(StepProfiler::DRIFT_KICK);
         }
-        g_profiler.stop(StepProfiler::DRIFT_KICK);
 
         // Refresh positions in global tree after drift
         g_profiler.start();
@@ -2542,13 +2563,16 @@ static void fsi_step_distributed(DistributedParticles& dp, int start, int count,
 #ifdef ENABLE_COLLISIONAL
         if (dp.local.collisional && !g_subsystem_mgr.active.empty()) {
             drift_field_only(dp.local, start, count, dt * FSI_DRIFT);
+            g_profiler.stop(StepProfiler::DRIFT_KICK);
+            g_profiler.start();
             advance_subsystems_in_range(dp.local, start, count, G, dt * FSI_DRIFT);
+            g_profiler.stop(StepProfiler::SUBSYSTEM_INTEG);
         } else
 #endif
         {
             drift(dp.local, start, count, dt * FSI_DRIFT);
+            g_profiler.stop(StepProfiler::DRIFT_KICK);
         }
-        g_profiler.stop(StepProfiler::DRIFT_KICK);
 
         // Refresh positions in global tree after drift
         g_profiler.start();
@@ -2610,16 +2634,21 @@ static void fsi_step_distributed(DistributedParticles& dp, int start, int count,
 #ifdef ENABLE_COLLISIONAL
     if (dp.local.collisional && !g_subsystem_mgr.active.empty()) {
         drift_field_only(dp.local, start, count, dt * FSI_DRIFT);
+        g_profiler.stop(StepProfiler::DRIFT_KICK);
+        g_profiler.start();
         advance_subsystems_in_range(dp.local, start, count, G, dt * FSI_DRIFT);
+        g_profiler.stop(StepProfiler::SUBSYSTEM_INTEG);
     } else
 #endif
     {
         drift(dp.local, start, count, dt * FSI_DRIFT);
+        g_profiler.stop(StepProfiler::DRIFT_KICK);
     }
-    g_profiler.stop(StepProfiler::DRIFT_KICK);
 
     // Re-sync packed positions after drift
+    g_profiler.start();
     dp.local.pack_pos_range(start, count);
+    g_profiler.stop(StepProfiler::PACK_DATA);
 
     // U-tilde kick (2dt/3) with gradient correction
     if (tree_mode) {
@@ -2669,16 +2698,21 @@ static void fsi_step_distributed(DistributedParticles& dp, int start, int count,
 #ifdef ENABLE_COLLISIONAL
     if (dp.local.collisional && !g_subsystem_mgr.active.empty()) {
         drift_field_only(dp.local, start, count, dt * FSI_DRIFT);
+        g_profiler.stop(StepProfiler::DRIFT_KICK);
+        g_profiler.start();
         advance_subsystems_in_range(dp.local, start, count, G, dt * FSI_DRIFT);
+        g_profiler.stop(StepProfiler::SUBSYSTEM_INTEG);
     } else
 #endif
     {
         drift(dp.local, start, count, dt * FSI_DRIFT);
+        g_profiler.stop(StepProfiler::DRIFT_KICK);
     }
-    g_profiler.stop(StepProfiler::DRIFT_KICK);
 
     // Re-sync packed positions after drift
+    g_profiler.start();
     dp.local.pack_pos_range(start, count);
+    g_profiler.stop(StepProfiler::PACK_DATA);
 
     // U kick (dt/6) - force then kick
     if (tree_mode) {
@@ -3778,10 +3812,10 @@ static void cpu_hhs_recursive(CpuSubset& s, int start, int count,
         return;
     }
 
-    // Forces discarded: partition reordered particles
+    // Partition was a no-op when slow_count==0, so dt_adapt still valid
     if (slow_count == 0) {
         double sub_pivot = pivot_dt * 0.5;
-        cpu_hhs_recursive(s, start, count, sub_pivot, G, soft2, dt_min, eta, false);
+        cpu_hhs_recursive(s, start, count, sub_pivot, G, soft2, dt_min, eta, true);
         cpu_hhs_recursive(s, start, count, sub_pivot, G, soft2, dt_min, eta, false);
         return;
     }
@@ -3884,12 +3918,13 @@ static void hhs_fsi_recursive_local(
     }
 
     // Base case: all particles are fast
-    // Forces discarded: partition reordered particles, invalidating ax/ay/az correspondence
+    // Partition was a no-op (line 754 early return), so dt_adapt values are still valid.
+    // First call reuses parent timesteps; second call recomputes (particles evolved).
     if (slow_count == 0) {
         dbg_hhs_slow0_local++;
         double sub_pivot = pivot_dt * 0.5;
         hhs_fsi_recursive_local(p, start, count, sub_pivot,
-                                G, soft2, dt_min, eta, false, local_depth + 1);
+                                G, soft2, dt_min, eta, true, local_depth + 1);
         hhs_fsi_recursive_local(p, start, count, sub_pivot,
                                 G, soft2, dt_min, eta, false, local_depth + 1);
         return;
@@ -4127,6 +4162,7 @@ static void hhs_fsi_recursive_distributed(
         // Subsystem detection at this HHS level (after timestep found neighbor pairs,
         // before partition reorders particles). Uses level-appropriate pivot_dt.
         if (dp.local.collisional) {
+            g_profiler.start();
             Kokkos::fence();
             g_subsystem_mgr.detect_from_pairs(dp.local, G, pivot_dt,
                                                g_collisional.r_ngb, g_collisional.r_ngb_max,
@@ -4153,6 +4189,7 @@ static void hhs_fsi_recursive_distributed(
                     g_subsystem_mgr.update_particle_flags(dp.local);
                 }
             }
+            g_profiler.stop(StepProfiler::SUBSYSTEM_DETECT);
         }
 #endif
     }
@@ -4189,12 +4226,13 @@ static void hhs_fsi_recursive_distributed(
     }
 
     // Base case: all particles are fast (no slow particles)
-    // Forces discarded: partition reordered particles, invalidating ax/ay/az correspondence
+    // Partition was a no-op (line 754 early return), so dt_adapt values are still valid.
+    // First call reuses parent timesteps; second call recomputes (particles evolved).
     if (slow_count == 0) {
         dbg_hhs_slow0_dist++;
         double sub_pivot = pivot_dt * 0.5;
         hhs_fsi_recursive_distributed(dp, start, count, sub_pivot,
-                                      G, soft2, dt_min, eta, false,
+                                      G, soft2, dt_min, eta, true,
                                       tree_for_subs, depth + 1);
         hhs_fsi_recursive_distributed(dp, start, count, sub_pivot,
                                       G, soft2, dt_min, eta, false,
@@ -4500,11 +4538,11 @@ static void gadget4_hhs_recursive_distributed(
         return;
     }
 
-    // Base case: all particles are fast
+    // Base case: all particles are fast — partition was a no-op, dt_adapt still valid
     if (slow_count == 0) {
         double sub_pivot = pivot_dt * 0.5;
         gadget4_hhs_recursive_distributed(dp, start, count, sub_pivot,
-                                          G, soft2, dt_min, eta, false);
+                                          G, soft2, dt_min, eta, true);
         gadget4_hhs_recursive_distributed(dp, start, count, sub_pivot,
                                           G, soft2, dt_min, eta, false);
         return;
