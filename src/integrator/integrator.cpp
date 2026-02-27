@@ -43,6 +43,8 @@ static int dbg_dist_depth_calls[DBG_MAX_DEPTH] = {};         // per-depth call c
 static long long dbg_dist_depth_count[DBG_MAX_DEPTH] = {};   // sum of 'count' at each depth (distributed)
 static int dbg_dist_depth_ngb_pairs[DBG_MAX_DEPTH] = {};     // neighbor pairs found per depth (distributed)
 static int dbg_dist_depth_l0_clamped[DBG_MAX_DEPTH] = {};    // particles clamped by level-0 per depth
+static int dbg_cpu_depth_calls[DBG_MAX_DEPTH] = {};           // per-depth call count (CPU serial)
+static long long dbg_cpu_depth_count[DBG_MAX_DEPTH] = {};     // sum of 'count' at each depth (CPU serial)
 
 // RAII timer for per-depth inclusive wall time in local path
 struct ScopedDepthTimer {
@@ -4193,6 +4195,10 @@ static void cpu_hhs_recursive(CpuSubset& s, Particles& p, int start, int count,
                               double pivot_dt, double G, double soft2,
                               double dt_min, double eta, bool dt_valid, int depth = 0) {
     if (count == 0) return;
+    if (depth < DBG_MAX_DEPTH) {
+        dbg_cpu_depth_calls[depth]++;
+        dbg_cpu_depth_count[depth] += count;
+    }
 
     if (pivot_dt * 0.5 < dt_min) {
         cpu_fsi_step(s, p, start, count, G, soft2, pivot_dt);
@@ -4344,12 +4350,13 @@ static void cpu_hhs_recursive(CpuSubset& s, Particles& p, int start, int count,
 // Entry point: copy subset to host, run CPU HHS, copy back
 static void hhs_fsi_recursive_cpu(Particles& p, int start, int count,
                                   double pivot_dt, double G, double soft2,
-                                  double dt_min, double eta, bool dt_valid) {
+                                  double dt_min, double eta, bool dt_valid,
+                                  int depth) {
     g_subset_hist.record(SubsetHistogram::LOCAL_CPU, count);
     CpuSubset s;
     s.resize(count);
     s.copy_from_device(p, start);
-    cpu_hhs_recursive(s, p, 0, count, pivot_dt, G, soft2, dt_min, eta, dt_valid);
+    cpu_hhs_recursive(s, p, 0, count, pivot_dt, G, soft2, dt_min, eta, dt_valid, depth);
     s.copy_to_device(p, start);
 }
 
@@ -4380,7 +4387,7 @@ static void hhs_fsi_recursive_local(
     // CPU serial path for very small subsets
     if (serial_n2_cpu > 0 && count <= serial_n2_cpu) {
         dbg_hhs_cpu++;
-        hhs_fsi_recursive_cpu(p, start, count, pivot_dt, G, soft2, dt_min, eta, dt_valid);
+        hhs_fsi_recursive_cpu(p, start, count, pivot_dt, G, soft2, dt_min, eta, dt_valid, local_depth);
         return;
     }
 
@@ -4621,7 +4628,7 @@ static void hhs_fsi_recursive_distributed(
     // Below threshold: skip MPI, all ranks compute full N² locally
     if (serial_n2_gpu > 0 && count <= serial_n2_gpu) {
         hhs_fsi_recursive_local(dp.local, start, count, pivot_dt,
-                                G, soft2, dt_min, eta, dt_valid);
+                                G, soft2, dt_min, eta, dt_valid, depth);
         // Re-sync packed views: local path modifies SoA directly without updating pos_packed
         dp.local.pack_pos_range(start, count);
         return;
@@ -5288,6 +5295,8 @@ void hhs_fsi_step_distributed(DistributedParticles& dp, double pivot_dt,
     std::memset(dbg_dist_depth_count, 0, sizeof(dbg_dist_depth_count));
     std::memset(dbg_dist_depth_ngb_pairs, 0, sizeof(dbg_dist_depth_ngb_pairs));
     std::memset(dbg_dist_depth_l0_clamped, 0, sizeof(dbg_dist_depth_l0_clamped));
+    std::memset(dbg_cpu_depth_calls, 0, sizeof(dbg_cpu_depth_calls));
+    std::memset(dbg_cpu_depth_count, 0, sizeof(dbg_cpu_depth_count));
 
 #ifdef ENABLE_COLLISIONAL
     if (dp.local.collisional) g_subsystem_mgr.reset_step_diagnostics();
@@ -5344,21 +5353,43 @@ void hhs_fsi_step_distributed(DistributedParticles& dp, double pivot_dt,
     if (MPIComm::rank() == 0)
 #endif
     {
-        std::printf("  HHS: dist=%d gpu=%d cpu=%d max_depth=%d\n",
-                    dbg_hhs_distributed, dbg_hhs_local, dbg_hhs_cpu, dbg_hhs_max_depth);
-        for (int d = 0; d < DBG_MAX_DEPTH; d++) {
+        // --- HHS Hierarchy ---
+        std::printf("\n  --- HHS Hierarchy (mpi=%d gpu=%d cpu=%d) ",
+                    dbg_hhs_distributed, dbg_hhs_local, dbg_hhs_cpu);
+        for (int i = 0; i < 40; i++) std::printf("-");
+        std::printf("\n");
+
+        // Find last populated depth (across all paths: distributed, local GPU, CPU serial)
+        int last_depth = -1;
+        for (int d = DBG_MAX_DEPTH - 1; d >= 0; d--) {
+            if (dbg_dist_depth_calls[d] > 0 || dbg_local_depth_calls[d] > 0 || dbg_cpu_depth_calls[d] > 0) {
+                last_depth = d;
+                break;
+            }
+        }
+        for (int d = 0; d <= last_depth; d++) {
             int dc = dbg_dist_depth_calls[d];
             int lc = dbg_local_depth_calls[d];
-            if (dc == 0 && lc == 0) break;
-            int total_calls = dc + lc;
-            long long avg_n = (dbg_dist_depth_count[d] + dbg_local_depth_count[d]) / total_calls;
-            std::printf("    L%d: %d calls, avg_n=%lld", d, total_calls, avg_n);
+            int cc = dbg_cpu_depth_calls[d];
+            int total_calls = dc + lc + cc;
+            long long total_count = dbg_dist_depth_count[d] + dbg_local_depth_count[d] + dbg_cpu_depth_count[d];
+            long long avg_n = total_calls > 0 ? total_count / total_calls : 0;
+            std::printf("    L%d: %3d calls", d, total_calls);
+            if (dc > 0 || lc > 0 || cc > 0) {
+                std::printf(" [");
+                bool first = true;
+                if (dc > 0) { std::printf("mpi=%d", dc); first = false; }
+                if (lc > 0) { std::printf("%sgpu=%d", first ? "" : " ", lc); first = false; }
+                if (cc > 0) { std::printf("%scpu=%d", first ? "" : " ", cc); first = false; }
+                std::printf("]");
+            }
+            std::printf("  avg_n=%5lld", avg_n);
             if (dbg_dist_depth_ngb_pairs[d] > 0)
-                std::printf(", ngb=%d", dbg_dist_depth_ngb_pairs[d]);
+                std::printf("  ngb=%d", dbg_dist_depth_ngb_pairs[d]);
             if (dbg_dist_depth_l0_clamped[d] > 0)
-                std::printf(", l0_clamp=%d", dbg_dist_depth_l0_clamped[d]);
+                std::printf("  l0_clamp=%d", dbg_dist_depth_l0_clamped[d]);
             if (dbg_local_depth_time[d] > 0.001)
-                std::printf(", time=%.3fs", dbg_local_depth_time[d]);
+                std::printf("  time=%.3fs", dbg_local_depth_time[d]);
             std::printf("\n");
         }
 

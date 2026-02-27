@@ -218,7 +218,13 @@ void print_timebin_table(const Particles& p, const std::vector<double>& levels,
                 "Level", "dt [Myr]", "count", e_label, p_label, "|dL/L|", "Time [Myr]", "Step");
     std::printf("----------------------------------------------------------------------------------------------------\n");
 
-    for (int l = 0; l < nl; l++) {
+    // Find last populated level
+    int last_pop = 0;
+    for (int l = nl - 1; l >= 0; l--) {
+        if (counts[l] > 0) { last_pop = l; break; }
+    }
+
+    for (int l = 0; l <= last_pop; l++) {
         double dt_myr = levels[l] * TIME_UNIT_MYR;
         std::printf("  L%-5d %14.6e %6d", l, dt_myr, counts[l]);
         if (l == 0 && dE >= 0.0) {

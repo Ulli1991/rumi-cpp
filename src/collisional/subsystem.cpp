@@ -746,48 +746,32 @@ void SubsystemManager::accumulate_diagnostics() {
 }
 
 void SubsystemManager::print_step_summary() const {
-    std::printf("  Subsystems: %d pairs (%d bound), %d subs (%d particles)",
-                step_total_pairs, step_total_bound, step_total_subsystems, step_total_members);
-    if (step_total_subsystems > 0) {
-        std::printf(" [");
-        bool first = true;
-        if (step_n_bin > 0)    { std::printf("%s%d bin", first ? "" : ", ", step_n_bin); first = false; }
-        if (step_n_fly > 0)    { std::printf("%s%d fly", first ? "" : ", ", step_n_fly); first = false; }
-        if (step_n_trip_s > 0) { std::printf("%s%d tri(s)", first ? "" : ", ", step_n_trip_s); first = false; }
-        if (step_n_trip_u > 0) { std::printf("%s%d tri(u)", first ? "" : ", ", step_n_trip_u); first = false; }
-        if (step_n_multi > 0)  { std::printf("%s%d multi", first ? "" : ", ", step_n_multi); first = false; }
-        if (step_n_secular > 0){ std::printf("%s%d secular", first ? "" : ", ", step_n_secular); first = false; }
-        std::printf("]");
-    }
+    // --- Collisional ---
+    std::printf("\n  --- Collisional ");
+    for (int i = 0; i < 62; i++) std::printf("-");
     std::printf("\n");
 
-    // Subsystem integration summary
-    if (step_logh_calls > 0 || step_secular_evolved > 0 || step_secular_triples > 0) {
-        std::printf("  Integration:");
-        if (step_logh_calls > 0) {
-            std::printf(" LogH=%d (gbs=%d, dE=[%.1e,%.1e]",
-                        step_logh_calls, step_logh_gbs_total,
-                        step_logh_best_dE, step_logh_worst_dE);
-            if (step_logh_cap_hit > 0)
-                std::printf(", cap=%d", step_logh_cap_hit);
-            if (step_logh_restarts > 0)
-                std::printf(", restart=%d/%d", step_logh_restart_ok, step_logh_restarts);
-            std::printf(")");
-        }
-        if (step_secular_evolved > 0)
-            std::printf(" Secular=%d", step_secular_evolved);
-        if (step_secular_triples > 0)
-            std::printf(" SecTriple=%d", step_secular_triples);
-        std::printf("\n");
-    }
+    std::printf("    Subsystems: %d pairs (%d bound), %d active (%d particles)\n",
+                step_total_pairs, step_total_bound, step_total_subsystems, step_total_members);
+    std::printf("      Types:  bin=%d  fly=%d  tri_s=%d  tri_u=%d  multi=%d\n",
+                step_n_bin, step_n_fly, step_n_trip_s, step_n_trip_u, step_n_multi);
 
-    // Merger and escaper events
-    if (step_mergers > 0 || step_escapers > 0) {
-        std::printf("  Events:");
-        if (step_mergers > 0) std::printf(" mergers=%d", step_mergers);
-        if (step_escapers > 0) std::printf(" escapers=%d", step_escapers);
-        std::printf("\n");
+    // Integration summary
+    std::printf("    Integration: LogH=%d", step_logh_calls);
+    if (step_logh_calls > 0) {
+        std::printf(" (gbs=%d, dE=[%.1e,%.1e]",
+                    step_logh_gbs_total,
+                    step_logh_best_dE, step_logh_worst_dE);
+        if (step_logh_cap_hit > 0)
+            std::printf(", cap=%d", step_logh_cap_hit);
+        if (step_logh_restarts > 0)
+            std::printf(", restart=%d/%d", step_logh_restart_ok, step_logh_restarts);
+        std::printf(")");
     }
+    std::printf("  Secular=%d  SecTriple=%d\n", step_secular_evolved, step_secular_triples);
+
+    // Events
+    std::printf("    Events: mergers=%d  escapers=%d\n", step_mergers, step_escapers);
 }
 
 void SubsystemManager::clear() {
