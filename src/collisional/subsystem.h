@@ -117,6 +117,17 @@ struct SubsystemManager {
     int step_n_secular = 0;
     int step_total_members = 0;
 
+    // Step-level subsystem integration statistics
+    int step_logh_calls = 0;           // subsystems integrated via LogH
+    int step_logh_gbs_total = 0;       // total GBS steps
+    double step_logh_worst_dE = 0;     // worst |dE/E| across all LogH calls
+    double step_logh_best_dE = 1e30;   // best |dE/E|
+    int step_logh_cap_hit = 0;         // hit GBS step limit (max_iter)
+    int step_logh_restarts = 0;        // per-subsystem restarts triggered
+    int step_logh_restart_ok = 0;      // restarts that succeeded
+    int step_secular_evolved = 0;      // secular binaries evolved
+    int step_secular_triples = 0;      // secular triples evolved
+
     // Reset step-level counters (call at start of each outer step)
     void reset_step_diagnostics();
 

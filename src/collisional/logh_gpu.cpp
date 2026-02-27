@@ -278,6 +278,7 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
     int total_gbs_steps = 0;
     double max_dE = 0.0;
     double min_dE = 1e30;
+    int cap_hit = 0;
 
     for (int s = 0; s < n_sub; s++) {
         int nb = h_nbod(s);
@@ -365,27 +366,7 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
         // Normalized PN speed of light
         double c_norm = c_code / V_scale;
 
-        // === DEBUG: compute omega (eccentricity vector angle) before integration ===
-        double omega_before = 0.0;
-        if (nb == 2) {
-            double rx = state.pos[1*3+0] - state.pos[0*3+0];
-            double ry = state.pos[1*3+1] - state.pos[0*3+1];
-            double rz = state.pos[1*3+2] - state.pos[0*3+2];
-            double vx = state.vel[1*3+0] - state.vel[0*3+0];
-            double vy = state.vel[1*3+1] - state.vel[0*3+1];
-            double vz = state.vel[1*3+2] - state.vel[0*3+2];
-            double rmag = std::sqrt(rx*rx + ry*ry + rz*rz);
-            double mu_bin = G_norm * (state.mass[0] + state.mass[1]);
-            double Lz = rx*vy - ry*vx;
-            double ex = vy*Lz/mu_bin - rx/rmag;
-            double ey = -vx*Lz/mu_bin - ry/rmag;
-            omega_before = std::atan2(ey, ex);
-            double emag = std::sqrt(ex*ex + ey*ey);
-            double L_mag = std::sqrt(Lz*Lz + (rz*vx - rx*vz)*(rz*vx - rx*vz)
-                                     + (rx*vy - ry*vx)*(rx*vy - ry*vx));
-            // Extra: check angular momentum in normalized units
-            // Not using L_mag for now, just omega_before
-        }
+        // (omega_before debug removed — stats tracked via batch.stat_* fields)
 
         // Enable auxiliary velocity for PN when compact objects present.
         // Restore persistent aux_vel if available (H&M extended phase space
@@ -460,49 +441,7 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
             double Omega_cur = logh_kinetic_energy(state) + state.B;
             double ds_est = (Omega_cur > 1e-30) ? dt_norm * Omega_cur : dt_norm;
             n_gbs_steps = gbs.integrate_to_time(state, dt_norm, G_norm, ds_est,
-                                                 c_norm, pn_order, 100000);
-        }
-
-        // === DEBUG: compute omega after integration ===
-        double omega_after = 0.0;
-        if (nb == 2) {
-            double rx = state.pos[1*3+0] - state.pos[0*3+0];
-            double ry = state.pos[1*3+1] - state.pos[0*3+1];
-            double rz = state.pos[1*3+2] - state.pos[0*3+2];
-            double vx = state.vel[1*3+0] - state.vel[0*3+0];
-            double vy = state.vel[1*3+1] - state.vel[0*3+1];
-            double vz = state.vel[1*3+2] - state.vel[0*3+2];
-            double rmag = std::sqrt(rx*rx + ry*ry + rz*rz);
-            double mu_bin = G_norm * (state.mass[0] + state.mass[1]);
-            double Lz = rx*vy - ry*vx;
-            double ex = vy*Lz/mu_bin - rx/rmag;
-            double ey = -vx*Lz/mu_bin - ry/rmag;
-            omega_after = std::atan2(ey, ex);
-            double emag = std::sqrt(ex*ex + ey*ey);
-
-            // Compute angular momentum before and after
-            double L_z_phys_before = 0.0;  // computed from input state
-            for (int b = 0; b < nb; b++) {
-                double px = (h_pos((off+b)*3+0) - cm_x);
-                double py = (h_pos((off+b)*3+1) - cm_y);
-                double pvx = (h_vel((off+b)*3+0) - cm_vx);
-                double pvy = (h_vel((off+b)*3+1) - cm_vy);
-                L_z_phys_before += h_mass(off+b) * (px*pvy - py*pvx);
-            }
-
-            double L_z_norm_after = 0.0;
-            for (int b = 0; b < nb; b++) {
-                L_z_norm_after += state.mass[b] * (state.pos[b*3+0]*state.vel[b*3+1]
-                                                   - state.pos[b*3+1]*state.vel[b*3+0]);
-            }
-
-            double dw = omega_after - omega_before;
-            if (dw < -M_PI) dw += 2.0 * M_PI;
-            if (dw > M_PI) dw -= 2.0 * M_PI;
-            std::printf("    LogH_debug: omega_before=%.6f  omega_after=%.6f  dw=%.6e"
-                        "  e=%.9f  dt_norm=%.4f  Lz_norm=%.10e  n_gbs=%d\n",
-                        omega_before, omega_after, dw, emag, dt_norm,
-                        L_z_norm_after, n_gbs_steps);
+                                                 c_norm, pn_order, 1000);
         }
 
         // ==================================================================
@@ -548,10 +487,6 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
 
         // Energy error in normalized units (dimensionless)
         double Ef_norm = logh_total_energy(state, G_norm);
-        // Check T(v)+U+B conservation
-        double ext_E0 = E0_norm + B_init_norm;  // T0+U0+B0
-        double ext_Ef = Ef_norm + state.B;       // Tf+Uf+Bf
-        double dE_ext = std::fabs((ext_Ef - ext_E0) / (std::fabs(ext_E0) + 1e-30));
         double dE_rel;
         if (any_compact && pn_order > 0 && c_norm > 0.0 && (pn_order & 1)) {
             double E_pn_0 = pn1_energy(state_init_pos, state_init_vel, state.mass,
@@ -564,23 +499,20 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
         } else {
             dE_rel = std::fabs((Ef_norm - E0_norm) / (std::fabs(E0_norm) + 1e-30));
         }
-        if (any_compact && pn_order > 0) {
-            std::printf("    LogH_energy: dE(T+U+B)=%.2e  dE(T+U+E_pn1)=%.2e  B_init=%.6e  B_final=%.6e\n",
-                        dE_ext, dE_rel, B_init_norm, state.B);
-        }
         h_eerr(s) = dE_rel;
-        h_conv(s) = 1;
+        h_conv(s) = (n_gbs_steps < 1000) ? 1 : 0;
 
         total_gbs_steps += n_gbs_steps;
         if (dE_rel > max_dE) max_dE = dE_rel;
         if (dE_rel < min_dE) min_dE = dE_rel;
+        if (n_gbs_steps >= 1000) cap_hit++;
     }
 
-    // Print compact summary (one line per batch)
-    if (n_sub > 0) {
-        std::printf("  LogH: %d subs, %d gbs_steps, dE=[%.2e, %.2e]\n",
-                    n_sub, total_gbs_steps, min_dE, max_dE);
-    }
+    // Store stats for caller (printed in step summary, not here)
+    batch.stat_total_gbs = total_gbs_steps;
+    batch.stat_worst_dE  = max_dE;
+    batch.stat_best_dE   = min_dE;
+    batch.stat_cap_hit   = cap_hit;
 
     Kokkos::deep_copy(batch.flat_pos_out, h_pos_out);
     Kokkos::deep_copy(batch.flat_vel_out, h_vel_out);

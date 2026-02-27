@@ -469,11 +469,7 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
             double p2[3] = {h_x(idx1), h_y(idx1), h_z(idx1)};
             double v2[3] = {h_vx(idx1), h_vy(idx1), h_vz(idx1)};
 
-            printf("  [SEC] pid=%d,%d  a=%.4e  e=%.6f  omega=%.4f  n_orb=%d  dt=%.4e\n",
-                   sub.particle_ids[0], sub.particle_ids[1],
-                   sub.orb.a, sub.orb.e,
-                   sub.orb.omega * 180.0 / M_PI,
-                   sub.n_orb_per_dt, dt);
+            g_subsystem_mgr.step_secular_evolved++;
 
             // Compute orbital energy before secular evolution for GW bookkeeping
             double m1_sec = h_m(idx0), m2_sec = h_m(idx1);
@@ -532,6 +528,7 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
         auto h_m  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.mass);
 
         for (int s : secular_triple_idx) {
+            g_subsystem_mgr.step_secular_triples++;
             const auto& sub = g_subsystem_mgr.active[s];
             if (sub.n_bodies != 3) continue;
 
@@ -717,19 +714,155 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
         }
     }
 
-    // --- LogH subsystems: batch integrate as before ---
+    // --- LogH subsystems: batch integrate with per-subsystem restart (BIFROST §3.19) ---
     if (!logh_idx.empty()) {
         SubsystemManager logh_mgr;
         for (int s : logh_idx) {
             logh_mgr.active.push_back(g_subsystem_mgr.active[s]);
         }
 
+        const int n_sub = (int)logh_mgr.active.size();
+        const double eta_restart = g_collisional.eta_restart;
+        constexpr int MAX_SUBDIV = 8;  // max 2^8 = 256 sub-steps
+
+        // Save pre-integration state for subsystem members (needed for restart)
+        struct SavedBody { double x, y, z, vx, vy, vz; };
+        std::vector<std::vector<SavedBody>> saved_bodies(n_sub);
+        std::vector<Subsystem> saved_subs(logh_mgr.active.begin(), logh_mgr.active.end());
+        {
+            auto hx  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.x);
+            auto hy  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.y);
+            auto hz  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.z);
+            auto hvx = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vx);
+            auto hvy = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vy);
+            auto hvz = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vz);
+            for (int si = 0; si < n_sub; si++) {
+                const auto& sub = logh_mgr.active[si];
+                saved_bodies[si].resize(sub.n_bodies);
+                for (int b = 0; b < sub.n_bodies; b++) {
+                    int idx = pid_to_idx[sub.particle_ids[b]];
+                    saved_bodies[si][b] = {hx(idx), hy(idx), hz(idx),
+                                           hvx(idx), hvy(idx), hvz(idx)};
+                }
+            }
+        }
+
+        // Initial batch integration
         g_logh_batch.pack(logh_mgr, p, G, dt);
         logh_integrate_batch_gpu(g_logh_batch, G, g_collisional.eta_gbs);
+
+        // Check per-subsystem energy errors
+        auto h_eerr = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
+                                                           g_logh_batch.energy_error);
+        std::vector<int> failed;
+        for (int si = 0; si < n_sub; si++) {
+            double dE = h_eerr(si);
+            if (eta_restart > 0 && (dE > eta_restart || std::isnan(dE))) {
+                failed.push_back(si);
+            }
+        }
+
+        // Unpack all results (passed get final state; failed get best-effort temporarily)
         g_logh_batch.unpack(logh_mgr, p);
 
-        // Propagate persistent B_phys and aux_vel back from logh_mgr to g_subsystem_mgr
-        for (int i = 0; i < (int)logh_idx.size(); i++) {
+        // Accumulate LogH stats into step-level counters
+        g_subsystem_mgr.step_logh_calls += n_sub;
+        g_subsystem_mgr.step_logh_gbs_total += g_logh_batch.stat_total_gbs;
+        if (g_logh_batch.stat_worst_dE > g_subsystem_mgr.step_logh_worst_dE)
+            g_subsystem_mgr.step_logh_worst_dE = g_logh_batch.stat_worst_dE;
+        if (g_logh_batch.stat_best_dE < g_subsystem_mgr.step_logh_best_dE)
+            g_subsystem_mgr.step_logh_best_dE = g_logh_batch.stat_best_dE;
+        g_subsystem_mgr.step_logh_cap_hit += g_logh_batch.stat_cap_hit;
+
+        // Retry failed subsystems with subdivided timestep (BIFROST §3.19)
+        if (!failed.empty()) {
+            g_subsystem_mgr.step_logh_restarts += (int)failed.size();
+            std::printf("  LogH restart: %d/%d subs exceeded eta_restart=%.1e\n",
+                        (int)failed.size(), n_sub, eta_restart);
+
+            // Helper: restore failed subsystems' particle state from saved copy
+            auto restore_failed = [&]() {
+                auto hx  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.x);
+                auto hy  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.y);
+                auto hz  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.z);
+                auto hvx = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vx);
+                auto hvy = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vy);
+                auto hvz = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vz);
+                for (int si : failed) {
+                    const auto& sub = saved_subs[si];
+                    for (int b = 0; b < sub.n_bodies; b++) {
+                        int idx = pid_to_idx[sub.particle_ids[b]];
+                        hx(idx)  = saved_bodies[si][b].x;
+                        hy(idx)  = saved_bodies[si][b].y;
+                        hz(idx)  = saved_bodies[si][b].z;
+                        hvx(idx) = saved_bodies[si][b].vx;
+                        hvy(idx) = saved_bodies[si][b].vy;
+                        hvz(idx) = saved_bodies[si][b].vz;
+                    }
+                    logh_mgr.active[si] = saved_subs[si];
+                }
+                Kokkos::deep_copy(p.x, hx);
+                Kokkos::deep_copy(p.y, hy);
+                Kokkos::deep_copy(p.z, hz);
+                Kokkos::deep_copy(p.vx, hvx);
+                Kokkos::deep_copy(p.vy, hvy);
+                Kokkos::deep_copy(p.vz, hvz);
+            };
+
+            restore_failed();
+
+            // Subdivision retry loop: 2, 4, 8, ... sub-steps
+            for (int subdiv = 1; subdiv <= MAX_SUBDIV; subdiv++) {
+                int n_steps = 1 << subdiv;
+                double dt_sub = dt / n_steps;
+
+                SubsystemManager retry_mgr;
+                for (int si : failed) retry_mgr.active.push_back(logh_mgr.active[si]);
+
+                bool all_passed = true;
+                double worst_dE = 0;
+
+                for (int step = 0; step < n_steps; step++) {
+                    SubsystemBatch retry_batch;
+                    retry_batch.pack(retry_mgr, p, G, dt_sub);
+                    logh_integrate_batch_gpu(retry_batch, G, g_collisional.eta_gbs);
+
+                    auto h_e = Kokkos::create_mirror_view_and_copy(
+                        Kokkos::HostSpace(), retry_batch.energy_error);
+                    for (int r = 0; r < (int)retry_mgr.active.size(); r++) {
+                        double dE = h_e(r);
+                        if (dE > eta_restart || std::isnan(dE)) all_passed = false;
+                        worst_dE = std::max(worst_dE, std::isnan(dE) ? 1e30 : dE);
+                    }
+
+                    retry_batch.unpack(retry_mgr, p);
+
+                    if (!all_passed) break;  // no point continuing if a sub-step failed
+                }
+
+                if (all_passed) {
+                    std::printf("  LogH restart: OK with %d sub-steps (worst dE=%.2e)\n",
+                                n_steps, worst_dE);
+                    g_subsystem_mgr.step_logh_restart_ok += (int)failed.size();
+                    // Copy final persistent state back to logh_mgr
+                    for (size_t r = 0; r < failed.size(); r++)
+                        logh_mgr.active[failed[r]] = retry_mgr.active[r];
+                    failed.clear();
+                    break;
+                }
+
+                std::printf("  LogH restart: %d sub-steps failed (worst dE=%.2e)\n",
+                            n_steps, worst_dE);
+
+                if (subdiv < MAX_SUBDIV) restore_failed();
+            }
+
+            if (!failed.empty())
+                std::printf("  LogH restart: GAVE UP after %d subdivisions\n", MAX_SUBDIV);
+        }
+
+        // Propagate persistent state back from logh_mgr to g_subsystem_mgr
+        for (int i = 0; i < n_sub; i++) {
             auto& dst = g_subsystem_mgr.active[logh_idx[i]];
             const auto& src = logh_mgr.active[i];
             dst.B_phys = src.B_phys;
@@ -738,6 +871,11 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
                 std::memcpy(dst.aux_vel_phys, src.aux_vel_phys,
                             LOGH_MAX_BODIES * 3 * sizeof(double));
             }
+            dst.V_scale = src.V_scale;
+            dst.R_scale = src.R_scale;
+            dst.T_scale = src.T_scale;
+            dst.E_scale = src.E_scale;
+            dst.scales_set = src.scales_set;
         }
     }
 }
@@ -5185,35 +5323,35 @@ void hhs_fsi_step_distributed(DistributedParticles& dp, double pivot_dt,
         global_pn1_kick(dp.local, 0, dp.N_total, G, g_collisional.c_code,
                         g_collisional.m_pn, pivot_dt * 0.5);
     }
-    if (dp.local.collisional) g_subsystem_mgr.print_step_summary();
+    // print_step_summary moved into unified block below
 #endif
 
-    // Print debug recursion counters
+    // Unified post-step summary: HHS hierarchy + subsystem stats
 #ifdef USE_MPI
     if (MPIComm::rank() == 0)
 #endif
     {
-        std::printf("  HHS recursion: distributed=%d, local_gpu=%d (cpu_dispatch=%d), "
-                    "slow0_dist=%d, slow0_local=%d, max_depth_dist=%d\n",
-                    dbg_hhs_distributed, dbg_hhs_local, dbg_hhs_cpu,
-                    dbg_hhs_slow0_dist, dbg_hhs_slow0_local, dbg_hhs_max_depth);
-        std::printf("  Distributed depth histogram (depth: calls, avg_count, ngb_pairs, l0_clamped):\n");
+        std::printf("  HHS: dist=%d gpu=%d cpu=%d max_depth=%d\n",
+                    dbg_hhs_distributed, dbg_hhs_local, dbg_hhs_cpu, dbg_hhs_max_depth);
         for (int d = 0; d < DBG_MAX_DEPTH; d++) {
-            if (dbg_dist_depth_calls[d] == 0) break;
-            std::printf("    D%2d: %6d calls, avg_count=%lld, ngb_pairs=%d, l0_clamped=%d\n",
-                        d, dbg_dist_depth_calls[d],
-                        dbg_dist_depth_count[d] / dbg_dist_depth_calls[d],
-                        dbg_dist_depth_ngb_pairs[d],
-                        dbg_dist_depth_l0_clamped[d]);
+            int dc = dbg_dist_depth_calls[d];
+            int lc = dbg_local_depth_calls[d];
+            if (dc == 0 && lc == 0) break;
+            int total_calls = dc + lc;
+            long long avg_n = (dbg_dist_depth_count[d] + dbg_local_depth_count[d]) / total_calls;
+            std::printf("    L%d: %d calls, avg_n=%lld", d, total_calls, avg_n);
+            if (dbg_dist_depth_ngb_pairs[d] > 0)
+                std::printf(", ngb=%d", dbg_dist_depth_ngb_pairs[d]);
+            if (dbg_dist_depth_l0_clamped[d] > 0)
+                std::printf(", l0_clamp=%d", dbg_dist_depth_l0_clamped[d]);
+            if (dbg_local_depth_time[d] > 0.001)
+                std::printf(", time=%.3fs", dbg_local_depth_time[d]);
+            std::printf("\n");
         }
-        std::printf("  Local depth histogram (depth: calls, avg_count, time_s):\n");
-        for (int d = 0; d < DBG_MAX_DEPTH; d++) {
-            if (dbg_local_depth_calls[d] == 0) break;
-            std::printf("    D%2d: %6d calls, avg_count=%lld, time=%.3fs (inclusive)\n",
-                        d, dbg_local_depth_calls[d],
-                        dbg_local_depth_count[d] / dbg_local_depth_calls[d],
-                        dbg_local_depth_time[d]);
-        }
+
+#ifdef ENABLE_COLLISIONAL
+        if (dp.local.collisional) g_subsystem_mgr.print_step_summary();
+#endif
     }
 }
 

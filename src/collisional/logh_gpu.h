@@ -50,6 +50,11 @@ struct SubsystemBatch {
     std::vector<double> stored_V_scale, stored_R_scale, stored_T_scale, stored_E_scale;
     std::vector<bool> stored_scales_set;
 
+    // Output statistics (filled by logh_integrate_batch_gpu)
+    int stat_total_gbs = 0;        // total GBS steps across all subsystems
+    double stat_worst_dE = 0;      // worst |dE/E|
+    double stat_best_dE = 1e30;    // best |dE/E|
+    int stat_cap_hit = 0;          // subsystems that hit GBS step limit
 
     // Allocate buffers
     void allocate(int n_sub, int total_bodies);
