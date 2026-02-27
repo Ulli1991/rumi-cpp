@@ -1,4 +1,5 @@
 #include "mergers.h"
+#include "merger_tree.h"
 #include "kepler.h"
 #include "constants.h"
 #include <cmath>
@@ -150,6 +151,8 @@ std::vector<MergerEvent> detect_mergers(const SubsystemManager& mgr,
         ev.type = MergerType::NONE;
         ev.pid1 = sub.particle_ids[0];
         ev.pid2 = sub.particle_ids[1];
+        ev.m1 = m1;
+        ev.m2 = m2;
 
         // ISCO check (BH)
         double r_isco = 6.0 * G * (m1 + m2) / (c_code * c_code);
@@ -305,9 +308,7 @@ void execute_merger(const MergerEvent& event, Particles& p,
         }
     }
 
-    double v_kick_mag = std::sqrt(v_kick[0]*v_kick[0] + v_kick[1]*v_kick[1] + v_kick[2]*v_kick[2]);
-    std::printf("MERGER: type=%d, pid %d + %d -> m_rem=%.4f M_sun, dm=%.4e, v_kick=%.1f km/s\n",
-                (int)event.type, event.pid1, event.pid2, m_rem, dm, v_kick_mag);
+    (void)dm;  // energy accounting already handled above
 }
 
 // ============================================================================
@@ -326,6 +327,7 @@ int remove_escapers(Particles& p, double G, double r_escape_rh,
     auto h_vy = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vy);
     auto h_vz = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vz);
     auto h_m  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.mass);
+    auto h_pid = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.particle_id);
     auto h_sid = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.subsystem_id);
 
     int N = p.N;
@@ -402,6 +404,12 @@ int remove_escapers(Particles& p, double G, double r_escape_rh,
             PE_esc -= G * h_m(i) * h_m(j) / rij;
         }
         books.E_escape += KE_esc + PE_esc;
+
+        // Record escaper event before zeroing mass
+        g_escaper_log.record(h_pid(i), g_sim_time, h_m(i),
+                             h_x(i), h_y(i), h_z(i),
+                             h_vx(i), h_vy(i), h_vz(i),
+                             r, std::sqrt(v2), E_spec);
 
         h_m(i) = 0.0;  // mark for removal
         n_escaped++;

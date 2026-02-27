@@ -12,6 +12,7 @@
 #include "post_newtonian.h"
 #include "secular.h"
 #include "mergers.h"
+#include "merger_tree.h"
 #include "checkpoint.h"
 #include "diagnostics.h"
 #endif
@@ -1239,9 +1240,12 @@ static void hhs_fsi_step_dynamic_impl(Particles& p, int start, int count, double
                 auto mergers = detect_mergers(g_subsystem_mgr, p, G,
                                                g_collisional.c_code, pivot_dt);
                 for (const auto& ev : mergers) {
+                    auto* sub = find_subsystem_for_merger(g_subsystem_mgr, ev);
+                    if (sub) g_merger_tree.record(ev, *sub, g_sim_time);
                     execute_merger(ev, p, g_subsystem_mgr, g_energy_books,
                                    G, g_collisional.c_code);
                 }
+                g_subsystem_mgr.step_mergers += (int)mergers.size();
                 if (!mergers.empty()) {
                     int n_removed = p.compact_remove_zero_mass();
                     count -= n_removed;
@@ -4259,9 +4263,12 @@ static void cpu_hhs_recursive(CpuSubset& s, Particles& p, int start, int count,
                 auto mergers = detect_mergers(g_subsystem_mgr, p, G,
                                                g_collisional.c_code, pivot_dt);
                 for (const auto& ev : mergers) {
+                    auto* sub = find_subsystem_for_merger(g_subsystem_mgr, ev);
+                    if (sub) g_merger_tree.record(ev, *sub, g_sim_time);
                     execute_merger(ev, p, g_subsystem_mgr, g_energy_books,
                                    G, g_collisional.c_code);
                 }
+                g_subsystem_mgr.step_mergers += (int)mergers.size();
                 if (!mergers.empty()) {
                     int n_removed = p.compact_remove_zero_mass();
                     count -= n_removed;
@@ -4450,9 +4457,12 @@ static void hhs_fsi_recursive_local(
                 auto mergers = detect_mergers(g_subsystem_mgr, p, G,
                                                g_collisional.c_code, pivot_dt);
                 for (const auto& ev : mergers) {
+                    auto* sub = find_subsystem_for_merger(g_subsystem_mgr, ev);
+                    if (sub) g_merger_tree.record(ev, *sub, g_sim_time);
                     execute_merger(ev, p, g_subsystem_mgr, g_energy_books,
                                    G, g_collisional.c_code);
                 }
+                g_subsystem_mgr.step_mergers += (int)mergers.size();
                 if (!mergers.empty()) {
                     int n_removed = p.compact_remove_zero_mass();
                     count -= n_removed;
@@ -4753,9 +4763,12 @@ static void hhs_fsi_recursive_distributed(
                 auto mergers = detect_mergers(g_subsystem_mgr, dp.local, G,
                                                g_collisional.c_code, pivot_dt);
                 for (const auto& ev : mergers) {
+                    auto* sub = find_subsystem_for_merger(g_subsystem_mgr, ev);
+                    if (sub) g_merger_tree.record(ev, *sub, g_sim_time);
                     execute_merger(ev, dp.local, g_subsystem_mgr, g_energy_books,
                                    G, g_collisional.c_code);
                 }
+                g_subsystem_mgr.step_mergers += (int)mergers.size();
                 if (!mergers.empty()) {
                     int n_removed = dp.local.compact_remove_zero_mass();
                     count -= n_removed;

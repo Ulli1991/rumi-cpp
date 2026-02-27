@@ -13,6 +13,7 @@
 #include "kepler.h"
 #include "checkpoint.h"
 #include "mergers.h"
+#include "merger_tree.h"
 #include "runtime_sse.h"
 CollisionalConfig g_collisional;
 
@@ -763,6 +764,9 @@ int main(int argc, char** argv) {
 #endif
             while (t < t_final) {
                 auto step_t0 = std::chrono::high_resolution_clock::now();
+#ifdef ENABLE_COLLISIONAL
+                g_sim_time = t;
+#endif
 
 #ifdef ENABLE_COLLISIONAL
                 // Runtime stellar evolution before each step
@@ -896,7 +900,15 @@ int main(int argc, char** argv) {
                     if (g_collisional.enabled && is_cluster && g_collisional.r_escape_rh > 0) {
                         int n_esc = remove_escapers(work_p, G, g_collisional.r_escape_rh,
                                                      g_subsystem_mgr, g_energy_books);
-                        if (n_esc > 0) work_p.compact_remove_zero_mass();
+                        if (n_esc > 0) {
+                            g_subsystem_mgr.step_escapers += n_esc;
+                            work_p.compact_remove_zero_mass();
+                        }
+                    }
+                    // Write event logs at snapshot intervals
+                    if (my_rank == 0) {
+                        g_merger_tree.write_ascii("merger_tree.dat");
+                        g_escaper_log.write_ascii("escaper_log.dat");
                     }
 #endif
                     if (my_rank == 0 && profiling_enabled) {
@@ -931,6 +943,11 @@ int main(int argc, char** argv) {
         auto diag_final = compute_diagnostics(work_p, G, soft2);
         if (my_rank == 0) {
             print_final(diag_final, diag0, work_p, levels, is_cluster, wall_sec, step, names);
+#ifdef ENABLE_COLLISIONAL
+            g_merger_tree.write_ascii("merger_tree.dat");
+            g_merger_tree.print_summary();
+            g_escaper_log.write_ascii("escaper_log.dat");
+#endif
         }
 
         if (use_distributed) {

@@ -87,7 +87,7 @@ TRIPLE_INCL_DEG = 45.0				# Mutual inclination (degrees); >39 for Kozai-Lidov
 # =============================================================================
 # Plummer cluster parameters (only used if TEST_CASE = plummer)
 # =============================================================================
-PLUMMER_N = 100000
+PLUMMER_N = 200000
 PLUMMER_M_TOTAL = 8.1e4            		# Total mass in solar masses (not used when kroupa_evolved)
 PLUMMER_R_HALF = 3.1                		# Half-mass radius in parsecs
 PLUMMER_SEED = 42                               # random seed for the mass sampling (I like 42)

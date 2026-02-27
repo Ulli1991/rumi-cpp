@@ -17,6 +17,7 @@ enum class MergerType {
 struct MergerEvent {
     MergerType type;
     int pid1, pid2;          // particle IDs
+    double m1, m2;           // progenitor masses
     double m_remnant;        // remnant mass
     double v_kick[3];        // GW kick velocity
     double spin_remnant[3];  // remnant spin vector

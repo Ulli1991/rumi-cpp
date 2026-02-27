@@ -42,6 +42,7 @@ if(ENABLE_COLLISIONAL)
         ${SRC_DIR}/collisional/secular.cpp
         ${SRC_DIR}/collisional/post_newtonian.cpp
         ${SRC_DIR}/collisional/mergers.cpp
+        ${SRC_DIR}/collisional/merger_tree.cpp
         ${SRC_DIR}/collisional/mstar.cpp
         ${SRC_DIR}/collisional/checkpoint.cpp
         ${SRC_DIR}/collisional/runtime_sse.cpp
