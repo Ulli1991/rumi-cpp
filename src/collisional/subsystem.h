@@ -83,8 +83,8 @@ struct SubsystemManager {
     // Remap internal indices after partition_by_pivot reorders particles
     void remap_indices(const Particles& p);
 
-    // Dissolve unbound subsystems
-    void prune(Particles& p, double G);
+    // Dissolve subsystems: binaries when unbound, flybys when separated beyond r_ngb_max
+    void dissolve_subsystems(Particles& p, double G, double r_ngb_max);
 
     // Update subsystem_id field in Particles based on active subsystems
     void update_particle_flags(Particles& p) const;

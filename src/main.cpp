@@ -662,7 +662,7 @@ int main(int argc, char** argv) {
                                                g_collisional.r_ngb, g_collisional.r_ngb_max,
                                                g_collisional.n_orb_secular);
             g_subsystem_mgr.update_particle_flags(work_p);
-            g_subsystem_mgr.prune(work_p, G);
+            g_subsystem_mgr.dissolve_subsystems(work_p, G, g_collisional.r_ngb_max);
             g_subsystem_mgr.update_particle_flags(work_p);
             g_subsystem_mgr.reset_step_diagnostics();
             g_subsystem_mgr.accumulate_diagnostics();

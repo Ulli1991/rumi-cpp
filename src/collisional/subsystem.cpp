@@ -5,6 +5,9 @@
 #include <numeric>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
+#include <map>
+#include <set>
 
 // Global subsystem manager instance
 SubsystemManager g_subsystem_mgr;
@@ -88,7 +91,7 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
     int n_pairs = h_count(0);
     if (n_pairs == 0) {
         // No new pairs detected. Keep existing subsystems — they persist
-        // until prune() dissolves them (unbound) or particles escape.
+        // until dissolve_subsystems() removes them or particles escape.
         // Same-subsystem pairs are excluded by the force/timestep kernel,
         // so they won't appear in the neighbor buffer. Clearing here would
         // destroy active subsystems every time re-detection runs.
@@ -184,8 +187,44 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
         }
     }
 
-    // Create subsystems
-    active.clear();
+    // Merge new detections with existing subsystems.
+    // Existing subsystems whose members are NOT involved in new detections are kept
+    // as-is (preserving B_phys, aux_vel LogH state). Existing subsystems whose
+    // members overlap with new detections are replaced by the new grouping, but
+    // B_phys/aux_vel are carried over if the member set is identical.
+
+    // Build set of pids in newly detected components
+    std::set<int> pids_in_new;
+    for (auto& [root, members] : components)
+        for (int pid : members)
+            pids_in_new.insert(pid);
+
+    // Partition existing: keep subsystems with no member in new detections
+    std::vector<Subsystem> kept, replaced;
+    for (auto& sub : active) {
+        bool overlaps = false;
+        for (int pid : sub.particle_ids) {
+            if (pids_in_new.count(pid)) { overlaps = true; break; }
+        }
+        if (overlaps) replaced.push_back(std::move(sub));
+        else          kept.push_back(std::move(sub));
+    }
+
+    // Build lookup from sorted pid set → old subsystem for state transfer
+    // (only for replaced subsystems that might match a new detection)
+    auto make_key = [](const std::vector<int>& pids) -> std::vector<int> {
+        std::vector<int> k = pids;
+        std::sort(k.begin(), k.end());
+        return k;
+    };
+    std::map<std::vector<int>, Subsystem*> old_by_pids;
+    for (auto& old_sub : replaced) {
+        old_by_pids[make_key(old_sub.particle_ids)] = &old_sub;
+    }
+
+    // Start with kept subsystems
+    active = std::move(kept);
+
     auto h_mass = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.mass);
     // Position/velocity mirrors created lazily (only for triples, avoids N-sized D2H for binaries)
     bool have_pos = false;
@@ -197,8 +236,20 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
     auto h_vz = Kokkos::create_mirror_view(Kokkos::HostSpace(), p.vz);
 
     for (auto& [root, members] : components) {
+        // Check if this component exactly matches an existing subsystem
+        auto key = make_key(members);
+        auto it = old_by_pids.find(key);
+
         Subsystem sub{};
-        sub.id = next_id++;
+        if (it != old_by_pids.end()) {
+            // Same members — carry over persistent LogH state
+            sub.id = it->second->id;
+            sub.B_phys = it->second->B_phys;
+            sub.has_aux_vel = it->second->has_aux_vel;
+            std::memcpy(sub.aux_vel_phys, it->second->aux_vel_phys, sizeof(sub.aux_vel_phys));
+        } else {
+            sub.id = next_id++;
+        }
         sub.particle_ids = members;
         sub.n_bodies = (int)members.size();
         sub.is_secular = false;
@@ -399,10 +450,12 @@ void SubsystemManager::remap_indices(const Particles& p) {
 }
 
 // ============================================================================
-// Prune unbound subsystems
+// Dissolve subsystems whose encounter is over
+// - BINARY: dissolved when unbound (E >= 0)
+// - FLYBY:  dissolved when particles separate beyond r_ngb_max
 // ============================================================================
 
-void SubsystemManager::prune(Particles& p, double G) {
+void SubsystemManager::dissolve_subsystems(Particles& p, double G, double r_ngb_max) {
     if (active.empty()) return;
 
     auto h_x  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.x);
@@ -420,27 +473,44 @@ void SubsystemManager::prune(Particles& p, double G) {
     std::vector<int> pid_to_idx(max_pid + 1, -1);
     for (int i = 0; i < p.N; i++) pid_to_idx[h_pid(i)] = i;
 
+    double r_ngb_max_sq = r_ngb_max * r_ngb_max;
+
     active.erase(std::remove_if(active.begin(), active.end(),
         [&](Subsystem& sub) {
-            if (sub.n_bodies != 2) return false;  // only prune binaries for now
+            if (sub.n_bodies != 2) return false;  // only dissolve 2-body for now
 
             int idx_i = pid_to_idx[sub.particle_ids[0]];
             int idx_j = pid_to_idx[sub.particle_ids[1]];
-            if (idx_i < 0 || idx_j < 0) return true;
+            if (idx_i < 0 || idx_j < 0) return true;  // particle missing → dissolve
 
             double dx = h_x(idx_j) - h_x(idx_i);
             double dy = h_y(idx_j) - h_y(idx_i);
             double dz = h_z(idx_j) - h_z(idx_i);
+            double r2 = dx*dx + dy*dy + dz*dz;
+
+            if (sub.type == SubsystemType::FLYBY) {
+                // Flyby: dissolve when particles have separated beyond r_ngb_max
+                // (the close encounter is over)
+                return (r2 > r_ngb_max_sq);
+            }
+
+            // Binary: dissolve when unbound
             double dvx = h_vx(idx_j) - h_vx(idx_i);
             double dvy = h_vy(idx_j) - h_vy(idx_i);
             double dvz = h_vz(idx_j) - h_vz(idx_i);
-
-            double r = std::sqrt(dx*dx + dy*dy + dz*dz);
             double v2 = dvx*dvx + dvy*dvy + dvz*dvz;
+            double r = std::sqrt(r2);
             double mu = G * (h_m(idx_i) + h_m(idx_j));
             double E = 0.5 * v2 - mu / r;
 
-            return (E >= 0.0);  // unbound → remove
+            if (E >= 0.0) {
+                // Was bound, now unbound — transition to FLYBY instead of
+                // immediately dissolving (the particles are still close)
+                sub.type = SubsystemType::FLYBY;
+                sub.orb.a = -mu / (2.0 * E);  // hyperbolic a (negative)
+                sub.orb.E_orb = E;
+            }
+            return false;
         }), active.end());
 }
 
@@ -484,7 +554,12 @@ void SubsystemManager::enforce_shared_timestep(Particles& p) const {
 }
 
 // ============================================================================
-// Perturbation timestep for subsystems (BIFROST Section 3.4.3)
+// Perturbation timestep for subsystems (BIFROST Section 3.4.3, Eq. 30)
+//
+// 2-body: Gauss planetary equations for da/dt, de/dt from tidal perturbation
+//   ε_pert = η_pert * min{ |a/ȧ|, |1/ė| }
+// N>2 body: total energy and angular momentum rates
+//   ε_pert = η_pert * min{ |E/Ė|, |L/L̇| }
 // ============================================================================
 
 void SubsystemManager::apply_perturbation_timestep(Particles& p, double G, double eta_pert) const {
@@ -512,46 +587,196 @@ void SubsystemManager::apply_perturbation_timestep(Particles& p, double G, doubl
     bool modified = false;
 
     for (const auto& sub : active) {
-        if (sub.n_bodies != 2) continue;  // only binaries for now
+        double dt_pert = 1e30;
 
-        int idx_i = pid_to_idx[sub.particle_ids[0]];
-        int idx_j = pid_to_idx[sub.particle_ids[1]];
-        if (idx_i < 0 || idx_j < 0) continue;
+        if (sub.n_bodies == 2) {
+            // --- 2-body: Gauss equations for ȧ, ė from tidal perturbation ---
+            int idx_i = pid_to_idx[sub.particle_ids[0]];
+            int idx_j = pid_to_idx[sub.particle_ids[1]];
+            if (idx_i < 0 || idx_j < 0) continue;
 
-        // Relative position and velocity
-        double rx = h_x(idx_j) - h_x(idx_i);
-        double ry = h_y(idx_j) - h_y(idx_i);
-        double rz = h_z(idx_j) - h_z(idx_i);
-        double r2 = rx*rx + ry*ry + rz*rz;
-        double r_mag = std::sqrt(r2);
-        if (r_mag < 1e-30) continue;
+            // Relative position
+            double rx = h_x(idx_j) - h_x(idx_i);
+            double ry = h_y(idx_j) - h_y(idx_i);
+            double rz = h_z(idx_j) - h_z(idx_i);
+            double r2 = rx*rx + ry*ry + rz*rz;
+            double r_mag = std::sqrt(r2);
+            if (r_mag < 1e-30) continue;
+            double r_inv = 1.0 / r_mag;
 
-        double vx = h_vx(idx_j) - h_vx(idx_i);
-        double vy = h_vy(idx_j) - h_vy(idx_i);
-        double vz = h_vz(idx_j) - h_vz(idx_i);
-        double v_mag = std::sqrt(vx*vx + vy*vy + vz*vz);
+            // Relative velocity
+            double dvx = h_vx(idx_j) - h_vx(idx_i);
+            double dvy = h_vy(idx_j) - h_vy(idx_i);
+            double dvz = h_vz(idx_j) - h_vz(idx_i);
+            double v2 = dvx*dvx + dvy*dvy + dvz*dvz;
 
-        // Tidal perturbation = difference in EXTERNAL (field) accelerations.
-        // Since the force kernel already excludes internal subsystem pairs (COLL),
-        // h_ax/h_ay/h_az contain only external forces. The perturbation is simply
-        // the differential external acceleration across the binary.
-        // (No need to subtract internal a_int — it's already excluded.)
-        double mu = G * (h_m(idx_i) + h_m(idx_j));
-        double da_tid_x = h_ax(idx_j) - h_ax(idx_i);
-        double da_tid_y = h_ay(idx_j) - h_ay(idx_i);
-        double da_tid_z = h_az(idx_j) - h_az(idx_i);
-        double da_tid = std::sqrt(da_tid_x*da_tid_x + da_tid_y*da_tid_y + da_tid_z*da_tid_z);
+            double mu = G * (h_m(idx_i) + h_m(idx_j));
 
-        if (da_tid < 1e-30) continue;
+            // Tidal perturbation = differential external acceleration
+            // (force kernel excludes internal subsystem pairs, so ax/ay/az are external only)
+            double fx = h_ax(idx_j) - h_ax(idx_i);
+            double fy = h_ay(idx_j) - h_ay(idx_i);
+            double fz = h_az(idx_j) - h_az(idx_i);
+            double f_mag = std::sqrt(fx*fx + fy*fy + fz*fz);
+            if (f_mag < 1e-30) continue;
 
-        // Perturbation timestep: dt_pert = eta_pert * |v_rel| / |delta_a_tidal|
-        // This is the timescale over which the tidal perturbation significantly
-        // changes the relative velocity (and hence orbital elements).
-        double dt_pert = eta_pert * std::max(v_mag, std::sqrt(mu / std::max(sub.orb.a, r_mag))) / da_tid;
+            // Orbital elements from current state
+            double E_orb = 0.5 * v2 - mu * r_inv;
+            double a = -mu / (2.0 * E_orb);  // negative for unbound (hyperbolic)
 
-        // Clamp dt_adapt of both members
+            // Angular momentum vector: L = r × v
+            double Lx = ry*dvz - rz*dvy;
+            double Ly = rz*dvx - rx*dvz;
+            double Lz = rx*dvy - ry*dvx;
+            double L2 = Lx*Lx + Ly*Ly + Lz*Lz;
+            double L_mag = std::sqrt(L2);
+
+            // Eccentricity
+            double p_param = L2 / mu;  // semi-latus rectum
+            double e2 = 1.0 - p_param / a;
+            if (e2 < 0.0) e2 = 0.0;
+            double e = std::sqrt(e2);
+
+            // Decompose perturbation into radial (R) and tangential (T) components
+            // r_hat = r/|r|, t_hat = (L × r) / |L × r| (in orbital plane, perpendicular to r)
+            double rhat_x = rx * r_inv, rhat_y = ry * r_inv, rhat_z = rz * r_inv;
+            double f_R = fx*rhat_x + fy*rhat_y + fz*rhat_z;  // radial component
+
+            // Tangential: project out radial, then the in-plane component
+            // t_hat = (v - (v·r_hat)*r_hat) / |...| but simpler via cross product:
+            // t_hat = (L_hat × r_hat)
+            double L_inv = (L_mag > 1e-30) ? 1.0 / L_mag : 0.0;
+            double Lhat_x = Lx * L_inv, Lhat_y = Ly * L_inv, Lhat_z = Lz * L_inv;
+            double that_x = Lhat_y*rhat_z - Lhat_z*rhat_y;
+            double that_y = Lhat_z*rhat_x - Lhat_x*rhat_z;
+            double that_z = Lhat_x*rhat_y - Lhat_y*rhat_x;
+            double f_T = fx*that_x + fy*that_y + fz*that_z;  // tangential component
+
+            // Gauss planetary equations (e.g. Murray & Dermott Ch. 2.9):
+            //   ȧ = 2/(n√(1-e²)) * [e·sin(ν)·f_R + (1+e·cos(ν))·f_T]
+            //   ė = √(1-e²)/(na) * [sin(ν)·f_R + (cos(ν)+cos(E))·f_T]
+            //
+            // We compute sin(ν), cos(ν) from state vectors:
+            //   cos(ν) = (p/r - 1) / e   where p = L²/μ
+            //   sin(ν) = (r·v) * √p / (e·μ·r)  [via h = r² dν/dt]
+            double abs_a = std::fabs(a);
+            double n = std::sqrt(mu / (abs_a * abs_a * abs_a));  // mean motion
+            double sqrt_1me2 = std::sqrt(std::fabs(1.0 - e2));
+
+            double cos_nu, sin_nu;
+            if (e > 1e-12) {
+                cos_nu = (p_param * r_inv - 1.0) / e;
+                double rdot = (rx*dvx + ry*dvy + rz*dvz) * r_inv;  // r·v / |r|
+                sin_nu = rdot * std::sqrt(p_param) / (e * std::sqrt(mu));
+            } else {
+                // Nearly circular: ν from position angle
+                cos_nu = 1.0;
+                sin_nu = 0.0;
+            }
+
+            // cos(E) from cos(ν): cos(E) = (e + cos(ν)) / (1 + e·cos(ν))
+            double cos_E = (e + cos_nu) / (1.0 + e * cos_nu);
+
+            double adot = 0.0, edot = 0.0;
+            if (n > 1e-30 && sqrt_1me2 > 1e-30) {
+                adot = 2.0 / (n * sqrt_1me2) *
+                       (e * sin_nu * f_R + (1.0 + e * cos_nu) * f_T);
+
+                edot = sqrt_1me2 / (n * abs_a) *
+                       (sin_nu * f_R + (cos_nu + cos_E) * f_T);
+            }
+
+            // dt_pert = η * min{ |a/ȧ|, |1/ė| }
+            if (std::fabs(adot) > 1e-30)
+                dt_pert = std::min(dt_pert, std::fabs(a / adot));
+            if (std::fabs(edot) > 1e-30)
+                dt_pert = std::min(dt_pert, 1.0 / std::fabs(edot));
+
+            dt_pert *= eta_pert;
+
+        } else {
+            // --- N>2 body: |E/Ė| and |L/L̇| from tidal perturbation ---
+            // Compute subsystem COM position, velocity, acceleration
+            double cx = 0, cy = 0, cz = 0;
+            double cvx = 0, cvy = 0, cvz = 0;
+            double cax = 0, cay = 0, caz = 0;
+            double M_tot = 0;
+            std::vector<int> idxs;
+            bool skip = false;
+            for (int pid : sub.particle_ids) {
+                int idx = (pid <= max_pid) ? pid_to_idx[pid] : -1;
+                if (idx < 0) { skip = true; break; }
+                idxs.push_back(idx);
+                double m = h_m(idx);
+                M_tot += m;
+                cx += m * h_x(idx);  cy += m * h_y(idx);  cz += m * h_z(idx);
+                cvx += m * h_vx(idx); cvy += m * h_vy(idx); cvz += m * h_vz(idx);
+                cax += m * h_ax(idx); cay += m * h_ay(idx); caz += m * h_az(idx);
+            }
+            if (skip || M_tot < 1e-30) continue;
+            double M_inv = 1.0 / M_tot;
+            cx *= M_inv; cy *= M_inv; cz *= M_inv;
+            cvx *= M_inv; cvy *= M_inv; cvz *= M_inv;
+            cax *= M_inv; cay *= M_inv; caz *= M_inv;
+
+            // Compute internal KE, PE, L and their time derivatives from external perturbation
+            double KE = 0, PE = 0;
+            double Lx = 0, Ly = 0, Lz = 0;
+            double dE_dt = 0;
+            double dLx_dt = 0, dLy_dt = 0, dLz_dt = 0;
+
+            for (int k = 0; k < sub.n_bodies; k++) {
+                int idx = idxs[k];
+                double m = h_m(idx);
+                // Relative to COM
+                double rx = h_x(idx) - cx, ry = h_y(idx) - cy, rz = h_z(idx) - cz;
+                double vx = h_vx(idx) - cvx, vy = h_vy(idx) - cvy, vz = h_vz(idx) - cvz;
+                // External perturbation on this particle (= a_external - a_COM_external)
+                double fx = h_ax(idx) - cax, fy = h_ay(idx) - cay, fz = h_az(idx) - caz;
+
+                KE += 0.5 * m * (vx*vx + vy*vy + vz*vz);
+                Lx += m * (ry*vz - rz*vy);
+                Ly += m * (rz*vx - rx*vz);
+                Lz += m * (rx*vy - ry*vx);
+
+                // dE/dt from external perturbation: Σ m_k v_k · f_k
+                dE_dt += m * (vx*fx + vy*fy + vz*fz);
+                // dL/dt from external perturbation: Σ m_k (r_k × f_k)
+                dLx_dt += m * (ry*fz - rz*fy);
+                dLy_dt += m * (rz*fx - rx*fz);
+                dLz_dt += m * (rx*fy - ry*fx);
+
+                // PE from internal pairwise interactions
+                for (int l = k + 1; l < sub.n_bodies; l++) {
+                    int idx2 = idxs[l];
+                    double dx = h_x(idx2) - h_x(idx);
+                    double dy = h_y(idx2) - h_y(idx);
+                    double dz = h_z(idx2) - h_z(idx);
+                    double r = std::sqrt(dx*dx + dy*dy + dz*dz);
+                    if (r > 1e-30)
+                        PE -= G * m * h_m(idx2) / r;
+                }
+            }
+
+            double E_int = KE + PE;
+            double L_mag = std::sqrt(Lx*Lx + Ly*Ly + Lz*Lz);
+            double dL_dt = (L_mag > 1e-30) ?
+                (Lx*dLx_dt + Ly*dLy_dt + Lz*dLz_dt) / L_mag : 0.0;
+
+            // dt_pert = η * min{ |E/Ė|, |L/L̇| }
+            if (std::fabs(dE_dt) > 1e-30 && std::fabs(E_int) > 1e-30)
+                dt_pert = std::min(dt_pert, std::fabs(E_int / dE_dt));
+            if (std::fabs(dL_dt) > 1e-30 && L_mag > 1e-30)
+                dt_pert = std::min(dt_pert, L_mag / std::fabs(dL_dt));
+
+            dt_pert *= eta_pert;
+        }
+
+        if (dt_pert >= 1e30) continue;
+
+        // Clamp dt_adapt of all members
         for (int pid : sub.particle_ids) {
-            int idx = pid_to_idx[pid];
+            int idx = (pid <= max_pid) ? pid_to_idx[pid] : -1;
             if (idx >= 0 && dt_pert < h_dt(idx)) {
                 h_dt(idx) = dt_pert;
                 modified = true;

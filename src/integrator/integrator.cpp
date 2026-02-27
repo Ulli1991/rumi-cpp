@@ -315,6 +315,126 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
 
     if (eligible.empty()) return;
 
+    // Re-evaluate secular/LogH classification from current orbital state.
+    // Subsystems persist across steps, so the detection-time is_secular may be stale.
+    {
+        auto h_x  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.x);
+        auto h_y  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.y);
+        auto h_z  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.z);
+        auto h_vx = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vx);
+        auto h_vy = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vy);
+        auto h_vz = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vz);
+        auto h_m  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.mass);
+
+        int n_orb_secular = g_collisional.n_orb_secular;
+
+        for (int s : eligible) {
+            auto& sub = g_subsystem_mgr.active[s];
+
+            if (sub.n_bodies == 2) {
+                int idx_i = pid_to_idx[sub.particle_ids[0]];
+                int idx_j = pid_to_idx[sub.particle_ids[1]];
+                if (idx_i < 0 || idx_j < 0) continue;
+
+                double rx = h_x(idx_j) - h_x(idx_i);
+                double ry = h_y(idx_j) - h_y(idx_i);
+                double rz = h_z(idx_j) - h_z(idx_i);
+                double vx = h_vx(idx_j) - h_vx(idx_i);
+                double vy = h_vy(idx_j) - h_vy(idx_i);
+                double vz = h_vz(idx_j) - h_vz(idx_i);
+                double r2 = rx*rx + ry*ry + rz*rz;
+                double v2 = vx*vx + vy*vy + vz*vz;
+                double r_mag = std::sqrt(r2);
+                double mu = G * (h_m(idx_i) + h_m(idx_j));
+                double E_orb = 0.5 * v2 - mu / r_mag;
+
+                // Update orbital elements
+                sub.orb.E_orb = E_orb;
+                if (E_orb < 0.0) {
+                    double a = -mu / (2.0 * E_orb);
+                    double L2 = (ry*vz-rz*vy)*(ry*vz-rz*vy) +
+                                (rz*vx-rx*vz)*(rz*vx-rx*vz) +
+                                (rx*vy-ry*vx)*(rx*vy-ry*vx);
+                    double e2 = 1.0 - L2 / (mu * a);
+                    sub.orb.a = a;
+                    sub.orb.e = (e2 > 0.0) ? std::sqrt(e2) : 0.0;
+                    sub.orb.period = 2.0 * M_PI * std::sqrt(a * a * a / mu);
+                    sub.n_orb_per_dt = (int)(dt / sub.orb.period);
+                    sub.is_secular = (sub.n_orb_per_dt >= n_orb_secular);
+
+                    // Transition: was FLYBY but now bound → BINARY
+                    if (sub.type == SubsystemType::FLYBY) sub.type = SubsystemType::BINARY;
+                } else {
+                    sub.orb.a = -mu / (2.0 * E_orb);  // hyperbolic
+                    sub.is_secular = false;
+
+                    // Transition: was BINARY but now unbound → FLYBY
+                    if (sub.type == SubsystemType::BINARY) sub.type = SubsystemType::FLYBY;
+                }
+
+            } else if (sub.n_bodies == 3 && sub.inner_binary_id >= 0 && sub.outer_companion_pid >= 0) {
+                // Recheck stability for triples with known hierarchy
+                int inner_i = sub.inner_binary_id;
+                int outer_pid = sub.outer_companion_pid;
+                int inner_j = -1;
+                for (int pid : sub.particle_ids) {
+                    if (pid != inner_i && pid != outer_pid) { inner_j = pid; break; }
+                }
+                if (inner_j < 0) continue;
+
+                int idx_i = (inner_i <= max_pid) ? pid_to_idx[inner_i] : -1;
+                int idx_j = (inner_j <= max_pid) ? pid_to_idx[inner_j] : -1;
+                int idx_o = (outer_pid <= max_pid) ? pid_to_idx[outer_pid] : -1;
+                if (idx_i < 0 || idx_j < 0 || idx_o < 0) continue;
+
+                double m1 = h_m(idx_i), m2 = h_m(idx_j), m3 = h_m(idx_o);
+                double mu_in = G * (m1 + m2);
+
+                // Inner binary elements
+                double r_in[3] = {h_x(idx_j)-h_x(idx_i), h_y(idx_j)-h_y(idx_i), h_z(idx_j)-h_z(idx_i)};
+                double v_in[3] = {h_vx(idx_j)-h_vx(idx_i), h_vy(idx_j)-h_vy(idx_i), h_vz(idx_j)-h_vz(idx_i)};
+                auto oe_in = cartesian_to_elements(r_in, v_in, mu_in);
+
+                if (oe_in.a > 0) {
+                    sub.orb.a = oe_in.a;
+                    sub.orb.e = oe_in.e;
+
+                    // Outer orbit relative to inner COM
+                    double M_in = m1 + m2;
+                    double cx  = (m1*h_x(idx_i)  + m2*h_x(idx_j))  / M_in;
+                    double cy  = (m1*h_y(idx_i)  + m2*h_y(idx_j))  / M_in;
+                    double cz  = (m1*h_z(idx_i)  + m2*h_z(idx_j))  / M_in;
+                    double cvx = (m1*h_vx(idx_i) + m2*h_vx(idx_j)) / M_in;
+                    double cvy = (m1*h_vy(idx_i) + m2*h_vy(idx_j)) / M_in;
+                    double cvz = (m1*h_vz(idx_i) + m2*h_vz(idx_j)) / M_in;
+                    double r_out[3] = {h_x(idx_o)-cx, h_y(idx_o)-cy, h_z(idx_o)-cz};
+                    double v_out[3] = {h_vx(idx_o)-cvx, h_vy(idx_o)-cvy, h_vz(idx_o)-cvz};
+                    auto oe_out = cartesian_to_elements(r_out, v_out, G * (M_in + m3));
+
+                    if (oe_out.a > 0) {
+                        bool stable = SubsystemManager::mardling_stability(
+                            oe_in.a, oe_in.e, oe_out.a, oe_out.e, m1, m2, m3);
+                        sub.type = stable ? SubsystemType::TRIPLE_STABLE : SubsystemType::TRIPLE_UNSTABLE;
+
+                        if (stable) {
+                            double P_in = 2.0 * M_PI * std::sqrt(oe_in.a*oe_in.a*oe_in.a / mu_in);
+                            sub.n_orb_per_dt = (int)(dt / P_in);
+                            sub.is_secular = (sub.n_orb_per_dt >= n_orb_secular);
+                        } else {
+                            sub.is_secular = false;
+                        }
+                    } else {
+                        sub.type = SubsystemType::TRIPLE_UNSTABLE;
+                        sub.is_secular = false;
+                    }
+                } else {
+                    sub.type = SubsystemType::TRIPLE_UNSTABLE;
+                    sub.is_secular = false;
+                }
+            }
+        }
+    }
+
     // Partition eligible subsystems into secular binaries, secular triples, and LogH
     std::vector<int> secular_idx, secular_triple_idx, logh_idx;
     for (int s : eligible) {
@@ -944,23 +1064,16 @@ static void hhs_fsi_step_dynamic_impl(Particles& p, int start, int count, double
                 }
             });
         }
-        // Level-0 clamping (BIFROST Section 3.4.1):
-        // At top level, record timestep in dt_level0.
-        // At deeper levels, prevent timestep from increasing beyond top-level value.
-        if (p.collisional) {
+        // Level-0 clamping (BIFROST Section 3.4.1)
+        // At depth > 0: clamp dt to the depth-0 reference before subsystem detection.
+        // At depth 0: store dt_l0 AFTER subsystem detection/enforce (see below).
+        if (p.collisional && depth > 0) {
             auto dt_f = p.dt_adapt;
             auto dt_l0 = p.dt_level0;
-            if (depth == 0) {
-                Kokkos::parallel_for("copy_dt_level0", count, KOKKOS_LAMBDA(int ii) {
-                    int i = start + ii;
-                    dt_l0(i) = dt_f(i);
-                });
-            } else {
-                Kokkos::parallel_for("clamp_dt_level0", count, KOKKOS_LAMBDA(int ii) {
-                    int i = start + ii;
-                    if (dt_f(i) > dt_l0(i)) dt_f(i) = dt_l0(i);
-                });
-            }
+            Kokkos::parallel_for("clamp_dt_level0", count, KOKKOS_LAMBDA(int ii) {
+                int i = start + ii;
+                if (dt_f(i) > dt_l0(i)) dt_f(i) = dt_l0(i);
+            });
         }
 #endif
         g_profiler.stop(StepProfiler::ADAPTIVE_DT);
@@ -974,11 +1087,21 @@ static void hhs_fsi_step_dynamic_impl(Particles& p, int start, int count, double
                                                g_collisional.r_ngb, g_collisional.r_ngb_max,
                                                g_collisional.n_orb_secular);
             g_subsystem_mgr.update_particle_flags(p);
-            g_subsystem_mgr.prune(p, G);
+            g_subsystem_mgr.dissolve_subsystems(p, G, g_collisional.r_ngb_max);
             g_subsystem_mgr.update_particle_flags(p);
             g_subsystem_mgr.enforce_shared_timestep(p);
             g_subsystem_mgr.apply_perturbation_timestep(p, G, g_collisional.eta_pert);
             g_subsystem_mgr.accumulate_diagnostics();
+
+            // Level-0 store: capture dt AFTER subsystem adjustments
+            if (depth == 0) {
+                auto dt_f = p.dt_adapt;
+                auto dt_l0 = p.dt_level0;
+                Kokkos::parallel_for("copy_dt_level0", count, KOKKOS_LAMBDA(int ii) {
+                    int i = start + ii;
+                    dt_l0(i) = dt_f(i);
+                });
+            }
 
             // Merger detection at every HHS level (BIFROST §3.14)
             if (g_collisional.c_code > 0.0) {
@@ -4109,14 +4232,10 @@ static void cpu_hhs_recursive(CpuSubset& s, Particles& p, int start, int count,
             }
         }
         // Level-0 clamping (BIFROST Section 3.4.1)
-        if (s.collisional) {
-            if (depth == 0) {
-                for (int i = start; i < start + count; i++)
-                    s.dt_level0[i] = s.dt_adapt[i];
-            } else {
-                for (int i = start; i < start + count; i++)
-                    if (s.dt_adapt[i] > s.dt_level0[i]) s.dt_adapt[i] = s.dt_level0[i];
-            }
+        // At depth > 0: clamp. At depth 0: store after subsystem detection (see below).
+        if (s.collisional && depth > 0) {
+            for (int i = start; i < start + count; i++)
+                if (s.dt_adapt[i] > s.dt_level0[i]) s.dt_adapt[i] = s.dt_level0[i];
         }
 
         // Subsystem detection: sync to device, run detection, sync back
@@ -4126,7 +4245,7 @@ static void cpu_hhs_recursive(CpuSubset& s, Particles& p, int start, int count,
                                                g_collisional.r_ngb, g_collisional.r_ngb_max,
                                                g_collisional.n_orb_secular);
             g_subsystem_mgr.update_particle_flags(p);
-            g_subsystem_mgr.prune(p, G);
+            g_subsystem_mgr.dissolve_subsystems(p, G, g_collisional.r_ngb_max);
             g_subsystem_mgr.update_particle_flags(p);
             g_subsystem_mgr.enforce_shared_timestep(p);
             g_subsystem_mgr.apply_perturbation_timestep(p, G, g_collisional.eta_pert);
@@ -4155,6 +4274,12 @@ static void cpu_hhs_recursive(CpuSubset& s, Particles& p, int start, int count,
                 Kokkos::deep_copy(h_dt, Kokkos::subview(p.dt_adapt, Kokkos::pair<int,int>(dev_start, dev_start+count)));
                 Kokkos::fence();
                 for (int i = 0; i < count; i++) s.dt_adapt[start + i] = h_dt(i);
+            }
+
+            // Level-0 store: capture dt AFTER subsystem adjustments
+            if (depth == 0) {
+                for (int i = start; i < start + count; i++)
+                    s.dt_level0[i] = s.dt_adapt[i];
             }
         }
 #endif
@@ -4315,7 +4440,7 @@ static void hhs_fsi_recursive_local(
                                                g_collisional.r_ngb, g_collisional.r_ngb_max,
                                                g_collisional.n_orb_secular);
             g_subsystem_mgr.update_particle_flags(p);
-            g_subsystem_mgr.prune(p, G);
+            g_subsystem_mgr.dissolve_subsystems(p, G, g_collisional.r_ngb_max);
             g_subsystem_mgr.update_particle_flags(p);
             g_subsystem_mgr.enforce_shared_timestep(p);
             g_subsystem_mgr.apply_perturbation_timestep(p, G, g_collisional.eta_pert);
@@ -4588,26 +4713,23 @@ static void hhs_fsi_recursive_distributed(
             });
         }
         // Level-0 clamping (BIFROST Section 3.4.1)
-        if (dp.local.collisional) {
+        // At depth > 0: clamp dt to the depth-0 reference before subsystem detection.
+        // At depth 0: store dt_l0 AFTER subsystem detection/enforce (see below),
+        // so it captures subsystem-adjusted timesteps and prevents members from
+        // migrating to coarser HHS levels in the second half of the step.
+        if (dp.local.collisional && depth > 0) {
             auto dt_f = dp.local.dt_adapt;
             auto dt_l0 = dp.local.dt_level0;
-            if (depth == 0) {
-                Kokkos::parallel_for("copy_dt_level0_dist", count, KOKKOS_LAMBDA(int ii) {
+            int n_clamped = 0;
+            Kokkos::parallel_reduce("clamp_dt_level0_dist", count,
+                KOKKOS_LAMBDA(int ii, int& cnt) {
                     int i = start + ii;
-                    dt_l0(i) = dt_f(i);
-                });
-            } else {
-                int n_clamped = 0;
-                Kokkos::parallel_reduce("clamp_dt_level0_dist", count,
-                    KOKKOS_LAMBDA(int ii, int& cnt) {
-                        int i = start + ii;
-                        if (dt_f(i) > dt_l0(i)) {
-                            dt_f(i) = dt_l0(i);
-                            cnt++;
-                        }
-                    }, n_clamped);
-                if (depth < DBG_MAX_DEPTH) dbg_dist_depth_l0_clamped[depth] += n_clamped;
-            }
+                    if (dt_f(i) > dt_l0(i)) {
+                        dt_f(i) = dt_l0(i);
+                        cnt++;
+                    }
+                }, n_clamped);
+            if (depth < DBG_MAX_DEPTH) dbg_dist_depth_l0_clamped[depth] += n_clamped;
         }
 #endif
         g_profiler.stop(StepProfiler::ADAPTIVE_DT, (long long)count * count);
@@ -4621,13 +4743,24 @@ static void hhs_fsi_recursive_distributed(
                                                g_collisional.r_ngb, g_collisional.r_ngb_max,
                                                g_collisional.n_orb_secular);
             g_subsystem_mgr.update_particle_flags(dp.local);
-            g_subsystem_mgr.prune(dp.local, G);
+            g_subsystem_mgr.dissolve_subsystems(dp.local, G, g_collisional.r_ngb_max);
             g_subsystem_mgr.update_particle_flags(dp.local);
             g_subsystem_mgr.enforce_shared_timestep(dp.local);
             g_subsystem_mgr.apply_perturbation_timestep(dp.local, G, g_collisional.eta_pert);
             g_subsystem_mgr.accumulate_diagnostics();
             if (depth < DBG_MAX_DEPTH)
                 dbg_dist_depth_ngb_pairs[depth] += g_subsystem_mgr.last_level_pairs;
+
+            // Level-0 store: capture dt AFTER subsystem adjustments so that
+            // deeper levels clamp to subsystem-aware values.
+            if (depth == 0) {
+                auto dt_f = dp.local.dt_adapt;
+                auto dt_l0 = dp.local.dt_level0;
+                Kokkos::parallel_for("copy_dt_level0_dist", count, KOKKOS_LAMBDA(int ii) {
+                    int i = start + ii;
+                    dt_l0(i) = dt_f(i);
+                });
+            }
 
             // Merger detection at every HHS level (BIFROST §3.14)
             if (g_collisional.c_code > 0.0) {
