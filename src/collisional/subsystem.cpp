@@ -86,15 +86,16 @@ bool SubsystemManager::mardling_stability(double a_in, double e_in,
 void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
                                           double r_ngb, double r_ngb_max,
                                           int n_orb_secular) {
+    // BIFROST Section 3.5: fresh detection at each HHS level.
+    // Save existing subsystems for persistent state transfer, then start fresh.
+    std::vector<Subsystem> old_active = std::move(active);
+    active.clear();
+
     // Copy neighbor count from device
     auto h_count = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), ngb_count);
     int n_pairs = h_count(0);
     if (n_pairs == 0) {
-        // No new pairs detected. Keep existing subsystems — they persist
-        // until dissolve_subsystems() removes them or particles escape.
-        // Same-subsystem pairs are excluded by the force/timestep kernel,
-        // so they won't appear in the neighbor buffer. Clearing here would
-        // destroy active subsystems every time re-detection runs.
+        // No neighbors at this level — no subsystems
         last_level_pairs = 0;
         last_level_bound = 0;
         return;
@@ -187,43 +188,17 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
         }
     }
 
-    // Merge new detections with existing subsystems.
-    // Existing subsystems whose members are NOT involved in new detections are kept
-    // as-is (preserving B_phys, aux_vel LogH state). Existing subsystems whose
-    // members overlap with new detections are replaced by the new grouping, but
-    // B_phys/aux_vel are carried over if the member set is identical.
-
-    // Build set of pids in newly detected components
-    std::set<int> pids_in_new;
-    for (auto& [root, members] : components)
-        for (int pid : members)
-            pids_in_new.insert(pid);
-
-    // Partition existing: keep subsystems with no member in new detections
-    std::vector<Subsystem> kept, replaced;
-    for (auto& sub : active) {
-        bool overlaps = false;
-        for (int pid : sub.particle_ids) {
-            if (pids_in_new.count(pid)) { overlaps = true; break; }
-        }
-        if (overlaps) replaced.push_back(std::move(sub));
-        else          kept.push_back(std::move(sub));
-    }
-
-    // Build lookup from sorted pid set → old subsystem for state transfer
-    // (only for replaced subsystems that might match a new detection)
+    // Build lookup from sorted pid set → old subsystem for persistent state transfer
+    // (B_phys, aux_vel, normalization scales carried over for identical member sets)
     auto make_key = [](const std::vector<int>& pids) -> std::vector<int> {
         std::vector<int> k = pids;
         std::sort(k.begin(), k.end());
         return k;
     };
     std::map<std::vector<int>, Subsystem*> old_by_pids;
-    for (auto& old_sub : replaced) {
+    for (auto& old_sub : old_active) {
         old_by_pids[make_key(old_sub.particle_ids)] = &old_sub;
     }
-
-    // Start with kept subsystems
-    active = std::move(kept);
 
     auto h_mass = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.mass);
     // Position/velocity mirrors created lazily (only for triples, avoids N-sized D2H for binaries)
@@ -247,6 +222,12 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
             sub.B_phys = it->second->B_phys;
             sub.has_aux_vel = it->second->has_aux_vel;
             std::memcpy(sub.aux_vel_phys, it->second->aux_vel_phys, sizeof(sub.aux_vel_phys));
+            // Carry over fixed normalization scales
+            sub.V_scale = it->second->V_scale;
+            sub.R_scale = it->second->R_scale;
+            sub.T_scale = it->second->T_scale;
+            sub.E_scale = it->second->E_scale;
+            sub.scales_set = it->second->scales_set;
         } else {
             sub.id = next_id++;
         }
@@ -447,71 +428,6 @@ void SubsystemManager::update_particle_flags(Particles& p) const {
 void SubsystemManager::remap_indices(const Particles& p) {
     // Subsystem tracks permanent particle_ids, not array indices.
     // No remapping needed — we always look up by particle_id.
-}
-
-// ============================================================================
-// Dissolve subsystems whose encounter is over
-// - BINARY: dissolved when unbound (E >= 0)
-// - FLYBY:  dissolved when particles separate beyond r_ngb_max
-// ============================================================================
-
-void SubsystemManager::dissolve_subsystems(Particles& p, double G, double r_ngb_max) {
-    if (active.empty()) return;
-
-    auto h_x  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.x);
-    auto h_y  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.y);
-    auto h_z  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.z);
-    auto h_vx = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vx);
-    auto h_vy = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vy);
-    auto h_vz = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vz);
-    auto h_m  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.mass);
-    auto h_pid = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.particle_id);
-
-    // Build pid->idx
-    int max_pid = 0;
-    for (int i = 0; i < p.N; i++) max_pid = std::max(max_pid, h_pid(i));
-    std::vector<int> pid_to_idx(max_pid + 1, -1);
-    for (int i = 0; i < p.N; i++) pid_to_idx[h_pid(i)] = i;
-
-    double r_ngb_max_sq = r_ngb_max * r_ngb_max;
-
-    active.erase(std::remove_if(active.begin(), active.end(),
-        [&](Subsystem& sub) {
-            if (sub.n_bodies != 2) return false;  // only dissolve 2-body for now
-
-            int idx_i = pid_to_idx[sub.particle_ids[0]];
-            int idx_j = pid_to_idx[sub.particle_ids[1]];
-            if (idx_i < 0 || idx_j < 0) return true;  // particle missing → dissolve
-
-            double dx = h_x(idx_j) - h_x(idx_i);
-            double dy = h_y(idx_j) - h_y(idx_i);
-            double dz = h_z(idx_j) - h_z(idx_i);
-            double r2 = dx*dx + dy*dy + dz*dz;
-
-            if (sub.type == SubsystemType::FLYBY) {
-                // Flyby: dissolve when particles have separated beyond r_ngb_max
-                // (the close encounter is over)
-                return (r2 > r_ngb_max_sq);
-            }
-
-            // Binary: dissolve when unbound
-            double dvx = h_vx(idx_j) - h_vx(idx_i);
-            double dvy = h_vy(idx_j) - h_vy(idx_i);
-            double dvz = h_vz(idx_j) - h_vz(idx_i);
-            double v2 = dvx*dvx + dvy*dvy + dvz*dvz;
-            double r = std::sqrt(r2);
-            double mu = G * (h_m(idx_i) + h_m(idx_j));
-            double E = 0.5 * v2 - mu / r;
-
-            if (E >= 0.0) {
-                // Was bound, now unbound — transition to FLYBY instead of
-                // immediately dissolving (the particles are still close)
-                sub.type = SubsystemType::FLYBY;
-                sub.orb.a = -mu / (2.0 * E);  // hyperbolic a (negative)
-                sub.orb.E_orb = E;
-            }
-            return false;
-        }), active.end());
 }
 
 // ============================================================================

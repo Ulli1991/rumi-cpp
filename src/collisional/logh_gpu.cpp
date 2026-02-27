@@ -67,13 +67,18 @@ void SubsystemBatch::pack(const SubsystemManager& mgr, const Particles& p,
     auto h_mass = Kokkos::create_mirror_view(flat_mass);
     auto h_ext  = Kokkos::create_mirror_view(flat_ext_accel);
 
-    // Copy persistent B values and auxiliary velocities from subsystems
+    // Copy persistent B values, auxiliary velocities, and normalization scales from subsystems
     stored_B.resize(n_sub);
     stored_aux_vel.resize(n_sub);
     has_stored_aux_vel.resize(n_sub);
     stored_spins.resize(n_sub * 6, 0.0);
     has_stored_spins.resize(n_sub, false);
     stored_stellar_type.resize(n_sub * 2, 0);
+    stored_V_scale.resize(n_sub);
+    stored_R_scale.resize(n_sub);
+    stored_T_scale.resize(n_sub);
+    stored_E_scale.resize(n_sub);
+    stored_scales_set.resize(n_sub);
     for (int s = 0; s < n_sub; s++) {
         stored_B[s] = mgr.active[s].B_phys;
         has_stored_aux_vel[s] = mgr.active[s].has_aux_vel;
@@ -82,6 +87,11 @@ void SubsystemBatch::pack(const SubsystemManager& mgr, const Particles& p,
             std::memcpy(stored_aux_vel[s].data(), mgr.active[s].aux_vel_phys,
                         mgr.active[s].n_bodies * 3 * sizeof(double));
         }
+        stored_V_scale[s] = mgr.active[s].V_scale;
+        stored_R_scale[s] = mgr.active[s].R_scale;
+        stored_T_scale[s] = mgr.active[s].T_scale;
+        stored_E_scale[s] = mgr.active[s].E_scale;
+        stored_scales_set[s] = mgr.active[s].scales_set;
     }
 
     // Read spin vectors and stellar types for 2-body BH binaries
@@ -195,7 +205,7 @@ void SubsystemBatch::unpack(SubsystemManager& mgr, Particles& p) {
     Kokkos::deep_copy(p.vz, h_vz);
     Kokkos::deep_copy(p.mass, h_m);
 
-    // Write persistent B and auxiliary velocities back to subsystems
+    // Write persistent B, auxiliary velocities, and scales back to subsystems
     for (int s = 0; s < n_sub; s++) {
         mgr.active[s].B_phys = stored_B[s];
         mgr.active[s].has_aux_vel = has_stored_aux_vel[s];
@@ -203,6 +213,11 @@ void SubsystemBatch::unpack(SubsystemManager& mgr, Particles& p) {
             std::memcpy(mgr.active[s].aux_vel_phys, stored_aux_vel[s].data(),
                         mgr.active[s].n_bodies * 3 * sizeof(double));
         }
+        mgr.active[s].V_scale = stored_V_scale[s];
+        mgr.active[s].R_scale = stored_R_scale[s];
+        mgr.active[s].T_scale = stored_T_scale[s];
+        mgr.active[s].E_scale = stored_E_scale[s];
+        mgr.active[s].scales_set = stored_scales_set[s];
     }
 
     // Write evolved spins back to particles
@@ -238,6 +253,10 @@ void SubsystemBatch::unpack(SubsystemManager& mgr, Particles& p) {
 //
 // Fix: normalize each subsystem to internal N-body units (G'=1, M'=1)
 // before integration, then denormalize afterward.
+// CRITICAL: normalization scales are computed ONCE on the first LogH
+// call and REUSED on all subsequent calls (stored in Subsystem struct).
+// This prevents persistent B from drifting due to E_scale changes
+// when FSI kicks modify subsystem member velocities between calls.
 // ============================================================================
 
 void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
@@ -266,9 +285,9 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
         double dt = h_dt(s);
 
         // ==================================================================
-        // Step 1: Compute normalization scales
-        // V_scale = sqrt(2*T_CM / M_total), R_scale = G*M/V^2, T_scale = R/V
-        // In normalized units: G'=1, M'=1, Ω'~O(1)
+        // Step 1: Compute CM and use fixed normalization scales.
+        // Scales are computed once on first LogH call and reused thereafter.
+        // This prevents persistent B from drifting due to E_scale changes.
         // ==================================================================
         double M_total = 0;
         double cm_x = 0, cm_y = 0, cm_z = 0;
@@ -286,23 +305,36 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
         cm_x /= M_total; cm_y /= M_total; cm_z /= M_total;
         cm_vx /= M_total; cm_vy /= M_total; cm_vz /= M_total;
 
-        // Kinetic energy in CM frame
-        double T_cm = 0;
-        for (int b = 0; b < nb; b++) {
-            double dvx = h_vel((off+b)*3+0) - cm_vx;
-            double dvy = h_vel((off+b)*3+1) - cm_vy;
-            double dvz = h_vel((off+b)*3+2) - cm_vz;
-            T_cm += 0.5 * h_mass(off+b) * (dvx*dvx + dvy*dvy + dvz*dvz);
+        double V_scale, R_scale, T_scale, E_scale;
+        if (batch.stored_scales_set[s]) {
+            // Reuse fixed scales from first call
+            V_scale = batch.stored_V_scale[s];
+            R_scale = batch.stored_R_scale[s];
+            T_scale = batch.stored_T_scale[s];
+            E_scale = batch.stored_E_scale[s];
+        } else {
+            // First call: compute normalization scales from current CM-frame KE
+            double T_cm = 0;
+            for (int b = 0; b < nb; b++) {
+                double dvx = h_vel((off+b)*3+0) - cm_vx;
+                double dvy = h_vel((off+b)*3+1) - cm_vy;
+                double dvz = h_vel((off+b)*3+2) - cm_vz;
+                T_cm += 0.5 * h_mass(off+b) * (dvx*dvx + dvy*dvy + dvz*dvz);
+            }
+            double V_scale_sq = 2.0 * T_cm / M_total;
+            V_scale = std::sqrt(V_scale_sq);
+            if (V_scale < 1e-30) V_scale = 1.0;
+            V_scale_sq = V_scale * V_scale;
+            R_scale = G * M_total / V_scale_sq;
+            T_scale = R_scale / V_scale;
+            E_scale = M_total * V_scale_sq;
+            // Store for all future calls
+            batch.stored_V_scale[s] = V_scale;
+            batch.stored_R_scale[s] = R_scale;
+            batch.stored_T_scale[s] = T_scale;
+            batch.stored_E_scale[s] = E_scale;
+            batch.stored_scales_set[s] = true;
         }
-
-        // Normalization scales
-        double V_scale_sq = 2.0 * T_cm / M_total;
-        double V_scale = std::sqrt(V_scale_sq);
-        if (V_scale < 1e-30) V_scale = 1.0;  // degenerate case
-        V_scale_sq = V_scale * V_scale;
-
-        double R_scale = G * M_total / V_scale_sq;
-        double T_scale = R_scale / V_scale;
         double G_norm = 1.0;  // by construction: G*M/(R*V²) = 1
 
         // ==================================================================
@@ -392,29 +424,18 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
         }
 
         // Initialize B in normalized units.
-        // If we have a stored B from a previous LogH call, convert from physical
-        // to normalized units. Otherwise compute from scratch: B = -(T + U).
-        // Persistent B is critical for PN: re-initializing discards PN energy
-        // tracking and causes monotonic secular drift.
+        // Persistent B is stored directly in these fixed normalized units — no
+        // conversion needed since scales are fixed. This eliminates the drift
+        // that occurred when E_scale changed between calls.
         double T_norm = logh_kinetic_energy(state);
         double U_norm = logh_potential_energy(state, G_norm);
-        double E_scale = M_total * V_scale_sq;  // energy normalization factor
 
         if (std::isnan(batch.stored_B[s])) {
-            // First call for this subsystem: B = -(T+U+E_pn1) in normalized units.
-            // Must include PN1 energy correction so that the first LogH integration
-            // starts with the correct binding energy. Without this, B is wrong by
-            // E_pn1/E ~ O(v²/c²) and the first call produces a ~0.3% energy error
-            // that persists as a one-time jump (subsequent calls use persistent B).
-            double E_pn1_init = 0.0;
-            if (state.use_aux_vel && pn_order > 0 && c_norm > 0.0 && (pn_order & 1)) {
-                E_pn1_init = pn1_energy(state.pos, state.vel, state.mass,
-                                         nb, G_norm, c_norm);
-            }
-            state.B = -U_norm - T_norm - E_pn1_init;
+            // First call: B = -(T+U). PN forces adjust B naturally via dB/ds.
+            state.B = -U_norm - T_norm;
         } else {
-            // Use persistent B from previous call, converted to current normalization
-            state.B = batch.stored_B[s] / E_scale;
+            // Persistent B — already in these fixed normalized units, no conversion
+            state.B = batch.stored_B[s];
         }
 
         double E0_norm = T_norm + U_norm;
@@ -504,7 +525,8 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
         }
 
         // Store updated B and auxiliary velocities for persistence across calls
-        batch.stored_B[s] = state.B * E_scale;
+        // B stays in fixed normalized units — no E_scale conversion needed
+        batch.stored_B[s] = state.B;
         if (state.use_aux_vel) {
             batch.has_stored_aux_vel[s] = true;
             for (int b = 0; b < nb; b++) {

@@ -38,9 +38,10 @@ struct Subsystem {
     bool is_secular;                     // orbit-averaged evolution
     int n_orb_per_dt;                    // orbits per FSI timestep
 
-    // Persistent binding energy B in physical (code) units.
+    // Persistent binding energy B in LogH internal (normalized) units.
     // NAN = not yet initialized (compute from -(T+U) on first LogH call).
     // Carried across LogH calls to properly track PN energy exchange.
+    // Uses fixed normalization scales (V_scale etc.) so no unit conversion drift.
     double B_phys = NAN;
 
     // Persistent auxiliary velocities for PN (code units, including CM).
@@ -49,6 +50,12 @@ struct Subsystem {
     // discards this divergence and causes O(v²/c²) energy errors.
     double aux_vel_phys[LOGH_MAX_BODIES * 3] = {};
     bool has_aux_vel = false;
+
+    // Static normalization scales (computed once on first LogH call, fixed thereafter).
+    // V_scale = sqrt(2*T_CM/M_total), R_scale = G*M/V², T_scale = R/V, E_scale = M*V².
+    // Fixed scales prevent persistent B from drifting due to E_scale changes between calls.
+    double V_scale = 0, R_scale = 0, T_scale = 0, E_scale = 0;
+    bool scales_set = false;
 
     // Hierarchy info (for triples)
     int inner_binary_id;                 // -1 if not hierarchical
@@ -82,9 +89,6 @@ struct SubsystemManager {
 
     // Remap internal indices after partition_by_pivot reorders particles
     void remap_indices(const Particles& p);
-
-    // Dissolve subsystems: binaries when unbound, flybys when separated beyond r_ngb_max
-    void dissolve_subsystems(Particles& p, double G, double r_ngb_max);
 
     // Update subsystem_id field in Particles based on active subsystems
     void update_particle_flags(Particles& p) const;

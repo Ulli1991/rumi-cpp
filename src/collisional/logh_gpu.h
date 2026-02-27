@@ -46,6 +46,10 @@ struct SubsystemBatch {
     std::vector<bool> has_stored_spins;
     std::vector<int> stored_stellar_type;  // flat: [n_sub * 2] for 2-body (spins)
 
+    // Persistent normalization scales (computed once per subsystem, fixed thereafter)
+    std::vector<double> stored_V_scale, stored_R_scale, stored_T_scale, stored_E_scale;
+    std::vector<bool> stored_scales_set;
+
 
     // Allocate buffers
     void allocate(int n_sub, int total_bodies);

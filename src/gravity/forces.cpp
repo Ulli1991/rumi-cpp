@@ -21,29 +21,8 @@ static void compute_acceleration_and_timestep_impl(Particles& p, double G, doubl
     RawView pax{p.ax.data()}, pay{p.ay.data()}, paz{p.az.data()};
     RawView m{p.mass.data()};
     RawView dt_f{p.dt_adapt.data()};
-    // Collisional: subsystem exclusion + neighbor detection (raw pointers to avoid View capture overhead)
+    // Collisional: subsystem exclusion (raw pointer to avoid View capture overhead)
     const int* sid_raw = COLL ? p.subsystem_id.data() : nullptr;
-    const int* pid_raw = COLL ? p.particle_id.data() : nullptr;
-#ifdef ENABLE_COLLISIONAL
-    int* ngb_i_raw = COLL ? g_subsystem_mgr.ngb_pair_i.data() : nullptr;
-    int* ngb_j_raw = COLL ? g_subsystem_mgr.ngb_pair_j.data() : nullptr;
-    double* ngb_a_raw = COLL ? g_subsystem_mgr.ngb_pair_a.data() : nullptr;
-    double* ngb_e_raw = COLL ? g_subsystem_mgr.ngb_pair_e.data() : nullptr;
-    double* ngb_E_raw = COLL ? g_subsystem_mgr.ngb_pair_E.data() : nullptr;
-    int* ngb_bound_raw = COLL ? g_subsystem_mgr.ngb_pair_bound.data() : nullptr;
-    int* ngb_cnt_raw = COLL ? g_subsystem_mgr.ngb_count.data() : nullptr;
-    int max_ngb = COLL ? g_subsystem_mgr.max_ngb_pairs : 0;
-    double r_ngb_max_sq_val = COLL ? g_collisional.r_ngb_max_sq : 0.0;
-    double r_ngb_val = COLL ? g_collisional.r_ngb : 0.0;
-    double pivot_dt_val = COLL ? g_collisional.flyby_pivot_dt : 0.0;
-#else
-    int* ngb_i_raw = nullptr; int* ngb_j_raw = nullptr;
-    double* ngb_a_raw = nullptr; double* ngb_e_raw = nullptr;
-    double* ngb_E_raw = nullptr;
-    int* ngb_bound_raw = nullptr; int* ngb_cnt_raw = nullptr;
-    int max_ngb = 0; double r_ngb_max_sq_val = 0.0; double r_ngb_val = 0.0;
-    double pivot_dt_val = 0.0;
-#endif
 
     // Capture eta_ff²/eta_fb² for per-criterion timestep scaling
 #ifdef ENABLE_COLLISIONAL
@@ -142,55 +121,6 @@ static void compute_acceleration_and_timestep_impl(Particles& p, double G, doubl
                         double t_fb_sq = r2s / (v_sq + EPS);
                         double t_min_sq_pair = Kokkos::fmin(eta_ff_sq * t_ff_sq, eta_fb_sq * t_fb_sq);
                         t_min_i = Kokkos::fmin(t_min_i, t_min_sq_pair);
-
-                        // Neighbor detection: identify bound/close pairs and unbound fly-bys
-                        if (COLL) {
-                            if (r2 < r_ngb_max_sq_val && i < j) {
-                                double mu = G * mass_sum;
-                                double r_val = Kokkos::sqrt(r2);
-                                double E_orb = 0.5 * v_sq - mu / (r_val + EPS);
-                                bool is_bound = (E_orb < 0);
-                                double a_val = -mu / (2.0 * E_orb + EPS);
-                                double Lx = dy*dvz - dz*dvy;
-                                double Ly = dz*dvx - dx*dvz;
-                                double Lz = dx*dvy - dy*dvx;
-                                double L2 = Lx*Lx + Ly*Ly + Lz*Lz;
-                                double e_val;
-                                if (is_bound) {
-                                    e_val = Kokkos::sqrt(Kokkos::fmax(0.0, 1.0 + 2.0*E_orb*L2/(mu*mu + EPS)));
-                                } else {
-                                    e_val = Kokkos::sqrt(Kokkos::fmax(1.0, 1.0 + 2.0*E_orb*L2/(mu*mu + EPS)));
-                                }
-
-                                bool is_neighbor = false;
-                                if (is_bound) {
-                                    is_neighbor = (a_val < r_ngb_val || r_val < r_ngb_val);
-                                } else {
-                                    // Unbound fly-by detection (BIFROST Eq. 4)
-                                    // Hyperbolic orbit: a < 0, e > 1, r_peri = |a|*(e-1)
-                                    double r_peri = Kokkos::fabs(a_val) * (e_val - 1.0);
-                                    if (r_val < r_ngb_val) {
-                                        is_neighbor = true;  // already close
-                                    } else if (r_peri < r_ngb_val && v_sq > EPS) {
-                                        // Check approach timescale: C * r / v < pivot_dt
-                                        double t_approach = 0.5 * r_val / Kokkos::sqrt(v_sq);
-                                        is_neighbor = (t_approach < pivot_dt_val);
-                                    }
-                                }
-
-                                if (is_neighbor) {
-                                    int idx = Kokkos::atomic_fetch_add(ngb_cnt_raw, 1);
-                                    if (idx < max_ngb) {
-                                        int pi = pid_raw[i], pj = pid_raw[j];
-                                        if (pi > pj) { int tmp = pi; pi = pj; pj = tmp; }
-                                        ngb_i_raw[idx] = pi; ngb_j_raw[idx] = pj;
-                                        ngb_a_raw[idx] = a_val; ngb_e_raw[idx] = e_val;
-                                        ngb_E_raw[idx] = E_orb;
-                                        ngb_bound_raw[idx] = is_bound ? 1 : 0;
-                                    }
-                                }
-                            }
-                        }
                     }
                 }
                 team.team_barrier();
@@ -682,27 +612,6 @@ static void compute_timestep_subset_impl(Particles& p, int start, int count,
     RawView m{p.mass.data()};
     RawView dt_f{p.dt_adapt.data()};
     const int* sid_raw = COLL ? p.subsystem_id.data() : nullptr;
-    const int* pid_raw = COLL ? p.particle_id.data() : nullptr;
-#ifdef ENABLE_COLLISIONAL
-    int* ngb_i_raw = COLL ? g_subsystem_mgr.ngb_pair_i.data() : nullptr;
-    int* ngb_j_raw = COLL ? g_subsystem_mgr.ngb_pair_j.data() : nullptr;
-    double* ngb_a_raw = COLL ? g_subsystem_mgr.ngb_pair_a.data() : nullptr;
-    double* ngb_e_raw = COLL ? g_subsystem_mgr.ngb_pair_e.data() : nullptr;
-    double* ngb_E_raw = COLL ? g_subsystem_mgr.ngb_pair_E.data() : nullptr;
-    int* ngb_bound_raw = COLL ? g_subsystem_mgr.ngb_pair_bound.data() : nullptr;
-    int* ngb_cnt_raw = COLL ? g_subsystem_mgr.ngb_count.data() : nullptr;
-    int max_ngb = COLL ? g_subsystem_mgr.max_ngb_pairs : 0;
-    double r_ngb_max_sq_val = COLL ? g_collisional.r_ngb_max_sq : 0.0;
-    double r_ngb_val = COLL ? g_collisional.r_ngb : 0.0;
-    double pivot_dt_val = COLL ? g_collisional.flyby_pivot_dt : 0.0;
-#else
-    int* ngb_i_raw = nullptr; int* ngb_j_raw = nullptr;
-    double* ngb_a_raw = nullptr; double* ngb_e_raw = nullptr;
-    double* ngb_E_raw = nullptr;
-    int* ngb_bound_raw = nullptr; int* ngb_cnt_raw = nullptr;
-    int max_ngb = 0; double r_ngb_max_sq_val = 0.0; double r_ngb_val = 0.0;
-    double pivot_dt_val = 0.0;
-#endif
     RawView pax{p.ax.data()}, pay{p.ay.data()}, paz{p.az.data()};
 #ifdef ENABLE_COLLISIONAL
     double eta_jerk_val = COLL ? g_collisional.eta_jerk : 0.0;
@@ -851,50 +760,6 @@ static void compute_timestep_subset_impl(Particles& p, int start, int count,
                             acc_zi += fac1 * dz;
                         }
 
-                        // Neighbor detection: identify bound/close pairs and unbound fly-bys
-                        if (COLL) {
-                            if (r2 < r_ngb_max_sq_val && i < j) {
-                                double mu = G * mass_sum;
-                                double r_val = Kokkos::sqrt(r2);
-                                double E_orb = 0.5 * v_sq - mu / (r_val + EPS);
-                                bool is_bound = (E_orb < 0);
-                                double a_val = -mu / (2.0 * E_orb + EPS);
-                                double Lx = dy*dvz - dz*dvy, Ly = dz*dvx - dx*dvz, Lz = dx*dvy - dy*dvx;
-                                double L2 = Lx*Lx + Ly*Ly + Lz*Lz;
-                                double e_val;
-                                if (is_bound) {
-                                    e_val = Kokkos::sqrt(Kokkos::fmax(0.0, 1.0 + 2.0*E_orb*L2/(mu*mu + EPS)));
-                                } else {
-                                    e_val = Kokkos::sqrt(Kokkos::fmax(1.0, 1.0 + 2.0*E_orb*L2/(mu*mu + EPS)));
-                                }
-
-                                bool is_neighbor = false;
-                                if (is_bound) {
-                                    is_neighbor = (a_val < r_ngb_val || r_val < r_ngb_val);
-                                } else {
-                                    // Unbound fly-by detection (BIFROST Eq. 4)
-                                    double r_peri = Kokkos::fabs(a_val) * (e_val - 1.0);
-                                    if (r_val < r_ngb_val) {
-                                        is_neighbor = true;
-                                    } else if (r_peri < r_ngb_val && v_sq > EPS) {
-                                        double t_approach = 0.5 * r_val / Kokkos::sqrt(v_sq);
-                                        is_neighbor = (t_approach < pivot_dt_val);
-                                    }
-                                }
-
-                                if (is_neighbor) {
-                                    int idx = Kokkos::atomic_fetch_add(ngb_cnt_raw, 1);
-                                    if (idx < max_ngb) {
-                                        int pi = pid_raw[i], pj = pid_raw[j];
-                                        if (pi > pj) { int tmp = pi; pi = pj; pj = tmp; }
-                                        ngb_i_raw[idx] = pi; ngb_j_raw[idx] = pj;
-                                        ngb_a_raw[idx] = a_val; ngb_e_raw[idx] = e_val;
-                                        ngb_E_raw[idx] = E_orb;
-                                        ngb_bound_raw[idx] = is_bound ? 1 : 0;
-                                    }
-                                }
-                            }
-                        }
                     }
                 }
                 team.team_barrier();
@@ -943,27 +808,6 @@ static void self_acceleration_and_timestep_impl(Particles& p, int start, int cou
     RawView m{p.mass.data()};
     RawView dt_f{p.dt_adapt.data()};
     const int* sid_raw = COLL ? p.subsystem_id.data() : nullptr;
-    const int* pid_raw = COLL ? p.particle_id.data() : nullptr;
-#ifdef ENABLE_COLLISIONAL
-    int* ngb_i_raw = COLL ? g_subsystem_mgr.ngb_pair_i.data() : nullptr;
-    int* ngb_j_raw = COLL ? g_subsystem_mgr.ngb_pair_j.data() : nullptr;
-    double* ngb_a_raw = COLL ? g_subsystem_mgr.ngb_pair_a.data() : nullptr;
-    double* ngb_e_raw = COLL ? g_subsystem_mgr.ngb_pair_e.data() : nullptr;
-    double* ngb_E_raw = COLL ? g_subsystem_mgr.ngb_pair_E.data() : nullptr;
-    int* ngb_bound_raw = COLL ? g_subsystem_mgr.ngb_pair_bound.data() : nullptr;
-    int* ngb_cnt_raw = COLL ? g_subsystem_mgr.ngb_count.data() : nullptr;
-    int max_ngb = COLL ? g_subsystem_mgr.max_ngb_pairs : 0;
-    double r_ngb_max_sq_val = COLL ? g_collisional.r_ngb_max_sq : 0.0;
-    double r_ngb_val = COLL ? g_collisional.r_ngb : 0.0;
-    double pivot_dt_val = COLL ? g_collisional.flyby_pivot_dt : 0.0;
-#else
-    int* ngb_i_raw = nullptr; int* ngb_j_raw = nullptr;
-    double* ngb_a_raw = nullptr; double* ngb_e_raw = nullptr;
-    double* ngb_E_raw = nullptr;
-    int* ngb_bound_raw = nullptr; int* ngb_cnt_raw = nullptr;
-    int max_ngb = 0; double r_ngb_max_sq_val = 0.0; double r_ngb_val = 0.0;
-    double pivot_dt_val = 0.0;
-#endif
     const int end = start + count;
 
     // Capture eta_ff/eta_fb for per-criterion timestep scaling
@@ -1064,52 +908,6 @@ static void self_acceleration_and_timestep_impl(Particles& p, int start, int cou
                         double t_sym_fb = t_fb + ct_fb / (u_fb + 1.0);
 
                         t_min_i = Kokkos::fmin(t_min_i, Kokkos::fmin(eta_ff_v * t_sym_ff, eta_fb_v * t_sym_fb));
-
-                        // Neighbor detection: identify bound/close pairs and unbound fly-bys
-                        if (COLL) {
-                            if (r2 < r_ngb_max_sq_val && i < j) {
-                                double mu = G * (mi_val + mj);
-                                double r_val = Kokkos::sqrt(r2);
-                                double v_sq_nd = dvx*dvx + dvy*dvy + dvz*dvz;
-                                double E_orb = 0.5 * v_sq_nd - mu / (r_val + EPS);
-                                bool is_bound = (E_orb < 0);
-                                double a_val = -mu / (2.0 * E_orb + EPS);
-                                double Lx = dy*dvz - dz*dvy, Ly = dz*dvx - dx*dvz, Lz = dx*dvy - dy*dvx;
-                                double L2 = Lx*Lx + Ly*Ly + Lz*Lz;
-                                double e_val;
-                                if (is_bound) {
-                                    e_val = Kokkos::sqrt(Kokkos::fmax(0.0, 1.0 + 2.0*E_orb*L2/(mu*mu + EPS)));
-                                } else {
-                                    e_val = Kokkos::sqrt(Kokkos::fmax(1.0, 1.0 + 2.0*E_orb*L2/(mu*mu + EPS)));
-                                }
-
-                                bool is_neighbor = false;
-                                if (is_bound) {
-                                    is_neighbor = (a_val < r_ngb_val || r_val < r_ngb_val);
-                                } else {
-                                    // Unbound fly-by detection (BIFROST Eq. 4)
-                                    double r_peri = Kokkos::fabs(a_val) * (e_val - 1.0);
-                                    if (r_val < r_ngb_val) {
-                                        is_neighbor = true;
-                                    } else if (r_peri < r_ngb_val && v_sq_nd > EPS) {
-                                        double t_approach = 0.5 * r_val / Kokkos::sqrt(v_sq_nd);
-                                        is_neighbor = (t_approach < pivot_dt_val);
-                                    }
-                                }
-
-                                if (is_neighbor) {
-                                    int idx = Kokkos::atomic_fetch_add(ngb_cnt_raw, 1);
-                                    if (idx < max_ngb) {
-                                        int pi = pid_raw[i], pj = pid_raw[j];
-                                        if (pi > pj) { int tmp = pi; pi = pj; pj = tmp; }
-                                        ngb_i_raw[idx] = pi; ngb_j_raw[idx] = pj;
-                                        ngb_a_raw[idx] = a_val; ngb_e_raw[idx] = e_val;
-                                        ngb_E_raw[idx] = E_orb;
-                                        ngb_bound_raw[idx] = is_bound ? 1 : 0;
-                                    }
-                                }
-                            }
-                        }
                     }
                 }
                 team.team_barrier();
@@ -1130,4 +928,149 @@ void self_acceleration_and_timestep(Particles& p, int start, int count,
 #endif
     self_acceleration_and_timestep_impl<false>(p, start, count, G, soft2, eta);
 }
+
+// ==========================================================================
+// Standalone neighbor search (BIFROST Section 3.5)
+// Lightweight N² tiled kernel that detects neighbor pairs without computing
+// forces or timesteps. Called once per HHS level BEFORE subsystem detection
+// and timestep computation.
+// No subsystem exclusion — every pair is checked fresh.
+// ==========================================================================
+#ifdef ENABLE_COLLISIONAL
+void neighbor_search_subset(Particles& p, int start, int count,
+                            double G, double r_ngb, double r_ngb_max,
+                            double pivot_dt) {
+    if (count <= 1) return;
+
+    RawView px{p.x.data()}, py{p.y.data()}, pz{p.z.data()};
+    RawView pvx{p.vx.data()}, pvy{p.vy.data()}, pvz{p.vz.data()};
+    RawView m{p.mass.data()};
+
+    int* ngb_i_raw = g_subsystem_mgr.ngb_pair_i.data();
+    int* ngb_j_raw = g_subsystem_mgr.ngb_pair_j.data();
+    double* ngb_a_raw = g_subsystem_mgr.ngb_pair_a.data();
+    double* ngb_e_raw = g_subsystem_mgr.ngb_pair_e.data();
+    double* ngb_E_raw = g_subsystem_mgr.ngb_pair_E.data();
+    int* ngb_bound_raw = g_subsystem_mgr.ngb_pair_bound.data();
+    int* ngb_cnt_raw = g_subsystem_mgr.ngb_count.data();
+    int max_ngb = g_subsystem_mgr.max_ngb_pairs;
+    double r_ngb_max_sq = r_ngb_max * r_ngb_max;
+
+    const int end = start + count;
+
+    using team_policy = Kokkos::TeamPolicy<>;
+    using member_type = team_policy::member_type;
+    using scratch_space = Kokkos::DefaultExecutionSpace::scratch_memory_space;
+
+    // Tile: [x, y, z, m, vx, vy, vz] per j-particle
+    size_t scratch_size = TILE_SIZE * 7 * sizeof(double);
+    int num_teams = (count + TILE_SIZE - 1) / TILE_SIZE;
+
+    Kokkos::parallel_for("ngb_search_tiled",
+        team_policy(num_teams, TILE_SIZE).set_scratch_size(0, Kokkos::PerTeam(scratch_size)),
+        KOKKOS_LAMBDA(const member_type& team) {
+            int ii = team.league_rank() * TILE_SIZE + team.team_rank();
+            int i = start + ii;
+
+            Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
+                tile(team.team_scratch(0), TILE_SIZE * 7);
+
+            double xi = 0, yi = 0, zi = 0, mi = 0;
+            double vxi = 0, vyi = 0, vzi = 0;
+            if (ii < count) {
+                xi = px(i); yi = py(i); zi = pz(i); mi = m(i);
+                vxi = pvx(i); vyi = pvy(i); vzi = pvz(i);
+            }
+
+            for (int tile_start = start; tile_start < end; tile_start += TILE_SIZE) {
+                int tile_end_idx = (tile_start + TILE_SIZE < end) ? tile_start + TILE_SIZE : end;
+                int tile_cnt = tile_end_idx - tile_start;
+
+                int t = team.team_rank();
+                if (t < tile_cnt) {
+                    int idx = tile_start + t;
+                    int base = t * 7;
+                    tile(base    ) = px(idx);
+                    tile(base + 1) = py(idx);
+                    tile(base + 2) = pz(idx);
+                    tile(base + 3) = m(idx);
+                    tile(base + 4) = pvx(idx);
+                    tile(base + 5) = pvy(idx);
+                    tile(base + 6) = pvz(idx);
+                }
+                team.team_barrier();
+
+                if (ii < count) {
+                    for (int jt = 0; jt < tile_cnt; jt++) {
+                        int j = tile_start + jt;
+                        if (j <= i) continue;  // Only upper triangle (i < j)
+
+                        int jb = jt * 7;
+                        double dx = tile(jb    ) - xi;
+                        double dy = tile(jb + 1) - yi;
+                        double dz = tile(jb + 2) - zi;
+                        double mj = tile(jb + 3);
+                        double r2 = dx*dx + dy*dy + dz*dz;
+
+                        if (r2 >= r_ngb_max_sq) continue;
+
+                        double dvx = tile(jb + 4) - vxi;
+                        double dvy = tile(jb + 5) - vyi;
+                        double dvz = tile(jb + 6) - vzi;
+                        double v_sq = dvx*dvx + dvy*dvy + dvz*dvz;
+
+                        double mass_sum = mi + mj;
+                        double mu = G * mass_sum;
+                        double r_val = Kokkos::sqrt(r2);
+                        double E_orb = 0.5 * v_sq - mu / (r_val + EPS);
+                        bool is_bound = (E_orb < 0);
+                        double a_val = -mu / (2.0 * E_orb + EPS);
+
+                        double Lx = dy*dvz - dz*dvy;
+                        double Ly = dz*dvx - dx*dvz;
+                        double Lz = dx*dvy - dy*dvx;
+                        double L2 = Lx*Lx + Ly*Ly + Lz*Lz;
+                        double e_val;
+                        if (is_bound) {
+                            e_val = Kokkos::sqrt(Kokkos::fmax(0.0, 1.0 + 2.0*E_orb*L2/(mu*mu + EPS)));
+                        } else {
+                            e_val = Kokkos::sqrt(Kokkos::fmax(1.0, 1.0 + 2.0*E_orb*L2/(mu*mu + EPS)));
+                        }
+
+                        bool is_neighbor = false;
+                        if (is_bound) {
+                            is_neighbor = (a_val < r_ngb || r_val < r_ngb);
+                        } else {
+                            // Unbound fly-by detection (BIFROST Eq. 4)
+                            double r_peri = Kokkos::fabs(a_val) * (e_val - 1.0);
+                            if (r_val < r_ngb) {
+                                is_neighbor = true;
+                            } else if (r_peri < r_ngb && v_sq > EPS) {
+                                double t_approach = 0.5 * r_val / Kokkos::sqrt(v_sq);
+                                is_neighbor = (t_approach < pivot_dt);
+                            }
+                        }
+
+                        if (is_neighbor) {
+                            int idx = Kokkos::atomic_fetch_add(ngb_cnt_raw, 1);
+                            if (idx < max_ngb) {
+                                // Store array indices (detect_from_pairs converts to particle IDs)
+                                ngb_i_raw[idx] = i;
+                                ngb_j_raw[idx] = j;
+                                ngb_a_raw[idx] = a_val;
+                                ngb_e_raw[idx] = e_val;
+                                ngb_E_raw[idx] = E_orb;
+                                ngb_bound_raw[idx] = is_bound ? 1 : 0;
+                            }
+                        }
+                    }
+                }
+                team.team_barrier();
+            }
+        });
+    Kokkos::fence();
+}
+#else
+void neighbor_search_subset(Particles&, int, int, double, double, double, double) {}
+#endif
 

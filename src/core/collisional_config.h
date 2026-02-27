@@ -36,9 +36,6 @@ struct CollisionalConfig {
     bool sse_enabled = true;           // runtime stellar evolution
     double sse_metallicity = 0.02;     // metallicity for SSE
 
-    // Flyby detection
-    double flyby_pivot_dt = 0.0;      // current pivot timestep (set by integrator before force kernels)
-
     // Derived quantities (computed at init)
     double r_ngb_sq = 0.0;            // r_ngb²
     double r_ngb_max_sq = 0.0;        // r_ngb_max²

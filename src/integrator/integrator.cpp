@@ -1023,22 +1023,29 @@ static void hhs_fsi_step_dynamic_impl(Particles& p, int start, int count, double
                           double eta, bool dt_valid, int depth = 0) {
     if (count == 0) return;
 
-    // Compute adaptive timesteps for this subset (skip if reusing from first half-step)
+    // BIFROST Section 3.5: fresh neighbor search + subsystem detection at each level,
+    // then timestep assignment with subsystem exclusion.
     if (!dt_valid && count > 1) {
 #ifdef ENABLE_COLLISIONAL
-        // Reset neighbor pair counter before force kernels detect new pairs at this level
+        // Step 1: Standalone neighbor search (no subsystem exclusion, no forces)
         if (p.collisional) {
+            g_profiler.start();
             g_subsystem_mgr.reset_ngb_count();
-            g_collisional.flyby_pivot_dt = pivot_dt;
+            neighbor_search_subset(p, start, count, G,
+                                   g_collisional.r_ngb, g_collisional.r_ngb_max, pivot_dt);
+            g_subsystem_mgr.detect_from_pairs(p, G, pivot_dt,
+                                               g_collisional.r_ngb, g_collisional.r_ngb_max,
+                                               g_collisional.n_orb_secular);
+            g_subsystem_mgr.update_particle_flags(p);
+            g_subsystem_mgr.accumulate_diagnostics();
+            g_profiler.stop(StepProfiler::SUBSYSTEM_DETECT);
         }
 #endif
+        // Step 2: Timestep computation (with subsystem exclusion active)
         g_profiler.start();
         compute_timestep_subset(p, start, count, G, soft2, eta, true);
 #ifdef ENABLE_COLLISIONAL
-        // Gradient timestep criteria (BIFROST Section 3.4.4):
-        // (1) dt = eta_grad * (|v| / |g'|)^{1/3}
-        // (2) dt = eta_grad * sqrt(|a| / |g'|)
-        // using stale grad_mag from previous step
+        // Gradient timestep criteria (BIFROST Section 3.4.4)
         if (p.collisional && g_collisional.eta_grad > 0.0) {
             auto dt_f = p.dt_adapt;
             auto gm = p.grad_mag;
@@ -1051,12 +1058,10 @@ static void hhs_fsi_step_dynamic_impl(Particles& p, int start, int count, double
                 if (g > EPS) {
                     double a_mag = Kokkos::sqrt(agx(i)*agx(i) + agy(i)*agy(i) + agz(i)*agz(i));
                     double v_mag = Kokkos::sqrt(vvx(i)*vvx(i) + vvy(i)*vvy(i) + vvz(i)*vvz(i));
-                    // Criterion (2): sqrt(|a|/|g'|) — skip if stale acceleration is ~0
                     if (a_mag > EPS) {
                         double dt_g2 = eta_g * Kokkos::sqrt(a_mag / g);
                         if (dt_g2 < dt_f(i)) dt_f(i) = dt_g2;
                     }
-                    // Criterion (1): (|v|/|g'|)^{1/3}
                     if (v_mag > EPS) {
                         double dt_g1 = eta_g * Kokkos::cbrt(v_mag / g);
                         if (dt_g1 < dt_f(i)) dt_f(i) = dt_g1;
@@ -1065,8 +1070,6 @@ static void hhs_fsi_step_dynamic_impl(Particles& p, int start, int count, double
             });
         }
         // Level-0 clamping (BIFROST Section 3.4.1)
-        // At depth > 0: clamp dt to the depth-0 reference before subsystem detection.
-        // At depth 0: store dt_l0 AFTER subsystem detection/enforce (see below).
         if (p.collisional && depth > 0) {
             auto dt_f = p.dt_adapt;
             auto dt_l0 = p.dt_level0;
@@ -1078,20 +1081,10 @@ static void hhs_fsi_step_dynamic_impl(Particles& p, int start, int count, double
 #endif
         g_profiler.stop(StepProfiler::ADAPTIVE_DT);
 #ifdef ENABLE_COLLISIONAL
-        // Subsystem detection at this HHS level (after timestep found neighbor pairs,
-        // before partition reorders particles). Uses level-appropriate pivot_dt.
+        // Step 3: Subsystem timestep adjustments
         if (p.collisional) {
-            g_profiler.start();
-            Kokkos::fence();
-            g_subsystem_mgr.detect_from_pairs(p, G, pivot_dt,
-                                               g_collisional.r_ngb, g_collisional.r_ngb_max,
-                                               g_collisional.n_orb_secular);
-            g_subsystem_mgr.update_particle_flags(p);
-            g_subsystem_mgr.dissolve_subsystems(p, G, g_collisional.r_ngb_max);
-            g_subsystem_mgr.update_particle_flags(p);
             g_subsystem_mgr.enforce_shared_timestep(p);
             g_subsystem_mgr.apply_perturbation_timestep(p, G, g_collisional.eta_pert);
-            g_subsystem_mgr.accumulate_diagnostics();
 
             // Level-0 store: capture dt AFTER subsystem adjustments
             if (depth == 0) {
@@ -1118,7 +1111,6 @@ static void hhs_fsi_step_dynamic_impl(Particles& p, int start, int count, double
                     g_subsystem_mgr.update_particle_flags(p);
                 }
             }
-            g_profiler.stop(StepProfiler::SUBSYSTEM_DETECT);
         }
 #endif
     }
@@ -2323,19 +2315,8 @@ static void compute_timestep_ring(DistributedParticles& dp, int start, int count
     RawView pax_dt{dp.local.ax.data()}, pay_dt{dp.local.ay.data()}, paz_dt{dp.local.az.data()};
 #ifdef ENABLE_COLLISIONAL
     const int* sid_raw = dp.local.subsystem_id.data();
-    const int* pid_raw = dp.local.particle_id.data();
     bool coll = dp.local.collisional;
     double eta_jerk_val = coll ? g_collisional.eta_jerk : 0.0;
-    int* ngb_i_raw = coll ? g_subsystem_mgr.ngb_pair_i.data() : nullptr;
-    int* ngb_j_raw = coll ? g_subsystem_mgr.ngb_pair_j.data() : nullptr;
-    double* ngb_a_raw = coll ? g_subsystem_mgr.ngb_pair_a.data() : nullptr;
-    double* ngb_e_raw = coll ? g_subsystem_mgr.ngb_pair_e.data() : nullptr;
-    double* ngb_E_raw = coll ? g_subsystem_mgr.ngb_pair_E.data() : nullptr;
-    int* ngb_bound_raw = coll ? g_subsystem_mgr.ngb_pair_bound.data() : nullptr;
-    int* ngb_cnt_raw = coll ? g_subsystem_mgr.ngb_count.data() : nullptr;
-    int max_ngb = coll ? g_subsystem_mgr.max_ngb_pairs : 0;
-    double r_ngb_max_sq_val = coll ? g_collisional.r_ngb_max_sq : 0.0;
-    double r_ngb_val = coll ? g_collisional.r_ngb : 0.0;
 #endif
 
     // Capture eta_ff/eta_fb for per-criterion timestep scaling
@@ -2480,33 +2461,6 @@ static void compute_timestep_ring(DistributedParticles& dp, int start, int count
                         }
 #endif
 
-#ifdef ENABLE_COLLISIONAL
-                        // Neighbor detection: identify bound/close pairs
-                        if (coll && r2 < r_ngb_max_sq_val && i < j) {
-                            double mu = G * mass_sum;
-                            double r_val = Kokkos::sqrt(r2);
-                            double E_orb = 0.5 * v_sq - mu / (r_val + EPS);
-                            bool is_bound = (E_orb < 0);
-                            double a_val = -mu / (2.0 * E_orb + EPS);
-                            double Lx = dy*dvz - dz*dvy;
-                            double Ly = dz*dvx - dx*dvz;
-                            double Lz = dx*dvy - dy*dvx;
-                            double L2 = Lx*Lx + Ly*Ly + Lz*Lz;
-                            double e_val = is_bound ?
-                                Kokkos::sqrt(Kokkos::fmax(0.0, 1.0 + 2.0*E_orb*L2/(mu*mu + EPS))) : 0.0;
-                            if (is_bound && (a_val < r_ngb_val || r_val < r_ngb_val)) {
-                                int idx = Kokkos::atomic_fetch_add(ngb_cnt_raw, 1);
-                                if (idx < max_ngb) {
-                                    int pi = pid_raw[i], pj = pid_raw[j];
-                                    if (pi > pj) { int tmp = pi; pi = pj; pj = tmp; }
-                                    ngb_i_raw[idx] = pi; ngb_j_raw[idx] = pj;
-                                    ngb_a_raw[idx] = a_val; ngb_e_raw[idx] = e_val;
-                                    ngb_E_raw[idx] = E_orb;
-                                    ngb_bound_raw[idx] = 1;
-                                }
-                            }
-                        }
-#endif
                     }
                 }
                 team.team_barrier();
@@ -3337,19 +3291,8 @@ static void compute_timestep_distributed(DistributedParticles& dp, int start, in
     RawView pax_dt{dp.local.ax.data()}, pay_dt{dp.local.ay.data()}, paz_dt{dp.local.az.data()};
 #ifdef ENABLE_COLLISIONAL
     const int* sid_raw = dp.local.subsystem_id.data();
-    const int* pid_raw = dp.local.particle_id.data();
     bool coll = dp.local.collisional;
     double eta_jerk_val = coll ? g_collisional.eta_jerk : 0.0;
-    int* ngb_i_raw = coll ? g_subsystem_mgr.ngb_pair_i.data() : nullptr;
-    int* ngb_j_raw = coll ? g_subsystem_mgr.ngb_pair_j.data() : nullptr;
-    double* ngb_a_raw = coll ? g_subsystem_mgr.ngb_pair_a.data() : nullptr;
-    double* ngb_e_raw = coll ? g_subsystem_mgr.ngb_pair_e.data() : nullptr;
-    double* ngb_E_raw = coll ? g_subsystem_mgr.ngb_pair_E.data() : nullptr;
-    int* ngb_bound_raw = coll ? g_subsystem_mgr.ngb_pair_bound.data() : nullptr;
-    int* ngb_cnt_raw = coll ? g_subsystem_mgr.ngb_count.data() : nullptr;
-    int max_ngb = coll ? g_subsystem_mgr.max_ngb_pairs : 0;
-    double r_ngb_max_sq_val = coll ? g_collisional.r_ngb_max_sq : 0.0;
-    double r_ngb_val = coll ? g_collisional.r_ngb : 0.0;
 #endif
 
     // Capture eta_ff/eta_fb for per-criterion timestep scaling
@@ -3493,33 +3436,6 @@ static void compute_timestep_distributed(DistributedParticles& dp, int start, in
                         }
 #endif
 
-#ifdef ENABLE_COLLISIONAL
-                        // Neighbor detection: identify bound/close pairs
-                        if (coll && r2 < r_ngb_max_sq_val && i < j) {
-                            double mu = G * mass_sum;
-                            double r_val = Kokkos::sqrt(r2);
-                            double E_orb = 0.5 * v_sq - mu / (r_val + EPS);
-                            bool is_bound = (E_orb < 0);
-                            double a_val = -mu / (2.0 * E_orb + EPS);
-                            double Lx = dy*dvz - dz*dvy;
-                            double Ly = dz*dvx - dx*dvz;
-                            double Lz = dx*dvy - dy*dvx;
-                            double L2 = Lx*Lx + Ly*Ly + Lz*Lz;
-                            double e_val = is_bound ?
-                                Kokkos::sqrt(Kokkos::fmax(0.0, 1.0 + 2.0*E_orb*L2/(mu*mu + EPS))) : 0.0;
-                            if (is_bound && (a_val < r_ngb_val || r_val < r_ngb_val)) {
-                                int idx = Kokkos::atomic_fetch_add(ngb_cnt_raw, 1);
-                                if (idx < max_ngb) {
-                                    int pi = pid_raw[i], pj = pid_raw[j];
-                                    if (pi > pj) { int tmp = pi; pi = pj; pj = tmp; }
-                                    ngb_i_raw[idx] = pi; ngb_j_raw[idx] = pj;
-                                    ngb_a_raw[idx] = a_val; ngb_e_raw[idx] = e_val;
-                                    ngb_E_raw[idx] = E_orb;
-                                    ngb_bound_raw[idx] = 1;
-                                }
-                            }
-                        }
-#endif
                     }
                 }
                 team.team_barrier();
@@ -3875,9 +3791,6 @@ static void cpu_compute_timestep(CpuSubset& s, int start, int count,
 #ifdef ENABLE_COLLISIONAL
     double eta_ff_v = g_collisional.eta_ff;
     double eta_fb_v = g_collisional.eta_fb;
-    double r_ngb_val = s.collisional ? g_collisional.r_ngb : 0.0;
-    double r_ngb_max_sq = s.collisional ? g_collisional.r_ngb_max_sq : 0.0;
-    double pivot_dt_val = s.collisional ? g_collisional.flyby_pivot_dt : 0.0;
     double eta_jerk_val = s.collisional ? g_collisional.eta_jerk : 0.0;
 #else
     double eta_ff_v = eta;
@@ -3958,61 +3871,6 @@ static void cpu_compute_timestep(CpuSubset& s, int start, int count,
                 acc_z[j - start] -= fac1_i * dz;
             }
 
-            // Neighbor pair detection (collisional only)
-            if (s.collisional && r2 < r_ngb_max_sq) {
-                double mu = G * mass_sum;
-                double r_val = std::sqrt(r2);
-                double E_orb = 0.5 * v_sq - mu / (r_val + EPS);
-                bool is_bound = (E_orb < 0);
-                double a_val = -mu / (2.0 * E_orb + EPS);
-                double Lx = dy*dvz - dz*dvy, Ly = dz*dvx - dx*dvz, Lz = dx*dvy - dy*dvx;
-                double L2 = Lx*Lx + Ly*Ly + Lz*Lz;
-                double e_val;
-                if (is_bound) {
-                    e_val = std::sqrt(std::max(0.0, 1.0 + 2.0*E_orb*L2/(mu*mu + EPS)));
-                } else {
-                    e_val = std::sqrt(std::max(1.0, 1.0 + 2.0*E_orb*L2/(mu*mu + EPS)));
-                }
-
-                bool is_neighbor = false;
-                if (is_bound) {
-                    is_neighbor = (a_val < r_ngb_val || r_val < r_ngb_val);
-                } else {
-                    double r_peri = std::abs(a_val) * (e_val - 1.0);
-                    if (r_val < r_ngb_val) {
-                        is_neighbor = true;
-                    } else if (r_peri < r_ngb_val && v_sq > EPS) {
-                        double t_approach = 0.5 * r_val / std::sqrt(v_sq);
-                        is_neighbor = (t_approach < pivot_dt_val);
-                    }
-                }
-
-                if (is_neighbor) {
-                    // Write to device ngb buffers via host mirror
-                    auto& mgr = g_subsystem_mgr;
-                    auto h_cnt = Kokkos::create_mirror_view(mgr.ngb_count);
-                    Kokkos::deep_copy(h_cnt, mgr.ngb_count);
-                    int idx = h_cnt(0);
-                    if (idx < mgr.max_ngb_pairs) {
-                        h_cnt(0) = idx + 1;
-                        Kokkos::deep_copy(mgr.ngb_count, h_cnt);
-                        // Use global indices (device_start + local)
-                        int gi = s.device_start + i;
-                        int gj = s.device_start + j;
-                        auto write_one = [&](auto view, int pos, auto val) {
-                            auto h = Kokkos::create_mirror_view(Kokkos::subview(view, std::make_pair(pos, pos+1)));
-                            h(0) = val;
-                            Kokkos::deep_copy(Kokkos::subview(view, std::make_pair(pos, pos+1)), h);
-                        };
-                        write_one(mgr.ngb_pair_i, idx, gi);
-                        write_one(mgr.ngb_pair_j, idx, gj);
-                        write_one(mgr.ngb_pair_a, idx, a_val);
-                        write_one(mgr.ngb_pair_e, idx, e_val);
-                        write_one(mgr.ngb_pair_E, idx, E_orb);
-                        write_one(mgr.ngb_pair_bound, idx, is_bound ? 1 : 0);
-                    }
-                }
-            }
 #endif
         }
     }
@@ -4202,13 +4060,24 @@ static void cpu_hhs_recursive(CpuSubset& s, Particles& p, int start, int count,
     // Global device offset for this subset
     int dev_start = s.device_start + start;
 
+    // BIFROST Section 3.5: fresh neighbor search + detection, then timestep
     if (!dt_valid && count > 1) {
 #ifdef ENABLE_COLLISIONAL
+        // Step 1: Neighbor search + detection (sync to device, run GPU kernel, sync back)
         if (s.collisional) {
+            cpu_sync_to_device(s, p, start, dev_start, count);
             g_subsystem_mgr.reset_ngb_count();
-            g_collisional.flyby_pivot_dt = pivot_dt;
+            neighbor_search_subset(p, dev_start, count, G,
+                                   g_collisional.r_ngb, g_collisional.r_ngb_max, pivot_dt);
+            g_subsystem_mgr.detect_from_pairs(p, G, pivot_dt,
+                                               g_collisional.r_ngb, g_collisional.r_ngb_max,
+                                               g_collisional.n_orb_secular);
+            g_subsystem_mgr.update_particle_flags(p);
+            g_subsystem_mgr.accumulate_diagnostics();
+            cpu_sync_sid_from_device(s, p, start, dev_start, count);
         }
 #endif
+        // Step 2: CPU timestep (with subsystem exclusion via s.sid)
         cpu_compute_timestep(s, start, count, G, soft2, eta);
 #ifdef ENABLE_COLLISIONAL
         // Gradient timestep criteria (BIFROST Section 3.4.4)
@@ -4219,7 +4088,6 @@ static void cpu_hhs_recursive(CpuSubset& s, Particles& p, int start, int count,
                 if (g > EPS) {
                     double a_mag = std::sqrt(s.ax[i]*s.ax[i] + s.ay[i]*s.ay[i] + s.az[i]*s.az[i]);
                     double v_mag = std::sqrt(s.vx[i]*s.vx[i] + s.vy[i]*s.vy[i] + s.vz[i]*s.vz[i]);
-                    // Criterion (2): sqrt(|a|/|g'|) — skip if stale acceleration is ~0
                     if (a_mag > EPS) {
                         double dt_g2 = eta_g * std::sqrt(a_mag / g);
                         if (dt_g2 < s.dt_adapt[i]) s.dt_adapt[i] = dt_g2;
@@ -4232,24 +4100,21 @@ static void cpu_hhs_recursive(CpuSubset& s, Particles& p, int start, int count,
             }
         }
         // Level-0 clamping (BIFROST Section 3.4.1)
-        // At depth > 0: clamp. At depth 0: store after subsystem detection (see below).
         if (s.collisional && depth > 0) {
             for (int i = start; i < start + count; i++)
                 if (s.dt_adapt[i] > s.dt_level0[i]) s.dt_adapt[i] = s.dt_level0[i];
         }
 
-        // Subsystem detection: sync to device, run detection, sync back
+        // Step 3: Subsystem timestep adjustments (sync dt to device, run, sync back)
         if (s.collisional) {
-            cpu_sync_to_device(s, p, start, dev_start, count);
-            g_subsystem_mgr.detect_from_pairs(p, G, pivot_dt,
-                                               g_collisional.r_ngb, g_collisional.r_ngb_max,
-                                               g_collisional.n_orb_secular);
-            g_subsystem_mgr.update_particle_flags(p);
-            g_subsystem_mgr.dissolve_subsystems(p, G, g_collisional.r_ngb_max);
-            g_subsystem_mgr.update_particle_flags(p);
+            // Sync dt_adapt to device for enforce/perturbation
+            {
+                auto h_dt = Kokkos::create_mirror_view(Kokkos::subview(p.dt_adapt, Kokkos::pair<int,int>(dev_start, dev_start+count)));
+                for (int i = 0; i < count; i++) h_dt(i) = s.dt_adapt[start + i];
+                Kokkos::deep_copy(Kokkos::subview(p.dt_adapt, Kokkos::pair<int,int>(dev_start, dev_start+count)), h_dt);
+            }
             g_subsystem_mgr.enforce_shared_timestep(p);
             g_subsystem_mgr.apply_perturbation_timestep(p, G, g_collisional.eta_pert);
-            g_subsystem_mgr.accumulate_diagnostics();
 
             // Merger detection (BIFROST §3.14)
             if (g_collisional.c_code > 0.0) {
@@ -4266,9 +4131,7 @@ static void cpu_hhs_recursive(CpuSubset& s, Particles& p, int start, int count,
                 }
             }
 
-            // Sync subsystem_id and dt_adapt back from device
-            cpu_sync_sid_from_device(s, p, start, dev_start, count);
-            // Also sync dt_adapt back (enforce_shared_timestep may have changed it)
+            // Sync dt_adapt back from device
             {
                 auto h_dt = Kokkos::create_mirror_view(Kokkos::subview(p.dt_adapt, Kokkos::pair<int,int>(dev_start, dev_start+count)));
                 Kokkos::deep_copy(h_dt, Kokkos::subview(p.dt_adapt, Kokkos::pair<int,int>(dev_start, dev_start+count)));
@@ -4382,14 +4245,24 @@ static void hhs_fsi_recursive_local(
         return;
     }
 
-    // Compute adaptive timesteps for this subset (always direct N² in serial path)
+    // BIFROST Section 3.5: fresh neighbor search + subsystem detection, then timestep
     if (!dt_valid && count > 1) {
 #ifdef ENABLE_COLLISIONAL
+        // Step 1: Standalone neighbor search (no subsystem exclusion)
         if (p.collisional) {
+            g_profiler.start();
             g_subsystem_mgr.reset_ngb_count();
-            g_collisional.flyby_pivot_dt = pivot_dt;
+            neighbor_search_subset(p, start, count, G,
+                                   g_collisional.r_ngb, g_collisional.r_ngb_max, pivot_dt);
+            g_subsystem_mgr.detect_from_pairs(p, G, pivot_dt,
+                                               g_collisional.r_ngb, g_collisional.r_ngb_max,
+                                               g_collisional.n_orb_secular);
+            g_subsystem_mgr.update_particle_flags(p);
+            g_subsystem_mgr.accumulate_diagnostics();
+            g_profiler.stop(StepProfiler::SUBSYSTEM_DETECT);
         }
 #endif
+        // Step 2: Timestep computation (with subsystem exclusion active)
         g_profiler.start();
         compute_timestep_subset(p, start, count, G, soft2, eta, true);
 #ifdef ENABLE_COLLISIONAL
@@ -4406,7 +4279,6 @@ static void hhs_fsi_recursive_local(
                 if (g > EPS) {
                     double a_mag = Kokkos::sqrt(agx(i)*agx(i) + agy(i)*agy(i) + agz(i)*agz(i));
                     double v_mag = Kokkos::sqrt(vvx(i)*vvx(i) + vvy(i)*vvy(i) + vvz(i)*vvz(i));
-                    // Criterion (2): sqrt(|a|/|g'|) — skip if stale acceleration is ~0
                     if (a_mag > EPS) {
                         double dt_g2 = eta_g * Kokkos::sqrt(a_mag / g);
                         if (dt_g2 < dt_f(i)) dt_f(i) = dt_g2;
@@ -4418,12 +4290,10 @@ static void hhs_fsi_recursive_local(
                 }
             });
         }
-        // Level-0 clamping (BIFROST Section 3.4.1)
+        // Level-0 clamping (local path is always at depth > 0)
         if (p.collisional) {
             auto dt_f = p.dt_adapt;
             auto dt_l0 = p.dt_level0;
-            // Local path is always at depth > 0 (entered from distributed path),
-            // so always clamp, never copy.
             Kokkos::parallel_for("clamp_dt_level0_local", count, KOKKOS_LAMBDA(int ii) {
                 int i = start + ii;
                 if (dt_f(i) > dt_l0(i)) dt_f(i) = dt_l0(i);
@@ -4432,19 +4302,10 @@ static void hhs_fsi_recursive_local(
 #endif
         g_profiler.stop(StepProfiler::ADAPTIVE_DT);
 #ifdef ENABLE_COLLISIONAL
-        // Subsystem detection at this HHS level
+        // Step 3: Subsystem timestep adjustments
         if (p.collisional) {
-            g_profiler.start();
-            Kokkos::fence();
-            g_subsystem_mgr.detect_from_pairs(p, G, pivot_dt,
-                                               g_collisional.r_ngb, g_collisional.r_ngb_max,
-                                               g_collisional.n_orb_secular);
-            g_subsystem_mgr.update_particle_flags(p);
-            g_subsystem_mgr.dissolve_subsystems(p, G, g_collisional.r_ngb_max);
-            g_subsystem_mgr.update_particle_flags(p);
             g_subsystem_mgr.enforce_shared_timestep(p);
             g_subsystem_mgr.apply_perturbation_timestep(p, G, g_collisional.eta_pert);
-            g_subsystem_mgr.accumulate_diagnostics();
 
             // Merger detection (BIFROST §3.14)
             if (g_collisional.c_code > 0.0) {
@@ -4461,7 +4322,6 @@ static void hhs_fsi_recursive_local(
                     g_subsystem_mgr.update_particle_flags(p);
                 }
             }
-            g_profiler.stop(StepProfiler::SUBSYSTEM_DETECT);
         }
 #endif
     }
@@ -4641,28 +4501,35 @@ static void hhs_fsi_recursive_distributed(
         return;
     }
 
-    // Compute adaptive timesteps for this subset (skip if reusing from first half-step)
-    // When symmetric_timesteps is enabled, fuse force+timestep in one N² pass
-    // and reuse the forces for the first FSI kick
+    // BIFROST Section 3.5: fresh neighbor search + detection, then timestep
     bool forces_valid = false;
-    bool tree_built_for_subset = false;  // true when g_octree was BUILT (not reused) for this level
+    bool tree_built_for_subset = false;
     if (!dt_valid && count > 1) {
 #ifdef ENABLE_COLLISIONAL
-        // Reset neighbor pair counter before force kernels detect new pairs at this level
+        // Step 1: Standalone neighbor search + detection (before timestep)
         if (dp.local.collisional) {
+            g_profiler.start();
             g_subsystem_mgr.reset_ngb_count();
-            g_collisional.flyby_pivot_dt = pivot_dt;
+            neighbor_search_subset(dp.local, start, count, G,
+                                   g_collisional.r_ngb, g_collisional.r_ngb_max, pivot_dt);
+            g_subsystem_mgr.detect_from_pairs(dp.local, G, pivot_dt,
+                                               g_collisional.r_ngb, g_collisional.r_ngb_max,
+                                               g_collisional.n_orb_secular);
+            g_subsystem_mgr.update_particle_flags(dp.local);
+            g_subsystem_mgr.accumulate_diagnostics();
+            if (depth < DBG_MAX_DEPTH)
+                dbg_dist_depth_ngb_pairs[depth] += g_subsystem_mgr.last_level_pairs;
+            g_profiler.stop(StepProfiler::SUBSYSTEM_DETECT);
         }
 #endif
+        // Step 2: Timestep computation (with subsystem exclusion active)
         g_profiler.start();
         if (global_tree_available && tree_eligible) {
-            // DEEPER LEVEL: use global tree with subset marking for timestep
             g_octree.update_subsets(dp.local, start, count);
             tree_global_self_acceleration_and_timestep(dp.local, g_octree, 0, G, soft2, eta);
             tree_momentum_correction(dp.local, start, count);
             forces_valid = true;
         } else if (!global_tree_available && tree_eligible) {
-            // TOP LEVEL: build the global tree for the first time
             g_octree.n_leaf = tree_n_leaf;
             g_octree.n_group = tree_n_group;
             g_octree.build(dp.local, start, count, tree_theta);
@@ -4677,7 +4544,6 @@ static void hhs_fsi_recursive_distributed(
             forces_valid = true;
             tree_built_for_subset = true;
         } else {
-            // Sync packed pos+vel for vectorized timestep kernel
             dp.local.pack_pos_range(start, count);
             dp.local.pack_vel_range(start, count);
 #ifdef MPI_TOPOLOGY_RING
@@ -4700,7 +4566,6 @@ static void hhs_fsi_recursive_distributed(
                 if (g > EPS) {
                     double a_mag = Kokkos::sqrt(agx(i)*agx(i) + agy(i)*agy(i) + agz(i)*agz(i));
                     double v_mag = Kokkos::sqrt(vvx(i)*vvx(i) + vvy(i)*vvy(i) + vvz(i)*vvz(i));
-                    // Criterion (2): sqrt(|a|/|g'|) — skip if stale acceleration is ~0
                     if (a_mag > EPS) {
                         double dt_g2 = eta_g * Kokkos::sqrt(a_mag / g);
                         if (dt_g2 < dt_f(i)) dt_f(i) = dt_g2;
@@ -4713,10 +4578,6 @@ static void hhs_fsi_recursive_distributed(
             });
         }
         // Level-0 clamping (BIFROST Section 3.4.1)
-        // At depth > 0: clamp dt to the depth-0 reference before subsystem detection.
-        // At depth 0: store dt_l0 AFTER subsystem detection/enforce (see below),
-        // so it captures subsystem-adjusted timesteps and prevents members from
-        // migrating to coarser HHS levels in the second half of the step.
         if (dp.local.collisional && depth > 0) {
             auto dt_f = dp.local.dt_adapt;
             auto dt_l0 = dp.local.dt_level0;
@@ -4734,25 +4595,12 @@ static void hhs_fsi_recursive_distributed(
 #endif
         g_profiler.stop(StepProfiler::ADAPTIVE_DT, (long long)count * count);
 #ifdef ENABLE_COLLISIONAL
-        // Subsystem detection at this HHS level (after timestep found neighbor pairs,
-        // before partition reorders particles). Uses level-appropriate pivot_dt.
+        // Step 3: Subsystem timestep adjustments
         if (dp.local.collisional) {
-            g_profiler.start();
-            Kokkos::fence();
-            g_subsystem_mgr.detect_from_pairs(dp.local, G, pivot_dt,
-                                               g_collisional.r_ngb, g_collisional.r_ngb_max,
-                                               g_collisional.n_orb_secular);
-            g_subsystem_mgr.update_particle_flags(dp.local);
-            g_subsystem_mgr.dissolve_subsystems(dp.local, G, g_collisional.r_ngb_max);
-            g_subsystem_mgr.update_particle_flags(dp.local);
             g_subsystem_mgr.enforce_shared_timestep(dp.local);
             g_subsystem_mgr.apply_perturbation_timestep(dp.local, G, g_collisional.eta_pert);
-            g_subsystem_mgr.accumulate_diagnostics();
-            if (depth < DBG_MAX_DEPTH)
-                dbg_dist_depth_ngb_pairs[depth] += g_subsystem_mgr.last_level_pairs;
 
-            // Level-0 store: capture dt AFTER subsystem adjustments so that
-            // deeper levels clamp to subsystem-aware values.
+            // Level-0 store: capture dt AFTER subsystem adjustments
             if (depth == 0) {
                 auto dt_f = dp.local.dt_adapt;
                 auto dt_l0 = dp.local.dt_level0;
@@ -4777,7 +4625,6 @@ static void hhs_fsi_recursive_distributed(
                     g_subsystem_mgr.update_particle_flags(dp.local);
                 }
             }
-            g_profiler.stop(StepProfiler::SUBSYSTEM_DETECT);
         }
 #endif
     }

@@ -33,3 +33,11 @@ void compute_timestep_subset(Particles& p, int start, int count,
 void self_acceleration_and_timestep(Particles& p, int start, int count,
                                      double G, double soft2, double eta);
 
+// Standalone neighbor search (BIFROST Section 3.5)
+// Lightweight N² tiled kernel: detects neighbor pairs without computing forces
+// or timesteps. No subsystem exclusion — all pairs are checked.
+// Writes detected pairs to g_subsystem_mgr neighbor buffers as array indices.
+void neighbor_search_subset(Particles& p, int start, int count,
+                            double G, double r_ngb, double r_ngb_max,
+                            double pivot_dt);
+

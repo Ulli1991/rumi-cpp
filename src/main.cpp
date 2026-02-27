@@ -653,16 +653,14 @@ int main(int argc, char** argv) {
         }
 
 #ifdef ENABLE_COLLISIONAL
-        // Run initial subsystem detection from pairs found during force computation.
-        // For N=2 binary test with FSI, this is the only detection needed —
-        // the binary is detected once and LogH handles it from there.
+        // Initial subsystem detection using standalone neighbor search
         if (g_collisional.enabled) {
-            Kokkos::fence();
+            g_subsystem_mgr.reset_ngb_count();
+            neighbor_search_subset(work_p, 0, work_p.N, G,
+                                   g_collisional.r_ngb, g_collisional.r_ngb_max, dt_max);
             g_subsystem_mgr.detect_from_pairs(work_p, G, dt_max,
                                                g_collisional.r_ngb, g_collisional.r_ngb_max,
                                                g_collisional.n_orb_secular);
-            g_subsystem_mgr.update_particle_flags(work_p);
-            g_subsystem_mgr.dissolve_subsystems(work_p, G, g_collisional.r_ngb_max);
             g_subsystem_mgr.update_particle_flags(work_p);
             g_subsystem_mgr.reset_step_diagnostics();
             g_subsystem_mgr.accumulate_diagnostics();
