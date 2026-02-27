@@ -4165,19 +4165,6 @@ static void cpu_hhs_recursive(CpuSubset& s, Particles& p, int start, int count,
     int fast_start = start + slow_count;
     int fast_count = count - slow_count;
 
-    // Diagnostic: print dt range and partition at each CPU recursion level
-#ifdef USE_MPI
-    if (MPIComm::rank() == 0 && count > 16) {
-        double min_dt = 1e30, max_dt = -1e30;
-        for (int i = start; i < start + count; i++) {
-            min_dt = std::min(min_dt, s.dt_adapt[i]);
-            max_dt = std::max(max_dt, s.dt_adapt[i]);
-        }
-        std::printf("[CPU-HHS] depth=%d count=%d pivot=%.3e slow=%d fast=%d dt=[%.3e, %.3e]\n",
-                    depth, count, pivot_dt, slow_count, fast_count, min_dt, max_dt);
-        std::fflush(stdout);
-    }
-#endif
 
     if (fast_count == 0) {
         cpu_fsi_step(s, p, start, count, G, soft2, pivot_dt);
@@ -4256,13 +4243,6 @@ static void hhs_fsi_recursive_local(
     }
     g_subset_hist.record(SubsetHistogram::LOCAL_GPU, count);
 
-#ifdef USE_MPI
-    if (MPIComm::rank() == 0 && count > 16) {
-        std::printf("[HHS-LOCAL] ld=%d count=%d start=%d pivot=%.3e dt_valid=%d\n",
-                    local_depth, count, start, pivot_dt, (int)dt_valid);
-        std::fflush(stdout);
-    }
-#endif
 
     // CPU serial path for very small subsets
     if (serial_n2_cpu > 0 && count <= serial_n2_cpu) {
@@ -4371,12 +4351,6 @@ static void hhs_fsi_recursive_local(
 
     // Base case: all particles are slow
     if (fast_count == 0) {
-#ifdef USE_MPI
-        if (MPIComm::rank() == 0 && count > 16) {
-            std::printf("[HHS-LOCAL] ld=%d all-slow base case count=%d\n", local_depth, count);
-            std::fflush(stdout);
-        }
-#endif
         fsi_step(p, start, count, G, soft2, pivot_dt, false, /*force_direct_n2=*/true);
         return;
     }
@@ -4386,13 +4360,6 @@ static void hhs_fsi_recursive_local(
     // First call reuses parent timesteps; second call recomputes (particles evolved).
     if (slow_count == 0) {
         dbg_hhs_slow0_local++;
-#ifdef USE_MPI
-        if (MPIComm::rank() == 0 && count > 16) {
-            std::printf("[HHS-LOCAL] ld=%d all-fast (slow0) count=%d sub_pivot=%.3e\n",
-                        local_depth, count, pivot_dt * 0.5);
-            std::fflush(stdout);
-        }
-#endif
         double sub_pivot = pivot_dt * 0.5;
         hhs_fsi_recursive_local(p, start, count, sub_pivot,
                                 G, soft2, dt_min, eta, true, local_depth + 1);
@@ -4517,23 +4484,9 @@ static void hhs_fsi_recursive_distributed(
     }
     g_subset_hist.record(SubsetHistogram::DISTRIBUTED, count);
 
-#ifdef USE_MPI
-    if (MPIComm::rank() == 0) {
-        std::printf("[HHS-DIST] depth=%d count=%d start=%d pivot=%.3e dt_valid=%d\n",
-                    depth, count, start, pivot_dt, (int)dt_valid);
-        std::fflush(stdout);
-    }
-#endif
 
     // Below threshold: skip MPI, all ranks compute full N² locally
     if (serial_n2_gpu > 0 && count <= serial_n2_gpu) {
-#ifdef USE_MPI
-        if (MPIComm::rank() == 0) {
-            std::printf("[HHS-DIST] depth=%d -> LOCAL (count=%d <= %d)\n",
-                        depth, count, serial_n2_gpu);
-            std::fflush(stdout);
-        }
-#endif
         hhs_fsi_recursive_local(dp.local, start, count, pivot_dt,
                                 G, soft2, dt_min, eta, dt_valid);
         // Re-sync packed views: local path modifies SoA directly without updating pos_packed
@@ -4705,13 +4658,6 @@ static void hhs_fsi_recursive_distributed(
     int fast_start = start + slow_count;
     int fast_count = count - slow_count;
 
-#ifdef USE_MPI
-    if (MPIComm::rank() == 0) {
-        std::printf("[HHS-DIST] depth=%d partition: slow=%d fast=%d (forces_valid=%d)\n",
-                    depth, slow_count, fast_count, (int)forces_valid);
-        std::fflush(stdout);
-    }
-#endif
 
     // Global tree available for sub-calls (either built here or inherited)
     bool tree_for_subs = global_tree_available || tree_built_for_subset;
@@ -4834,7 +4780,6 @@ static void hhs_fsi_recursive_distributed(
 
     // Step 1: Cross-force S<->F then kick (dt/6)
 #ifdef USE_MPI
-    if (MPIComm::rank() == 0) { std::printf("[HHS-DIST] d=%d step1: cross-kick\n", depth); std::fflush(stdout); }
 #endif
     g_profiler.start();
     if (use_tree_cross) {
@@ -4852,7 +4797,6 @@ static void hhs_fsi_recursive_distributed(
 
     // Step 2: FSI half-step on slow
 #ifdef USE_MPI
-    if (MPIComm::rank() == 0) { std::printf("[HHS-DIST] d=%d step2: FSI-slow(%d)\n", depth, slow_count); std::fflush(stdout); }
 #endif
     // flag=0 = slow (from update_subsets above), so global_tree_subset=0 is correct
     if (use_tree_self || use_tree_cross) {
@@ -4864,7 +4808,6 @@ static void hhs_fsi_recursive_distributed(
 
     // Step 3: Recurse on fast (first half) — always compute fresh timesteps
 #ifdef USE_MPI
-    if (MPIComm::rank() == 0) { std::printf("[HHS-DIST] d=%d step3: recurse-fast(%d)\n", depth, fast_count); std::fflush(stdout); }
 #endif
     hhs_fsi_recursive_distributed(dp, fast_start, fast_count, pivot_dt * 0.5,
                                   G, soft2, dt_min, eta, false,
@@ -4883,7 +4826,6 @@ static void hhs_fsi_recursive_distributed(
 
     // Step 4: Cross-kick S<->F with gradient (2dt/3)
 #ifdef USE_MPI
-    if (MPIComm::rank() == 0) { std::printf("[HHS-DIST] d=%d step4: cross-grad\n", depth); std::fflush(stdout); }
 #endif
     g_profiler.start();
     if (use_tree_cross) {
@@ -4902,7 +4844,6 @@ static void hhs_fsi_recursive_distributed(
 
     // Step 5: Recurse on fast (second half)
 #ifdef USE_MPI
-    if (MPIComm::rank() == 0) { std::printf("[HHS-DIST] d=%d step5: recurse-fast-2(%d)\n", depth, fast_count); std::fflush(stdout); }
 #endif
     {
         double sub_pivot = pivot_dt * 0.5;
@@ -4924,7 +4865,6 @@ static void hhs_fsi_recursive_distributed(
 
     // Step 6: FSI half-step on slow
 #ifdef USE_MPI
-    if (MPIComm::rank() == 0) { std::printf("[HHS-DIST] d=%d step6: FSI-slow(%d)\n", depth, slow_count); std::fflush(stdout); }
 #endif
     if (use_tree_self || use_tree_cross) {
         fsi_step_distributed(dp, slow_start, slow_count, G, soft2, pivot_dt * 0.5,
@@ -4942,7 +4882,6 @@ static void hhs_fsi_recursive_distributed(
 
     // Step 7: Cross-force S<->F then kick (dt/6)
 #ifdef USE_MPI
-    if (MPIComm::rank() == 0) { std::printf("[HHS-DIST] d=%d step7: cross-kick\n", depth); std::fflush(stdout); }
 #endif
     g_profiler.start();
     if (use_tree_cross) {
@@ -4958,7 +4897,6 @@ static void hhs_fsi_recursive_distributed(
     kick_velocities(dp.local, fast_start, fast_count, pivot_dt * FSI_KICK);
     g_profiler.stop(StepProfiler::DRIFT_KICK);
 #ifdef USE_MPI
-    if (MPIComm::rank() == 0) { std::printf("[HHS-DIST] d=%d DONE\n", depth); std::fflush(stdout); }
 #endif
 #endif // MPI_TOPOLOGY_RING
 }

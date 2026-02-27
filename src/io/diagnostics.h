@@ -28,6 +28,11 @@ extern EnergyBookkeeping g_energy_books;
 
 DiagnosticState compute_diagnostics(const Particles& p, double G, double soft2);
 
+// Tiled GPU potential energy computation (shared-memory tiled, O(N²))
+// Computes PE for i in [i_start, i_start+i_count) against all N particles (j > i only)
+double compute_potential_energy_tiled(const Particles& p, double G, double soft2,
+                                      int i_start, int i_count);
+
 void compute_errors(const DiagnosticState& cur, const DiagnosticState& ini,
                     const Particles& p, bool is_cluster,
                     double& dE, double& dP, double& dL);

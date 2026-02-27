@@ -1,5 +1,6 @@
 #include "checkpoint.h"
 #include "collisional_config.h"
+#include "diagnostics.h"
 #include <cstdio>
 #include <cmath>
 
@@ -209,20 +210,8 @@ double compute_energy_error(const Particles& p, const EnergyBookkeeping& books,
             lKE += 0.5 * pm(i) * v2;
         }, KE);
 
-    auto px = p.x; auto py = p.y; auto pz = p.z;
-    double PE = 0;
-    Kokkos::parallel_reduce("chk_pe", N,
-        KOKKOS_LAMBDA(int i, double& lPE) {
-            double pe_i = 0;
-            for (int j = i + 1; j < N; j++) {
-                double dx = px(j) - px(i);
-                double dy = py(j) - py(i);
-                double dz = pz(j) - pz(i);
-                double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                pe_i -= G * pm(i) * pm(j) / std::sqrt(r2);
-            }
-            lPE += pe_i;
-        }, PE);
+    // Use tiled PE kernel (same as diagnostics) instead of raw N² loop
+    double PE = compute_potential_energy_tiled(p, G, soft2, 0, N);
 
     double E_total = KE + PE + books.total_sink();
     return std::fabs((E_total - E_initial) / (std::fabs(E_initial) + 1e-30));

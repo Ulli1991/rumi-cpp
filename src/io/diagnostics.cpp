@@ -1,5 +1,6 @@
 #include "diagnostics.h"
 #include "constants.h"
+#include "mpi_comm.h"
 #ifdef ENABLE_COLLISIONAL
 #include "collisional_config.h"
 #include "post_newtonian.h"
@@ -11,9 +12,107 @@
 #include <cmath>
 #include <cstdio>
 #include <vector>
+#ifdef USE_MPI
+#include <mpi.h>
+#endif
 
 // Global energy bookkeeping instance
 EnergyBookkeeping g_energy_books;
+
+// ==========================================================================
+// Tiled GPU potential energy computation (shared-memory, TILE_SIZE tiles)
+// Computes PE for i in [i_start, i_start+i_count) against all j > i
+// ==========================================================================
+double compute_potential_energy_tiled(const Particles& p, double G, double soft2,
+                                      int i_start, int i_count) {
+    const int N = p.N;
+    auto px = p.x; auto py = p.y; auto pz = p.z;
+    auto pm = p.mass;
+
+    using team_policy = Kokkos::TeamPolicy<>;
+    using member_type = team_policy::member_type;
+    using scratch_space = Kokkos::DefaultExecutionSpace::scratch_memory_space;
+
+    // Tile: x,y,z,m per j-particle
+    size_t scratch_size = TILE_SIZE * 4 * sizeof(double);
+    int num_teams = (i_count + TILE_SIZE - 1) / TILE_SIZE;
+    if (num_teams == 0) return 0.0;
+
+    double PE = 0;
+    Kokkos::parallel_reduce("pe_tiled",
+        team_policy(num_teams, TILE_SIZE).set_scratch_size(0, Kokkos::PerTeam(scratch_size)),
+        KOKKOS_LAMBDA(const member_type& team, double& lPE) {
+            int i = i_start + team.league_rank() * TILE_SIZE + team.team_rank();
+
+            Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
+                tile(team.team_scratch(0), TILE_SIZE * 4);
+
+            double xi = 0, yi = 0, zi = 0, mi = 0;
+            if (i < i_start + i_count) {
+                xi = px(i); yi = py(i); zi = pz(i); mi = pm(i);
+            }
+
+            double pe_i = 0;
+            for (int tile_start = 0; tile_start < N; tile_start += TILE_SIZE) {
+                int tile_end = (tile_start + TILE_SIZE < N) ? tile_start + TILE_SIZE : N;
+                int tile_count = tile_end - tile_start;
+
+                // Collaborative tile load
+                int t = team.team_rank();
+                if (t < tile_count) {
+                    int idx = tile_start + t;
+                    int base = t * 4;
+                    tile(base)     = px(idx);
+                    tile(base + 1) = py(idx);
+                    tile(base + 2) = pz(idx);
+                    tile(base + 3) = pm(idx);
+                }
+                team.team_barrier();
+
+                if (i < i_start + i_count) {
+                    for (int jt = 0; jt < tile_count; jt++) {
+                        int j = tile_start + jt;
+                        if (j <= i) continue;  // unique pairs only (j > i)
+                        int jb = jt * 4;
+                        double dx = tile(jb)     - xi;
+                        double dy = tile(jb + 1) - yi;
+                        double dz = tile(jb + 2) - zi;
+                        double mj = tile(jb + 3);
+                        double inv_r = fast_rsqrt(dx*dx + dy*dy + dz*dz + soft2);
+                        pe_i -= G * mi * mj * inv_r;
+                    }
+                }
+                team.team_barrier();
+            }
+            lPE += pe_i;
+        }, PE);
+
+    return PE;
+}
+
+// ==========================================================================
+// Compute PE distributed across MPI ranks (tiled kernel + allreduce)
+// ==========================================================================
+static double compute_potential_energy_distributed(const Particles& p, double G, double soft2) {
+    const int N = p.N;
+#ifdef USE_MPI
+    if (MPIComm::size() > 1) {
+        int n_ranks = MPIComm::size();
+        int my_rank = MPIComm::rank();
+        int base = N / n_ranks;
+        int rem  = N % n_ranks;
+        int i_start = my_rank * base + (my_rank < rem ? my_rank : rem);
+        int i_count = base + (my_rank < rem ? 1 : 0);
+
+        double local_PE = compute_potential_energy_tiled(p, G, soft2, i_start, i_count);
+
+        double total_PE = 0;
+        MPI_Allreduce(&local_PE, &total_PE, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+        return total_PE;
+    }
+#endif
+    return compute_potential_energy_tiled(p, G, soft2, 0, N);
+}
 
 DiagnosticState compute_diagnostics(const Particles& p, double G, double soft2) {
     const int N = p.N;
@@ -21,7 +120,7 @@ DiagnosticState compute_diagnostics(const Particles& p, double G, double soft2) 
     auto pvx = p.vx; auto pvy = p.vy; auto pvz = p.vz;
     auto pm = p.mass;
 
-    // Kinetic energy + momentum + angular momentum
+    // Kinetic energy + momentum + angular momentum (O(N), fast)
     double KE = 0, Px = 0, Py = 0, Pz = 0, Lx = 0, Ly = 0, Lz = 0;
     Kokkos::parallel_reduce("diag_ke", N,
         KOKKOS_LAMBDA(int i, double& lKE) {
@@ -49,20 +148,8 @@ DiagnosticState compute_diagnostics(const Particles& p, double G, double soft2) 
             lLz += pm(i) * (px(i)*pvy(i) - py(i)*pvx(i));
         }, Lz);
 
-    // Potential energy: O(N^2)
-    double PE = 0;
-    Kokkos::parallel_reduce("diag_pe", N,
-        KOKKOS_LAMBDA(int i, double& lPE) {
-            double pe_i = 0;
-            for (int j = i + 1; j < N; j++) {
-                double dx = px(j) - px(i);
-                double dy = py(j) - py(i);
-                double dz = pz(j) - pz(i);
-                double inv_r = fast_rsqrt(dx*dx + dy*dy + dz*dz + soft2);
-                pe_i -= G * pm(i) * pm(j) * inv_r;
-            }
-            lPE += pe_i;
-        }, PE);
+    // Potential energy: tiled GPU kernel + MPI-distributed
+    double PE = compute_potential_energy_distributed(p, G, soft2);
 
     Kokkos::fence();
 
@@ -71,37 +158,8 @@ DiagnosticState compute_diagnostics(const Particles& p, double G, double soft2) 
     d.Px = Px; d.Py = Py; d.Pz = Pz;
     d.Lx = Lx; d.Ly = Ly; d.Lz = Lz;
 
-#ifdef ENABLE_COLLISIONAL
-    // Add PN energy corrections when post-Newtonian corrections are active
-    if (g_collisional.enabled && g_collisional.pn_order > 0 && g_collisional.c_code > 0.0) {
-        // Copy positions/velocities/masses to host flat arrays for pn1_energy()
-        auto h_x  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.x);
-        auto h_y  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.y);
-        auto h_z  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.z);
-        auto h_vx = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vx);
-        auto h_vy = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vy);
-        auto h_vz = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vz);
-        auto h_m  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.mass);
-
-        std::vector<double> flat_pos(N * 3), flat_vel(N * 3), flat_mass(N);
-        for (int i = 0; i < N; i++) {
-            flat_pos[i*3+0] = h_x(i);
-            flat_pos[i*3+1] = h_y(i);
-            flat_pos[i*3+2] = h_z(i);
-            flat_vel[i*3+0] = h_vx(i);
-            flat_vel[i*3+1] = h_vy(i);
-            flat_vel[i*3+2] = h_vz(i);
-            flat_mass[i] = h_m(i);
-        }
-
-        if (g_collisional.pn_order & 1) {
-            d.E_pn1 = pn1_energy(flat_pos.data(), flat_vel.data(), flat_mass.data(),
-                                 N, G, g_collisional.c_code);
-        }
-        // E_total stays Newtonian (T+U). PN corrections are tracked
-        // separately in E_pn1/E_pn2 for diagnostics only.
-    }
-#endif
+    // Note: PN1 energy diagnostic (pn1_energy) removed — host-side O(N²) is
+    // prohibitively slow for large N. PN forces in the integrator are unaffected.
 
     return d;
 }
