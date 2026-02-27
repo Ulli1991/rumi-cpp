@@ -128,6 +128,10 @@ struct SubsystemManager {
     int step_secular_evolved = 0;      // secular binaries evolved
     int step_secular_triples = 0;      // secular triples evolved
 
+    // Step-level merger and escaper counters
+    int step_mergers = 0;              // mergers executed this step
+    int step_escapers = 0;             // escapers removed this step
+
     // Reset step-level counters (call at start of each outer step)
     void reset_step_diagnostics();
 
