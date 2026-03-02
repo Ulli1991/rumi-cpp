@@ -118,17 +118,30 @@ std::vector<MergerEvent> detect_mergers(const SubsystemManager& mgr,
     std::vector<MergerEvent> events;
     if (mgr.active.empty()) return events;
 
-    auto h_x  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.x);
-    auto h_y  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.y);
-    auto h_z  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.z);
-    auto h_vx = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vx);
-    auto h_vy = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vy);
-    auto h_vz = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vz);
-    auto h_m  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.mass);
-    auto h_stype = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.stellar_type);
-    auto h_srad = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.stellar_radius);
-
     const auto& pid_to_idx = mgr.pid_to_idx();
+
+    // Find min/max index among subsystem members to copy only the needed range
+    int min_idx = p.N, max_idx = 0;
+    for (const auto& sub : mgr.active) {
+        if (sub.n_bodies != 2) continue;
+        for (int pid : sub.particle_ids) {
+            int idx = (pid >= 0 && pid < (int)pid_to_idx.size()) ? pid_to_idx[pid] : -1;
+            if (idx >= 0) { min_idx = std::min(min_idx, idx); max_idx = std::max(max_idx, idx); }
+        }
+    }
+    if (min_idx > max_idx) return events;
+
+    auto rng = Kokkos::pair<int,int>(min_idx, max_idx + 1);
+    auto h_x  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Kokkos::subview(p.x, rng));
+    auto h_y  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Kokkos::subview(p.y, rng));
+    auto h_z  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Kokkos::subview(p.z, rng));
+    auto h_vx = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Kokkos::subview(p.vx, rng));
+    auto h_vy = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Kokkos::subview(p.vy, rng));
+    auto h_vz = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Kokkos::subview(p.vz, rng));
+    auto h_m  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Kokkos::subview(p.mass, rng));
+    auto h_stype = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Kokkos::subview(p.stellar_type, rng));
+    auto h_srad = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Kokkos::subview(p.stellar_radius, rng));
+    const int off = min_idx;  // offset for remapping: h_x(idx - off)
 
     double R_sun_to_pc = 2.254e-8;  // R_sun in parsecs
 
@@ -139,13 +152,13 @@ std::vector<MergerEvent> detect_mergers(const SubsystemManager& mgr,
         int idx2 = pid_to_idx[sub.particle_ids[1]];
         if (idx1 < 0 || idx2 < 0) continue;
 
-        double dx = h_x(idx2) - h_x(idx1);
-        double dy = h_y(idx2) - h_y(idx1);
-        double dz = h_z(idx2) - h_z(idx1);
+        double dx = h_x(idx2 - off) - h_x(idx1 - off);
+        double dy = h_y(idx2 - off) - h_y(idx1 - off);
+        double dz = h_z(idx2 - off) - h_z(idx1 - off);
         double r = std::sqrt(dx*dx + dy*dy + dz*dz);
 
-        double m1 = h_m(idx1), m2 = h_m(idx2);
-        int stype1 = h_stype(idx1), stype2 = h_stype(idx2);
+        double m1 = h_m(idx1 - off), m2 = h_m(idx2 - off);
+        int stype1 = h_stype(idx1 - off), stype2 = h_stype(idx2 - off);
         bool is_bh1 = (stype1 == 14), is_bh2 = (stype2 == 14);
 
         MergerEvent ev{};
@@ -173,8 +186,8 @@ std::vector<MergerEvent> detect_mergers(const SubsystemManager& mgr,
 
         // Stellar collision
         if (ev.type == MergerType::NONE && !is_bh1 && !is_bh2) {
-            double R1_pc = h_srad(idx1) * R_sun_to_pc;
-            double R2_pc = h_srad(idx2) * R_sun_to_pc;
+            double R1_pc = h_srad(idx1 - off) * R_sun_to_pc;
+            double R2_pc = h_srad(idx2 - off) * R_sun_to_pc;
             if (r < R1_pc + R2_pc) {
                 ev.type = MergerType::STELLAR_COLLISION;
                 ev.m_remnant = m1 + m2;
@@ -184,14 +197,14 @@ std::vector<MergerEvent> detect_mergers(const SubsystemManager& mgr,
         // Tidal disruption (star + BH)
         if (ev.type == MergerType::NONE) {
             if (is_bh1 && !is_bh2) {
-                double R_star_pc = h_srad(idx2) * R_sun_to_pc;
+                double R_star_pc = h_srad(idx2 - off) * R_sun_to_pc;
                 double R_td = tidal_disruption_radius(m2, R_star_pc, m1);
                 if (r < R_td) {
                     ev.type = MergerType::TIDAL_DISRUPTION;
                     ev.m_remnant = m1;  // BH eats the star (simplified)
                 }
             } else if (!is_bh1 && is_bh2) {
-                double R_star_pc = h_srad(idx1) * R_sun_to_pc;
+                double R_star_pc = h_srad(idx1 - off) * R_sun_to_pc;
                 double R_td = tidal_disruption_radius(m1, R_star_pc, m2);
                 if (r < R_td) {
                     ev.type = MergerType::TIDAL_DISRUPTION;

@@ -34,7 +34,6 @@ TREE_THRESHOLD = 100000 	                # Use tree above this count, N² below
 TREE_THETA = 0.7                          	# Opening angle (smaller = more accurate, slower)
 TREE_N_LEAF = 32                          	# Max particles per leaf cell
 TREE_N_GROUP = 64                         	# Particles per traversal group
-GADGET4_CROSS = false                     	# F_cross = F_all - F_self decomposition (requires USE_TREE)
 
 # =============================================================================
 # Collisional dynamics

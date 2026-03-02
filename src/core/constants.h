@@ -40,6 +40,7 @@ KOKKOS_INLINE_FUNCTION double fast_rsqrt(double x) {
 KOKKOS_INLINE_FUNCTION void load4(const double* __restrict__ ptr,
                                    double& a, double& b, double& c, double& d) {
 #if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
+    static_assert(alignof(double4) <= 32, "double4 alignment exceeds expected 32 bytes");
     const double4 v = *reinterpret_cast<const double4*>(ptr);
     a = v.x; b = v.y; c = v.z; d = v.w;
 #else

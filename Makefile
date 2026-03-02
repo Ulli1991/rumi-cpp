@@ -60,7 +60,7 @@ EQUALS = =
 CMAKE_SOURCE_DIR = /u/uli/cpp-nbody
 
 # The top-level build directory on which CMake was run.
-CMAKE_BINARY_DIR = /raven/u/uli/cpp-nbody
+CMAKE_BINARY_DIR = /u/uli/cpp-nbody
 
 #=============================================================================
 # Targets provided globally by CMake.
@@ -87,9 +87,9 @@ rebuild_cache/fast: rebuild_cache
 
 # The main all target
 all: cmake_check_build_system
-	$(CMAKE_COMMAND) -E cmake_progress_start /raven/u/uli/cpp-nbody/CMakeFiles /raven/u/uli/cpp-nbody//CMakeFiles/progress.marks
+	$(CMAKE_COMMAND) -E cmake_progress_start /u/uli/cpp-nbody/CMakeFiles /u/uli/cpp-nbody//CMakeFiles/progress.marks
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 all
-	$(CMAKE_COMMAND) -E cmake_progress_start /raven/u/uli/cpp-nbody/CMakeFiles 0
+	$(CMAKE_COMMAND) -E cmake_progress_start /u/uli/cpp-nbody/CMakeFiles 0
 .PHONY : all
 
 # The main clean target
@@ -225,29 +225,29 @@ src/collisional/logh.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/nbody-kokkos.dir/build.make CMakeFiles/nbody-kokkos.dir/src/collisional/logh.cpp.s
 .PHONY : src/collisional/logh.cpp.s
 
-src/collisional/logh_gpu.o: src/collisional/logh_gpu.cpp.o
-.PHONY : src/collisional/logh_gpu.o
+src/collisional/logh_batch.o: src/collisional/logh_batch.cpp.o
+.PHONY : src/collisional/logh_batch.o
 
 # target to build an object file
-src/collisional/logh_gpu.cpp.o:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/nbody-kokkos.dir/build.make CMakeFiles/nbody-kokkos.dir/src/collisional/logh_gpu.cpp.o
-.PHONY : src/collisional/logh_gpu.cpp.o
+src/collisional/logh_batch.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/nbody-kokkos.dir/build.make CMakeFiles/nbody-kokkos.dir/src/collisional/logh_batch.cpp.o
+.PHONY : src/collisional/logh_batch.cpp.o
 
-src/collisional/logh_gpu.i: src/collisional/logh_gpu.cpp.i
-.PHONY : src/collisional/logh_gpu.i
+src/collisional/logh_batch.i: src/collisional/logh_batch.cpp.i
+.PHONY : src/collisional/logh_batch.i
 
 # target to preprocess a source file
-src/collisional/logh_gpu.cpp.i:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/nbody-kokkos.dir/build.make CMakeFiles/nbody-kokkos.dir/src/collisional/logh_gpu.cpp.i
-.PHONY : src/collisional/logh_gpu.cpp.i
+src/collisional/logh_batch.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/nbody-kokkos.dir/build.make CMakeFiles/nbody-kokkos.dir/src/collisional/logh_batch.cpp.i
+.PHONY : src/collisional/logh_batch.cpp.i
 
-src/collisional/logh_gpu.s: src/collisional/logh_gpu.cpp.s
-.PHONY : src/collisional/logh_gpu.s
+src/collisional/logh_batch.s: src/collisional/logh_batch.cpp.s
+.PHONY : src/collisional/logh_batch.s
 
 # target to generate assembly for a file
-src/collisional/logh_gpu.cpp.s:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/nbody-kokkos.dir/build.make CMakeFiles/nbody-kokkos.dir/src/collisional/logh_gpu.cpp.s
-.PHONY : src/collisional/logh_gpu.cpp.s
+src/collisional/logh_batch.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/nbody-kokkos.dir/build.make CMakeFiles/nbody-kokkos.dir/src/collisional/logh_batch.cpp.s
+.PHONY : src/collisional/logh_batch.cpp.s
 
 src/collisional/merger_tree.o: src/collisional/merger_tree.cpp.o
 .PHONY : src/collisional/merger_tree.o
@@ -609,6 +609,30 @@ src/integrator/integrator.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/nbody-kokkos.dir/build.make CMakeFiles/nbody-kokkos.dir/src/integrator/integrator.cpp.s
 .PHONY : src/integrator/integrator.cpp.s
 
+src/integrator/integrator_cpu.o: src/integrator/integrator_cpu.cpp.o
+.PHONY : src/integrator/integrator_cpu.o
+
+# target to build an object file
+src/integrator/integrator_cpu.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/nbody-kokkos.dir/build.make CMakeFiles/nbody-kokkos.dir/src/integrator/integrator_cpu.cpp.o
+.PHONY : src/integrator/integrator_cpu.cpp.o
+
+src/integrator/integrator_cpu.i: src/integrator/integrator_cpu.cpp.i
+.PHONY : src/integrator/integrator_cpu.i
+
+# target to preprocess a source file
+src/integrator/integrator_cpu.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/nbody-kokkos.dir/build.make CMakeFiles/nbody-kokkos.dir/src/integrator/integrator_cpu.cpp.i
+.PHONY : src/integrator/integrator_cpu.cpp.i
+
+src/integrator/integrator_cpu.s: src/integrator/integrator_cpu.cpp.s
+.PHONY : src/integrator/integrator_cpu.s
+
+# target to generate assembly for a file
+src/integrator/integrator_cpu.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/nbody-kokkos.dir/build.make CMakeFiles/nbody-kokkos.dir/src/integrator/integrator_cpu.cpp.s
+.PHONY : src/integrator/integrator_cpu.cpp.s
+
 src/integrator/timestep.o: src/integrator/timestep.cpp.o
 .PHONY : src/integrator/timestep.o
 
@@ -702,9 +726,9 @@ help:
 	@echo "... src/collisional/logh.o"
 	@echo "... src/collisional/logh.i"
 	@echo "... src/collisional/logh.s"
-	@echo "... src/collisional/logh_gpu.o"
-	@echo "... src/collisional/logh_gpu.i"
-	@echo "... src/collisional/logh_gpu.s"
+	@echo "... src/collisional/logh_batch.o"
+	@echo "... src/collisional/logh_batch.i"
+	@echo "... src/collisional/logh_batch.s"
 	@echo "... src/collisional/merger_tree.o"
 	@echo "... src/collisional/merger_tree.i"
 	@echo "... src/collisional/merger_tree.s"
@@ -750,6 +774,9 @@ help:
 	@echo "... src/integrator/integrator.o"
 	@echo "... src/integrator/integrator.i"
 	@echo "... src/integrator/integrator.s"
+	@echo "... src/integrator/integrator_cpu.o"
+	@echo "... src/integrator/integrator_cpu.i"
+	@echo "... src/integrator/integrator_cpu.s"
 	@echo "... src/integrator/timestep.o"
 	@echo "... src/integrator/timestep.i"
 	@echo "... src/integrator/timestep.s"

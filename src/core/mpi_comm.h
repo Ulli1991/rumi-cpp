@@ -3,9 +3,21 @@
 #include "particles.h"
 #include <Kokkos_Core.hpp>
 #include <vector>
+#include <cstdio>
 
 #ifdef USE_MPI
 #include <mpi.h>
+
+// MPI error checking macro — wraps any MPI call, aborts on failure
+#define MPI_CHECK(call) do { \
+    int _mpi_err = (call); \
+    if (_mpi_err != MPI_SUCCESS) { \
+        char _mpi_msg[MPI_MAX_ERROR_STRING]; int _mpi_len; \
+        MPI_Error_string(_mpi_err, _mpi_msg, &_mpi_len); \
+        std::fprintf(stderr, "MPI error at %s:%d: %s\n", __FILE__, __LINE__, _mpi_msg); \
+        MPI_Abort(MPI_COMM_WORLD, _mpi_err); \
+    } \
+} while(0)
 #endif
 
 // =============================================================================

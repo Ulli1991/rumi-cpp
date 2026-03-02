@@ -4,7 +4,6 @@ project(nbody-kokkos LANGUAGES CXX)
 # Option to enable MPI
 option(USE_MPI "Enable MPI for multi-node support" OFF)
 option(USE_GPU_AWARE_MPI "Enable GPU-aware MPI (CUDA-aware/ROCm-aware)" OFF)
-option(MPI_TOPOLOGY_RING "Use ring/j-partitioned MPI topology (allreduce instead of allgatherv)" OFF)
 option(ENABLE_COLLISIONAL "Compile collisional (unsoftened) support" OFF)
 
 # Find Kokkos (set Kokkos_ROOT or CMAKE_PREFIX_PATH)
@@ -25,6 +24,7 @@ add_executable(nbody-kokkos
     ${SRC_DIR}/gravity/tree.cpp
     ${SRC_DIR}/gravity/tree_forces.cpp
     ${SRC_DIR}/integrator/integrator.cpp
+    ${SRC_DIR}/integrator/integrator_cpu.cpp
     ${SRC_DIR}/integrator/timestep.cpp
     ${SRC_DIR}/ic_gen/initial_conditions.cpp
     ${SRC_DIR}/ic_gen/sse.cpp
@@ -89,9 +89,11 @@ if(USE_MPI)
         message(STATUS "GPU-aware MPI enabled - ensure your MPI supports CUDA/ROCm")
     endif()
 
-    # Ring topology: j-partitioned force compute with MPI_Allreduce
-    if(MPI_TOPOLOGY_RING)
-        target_compile_definitions(nbody-kokkos PRIVATE MPI_TOPOLOGY_RING)
-        message(STATUS "MPI topology: RING (j-partitioned, allreduce)")
-    endif()
+endif()
+
+# Disable profiling fences (removes Kokkos::fence() around profiler regions for production runs)
+option(DISABLE_PROFILING_FENCES "Remove Kokkos::fence() around profiler regions" OFF)
+if(DISABLE_PROFILING_FENCES)
+    target_compile_definitions(nbody-kokkos PRIVATE DISABLE_PROFILING_FENCES)
+    message(STATUS "Profiling fences disabled")
 endif()
