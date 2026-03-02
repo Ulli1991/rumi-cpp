@@ -1,5 +1,7 @@
 #pragma once
 
+#include <string>
+
 // Collisional N-body configuration (BIFROST-style)
 // All parameters under "Unsoftened direct N-body options" in config file
 
@@ -35,6 +37,12 @@ struct CollisionalConfig {
     // Stellar evolution
     bool sse_enabled = true;           // runtime stellar evolution
     double sse_metallicity = 0.02;     // metallicity for SSE
+    std::string sse_wind = "HURLEY";            // Wind model
+    std::string sse_remnant = "BELCZYNSKI02";   // Remnant model
+    std::string sse_ppisn = "NONE";             // PPISN model
+    std::string sse_ecsn = "OFF";               // ECSN model
+    double sse_mxns = -1.0;                     // Max NS mass (-1 = auto)
+    double sse_flbv = 1.5;                      // LBV scaling factor
 
     // Derived quantities (computed at init)
     double r_ngb_sq = 0.0;            // r_ngb²
