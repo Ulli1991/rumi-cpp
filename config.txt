@@ -54,6 +54,14 @@ MSTAR_THRESHOLD = 8                 		# N-body threshold: MSTAR (>=) vs LogH (<)
 SSE_ENABLED = false                  		# Runtime single stellar evolution
 SSE_METALLICITY = 0.0002            		# Metallicity Z for SSE (0.01 Z_sun)
 
+# SSE model prescriptions (also used by IC generator for kroupa_evolved)
+SSE_WIND_MODEL    = VINK			# HURLEY / HURLEY_LBV / VINK / VINK_NO_BISTAB
+SSE_REMNANT_MODEL = BELCZYNSKI02		# HURLEY / BELCZYNSKI02 / BELCZYNSKI08 / FRYER_RAPID / FRYER_DELAYED / ELDRIDGE_TOUT
+SSE_PPISN_MODEL   = STRONG			# NONE / STRONG / MODERATE / WEAK
+SSE_ECSN_MODEL    = ON				# OFF / ON
+SSE_MXNS          = 2.5				# Max NS mass (-1 = auto: 1.8 for HURLEY, 2.5 otherwise)
+SSE_FLBV          = 1.5				# LBV scaling factor
+
 # =============================================================================
 # Binary test parameters (only used if TEST_CASE = binary_test)
 # BH binary for PN precession test (BIFROST Fig. 2).
@@ -78,11 +86,6 @@ TRIPLE_A_OUT_PC = 5e-8				# Outer semi-major axis in pc (a_out/a_in=5)
 TRIPLE_E_OUT = 0.1				# Outer eccentricity
 TRIPLE_M3 = 10.0				# Outer body mass (M_sun)
 TRIPLE_INCL_DEG = 45.0				# Mutual inclination (degrees); >39 for Kozai-Lidov
-# Clean unstable triple: a_out/a_in=5, e_out=0.1, i=45°. Clearly Mardling-unstable
-# but mild Kozai (e_max~0.47) — tests LogH 3-body without PN blowup.
-#
-# Hard case (Kozai-driven PN blowup): TRIPLE_A_OUT_PC=4e-8, TRIPLE_E_OUT=0.7,
-# TRIPLE_INCL_DEG=85.0 → a_out/a_in=4, near-resonant Kozai, drives e→1 and B→0.
 
 # =============================================================================
 # Plummer cluster parameters (only used if TEST_CASE = plummer)
