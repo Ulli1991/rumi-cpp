@@ -411,6 +411,17 @@ int main(int argc, char** argv) {
         double imbh_spin    = cfg.get_double("IMBH_SPIN", 0.0);
         double r_break_au   = cfg.get_double("R_BREAK_AU", 0.0);
 
+        // SSE model config (used by IC generator and runtime SSE)
+        std::string sse_wind_str    = cfg.get_str("SSE_WIND_MODEL", "HURLEY");
+        std::string sse_remnant_str = cfg.get_str("SSE_REMNANT_MODEL", "BELCZYNSKI02");
+        std::string sse_ppisn_str   = cfg.get_str("SSE_PPISN_MODEL", "NONE");
+        std::string sse_ecsn_str    = cfg.get_str("SSE_ECSN_MODEL", "OFF");
+        double sse_mxns_val         = cfg.get_double("SSE_MXNS", -1.0);
+        double sse_flbv_val         = cfg.get_double("SSE_FLBV", 1.5);
+        SSEConfig ic_sse_cfg = make_sse_config(sse_wind_str, sse_remnant_str,
+                                                sse_ppisn_str, sse_ecsn_str,
+                                                sse_mxns_val, sse_flbv_val);
+
         bool profiling_enabled = (cfg.get_str("PROFILING", "true") == "true");
         serial_n2_gpu = std::stoi(cfg.get_str("SERIAL_N2_GPU", "0"));
         serial_n2_cpu = std::stoi(cfg.get_str("SERIAL_N2_CPU", "0"));
@@ -448,6 +459,12 @@ int main(int argc, char** argv) {
             g_collisional.mstar_threshold = cfg.get_int("MSTAR_THRESHOLD", 8);
             g_collisional.sse_enabled     = (cfg.get_str("SSE_ENABLED", "true") == "true");
             g_collisional.sse_metallicity = cfg.get_double("SSE_METALLICITY", 0.02);
+            g_collisional.sse_wind        = sse_wind_str;
+            g_collisional.sse_remnant     = sse_remnant_str;
+            g_collisional.sse_ppisn       = sse_ppisn_str;
+            g_collisional.sse_ecsn        = sse_ecsn_str;
+            g_collisional.sse_mxns        = sse_mxns_val;
+            g_collisional.sse_flbv        = sse_flbv_val;
             g_collisional.compute_derived();
 
             // Collisional mode requires zero softening
@@ -505,7 +522,7 @@ int main(int argc, char** argv) {
                 init_plummer(p, N_plummer, M_total_msun, r_half_pc, seed, mass_dist, age_gyr, metallicity,
                              remove_bh, binary_frac, bin_a_min_au, bin_a_max_au,
                              add_imbh, imbh_m1, imbh_m2, imbh_a_pc, imbh_e, imbh_spin,
-                             r_break_au);
+                             r_break_au, &ic_sse_cfg);
             } else if (test == "binary_test") {
                 init_binary_test(p, binary_a_pc, binary_e, binary_m1, binary_m2);
             } else if (test == "binary_test_peri") {
@@ -599,7 +616,12 @@ int main(int argc, char** argv) {
                 std::printf("  PN order=%d, M_PN=%.1f M_sun, MSTAR threshold=%d\n",
                             g_collisional.pn_order, g_collisional.m_pn, g_collisional.mstar_threshold);
                 if (g_collisional.sse_enabled) {
-                    std::printf("  SSE: Z=%.4f\n", g_collisional.sse_metallicity);
+                    std::printf("  SSE: Z=%.4f, wind=%s, remnant=%s, ppisn=%s, ecsn=%s\n",
+                                g_collisional.sse_metallicity,
+                                g_collisional.sse_wind.c_str(),
+                                g_collisional.sse_remnant.c_str(),
+                                g_collisional.sse_ppisn.c_str(),
+                                g_collisional.sse_ecsn.c_str());
                 }
             }
 #endif
@@ -631,7 +653,13 @@ int main(int argc, char** argv) {
         // Initialize SSE context for runtime stellar evolution
         SSEContext* g_sse_ctx = nullptr;
         if (g_collisional.enabled && g_collisional.sse_enabled) {
-            g_sse_ctx = new SSEContext(g_collisional.sse_metallicity);
+            auto sse_cfg = make_sse_config(g_collisional.sse_wind,
+                                            g_collisional.sse_remnant,
+                                            g_collisional.sse_ppisn,
+                                            g_collisional.sse_ecsn,
+                                            g_collisional.sse_mxns,
+                                            g_collisional.sse_flbv);
+            g_sse_ctx = new SSEContext(g_collisional.sse_metallicity, sse_cfg);
         }
 #endif
 

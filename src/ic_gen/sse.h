@@ -1,5 +1,67 @@
 #pragma once
 
+#include <string>
+
+// =========================================================================
+// SSE model selection enums
+// =========================================================================
+
+enum class WindModel {
+    HURLEY         = 1,  // NdJ + Reimers + VW + WR + additive LBV (Hurley 2000)
+    HURLEY_LBV     = 2,  // Same but flat-rate LBV (1e-4 * flbv)
+    VINK           = 3,  // Vink 2001 hot-star + Z-dep WR (DRAGON-II)
+    VINK_NO_BISTAB = 4,  // Vink without bi-stability jump
+};
+
+enum class RemnantModel {
+    HURLEY         = 0,  // Linear Mc->Mt (Hurley 2000)
+    BELCZYNSKI02   = 1,  // FeNi core + fallback (current default)
+    BELCZYNSKI08   = 2,  // Updated FeNi core (Belczynski 2008)
+    FRYER_RAPID    = 3,  // Rapid SN, mass gap (Fryer 2012)
+    FRYER_DELAYED  = 4,  // Delayed SN, no gap (DRAGON-II default)
+    ELDRIDGE_TOUT  = 5,  // Quadratic (Eldridge & Tout 2004)
+};
+
+enum class PPISNModel {
+    NONE     = 0,  // No PPISN (current)
+    STRONG   = 1,  // Cap at 45 Msun, PISN 65-135 (Belczynski 2016)
+    MODERATE = 2,  // Piecewise cap (Leung 2019)
+    WEAK     = 3,  // Higher cap (Leung 2019)
+};
+
+enum class ECSNModel { OFF = 0, ON = 1 };
+
+// =========================================================================
+// SSE configuration
+// =========================================================================
+
+struct SSEConfig {
+    double neta = 0.5, bwind = 0.0, hewind = 1.0, flbv = 1.5;
+    double mxns = -1.0;  // -1 = auto (1.8 for HURLEY remnant, 2.5 otherwise)
+    WindModel    wind    = WindModel::HURLEY;
+    RemnantModel remnant = RemnantModel::BELCZYNSKI02;
+    PPISNModel   ppisn   = PPISNModel::NONE;
+    ECSNModel    ecsn    = ECSNModel::OFF;
+    int ifflag = 1, wdflag = 1;
+    double pts1 = 0.05, pts2 = 0.01, pts3 = 0.02;
+
+    double effective_mxns() const {
+        if (mxns > 0) return mxns;
+        return (remnant == RemnantModel::HURLEY) ? 1.8 : 3.0;
+    }
+};
+
+// Parse string config values into SSEConfig
+SSEConfig make_sse_config(const std::string& wind_str,
+                          const std::string& remnant_str,
+                          const std::string& ppisn_str,
+                          const std::string& ecsn_str,
+                          double mxns, double flbv);
+
+// =========================================================================
+// SSE result
+// =========================================================================
+
 struct SSEResult {
     int kw;           // Stellar type (0-15)
     double mass;      // Final mass (M_sun)
@@ -8,28 +70,27 @@ struct SSEResult {
     double luminosity;// Luminosity (L_sun)
 };
 
+// =========================================================================
+// SSE context (stellar evolution engine)
+// =========================================================================
+
+struct RemnantResult {
+    double mt;    // remnant mass
+    int kw;       // stellar type (13=NS, 14=BH, 15=massless SN)
+    double fbfac; // fallback fraction (informational)
+};
+
 class SSEContext {
 public:
-    explicit SSEContext(double Z);
+    explicit SSEContext(double Z, const SSEConfig& cfg = SSEConfig{});
     SSEResult evolve(double m_zams, double age_myr) const;
 
 private:
     double Z_;
+    SSEConfig cfg_;
     double zpars_[20];
     double msp_[200];
     double gbp_[200];
-
-    // McLuster default parameters
-    static constexpr double neta_   = 0.5;
-    static constexpr double bwind_  = 0.0;
-    static constexpr double hewind_ = 1.0;
-    static constexpr double mxns_   = 3.0;
-    static constexpr int    nsflag_ = 1;
-    static constexpr int    ifflag_ = 1;
-    static constexpr int    wdflag_ = 1;
-    static constexpr double pts1_   = 0.05;
-    static constexpr double pts2_   = 0.01;
-    static constexpr double pts3_   = 0.02;
 
     void init_coefficients();
 
@@ -76,6 +137,10 @@ private:
     double rhegbf(double lum) const;
     double lpertf(double m, double mew) const;
     double rpertf(double m, double mew, double r, double rc) const;
+
+    // Remnant mass computation (centralizes NS/BH/PPISN logic)
+    RemnantResult compute_remnant(double mc, double mcbagb, double mt_presn,
+                                  double mass0, bool from_he_star) const;
 
     // Main routines
     void star(int& kw, double mass, double mt, double& tm, double& tn,

@@ -72,9 +72,9 @@ void init_outer_planets(Particles& p) {
 // Stellar evolution via SSE (Hurley et al. 2000)
 // =========================================================================
 
-static double turnoff_mass(double age_gyr, double Z) {
+static double turnoff_mass(double age_gyr, double Z, const SSEConfig* sse_cfg = nullptr) {
     // Binary search: find the mass where SSE transitions from MS to post-MS
-    SSEContext sse(Z);
+    SSEContext sse(Z, sse_cfg ? *sse_cfg : SSEConfig{});
     double age_myr = age_gyr * 1000.0;
     double m_low = 0.1, m_high = 100.0;
     while (m_high - m_low > 0.001) {
@@ -123,7 +123,8 @@ void init_plummer(Particles& p, int N, double M_total_msun, double r_half_pc, in
                   double bin_a_min_au, double bin_a_max_au,
                   bool add_imbh, double imbh_m1, double imbh_m2,
                   double imbh_a_pc, double imbh_e, double imbh_spin,
-                  double r_break_au) {
+                  double r_break_au,
+                  const SSEConfig* sse_cfg) {
     // Use host-side std::vectors so we can resize for REMOVE_BH / ADD_IMBH
     double M_total = M_total_msun;
     double a_pc = r_half_pc / PLUMMER_SCALE_FACTOR;
@@ -171,7 +172,7 @@ void init_plummer(Particles& p, int N, double M_total_msun, double r_half_pc, in
         std::printf("  Raw Kroupa IMF (not evolved)\n");
         std::printf("    Mass range: %.2f - %.2f M_sun\n", mn, mx);
     } else if (mass_distribution == "kroupa_evolved") {
-        SSEContext sse(metallicity);
+        SSEContext sse(metallicity, sse_cfg ? *sse_cfg : SSEConfig{});
         double age_myr = age_gyr * 1000.0;
         auto m_initial = sample_kroupa_imf(N, rng);
         int n_ms = 0, n_evolved = 0, n_wd = 0, n_ns = 0, n_bh = 0;
@@ -195,7 +196,7 @@ void init_plummer(Particles& p, int N, double M_total_msun, double r_half_pc, in
         for (int i = 0; i < N; i++) M_total_msun += hmass[i];
         M_total = M_total_msun;
 
-        double m_to = turnoff_mass(age_gyr, metallicity);
+        double m_to = turnoff_mass(age_gyr, metallicity, sse_cfg);
         std::printf("  Stellar population at %.1f Gyr (Z=%.4f, full SSE):\n", age_gyr, metallicity);
         std::printf("    Turn-off mass: %.2f M_sun\n", m_to);
         std::printf("    Total mass:    %.0f M_sun\n", M_total_msun);
@@ -207,12 +208,15 @@ void init_plummer(Particles& p, int N, double M_total_msun, double r_half_pc, in
         double mn = *std::min_element(hmass.begin(), hmass.end());
         double mx = *std::max_element(hmass.begin(), hmass.end());
         std::printf("    Mass range: %.4f - %.4f M_sun\n", mn, mx);
+        double ms_mn = 1e30, ms_mx = 0;
         double wd_mn = 1e30, wd_mx = 0, ns_mn = 1e30, ns_mx = 0, bh_mn = 1e30, bh_mx = 0;
         for (int i = 0; i < N; i++) {
-            if (h_kw[i] >= 10 && h_kw[i] <= 12) { wd_mn = std::min(wd_mn, hmass[i]); wd_mx = std::max(wd_mx, hmass[i]); }
+            if (h_kw[i] <= 1) { ms_mn = std::min(ms_mn, hmass[i]); ms_mx = std::max(ms_mx, hmass[i]); }
+            else if (h_kw[i] >= 10 && h_kw[i] <= 12) { wd_mn = std::min(wd_mn, hmass[i]); wd_mx = std::max(wd_mx, hmass[i]); }
             else if (h_kw[i] == 13) { ns_mn = std::min(ns_mn, hmass[i]); ns_mx = std::max(ns_mx, hmass[i]); }
             else if (h_kw[i] == 14) { bh_mn = std::min(bh_mn, hmass[i]); bh_mx = std::max(bh_mx, hmass[i]); }
         }
+        if (n_ms > 0) std::printf("    MS masses:  %.4f - %.4f M_sun\n", ms_mn, ms_mx);
         if (n_wd > 0) std::printf("    WD masses:  %.4f - %.4f M_sun\n", wd_mn, wd_mx);
         if (n_ns > 0) std::printf("    NS masses:  %.4f - %.4f M_sun\n", ns_mn, ns_mx);
         if (n_bh > 0) std::printf("    BH masses:  %.4f - %.4f M_sun\n", bh_mn, bh_mx);

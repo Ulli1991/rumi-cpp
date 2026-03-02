@@ -2,6 +2,7 @@
 #include <cmath>
 #include <algorithm>
 #include <cstdio>
+#include <stdexcept>
 
 // =========================================================================
 // zdata.h - Initialization data for fitting formulae
@@ -172,11 +173,50 @@ static const double xh[99] = {
 // =========================================================================
 // Constructor
 // =========================================================================
-SSEContext::SSEContext(double Z) : Z_(Z) {
+SSEContext::SSEContext(double Z, const SSEConfig& cfg) : Z_(Z), cfg_(cfg) {
     std::fill(msp_, msp_ + 200, 0.0);
     std::fill(gbp_, gbp_ + 200, 0.0);
     std::fill(zpars_, zpars_ + 20, 0.0);
     init_coefficients();
+}
+
+// =========================================================================
+// make_sse_config — parse string config values into SSEConfig
+// =========================================================================
+SSEConfig make_sse_config(const std::string& wind_str,
+                          const std::string& remnant_str,
+                          const std::string& ppisn_str,
+                          const std::string& ecsn_str,
+                          double mxns, double flbv) {
+    SSEConfig c;
+    c.mxns = mxns;
+    c.flbv = flbv;
+
+    if      (wind_str == "HURLEY")         c.wind = WindModel::HURLEY;
+    else if (wind_str == "HURLEY_LBV")     c.wind = WindModel::HURLEY_LBV;
+    else if (wind_str == "VINK")           c.wind = WindModel::VINK;
+    else if (wind_str == "VINK_NO_BISTAB") c.wind = WindModel::VINK_NO_BISTAB;
+    else throw std::runtime_error("Unknown SSE_WIND_MODEL: " + wind_str);
+
+    if      (remnant_str == "HURLEY")        c.remnant = RemnantModel::HURLEY;
+    else if (remnant_str == "BELCZYNSKI02")  c.remnant = RemnantModel::BELCZYNSKI02;
+    else if (remnant_str == "BELCZYNSKI08")  c.remnant = RemnantModel::BELCZYNSKI08;
+    else if (remnant_str == "FRYER_RAPID")   c.remnant = RemnantModel::FRYER_RAPID;
+    else if (remnant_str == "FRYER_DELAYED") c.remnant = RemnantModel::FRYER_DELAYED;
+    else if (remnant_str == "ELDRIDGE_TOUT") c.remnant = RemnantModel::ELDRIDGE_TOUT;
+    else throw std::runtime_error("Unknown SSE_REMNANT_MODEL: " + remnant_str);
+
+    if      (ppisn_str == "NONE")     c.ppisn = PPISNModel::NONE;
+    else if (ppisn_str == "STRONG")   c.ppisn = PPISNModel::STRONG;
+    else if (ppisn_str == "MODERATE") c.ppisn = PPISNModel::MODERATE;
+    else if (ppisn_str == "WEAK")     c.ppisn = PPISNModel::WEAK;
+    else throw std::runtime_error("Unknown SSE_PPISN_MODEL: " + ppisn_str);
+
+    if      (ecsn_str == "OFF") c.ecsn = ECSNModel::OFF;
+    else if (ecsn_str == "ON")  c.ecsn = ECSNModel::ON;
+    else throw std::runtime_error("Unknown SSE_ECSN_MODEL: " + ecsn_str);
+
+    return c;
 }
 
 // =========================================================================
@@ -949,50 +989,132 @@ double SSEContext::rpertf(double m, double mew, double r, double rc) const {
 }
 
 // =========================================================================
-// mlwind - port of mlwind.f
+// mlwind - port of mlwind.f with Vink 2001 extensions (Kamlah/DRAGON-II)
 // =========================================================================
 double SSEContext::mlwind(int kw, double lum, double r, double mt,
                           double mc, double rl, double z) const {
     const double lum0 = 7.0e+04, kap = -0.5;
-    double dms = 0.0, dml;
-    // Nieuwenhuijzen & de Jager for massive stars
-    if (lum > 4000.0) {
-        double x = std::min(1.0, (lum-4000.0)/500.0);
-        dms = 9.6e-15 * x * std::pow(r,0.81) * std::pow(lum,1.24) * std::pow(mt,0.16);
-        dms = dms * std::sqrt(z/0.02);
-    }
-    if (kw >= 2 && kw <= 9) {
-        // Reimers mass loss
-        dml = neta_ * 4.0e-13 * r * lum / mt;
-        if (rl > 0.0) dml = dml * (1.0 + bwind_ * std::pow(std::min(0.5, r/rl), 6));
-        // Vassiliadis & Wood for AGB
-        if (kw == 5 || kw == 6) {
-            double p0 = -2.07 - 0.9*std::log10(mt) + 1.94*std::log10(r);
-            p0 = std::pow(10.0, p0);
-            p0 = std::min(p0, 2000.0);
-            double dmt = -11.4 + 0.0125*(p0 - 100.0*std::max(mt-2.5, 0.0));
-            dmt = std::pow(10.0, dmt);
-            dmt = 1.0 * std::min(dmt, 1.36e-09*lum);
-            dml = std::max(dml, dmt);
+    const int mdflag = static_cast<int>(cfg_.wind);
+    double dms = 0.0, dml = 0.0;
+
+    if (mdflag <= 2) {
+        // ---- HURLEY / HURLEY_LBV (mdflag 1-2) ----
+        // Nieuwenhuijzen & de Jager for massive stars
+        if (lum > 4000.0) {
+            double x = std::min(1.0, (lum-4000.0)/500.0);
+            dms = 9.6e-15 * x * std::pow(r,0.81) * std::pow(lum,1.24) * std::pow(mt,0.16);
+            dms = dms * std::sqrt(z/0.02);
         }
-        if (kw > 6) {
-            dms = std::max(dml, 1.0e-13 * hewind_ * std::pow(lum, 1.5));
-        } else {
-            dms = std::max(dml, dms);
-            double mew = ((mt-mc)/mt) * std::min(5.0, std::max(1.2, std::pow(lum/lum0, kap)));
-            // reduced WR-like mass loss
-            if (mew < 1.0) {
-                dml = 1.0e-13 * std::pow(lum, 1.5) * (1.0 - mew);
+        if (kw >= 2 && kw <= 9) {
+            // Reimers mass loss
+            dml = cfg_.neta * 4.0e-13 * r * lum / mt;
+            if (rl > 0.0) dml = dml * (1.0 + cfg_.bwind * std::pow(std::min(0.5, r/rl), 6));
+            // Vassiliadis & Wood for AGB
+            if (kw == 5 || kw == 6) {
+                double p0 = -2.07 - 0.9*std::log10(mt) + 1.94*std::log10(r);
+                p0 = std::pow(10.0, p0);
+                p0 = std::min(p0, 2000.0);
+                double dmt = -11.4 + 0.0125*(p0 - 100.0*std::max(mt-2.5, 0.0));
+                dmt = std::pow(10.0, dmt);
+                dmt = 1.0 * std::min(dmt, 1.36e-09*lum);
+                dml = std::max(dml, dmt);
+            }
+            if (kw > 6) {
+                dms = std::max(dml, 1.0e-13 * cfg_.hewind * std::pow(lum, 1.5));
+            } else {
                 dms = std::max(dml, dms);
+                double mew = ((mt-mc)/mt) * std::min(5.0, std::max(1.2, std::pow(lum/lum0, kap)));
+                // reduced WR-like mass loss
+                if (mew < 1.0) {
+                    dml = 1.0e-13 * std::pow(lum, 1.5) * (1.0 - mew);
+                    dms = std::max(dml, dms);
+                }
+                // LBV-like mass loss
+                double x = 1.0e-5 * r * std::sqrt(lum);
+                if (lum > 6.0e+05 && x > 1.0) {
+                    if (mdflag == 1) {
+                        // Original Hurley: cubic ramp
+                        dml = 0.1 * std::pow(x-1.0, 3) * (lum/6.0e+05 - 1.0);
+                    } else {
+                        // HURLEY_LBV: flat rate
+                        dml = 1.0e-4 * cfg_.flbv;
+                    }
+                    dms = dms + dml;
+                }
             }
-            // LBV-like mass loss
-            double x = 1.0e-5 * r * std::sqrt(lum);
-            if (lum > 6.0e+05 && x > 1.0) {
-                dml = 0.1 * std::pow(x-1.0, 3) * (lum/6.0e+05 - 1.0);
-                dms = dms + dml;
+        }
+    } else {
+        // ---- VINK / VINK_NO_BISTAB (mdflag 3-4) ----
+        if (kw >= 2 && kw <= 9) {
+            // Reimers mass loss (always present as floor)
+            dml = cfg_.neta * 4.0e-13 * r * lum / mt;
+            if (rl > 0.0) dml = dml * (1.0 + cfg_.bwind * std::pow(std::min(0.5, r/rl), 6));
+            // Vassiliadis & Wood for AGB
+            if (kw == 5 || kw == 6) {
+                double p0 = -2.07 - 0.9*std::log10(mt) + 1.94*std::log10(r);
+                p0 = std::pow(10.0, p0);
+                p0 = std::min(p0, 2000.0);
+                double dmt = -11.4 + 0.0125*(p0 - 100.0*std::max(mt-2.5, 0.0));
+                dmt = std::pow(10.0, dmt);
+                dmt = 1.0 * std::min(dmt, 1.36e-09*lum);
+                dml = std::max(dml, dmt);
+            }
+            if (kw > 6) {
+                // Naked helium star WR: Z-dependent (Vink prescription)
+                double dms_wr = 1.0e-13 * std::pow(lum, 1.5) * std::pow(z/0.02, 0.86);
+                dms = std::max(dml, dms_wr);
+            } else {
+                // Effective temperature for Vink regime boundaries
+                double teff = 5778.0 * std::sqrt(std::sqrt(lum)) / std::sqrt(r);
+                double logl5 = std::log10(lum / 1.0e5);
+                double logm30 = std::log10(mt / 30.0);
+                double logz02 = std::log10(z / 0.02);
+
+                // LBV first (overrides everything if triggered)
+                double xlbv = 1.0e-5 * r * std::sqrt(lum);
+                if (lum > 6.0e+05 && xlbv > 1.0) {
+                    dms = 1.0e-4 * cfg_.flbv;
+                } else if (mdflag == 3 && teff >= 12500.0 && teff <= 25000.0) {
+                    // Vink cool-side (bi-stability jump)
+                    double logt2 = std::log10(teff / 20000.0);
+                    double logdm = -6.688 + 2.210*logl5 - 1.339*logm30
+                                   - 1.601*std::log10(0.65) + 0.85*logz02
+                                   + 1.07*logt2;
+                    dms = std::pow(10.0, logdm);
+                } else if (teff > 12500.0) {
+                    // Vink hot-side
+                    double t40 = std::log10(teff / 40000.0);
+                    double logdm = -6.697 + 2.194*logl5 - 1.313*logm30
+                                   - 1.226*std::log10(1.3) + 0.85*logz02
+                                   + 0.933*t40*(1.0 - 11.704*t40);
+                    dms = std::pow(10.0, logdm);
+                } else {
+                    // Cool stars (Teff < 12500K): NdJ fallback
+                    if (lum > 4000.0) {
+                        double x = std::min(1.0, (lum-4000.0)/500.0);
+                        dms = 9.6e-15 * x * std::pow(r,0.81) * std::pow(lum,1.24) * std::pow(mt,0.16);
+                        dms = dms * std::sqrt(z/0.02);
+                    }
+                }
+                dms = std::max(dml, dms);
+
+                // Reduced WR-like mass loss for thin envelopes
+                double mew = ((mt-mc)/mt) * std::min(5.0, std::max(1.2, std::pow(lum/lum0, kap)));
+                if (mew < 1.0) {
+                    double dms_wr = 1.0e-13 * std::pow(lum, 1.5) * std::pow(z/0.02, 0.86) * (1.0 - mew);
+                    dms = std::max(dms_wr, dms);
+                }
+            }
+        } else {
+            // Non-evolved stars (kw 0-1): NdJ only
+            if (lum > 4000.0) {
+                double x = std::min(1.0, (lum-4000.0)/500.0);
+                dms = 9.6e-15 * x * std::pow(r,0.81) * std::pow(lum,1.24) * std::pow(mt,0.16);
+                dms = dms * std::sqrt(z/0.02);
             }
         }
     }
+
     return dms;
 }
 
@@ -1002,41 +1124,41 @@ double SSEContext::mlwind(int kw, double lum, double r, double mt,
 void SSEContext::deltat(int kw, double age, double tm, double tn,
                         const double tscls[20], double& dt, double& dtr) const {
     if (kw <= 1) {
-        dt = pts1_ * tm;
+        dt = cfg_.pts1 * tm;
         dtr = tm - age;
     } else if (kw == 2) {
-        dt = pts1_ * (tscls[0] - tm);
+        dt = cfg_.pts1 * (tscls[0] - tm);
         dtr = tscls[0] - age;
     } else if (kw == 3) {
         if (age < tscls[5])
-            dt = pts2_ * (tscls[3] - age);
+            dt = cfg_.pts2 * (tscls[3] - age);
         else
-            dt = pts2_ * (tscls[4] - age);
+            dt = cfg_.pts2 * (tscls[4] - age);
         dtr = std::min(tscls[1], tn) - age;
     } else if (kw == 4) {
-        dt = pts2_ * tscls[2];
+        dt = cfg_.pts2 * tscls[2];
         dtr = std::min(tn, tscls[1] + tscls[2]) - age;
     } else if (kw == 5) {
         if (age < tscls[8])
-            dt = pts3_ * (tscls[6] - age);
+            dt = cfg_.pts3 * (tscls[6] - age);
         else
-            dt = pts3_ * (tscls[7] - age);
+            dt = cfg_.pts3 * (tscls[7] - age);
         dtr = std::min(tn, tscls[12]) - age;
     } else if (kw == 6) {
         if (age < tscls[11])
-            dt = pts3_ * (tscls[9] - age);
+            dt = cfg_.pts3 * (tscls[9] - age);
         else
-            dt = pts3_ * (tscls[10] - age);
+            dt = cfg_.pts3 * (tscls[10] - age);
         dt = std::min(dt, 0.005);
         dtr = tn - age;
     } else if (kw == 7) {
-        dt = pts1_ * tm;
+        dt = cfg_.pts1 * tm;
         dtr = tm - age;
     } else if (kw == 8 || kw == 9) {
         if (age < tscls[5])
-            dt = pts2_ * (tscls[3] - age);
+            dt = cfg_.pts2 * (tscls[3] - age);
         else
-            dt = pts2_ * (tscls[4] - age);
+            dt = cfg_.pts2 * (tscls[4] - age);
         dtr = tn - age;
     } else {
         dt = std::max(0.1, dt*10.0);
@@ -1327,6 +1449,201 @@ label_96:
 label_100:
     (void)mass0;
     return;
+}
+
+// =========================================================================
+// compute_remnant — centralizes NS/BH/PPISN logic
+// mc:        CO core mass at collapse
+// mcbagb:    He core mass at BAGB (or ZAMS mass for He stars)
+// mt_presn:  total mass just before SN
+// mass0:     initial (ZAMS) mass of progenitor
+// from_he_star: true if coming from naked He-star channel
+// =========================================================================
+RemnantResult SSEContext::compute_remnant(double mc, double mcbagb,
+                                          double mt_presn, double mass0,
+                                          bool from_he_star) const {
+    const int nsflag = static_cast<int>(cfg_.remnant);
+    RemnantResult res;
+    res.fbfac = 0.0;
+
+    // ---- ECSN: electron-capture SN for low-mass He cores ----
+    if (cfg_.ecsn == ECSNModel::ON && mcbagb >= 1.6 && mcbagb <= 2.25 && mc >= 1.372) {
+        res.mt = 1.26;
+        res.kw = 13;  // NS
+        res.fbfac = 0.0;
+        return res;
+    }
+
+    // ---- PISN: pair-instability SN (complete disruption) ----
+    if (cfg_.ppisn != PPISNModel::NONE && mcbagb >= 65.0 && mcbagb <= 135.0) {
+        res.mt = 0.0;
+        res.kw = 15;  // massless remnant
+        res.fbfac = 0.0;
+        return res;
+    }
+
+    // ---- PPISN: pulsational pair-instability caps BH mass ----
+    double mt_cap = 1.0e30;  // effectively no cap
+    if (cfg_.ppisn == PPISNModel::STRONG) {
+        mt_cap = 45.0;
+    } else if (cfg_.ppisn == PPISNModel::MODERATE) {
+        // Leung 2019 moderate piecewise:
+        //   mcbagb < 32 → no cap
+        //   32-37: linear ramp 32 → cap at 40.5
+        //   37-60: cap at 40.5
+        if (mcbagb >= 32.0 && mcbagb < 37.0) {
+            mt_cap = 32.0 + (40.5-32.0) * (mcbagb-32.0)/5.0;
+        } else if (mcbagb >= 37.0 && mcbagb < 60.0) {
+            mt_cap = 40.5;
+        } else if (mcbagb >= 60.0 && mcbagb < 65.0) {
+            // taper to PISN gap
+            mt_cap = 40.5 * (65.0 - mcbagb) / 5.0;
+        }
+    } else if (cfg_.ppisn == PPISNModel::WEAK) {
+        // Leung 2019 weak: higher cap
+        if (mcbagb >= 32.0 && mcbagb < 37.0) {
+            mt_cap = 32.0 + (50.0-32.0) * (mcbagb-32.0)/5.0;
+        } else if (mcbagb >= 37.0 && mcbagb < 60.0) {
+            mt_cap = 50.0;
+        } else if (mcbagb >= 60.0 && mcbagb < 65.0) {
+            mt_cap = 50.0 * (65.0 - mcbagb) / 5.0;
+        }
+    }
+
+    // ---- Proto-compact-object mass (mcx) per remnant model ----
+    double mcx = 0.0;
+    double mt = mt_presn;
+
+    if (nsflag == 0) {
+        // Hurley 2000: linear
+        mt = 1.17 + 0.09 * mc;
+        res.mt = std::min(mt, mt_cap);
+        res.kw = (res.mt <= cfg_.effective_mxns()) ? 13 : 14;
+        res.fbfac = 0.0;
+        return res;
+    } else if (nsflag == 1) {
+        // Belczynski 2002
+        if (mc < 2.5)
+            mcx = 0.161767*mc + 1.067055;
+        else
+            mcx = 0.314154*mc + 0.686088;
+    } else if (nsflag == 2) {
+        // Belczynski 2008
+        if (mc < 4.82)
+            mcx = 1.5;
+        else if (mc < 6.31)
+            mcx = 2.11;
+        else if (mc < 6.75)
+            mcx = 0.69315*mc - 2.26;
+        else
+            mcx = 0.37*mc - 0.0828;
+    } else if (nsflag == 3) {
+        // Fryer 2012 rapid: fixed proto-CO mass
+        mcx = 1.0;
+    } else if (nsflag == 4) {
+        // Fryer 2012 delayed: staircase
+        if (mc < 3.5)
+            mcx = 1.2;
+        else if (mc < 6.0)
+            mcx = 1.3;
+        else if (mc < 11.0)
+            mcx = 1.4;
+        else
+            mcx = 1.6;
+    } else {
+        // Eldridge & Tout 2004: quadratic
+        if (mc <= 2.5)
+            mcx = 0.161767*mc + 1.067055;
+        else
+            mcx = 0.314154*mc + 0.686088;
+    }
+
+    // ---- Fallback fraction ----
+    double fb = 0.0;
+
+    if (nsflag == 1 || nsflag == 2) {
+        // Belczynski: partial fallback for mc 5-7.6, full above 7.6
+        if (mc <= 5.0) {
+            mt = mcx;
+        } else if (mc < 7.6) {
+            fb = (mc - 5.0) / 2.6;
+            mt = mcx + fb * (mt_presn - mcx);
+        } else {
+            fb = 1.0;
+            mt = mt_presn;  // full fallback → direct collapse
+        }
+    } else if (nsflag == 3) {
+        // Fryer 2012 rapid: piecewise with island of explodability
+        if (mc < 2.5) {
+            fb = 0.2 / (mc - 1.0);
+        } else if (mc < 3.5) {
+            fb = 0.286*mc - 0.514;
+        } else if (mc < 11.0) {
+            // island: linear ramp down then up
+            double a1 = 0.25 - 1.275/(mc - 1.0);
+            double b1 = -11.0*a1 + 1.0;
+            fb = a1*mc + b1;
+        } else {
+            fb = 1.0;
+        }
+        fb = std::max(0.0, std::min(1.0, fb));
+        mt = mcx + fb * (mt_presn - mcx);
+    } else if (nsflag == 4) {
+        // Fryer 2012 delayed: smooth prescription
+        if (mc < 2.5) {
+            fb = 0.2 / (mc - 1.0);
+        } else if (mc < 3.5) {
+            fb = 0.5*mc - 1.05;
+        } else if (mc < 11.0) {
+            double a2 = 0.133 - 0.093 / (mc - 1.0);
+            double b2 = -11.0*a2 + 1.0;
+            fb = a2*mc + b2;
+        } else {
+            fb = 1.0;
+        }
+        fb = std::max(0.0, std::min(1.0, fb));
+        mt = mcx + fb * (mt_presn - mcx);
+    } else if (nsflag == 5) {
+        // Eldridge & Tout 2004: direct (no separate fallback)
+        mt = mcx;
+        fb = 0.0;
+    }
+    res.fbfac = fb;
+
+    // ---- Gravitational mass correction (nsflag >= 1) ----
+    if (nsflag >= 1) {
+        // Lattimer & Yahil gravitational mass: m_grav = (-1+sqrt(1+0.3*m_bary))/0.15
+        double mt_grav = (-1.0 + std::sqrt(1.0 + 0.3*mt)) / 0.15;
+        if (mt_grav <= cfg_.effective_mxns()) {
+            // NS: use gravitational mass
+            mt = mt_grav;
+        } else {
+            // BH: lose 10% to neutrinos from baryonic mass
+            mt = 0.9 * mt;
+        }
+    }
+
+    // Apply PPISN cap
+    mt = std::min(mt, mt_cap);
+
+    // Classify
+    if (mt <= 0.0) {
+        res.mt = 0.0;
+        res.kw = 15;
+    } else if (mt <= cfg_.effective_mxns()) {
+        res.mt = mt;
+        res.kw = 13;  // NS
+    } else {
+        res.mt = mt;
+        res.kw = 14;  // BH
+    }
+
+    // DEBUG: print remnant properties
+    if (res.kw == 14 || (res.kw == 13 && res.mt > 1.8))
+        std::printf("REMNANT: mc=%.3f mcbagb=%.3f mt_pre=%.2f nsflag=%d fb=%.3f mt=%.3f kw=%d he=%d\n",
+                    mc, mcbagb, mt_presn, nsflag, fb, res.mt, res.kw, (int)from_he_star);
+
+    return res;
 }
 
 // =========================================================================
@@ -1640,7 +1957,7 @@ void SSEContext::hrdiag(double& mass, double& aj, double& mt, double& tm, double
                 mc = mcmax;
                 if (mc < mch) {
                     // WD IFMR
-                    if (ifflag_ >= 1) {
+                    if (cfg_.ifflag >= 1) {
                         if (zpars_[13] >= 1.0e-08) {
                             mc = std::min(0.36+0.104*mass, 0.58+0.061*mass);
                             mc = std::max(0.54+0.042*mass, mc);
@@ -1664,27 +1981,11 @@ void SSEContext::hrdiag(double& mass, double& aj, double& mt, double& tm, double
                         lum = 1.0e-10;
                         r = 1.0e-10;
                     } else {
-                        // NS/BH remnant (Belczynski 2002)
-                        if (nsflag_ == 0) {
-                            mt = 1.17 + 0.09*mc;
-                        } else {
-                            double mcx_v;
-                            if (mc < 2.5)
-                                mcx_v = 0.161767*mc + 1.067055;
-                            else
-                                mcx_v = 0.314154*mc + 0.686088;
-                            if (mc <= 5.0) {
-                                mt = mcx_v;
-                            } else if (mc < 7.6) {
-                                mt = mcx_v + (mc - 5.0)*(mt - mcx_v)/2.6;
-                            }
-                            // else mt unchanged (full fallback)
-                        }
+                        auto rem = compute_remnant(mc, mcbagb, mt, mass, false);
+                        mt = rem.mt;
+                        kw = rem.kw;
                         mc = mt;
-                        if (mt <= mxns_)
-                            kw = 13; // NS
-                        else
-                            kw = 14; // BH
+                        if (kw == 15) { lum = 1.0e-10; r = 1.0e-10; }
                     }
                 }
             }
@@ -1733,21 +2034,11 @@ label_90:
                         lum = 1.0e-10;
                         r = 1.0e-10;
                     } else {
-                        if (nsflag_ == 0) {
-                            mt = 1.17 + 0.09*mc;
-                        } else {
-                            double mcx_v;
-                            if (mc < 2.5)
-                                mcx_v = 0.161767*mc + 1.067055;
-                            else
-                                mcx_v = 0.314154*mc + 0.686088;
-                            if (mc <= 5.0)
-                                mt = mcx_v;
-                            else if (mc < 7.6)
-                                mt = mcx_v + (mc - 5.0)*(mt - mcx_v)/2.6;
-                        }
+                        auto rem = compute_remnant(mc, mass, mt, mass, true);
+                        mt = rem.mt;
+                        kw = rem.kw;
                         mc = mt;
-                        if (mt <= mxns_) kw = 13; else kw = 14;
+                        if (kw == 15) { lum = 1.0e-10; r = 1.0e-10; }
                     }
                 }
             }
@@ -1762,7 +2053,7 @@ label_90:
             else { kw = 15; aj = 0.0; mt = 0.0; lum = 1.0e-10; r = 1.0e-10; }
         } else {
             double xx = (kw == 10) ? ahe : aco;
-            if (wdflag_ == 0) {
+            if (cfg_.wdflag == 0) {
                 lum = 635.0*mt*zpars_[13] / std::pow(xx*(aj+0.1), 1.4);
             } else {
                 if (aj < 9000.0) {
@@ -1782,7 +2073,7 @@ label_90:
 
     if (kw == 13) {
         mc = mt;
-        if (mc > mxns_) {
+        if (mc > cfg_.effective_mxns()) {
             kw = 14;
             aj = 0.0;
         } else {
@@ -1831,7 +2122,7 @@ label_90:
                     lx_v = lzhef(mc);
                     rx_v = rzhef(mc);
                 } else {
-                    if (wdflag_ == 0)
+                    if (cfg_.wdflag == 0)
                         lx_v = 635.0*mc*zpars_[13] / std::pow(ahe*0.1, 1.4);
                     else
                         lx_v = 300.0*mc*zpars_[13] / std::pow(ahe*0.1, 1.18);
@@ -1840,7 +2131,7 @@ label_90:
                     rx_v = 5.0*rx_v;
                 }
             } else if (kw <= 6) {
-                if (wdflag_ == 0)
+                if (cfg_.wdflag == 0)
                     lx_v = 635.0*mc*zpars_[13] / std::pow(aco*0.1, 1.4);
                 else
                     lx_v = 300.0*mc*zpars_[13] / std::pow(aco*0.1, 1.18);
@@ -1849,7 +2140,7 @@ label_90:
                 rx_v = 5.0*rx_v;
             } else {
                 // kw 8,9
-                if (wdflag_ == 0)
+                if (cfg_.wdflag == 0)
                     lx_v = 635.0*mc*zpars_[13] / std::pow(aco*0.1, 1.4);
                 else
                     lx_v = 300.0*mc*zpars_[13] / std::pow(aco*0.1, 1.18);
@@ -1905,7 +2196,7 @@ SSEResult SSEContext::evolve(double m_zams, double age_myr) const {
     for (int j = 1; j <= nv; j++) {
         double dms = 0.0;
 
-        if (neta_ > tiny && j > 1) {
+        if (cfg_.neta > tiny && j > 1) {
             double dt = 1.0e+06 * dtm;
             dms = mlwind(kw, lum, r, mt, mc, rl, Z_) * dt;
             if (kw < 10) {

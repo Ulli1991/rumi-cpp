@@ -1,6 +1,7 @@
 #pragma once
 
 #include "particles.h"
+#include "sse.h"
 #include <string>
 
 void init_outer_planets(Particles& p);
@@ -12,7 +13,8 @@ void init_plummer(Particles& p, int N, double M_total_msun, double r_half_pc, in
                   double bin_a_min_au = 0.01, double bin_a_max_au = 100.0,
                   bool add_imbh = false, double imbh_m1 = 500.0, double imbh_m2 = 500.0,
                   double imbh_a_pc = 1e-4, double imbh_e = 0.5, double imbh_spin = 0.0,
-                  double r_break_au = 0.0);
+                  double r_break_au = 0.0,
+                  const SSEConfig* sse_cfg = nullptr);
 
 // Isolated binary test case (2 particles): configurable orbital elements
 // a_pc: semi-major axis in parsecs, e: eccentricity, m1/m2: masses in M_sun
