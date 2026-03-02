@@ -326,8 +326,11 @@ int GBSIntegrator::integrate_to_time(LogHState& state, double t_target, double G
     double dt_remain = t_target - state.t;
     bool reached = std::fabs(dt_remain) < 1e-4 * std::fabs(t_target);
     if (!reached) {
-        std::printf("      GBS: %d steps, t_final=%.6f/%.6f *** DID NOT REACH TARGET ***\n",
-                    n_steps, state.t, t_target);
+        double Omega_final = logh_kinetic_energy(state) + state.B;
+        std::printf("      GBS: %d steps, t_final=%.6f/%.6f  Omega=%.3e  ds_range=[%.2e,%.2e]  fail=%d overshoot=%d"
+                    " *** DID NOT REACH TARGET ***\n",
+                    n_steps, state.t, t_target, Omega_final,
+                    ds_min_used, ds_max_used, n_failed, n_overshoot);
     }
 
     return n_steps;

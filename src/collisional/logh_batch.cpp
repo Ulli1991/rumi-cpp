@@ -489,6 +489,18 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
         double E0_norm = T_norm + U_norm;
         double Omega_norm = T_norm + state.B;
 
+        // Guard: between LogH calls, external kicks change T while B is
+        // fixed. This can drive Omega = T + B to near-zero or negative,
+        // making the LogH EOM singular (all terms ∝ 1/Omega).
+        // Reset B = -(T+U) to restore Omega = -U > 0.
+        double minus_U = -U_norm;  // always > 0 (gravitational potential)
+        if (Omega_norm < 0.01 * minus_U || Omega_norm <= 0.0) {
+            std::printf("    LogH: resetting B for sub %d (Omega=%.3e, -U=%.3e)\n",
+                        s, Omega_norm, minus_U);
+            state.B = -U_norm - T_norm;
+            Omega_norm = minus_U;
+        }
+
         // Save initial state for PN energy comparison after integration
         double state_init_pos[LOGH_MAX_BODIES * 3];
         double state_init_vel[LOGH_MAX_BODIES * 3];
