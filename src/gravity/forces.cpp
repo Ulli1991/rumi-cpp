@@ -43,7 +43,8 @@ static void compute_acceleration_and_timestep_impl(Particles& p, double G, doubl
     // Pack SoA data into vectorized format for efficient global memory access
     p.pack();
 
-    size_t scratch_size = TILE_SIZE * 7 * sizeof(double);
+    constexpr int TS = COLL ? 8 : 7;  // tile stride: +1 for sid in collisional mode
+    size_t scratch_size = TILE_SIZE * TS * sizeof(double);
     int num_teams = (N + TILE_SIZE - 1) / TILE_SIZE;
 
     // Use packed views for vectorized global memory access
@@ -55,9 +56,9 @@ static void compute_acceleration_and_timestep_impl(Particles& p, double G, doubl
         KOKKOS_LAMBDA(const member_type& team) {
             int i = team.league_rank() * TILE_SIZE + team.team_rank();
 
-            // AoS interleaved tile: [x,y,z,m,vx,vy,vz] per j-particle
+            // AoS interleaved tile: [x,y,z,m,vx,vy,vz,(sid)] per j-particle
             Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                tile(team.team_scratch(0), TILE_SIZE * 7);
+                tile(team.team_scratch(0), TILE_SIZE * TS);
 
             double xi = 0, yi = 0, zi = 0;
             double vxi = 0, vyi = 0, vzi = 0;
@@ -80,10 +81,11 @@ static void compute_acceleration_and_timestep_impl(Particles& p, double G, doubl
                 int t = team.team_rank();
                 if (t < tile_count) {
                     int idx = tile_start + t;
-                    int base = t * 7;
+                    int base = t * TS;
                     double vpad;
                     load4(&pos(idx, 0), tile(base), tile(base+1), tile(base+2), tile(base+3));
                     load4(&vel(idx, 0), tile(base+4), tile(base+5), tile(base+6), vpad);
+                    if (COLL) tile(base + 7) = static_cast<double>(sid_raw[idx]);
                 }
                 team.team_barrier();
 
@@ -92,9 +94,9 @@ static void compute_acceleration_and_timestep_impl(Particles& p, double G, doubl
                         int j = tile_start + jt;
                         if (j == i) continue;
                         // Subsystem exclusion: skip intra-subsystem pairs
-                        if (COLL) { if (sid_i >= 0 && sid_raw[j] == sid_i) continue; }
+                        if (COLL) { if (sid_i >= 0 && static_cast<int>(tile(jt * TS + 7)) == sid_i) continue; }
 
-                        int jb = jt * 7;
+                        int jb = jt * TS;
                         double dx = tile(jb    ) - xi;
                         double dy = tile(jb + 1) - yi;
                         double dz = tile(jb + 2) - zi;
@@ -157,7 +159,8 @@ static void self_acceleration_impl(Particles& p, int start, int count,
     using team_policy = Kokkos::TeamPolicy<>;
     using member_type = team_policy::member_type;
     using scratch_space = Kokkos::DefaultExecutionSpace::scratch_memory_space;
-    size_t scratch_size = TILE_SIZE * 4 * sizeof(double);
+    constexpr int TS = COLL ? 5 : 4;  // tile stride: +1 for sid in collisional mode
+    size_t scratch_size = TILE_SIZE * TS * sizeof(double);
     int num_teams = (count + TILE_SIZE - 1) / TILE_SIZE;
 
     Kokkos::parallel_for("self_acc_tiled",
@@ -166,7 +169,7 @@ static void self_acceleration_impl(Particles& p, int start, int count,
             int ii = team.league_rank() * TILE_SIZE + team.team_rank();
             int i = start + ii;
             Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                tile(team.team_scratch(0), TILE_SIZE * 4);
+                tile(team.team_scratch(0), TILE_SIZE * TS);
 
             double xi = 0, yi = 0, zi = 0;
             int sid_i = -1;
@@ -178,22 +181,25 @@ static void self_acceleration_impl(Particles& p, int start, int count,
                 int t = team.team_rank();
                 if (t < tile_count) {
                     int j = tile_start + t;
-                    tile(t*4+0) = px(j); tile(t*4+1) = py(j);
-                    tile(t*4+2) = pz(j); tile(t*4+3) = m(j);
+                    int tb = t * TS;
+                    tile(tb+0) = px(j); tile(tb+1) = py(j);
+                    tile(tb+2) = pz(j); tile(tb+3) = m(j);
+                    if (COLL) tile(tb+4) = static_cast<double>(sid_raw[j]);
                 }
                 team.team_barrier();
                 if (ii < count) {
                     for (int jt = 0; jt < tile_count; jt++) {
                         int j = tile_start + jt;
                         if (j == i) continue;
-                        if (COLL) { if (sid_i >= 0 && sid_raw[j] == sid_i) continue; }
-                        double dx = tile(jt*4+0) - xi;
-                        double dy = tile(jt*4+1) - yi;
-                        double dz = tile(jt*4+2) - zi;
+                        int jb = jt * TS;
+                        if (COLL) { if (sid_i >= 0 && static_cast<int>(tile(jb+4)) == sid_i) continue; }
+                        double dx = tile(jb+0) - xi;
+                        double dy = tile(jb+1) - yi;
+                        double dz = tile(jb+2) - zi;
                         double r2 = dx*dx + dy*dy + dz*dz + soft2;
                         double inv_r = fast_rsqrt(r2);
                         double inv_r3 = inv_r * inv_r * inv_r;
-                        double fj = G * tile(jt*4+3) * inv_r3;
+                        double fj = G * tile(jb+3) * inv_r3;
                         axi += fj * dx; ayi += fj * dy; azi += fj * dz;
                     }
                 }
@@ -236,7 +242,8 @@ static void self_gradient_correction_impl(Particles& p, int start, int count,
     using team_policy = Kokkos::TeamPolicy<>;
     using member_type = team_policy::member_type;
     using scratch_space = Kokkos::DefaultExecutionSpace::scratch_memory_space;
-    size_t scratch_size = TILE_SIZE * 7 * sizeof(double);  // [x,y,z,m,ax0,ay0,az0]
+    constexpr int TS = COLL ? 8 : 7;  // tile stride: +1 for sid in collisional mode
+    size_t scratch_size = TILE_SIZE * TS * sizeof(double);  // [x,y,z,m,ax0,ay0,az0,(sid)]
     int num_teams = (count + TILE_SIZE - 1) / TILE_SIZE;
 
     Kokkos::parallel_for("self_grad_tiled",
@@ -245,7 +252,7 @@ static void self_gradient_correction_impl(Particles& p, int start, int count,
             int ii = team.league_rank() * TILE_SIZE + team.team_rank();
             int i = start + ii;
             Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                tile(team.team_scratch(0), TILE_SIZE * 7);
+                tile(team.team_scratch(0), TILE_SIZE * TS);
 
             double xi = 0, yi = 0, zi = 0;
             double axi0 = 0, ayi0 = 0, azi0 = 0;
@@ -263,19 +270,20 @@ static void self_gradient_correction_impl(Particles& p, int start, int count,
                 if (t < tile_count) {
                     int jj = tile_idx + t;
                     int j = start + jj;
-                    int base = t * 7;
+                    int base = t * TS;
                     tile(base+0) = px(j); tile(base+1) = py(j);
                     tile(base+2) = pz(j); tile(base+3) = m(j);
                     tile(base+4) = ax0(jj); tile(base+5) = ay0(jj);
                     tile(base+6) = az0(jj);
+                    if (COLL) tile(base+7) = static_cast<double>(sid_raw[j]);
                 }
                 team.team_barrier();
                 if (ii < count) {
                     for (int jt = 0; jt < tile_count; jt++) {
                         int jj = tile_idx + jt;
                         if (jj == ii) continue;
-                        if (COLL) { if (sid_i >= 0 && sid_raw[start + jj] == sid_i) continue; }
-                        int jb = jt * 7;
+                        int jb = jt * TS;
+                        if (COLL) { if (sid_i >= 0 && static_cast<int>(tile(jb+7)) == sid_i) continue; }
                         double dx = tile(jb+0) - xi;
                         double dy = tile(jb+1) - yi;
                         double dz = tile(jb+2) - zi;
@@ -329,7 +337,8 @@ static void cross_acceleration_impl(Particles& p,
     using team_policy = Kokkos::TeamPolicy<>;
     using member_type = team_policy::member_type;
     using scratch_space = Kokkos::DefaultExecutionSpace::scratch_memory_space;
-    size_t scratch_size = TILE_SIZE * 4 * sizeof(double);
+    constexpr int TS = COLL ? 5 : 4;  // tile stride: +1 for sid in collisional mode
+    size_t scratch_size = TILE_SIZE * TS * sizeof(double);
 
     // A from B
     int num_teams_a = (a_count + TILE_SIZE - 1) / TILE_SIZE;
@@ -339,7 +348,7 @@ static void cross_acceleration_impl(Particles& p,
             int ii = team.league_rank() * TILE_SIZE + team.team_rank();
             int i = a_start + ii;
             Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                tile(team.team_scratch(0), TILE_SIZE * 4);
+                tile(team.team_scratch(0), TILE_SIZE * TS);
 
             double xi = 0, yi = 0, zi = 0;
             int sid_i = -1;
@@ -351,21 +360,23 @@ static void cross_acceleration_impl(Particles& p,
                 int t = team.team_rank();
                 if (t < tile_count) {
                     int j = tile_start + t;
-                    tile(t*4+0) = px(j); tile(t*4+1) = py(j);
-                    tile(t*4+2) = pz(j); tile(t*4+3) = m(j);
+                    int tb = t * TS;
+                    tile(tb+0) = px(j); tile(tb+1) = py(j);
+                    tile(tb+2) = pz(j); tile(tb+3) = m(j);
+                    if (COLL) tile(tb+4) = static_cast<double>(sid_raw[j]);
                 }
                 team.team_barrier();
                 if (ii < a_count) {
                     for (int jt = 0; jt < tile_count; jt++) {
-                        int j_cross = tile_start + jt;
-                        if (COLL) { if (sid_i >= 0 && sid_raw[j_cross] == sid_i) continue; }
-                        double dx = tile(jt*4+0) - xi;
-                        double dy = tile(jt*4+1) - yi;
-                        double dz = tile(jt*4+2) - zi;
+                        int jb = jt * TS;
+                        if (COLL) { if (sid_i >= 0 && static_cast<int>(tile(jb+4)) == sid_i) continue; }
+                        double dx = tile(jb+0) - xi;
+                        double dy = tile(jb+1) - yi;
+                        double dz = tile(jb+2) - zi;
                         double r2 = dx*dx + dy*dy + dz*dz + soft2;
                         double inv_r = fast_rsqrt(r2);
                         double inv_r3 = inv_r * inv_r * inv_r;
-                        double fj = G * tile(jt*4+3) * inv_r3;
+                        double fj = G * tile(jb+3) * inv_r3;
                         axi += fj * dx; ayi += fj * dy; azi += fj * dz;
                     }
                 }
@@ -381,7 +392,7 @@ static void cross_acceleration_impl(Particles& p,
             int ii = team.league_rank() * TILE_SIZE + team.team_rank();
             int j = b_start + ii;
             Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                tile(team.team_scratch(0), TILE_SIZE * 4);
+                tile(team.team_scratch(0), TILE_SIZE * TS);
 
             double xj = 0, yj = 0, zj = 0;
             int sid_j = -1;
@@ -393,21 +404,23 @@ static void cross_acceleration_impl(Particles& p,
                 int t = team.team_rank();
                 if (t < tile_count) {
                     int i2 = tile_start + t;
-                    tile(t*4+0) = px(i2); tile(t*4+1) = py(i2);
-                    tile(t*4+2) = pz(i2); tile(t*4+3) = m(i2);
+                    int tb = t * TS;
+                    tile(tb+0) = px(i2); tile(tb+1) = py(i2);
+                    tile(tb+2) = pz(i2); tile(tb+3) = m(i2);
+                    if (COLL) tile(tb+4) = static_cast<double>(sid_raw[i2]);
                 }
                 team.team_barrier();
                 if (ii < b_count) {
                     for (int it = 0; it < tile_count; it++) {
-                        int i2_cross = tile_start + it;
-                        if (COLL) { if (sid_j >= 0 && sid_raw[i2_cross] == sid_j) continue; }
-                        double dx = tile(it*4+0) - xj;
-                        double dy = tile(it*4+1) - yj;
-                        double dz = tile(it*4+2) - zj;
+                        int ib = it * TS;
+                        if (COLL) { if (sid_j >= 0 && static_cast<int>(tile(ib+4)) == sid_j) continue; }
+                        double dx = tile(ib+0) - xj;
+                        double dy = tile(ib+1) - yj;
+                        double dz = tile(ib+2) - zj;
                         double r2 = dx*dx + dy*dy + dz*dz + soft2;
                         double inv_r = fast_rsqrt(r2);
                         double inv_r3 = inv_r * inv_r * inv_r;
-                        double fi = G * tile(it*4+3) * inv_r3;
+                        double fi = G * tile(ib+3) * inv_r3;
                         axj += fi * dx; ayj += fi * dy; azj += fi * dz;
                     }
                 }
@@ -459,7 +472,8 @@ static void cross_gradient_correction_impl(Particles& p,
     using team_policy = Kokkos::TeamPolicy<>;
     using member_type = team_policy::member_type;
     using scratch_space = Kokkos::DefaultExecutionSpace::scratch_memory_space;
-    size_t scratch_size = TILE_SIZE * 7 * sizeof(double);  // [x,y,z,m,ax0,ay0,az0]
+    constexpr int TS = COLL ? 8 : 7;  // tile stride: +1 for sid in collisional mode
+    size_t scratch_size = TILE_SIZE * TS * sizeof(double);  // [x,y,z,m,ax0,ay0,az0,(sid)]
 
     // A from B: tile over B particles
     int num_teams_a = (a_count + TILE_SIZE - 1) / TILE_SIZE;
@@ -469,7 +483,7 @@ static void cross_gradient_correction_impl(Particles& p,
             int ii = team.league_rank() * TILE_SIZE + team.team_rank();
             int i = a_start + ii;
             Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                tile(team.team_scratch(0), TILE_SIZE * 7);
+                tile(team.team_scratch(0), TILE_SIZE * TS);
 
             double xi = 0, yi = 0, zi = 0;
             double axi0 = 0, ayi0 = 0, azi0 = 0;
@@ -487,18 +501,18 @@ static void cross_gradient_correction_impl(Particles& p,
                 if (t < tile_count) {
                     int jj = tile_idx + t;
                     int j = b_start + jj;
-                    int base = t * 7;
+                    int base = t * TS;
                     tile(base+0) = px(j); tile(base+1) = py(j);
                     tile(base+2) = pz(j); tile(base+3) = m(j);
                     tile(base+4) = ax0_b(jj); tile(base+5) = ay0_b(jj);
                     tile(base+6) = az0_b(jj);
+                    if (COLL) tile(base+7) = static_cast<double>(sid_raw[j]);
                 }
                 team.team_barrier();
                 if (ii < a_count) {
                     for (int jt = 0; jt < tile_count; jt++) {
-                        int j_cross = b_start + tile_idx + jt;
-                        if (COLL) { if (sid_i >= 0 && sid_raw[j_cross] == sid_i) continue; }
-                        int jb = jt * 7;
+                        int jb = jt * TS;
+                        if (COLL) { if (sid_i >= 0 && static_cast<int>(tile(jb+7)) == sid_i) continue; }
                         double dx = tile(jb+0) - xi;
                         double dy = tile(jb+1) - yi;
                         double dz = tile(jb+2) - zi;
@@ -531,7 +545,7 @@ static void cross_gradient_correction_impl(Particles& p,
             int ii = team.league_rank() * TILE_SIZE + team.team_rank();
             int j = b_start + ii;
             Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                tile(team.team_scratch(0), TILE_SIZE * 7);
+                tile(team.team_scratch(0), TILE_SIZE * TS);
 
             double xj = 0, yj = 0, zj = 0;
             double axj0 = 0, ayj0 = 0, azj0 = 0;
@@ -549,18 +563,18 @@ static void cross_gradient_correction_impl(Particles& p,
                 if (t < tile_count) {
                     int ai = tile_idx + t;
                     int i2 = a_start + ai;
-                    int base = t * 7;
+                    int base = t * TS;
                     tile(base+0) = px(i2); tile(base+1) = py(i2);
                     tile(base+2) = pz(i2); tile(base+3) = m(i2);
                     tile(base+4) = ax0_a(ai); tile(base+5) = ay0_a(ai);
                     tile(base+6) = az0_a(ai);
+                    if (COLL) tile(base+7) = static_cast<double>(sid_raw[i2]);
                 }
                 team.team_barrier();
                 if (ii < b_count) {
                     for (int it = 0; it < tile_count; it++) {
-                        int i2_cross = a_start + tile_idx + it;
-                        if (COLL) { if (sid_j >= 0 && sid_raw[i2_cross] == sid_j) continue; }
-                        int ib = it * 7;
+                        int ib = it * TS;
+                        if (COLL) { if (sid_j >= 0 && static_cast<int>(tile(ib+7)) == sid_j) continue; }
                         double dx = tile(ib+0) - xj;
                         double dy = tile(ib+1) - yj;
                         double dz = tile(ib+2) - zj;
@@ -603,8 +617,7 @@ void cross_gradient_correction(Particles& p, int a_start, int a_count,
 // ==========================================================================
 template<bool COLL>
 static void compute_timestep_subset_impl(Particles& p, int start, int count,
-                          double G, double soft2, double eta,
-                          bool symmetrize) {
+                          double G, double soft2, double eta) {
     if (count <= 1) return;  // No pairs to consider
 
     RawView px{p.x.data()}, py{p.y.data()}, pz{p.z.data()};
@@ -634,15 +647,14 @@ static void compute_timestep_subset_impl(Particles& p, int start, int count,
     double eta_ff_v = eta;
     double eta_fb_v = eta;
 #endif
-    double eta_ff_sq = eta_ff_v * eta_ff_v;
-    double eta_fb_sq = eta_fb_v * eta_fb_v;
 
-    // Full N^2 within subset - tiled with shared memory, squared-space timestep
+    // Full N^2 within subset - tiled with shared memory, symmetrized timestep
     using team_policy = Kokkos::TeamPolicy<>;
     using member_type = team_policy::member_type;
     using scratch_space = Kokkos::DefaultExecutionSpace::scratch_memory_space;
 
-    size_t scratch_size = TILE_SIZE * 7 * sizeof(double);
+    constexpr int TS = COLL ? 8 : 7;  // tile stride: +1 for sid in collisional mode
+    size_t scratch_size = TILE_SIZE * TS * sizeof(double);
     int num_teams = (count + TILE_SIZE - 1) / TILE_SIZE;
 
     Kokkos::parallel_for("dt_subset_tiled",
@@ -651,9 +663,9 @@ static void compute_timestep_subset_impl(Particles& p, int start, int count,
             int ii = team.league_rank() * TILE_SIZE + team.team_rank();
             int i = start + ii;
 
-            // AoS interleaved tile: [x,y,z,m,vx,vy,vz] per j-particle
+            // AoS interleaved tile: [x,y,z,m,vx,vy,vz,(sid)] per j-particle
             Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                tile(team.team_scratch(0), TILE_SIZE * 7);
+                tile(team.team_scratch(0), TILE_SIZE * TS);
 
             double xi = 0, yi = 0, zi = 0;
             double vxi = 0, vyi = 0, vzi = 0;
@@ -666,8 +678,7 @@ static void compute_timestep_subset_impl(Particles& p, int start, int count,
                 if (COLL) sid_i = sid_raw[i];
             }
 
-            double t_min_sq = 1e60;   // non-symmetrized path
-            double t_min_i = 1e30;    // symmetrized path
+            double t_min_i = 1e30;
             double jerk_x = 0, jerk_y = 0, jerk_z = 0;  // jerk accumulators (collisional only)
             double acc_xi = 0, acc_yi = 0, acc_zi = 0;  // fresh subset acceleration for jerk criterion
 
@@ -678,7 +689,7 @@ static void compute_timestep_subset_impl(Particles& p, int start, int count,
                 int t = team.team_rank();
                 if (t < tile_cnt) {
                     int idx = tile_st + t;
-                    int base = t * 7;
+                    int base = t * TS;
                     tile(base    ) = px(idx);
                     tile(base + 1) = py(idx);
                     tile(base + 2) = pz(idx);
@@ -686,6 +697,7 @@ static void compute_timestep_subset_impl(Particles& p, int start, int count,
                     tile(base + 4) = pvx(idx);
                     tile(base + 5) = pvy(idx);
                     tile(base + 6) = pvz(idx);
+                    if (COLL) tile(base + 7) = static_cast<double>(sid_raw[idx]);
                 }
                 team.team_barrier();
 
@@ -693,9 +705,9 @@ static void compute_timestep_subset_impl(Particles& p, int start, int count,
                     for (int jt = 0; jt < tile_cnt; jt++) {
                         int j = tile_st + jt;
                         if (j == i) continue;
-                        if (COLL) { if (sid_i >= 0 && sid_raw[j] == sid_i) continue; }
+                        if (COLL) { if (sid_i >= 0 && static_cast<int>(tile(jt * TS + 7)) == sid_i) continue; }
 
-                        int jb = jt * 7;
+                        int jb = jt * TS;
                         double dx = tile(jb    ) - xi;
                         double dy = tile(jb + 1) - yi;
                         double dz = tile(jb + 2) - zi;
@@ -706,43 +718,14 @@ static void compute_timestep_subset_impl(Particles& p, int start, int count,
                         double dvx = tile(jb + 4) - vxi;
                         double dvy = tile(jb + 5) - vyi;
                         double dvz = tile(jb + 6) - vzi;
-                        double v_sq = dvx*dvx + dvy*dvy + dvz*dvz;
 
                         double inv_r = fast_rsqrt(r2s);
                         double mass_sum = mi + mj;
-                        double r3 = r2s * r2s * inv_r;
 
-                        if (symmetrize) {
-                            double inv_Gm = 1.0 / (G * mass_sum + EPS);
-                            double inv_vsq = 1.0 / (v_sq + EPS);
-                            double t_ff_sq = r3 * inv_Gm;
-                            double t_fb_sq = r2s * inv_vsq;
-                            double t_ff = t_ff_sq * fast_rsqrt(t_ff_sq + EPS);
-                            double t_fb = t_fb_sq * fast_rsqrt(t_fb_sq + EPS);
-
-                            double inv_r2 = inv_r * inv_r;
-                            double r_dot_v = dx*dvx + dy*dvy + dz*dvz;
-
-                            double c_ff = 1.5 * r_dot_v * inv_r2;
-                            double c_fb = r_dot_v * inv_r2 * (1.0 + G * mass_sum * inv_r * inv_vsq);
-
-                            double ct_ff = c_ff * t_ff_sq;
-                            double s_ff = 1.0 + c_ff * ct_ff;
-                            double u_ff = s_ff * fast_rsqrt(s_ff);
-                            double t_sym_ff = t_ff + ct_ff / (u_ff + 1.0);
-
-                            double ct_fb = c_fb * t_fb_sq;
-                            double s_fb = 1.0 + c_fb * ct_fb;
-                            double u_fb = s_fb * fast_rsqrt(s_fb);
-                            double t_sym_fb = t_fb + ct_fb / (u_fb + 1.0);
-
-                            t_min_i = Kokkos::fmin(t_min_i, Kokkos::fmin(eta_ff_v * t_sym_ff, eta_fb_v * t_sym_fb));
-                        } else {
-                            double t_ff_sq = r3 / (G * mass_sum + EPS);
-                            double t_fb_sq = r2s / (v_sq + EPS);
-                            double t_min_sq_pair = Kokkos::fmin(eta_ff_sq * t_ff_sq, eta_fb_sq * t_fb_sq);
-                            t_min_sq = Kokkos::fmin(t_min_sq, t_min_sq_pair);
-                        }
+                        // Symmetrized timestep (always on)
+                        double t_sym_ff, t_sym_fb;
+                        symmetrized_timestep(r2s, inv_r, dx, dy, dz, dvx, dvy, dvz, G, mass_sum, t_sym_ff, t_sym_fb);
+                        t_min_i = Kokkos::fmin(t_min_i, Kokkos::fmin(eta_ff_v * t_sym_ff, eta_fb_v * t_sym_fb));
 
                         // Jerk + acceleration accumulation (collisional only)
                         // j_ij = G*m_j * (v_ij/r³ - 3*(r·v)/(r^5) * r_ij)
@@ -766,7 +749,7 @@ static void compute_timestep_subset_impl(Particles& p, int start, int count,
             }
 
             if (ii < count) {
-                double dt_val = symmetrize ? t_min_i : Kokkos::sqrt(t_min_sq);
+                double dt_val = t_min_i;
 
                 // Jerk timestep: dt_jerk = eta_j * |a| / |j| (BIFROST §3.4.5)
                 // Uses freshly accumulated subset acceleration, not stale p.ax/ay/az
@@ -786,12 +769,12 @@ static void compute_timestep_subset_impl(Particles& p, int start, int count,
 }
 
 void compute_timestep_subset(Particles& p, int start, int count,
-                          double G, double soft2, double eta, bool symmetrize) {
+                          double G, double soft2, double eta) {
 #ifdef ENABLE_COLLISIONAL
-    if (p.collisional) compute_timestep_subset_impl<true>(p, start, count, G, soft2, eta, symmetrize);
+    if (p.collisional) compute_timestep_subset_impl<true>(p, start, count, G, soft2, eta);
     else
 #endif
-    compute_timestep_subset_impl<false>(p, start, count, G, soft2, eta, symmetrize);
+    compute_timestep_subset_impl<false>(p, start, count, G, soft2, eta);
 }
 
 // ==========================================================================
@@ -822,7 +805,8 @@ static void self_acceleration_and_timestep_impl(Particles& p, int start, int cou
     using team_policy = Kokkos::TeamPolicy<>;
     using member_type = team_policy::member_type;
     using scratch_space = Kokkos::DefaultExecutionSpace::scratch_memory_space;
-    size_t scratch_size = TILE_SIZE * 7 * sizeof(double);  // [x,y,z,m,vx,vy,vz]
+    constexpr int TS = COLL ? 8 : 7;  // tile stride: +1 for sid in collisional mode
+    size_t scratch_size = TILE_SIZE * TS * sizeof(double);  // [x,y,z,m,vx,vy,vz,(sid)]
     int num_teams = (count + TILE_SIZE - 1) / TILE_SIZE;
 
     Kokkos::parallel_for("self_acc_dt_sym_tiled",
@@ -831,7 +815,7 @@ static void self_acceleration_and_timestep_impl(Particles& p, int start, int cou
             int ii = team.league_rank() * TILE_SIZE + team.team_rank();
             int i = start + ii;
             Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                tile(team.team_scratch(0), TILE_SIZE * 7);
+                tile(team.team_scratch(0), TILE_SIZE * TS);
 
             double xi = 0, yi = 0, zi = 0, mi_val = 0;
             double vxi = 0, vyi = 0, vzi = 0;
@@ -849,19 +833,20 @@ static void self_acceleration_and_timestep_impl(Particles& p, int start, int cou
                 int t = team.team_rank();
                 if (t < tile_count) {
                     int j = tile_start + t;
-                    int base = t * 7;
+                    int base = t * TS;
                     tile(base+0) = px(j); tile(base+1) = py(j);
                     tile(base+2) = pz(j); tile(base+3) = m(j);
                     tile(base+4) = pvx(j); tile(base+5) = pvy(j);
                     tile(base+6) = pvz(j);
+                    if (COLL) tile(base+7) = static_cast<double>(sid_raw[j]);
                 }
                 team.team_barrier();
                 if (ii < count) {
                     for (int jt = 0; jt < tile_count; jt++) {
                         int j = tile_start + jt;
                         if (j == i) continue;
-                        if (COLL) { if (sid_i >= 0 && sid_raw[j] == sid_i) continue; }
-                        int jb = jt * 7;
+                        if (COLL) { if (sid_i >= 0 && static_cast<int>(tile(jt * TS + 7)) == sid_i) continue; }
+                        int jb = jt * TS;
                         double dx = tile(jb+0) - xi;
                         double dy = tile(jb+1) - yi;
                         double dz = tile(jb+2) - zi;
@@ -874,39 +859,13 @@ static void self_acceleration_and_timestep_impl(Particles& p, int start, int cou
                         double fj = G * mj * inv_r3;
                         axi += fj * dx; ayi += fj * dy; azi += fj * dz;
 
-                        // Symmetrized timestep — branchless, precomputed reciprocals
+                        // Symmetrized timestep
                         double dvx = tile(jb+4) - vxi;
                         double dvy = tile(jb+5) - vyi;
                         double dvz = tile(jb+6) - vzi;
-                        double v_sq = dvx*dvx + dvy*dvy + dvz*dvz;
                         double mass_sum = mi_val + mj;
-                        double inv_Gm = 1.0 / (G * mass_sum + EPS);
-                        double inv_vsq = 1.0 / (v_sq + EPS);
-
-                        double r3 = r2s * r2s * inv_r;
-                        double t_ff_sq = r3 * inv_Gm;
-                        double t_fb_sq = r2s * inv_vsq;
-                        double t_ff = t_ff_sq * fast_rsqrt(t_ff_sq + EPS);
-                        double t_fb = t_fb_sq * fast_rsqrt(t_fb_sq + EPS);
-
-                        double inv_r2 = inv_r * inv_r;
-                        double r_dot_v = dx*dvx + dy*dvy + dz*dvz;
-
-                        // d*t products via c*t² (avoids computing d explicitly)
-                        double c_ff = 1.5 * r_dot_v * inv_r2;
-                        double c_fb = r_dot_v * inv_r2 * (1.0 + G * mass_sum * inv_r * inv_vsq);
-
-                        // Rationalized form: t_sym = t + c*t²/(sqrt(1 + c²*t²) + 1)
-                        double ct_ff = c_ff * t_ff_sq;
-                        double s_ff = 1.0 + c_ff * ct_ff;
-                        double u_ff = s_ff * fast_rsqrt(s_ff);
-                        double t_sym_ff = t_ff + ct_ff / (u_ff + 1.0);
-
-                        double ct_fb = c_fb * t_fb_sq;
-                        double s_fb = 1.0 + c_fb * ct_fb;
-                        double u_fb = s_fb * fast_rsqrt(s_fb);
-                        double t_sym_fb = t_fb + ct_fb / (u_fb + 1.0);
-
+                        double t_sym_ff, t_sym_fb;
+                        symmetrized_timestep(r2s, inv_r, dx, dy, dz, dvx, dvy, dvz, G, mass_sum, t_sym_ff, t_sym_fb);
                         t_min_i = Kokkos::fmin(t_min_i, Kokkos::fmin(eta_ff_v * t_sym_ff, eta_fb_v * t_sym_fb));
                     }
                 }

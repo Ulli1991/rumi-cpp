@@ -111,6 +111,12 @@ struct DistributedParticles {
     std::vector<int> mpi_packed_counts_slot[2];
     std::vector<int> mpi_packed_displs_slot[2];
 
+    // Persistent host-staged buffers (reused across calls, avoids per-call allocation)
+    std::vector<double> host_send_buf;   // packed [ax,ay,az] for send
+    std::vector<double> host_recv_buf;   // packed [ax,ay,az] for recv
+    std::vector<double> host_recv_ax, host_recv_ay, host_recv_az;  // unpacked
+    std::vector<double> host_send_dt, host_recv_dt;  // timestep staging
+
     // Initialize distributed particles from a global particle set
     // Only rank 0 should have the full particle set initially
     // After this, ALL ranks have ALL particles (replicated)

@@ -26,8 +26,7 @@ void cross_gradient_correction(Particles& p,
 // Compute adaptive timesteps for a subset of particles [start, start+count)
 // Only considers mutual interactions within the subset
 void compute_timestep_subset(Particles& p, int start, int count,
-                          double G, double soft2, double eta,
-                          bool symmetrize = false);
+                          double G, double soft2, double eta);
 
 // Fused self-force + symmetrized timestep (no kick, stores forces for reuse)
 void self_acceleration_and_timestep(Particles& p, int start, int count,

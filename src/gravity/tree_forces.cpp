@@ -45,12 +45,10 @@ void tree_self_acceleration(Particles& p, const Octree& tree,
     using member_type = team_policy::member_type;
     using scratch_space = Kokkos::DefaultExecutionSpace::scratch_memory_space;
 
-    // Scratch: stack (ints) + particle positions (doubles)
+    // Scratch: stack for tree traversal
     // Stack: TREE_STACK_SIZE ints
-    // Particle cache: TREE_GROUP_SIZE * 4 doubles (for P2P leaf interactions)
     size_t stack_bytes = TREE_STACK_SIZE * sizeof(int);
-    size_t particle_cache_bytes = TREE_GROUP_SIZE * 4 * sizeof(double);
-    size_t total_scratch = stack_bytes + particle_cache_bytes;
+    size_t total_scratch = stack_bytes;
 
     const int g_offset = group_offset;
     Kokkos::parallel_for("tree_traversal",
@@ -331,33 +329,9 @@ void tree_self_acceleration_and_timestep(Particles& p, const Octree& tree,
                         double dvx = cell_vel_v(node, 0) - vxi;
                         double dvy = cell_vel_v(node, 1) - vyi;
                         double dvz = cell_vel_v(node, 2) - vzi;
-                        double v_sq = dvx*dvx + dvy*dvy + dvz*dvz;
                         double mass_sum = mi + cmass;
-                        double inv_Gm = 1.0 / (G * mass_sum + EPS);
-                        double inv_vsq = 1.0 / (v_sq + EPS);
-
-                        double r3 = r2 * r2 * inv_r;
-                        double t_ff_sq = r3 * inv_Gm;
-                        double t_fb_sq = r2 * inv_vsq;
-                        double t_ff = t_ff_sq * fast_rsqrt(t_ff_sq + EPS);
-                        double t_fb = t_fb_sq * fast_rsqrt(t_fb_sq + EPS);
-
-                        double inv_r2 = inv_r * inv_r;
-                        double r_dot_v = dx*dvx + dy*dvy + dz*dvz;
-
-                        double c_ff = 1.5 * r_dot_v * inv_r2;
-                        double c_fb = r_dot_v * inv_r2 * (1.0 + G * mass_sum * inv_r * inv_vsq);
-
-                        double ct_ff = c_ff * t_ff_sq;
-                        double s_ff = 1.0 + c_ff * ct_ff;
-                        double u_ff = s_ff * fast_rsqrt(s_ff);
-                        double t_sym_ff = t_ff + ct_ff / (u_ff + 1.0);
-
-                        double ct_fb = c_fb * t_fb_sq;
-                        double s_fb = 1.0 + c_fb * ct_fb;
-                        double u_fb = s_fb * fast_rsqrt(s_fb);
-                        double t_sym_fb = t_fb + ct_fb / (u_fb + 1.0);
-
+                        double t_sym_ff, t_sym_fb;
+                        symmetrized_timestep(r2, inv_r, dx, dy, dz, dvx, dvy, dvz, G, mass_sum, t_sym_ff, t_sym_fb);
                         t_min_sq = Kokkos::fmin(t_min_sq,
                                    Kokkos::fmin(eta_ff_sq * t_sym_ff * t_sym_ff, eta_fb_sq * t_sym_fb * t_sym_fb));
                     }
@@ -385,34 +359,9 @@ void tree_self_acceleration_and_timestep(Particles& p, const Octree& tree,
                             double dvx = pvx(j_orig) - vxi;
                             double dvy = pvy(j_orig) - vyi;
                             double dvz = pvz(j_orig) - vzi;
-                            double v_sq = dvx*dvx + dvy*dvy + dvz*dvz;
                             double mass_sum = mi + mj;
-                            double inv_Gm = 1.0 / (G * mass_sum + EPS);
-                            double inv_vsq = 1.0 / (v_sq + EPS);
-
-                            double r3 = r2 * r2 * inv_r;
-                            double t_ff_sq = r3 * inv_Gm;
-                            double t_fb_sq = r2 * inv_vsq;
-                            double t_ff = t_ff_sq * fast_rsqrt(t_ff_sq + EPS);
-                            double t_fb = t_fb_sq * fast_rsqrt(t_fb_sq + EPS);
-
-                            double inv_r2 = inv_r * inv_r;
-                            double r_dot_v = dx*dvx + dy*dvy + dz*dvz;
-
-                            double c_ff = 1.5 * r_dot_v * inv_r2;
-                            double c_fb = r_dot_v * inv_r2 * (1.0 + G * mass_sum * inv_r * inv_vsq);
-
-                            // Rationalized form: t_sym = t + c*t²/(sqrt(1 + c²*t²) + 1)
-                            double ct_ff = c_ff * t_ff_sq;
-                            double s_ff = 1.0 + c_ff * ct_ff;
-                            double u_ff = s_ff * fast_rsqrt(s_ff);
-                            double t_sym_ff = t_ff + ct_ff / (u_ff + 1.0);
-
-                            double ct_fb = c_fb * t_fb_sq;
-                            double s_fb = 1.0 + c_fb * ct_fb;
-                            double u_fb = s_fb * fast_rsqrt(s_fb);
-                            double t_sym_fb = t_fb + ct_fb / (u_fb + 1.0);
-
+                            double t_sym_ff, t_sym_fb;
+                            symmetrized_timestep(r2, inv_r, dx, dy, dz, dvx, dvy, dvz, G, mass_sum, t_sym_ff, t_sym_fb);
                             t_min_sq = Kokkos::fmin(t_min_sq,
                                        Kokkos::fmin(eta_ff_sq * t_sym_ff * t_sym_ff, eta_fb_sq * t_sym_fb * t_sym_fb));
                         }
@@ -1836,33 +1785,9 @@ void tree_global_self_acceleration_and_timestep(Particles& p, const Octree& tree
                         double dvx = cell_vel_src(node, 0) - vxi;
                         double dvy = cell_vel_src(node, 1) - vyi;
                         double dvz = cell_vel_src(node, 2) - vzi;
-                        double v_sq = dvx*dvx + dvy*dvy + dvz*dvz;
                         double mass_sum = mi + cmass;
-                        double inv_Gm = 1.0 / (G * mass_sum + EPS);
-                        double inv_vsq = 1.0 / (v_sq + EPS);
-
-                        double r3 = r2 * r2 * inv_r;
-                        double t_ff_sq = r3 * inv_Gm;
-                        double t_fb_sq = r2 * inv_vsq;
-                        double t_ff = t_ff_sq * fast_rsqrt(t_ff_sq + EPS);
-                        double t_fb = t_fb_sq * fast_rsqrt(t_fb_sq + EPS);
-
-                        double inv_r2 = inv_r * inv_r;
-                        double r_dot_v = dx*dvx + dy*dvy + dz*dvz;
-
-                        double c_ff = 1.5 * r_dot_v * inv_r2;
-                        double c_fb = r_dot_v * inv_r2 * (1.0 + G * mass_sum * inv_r * inv_vsq);
-
-                        double ct_ff = c_ff * t_ff_sq;
-                        double s_ff = 1.0 + c_ff * ct_ff;
-                        double u_ff = s_ff * fast_rsqrt(s_ff);
-                        double t_sym_ff = t_ff + ct_ff / (u_ff + 1.0);
-
-                        double ct_fb = c_fb * t_fb_sq;
-                        double s_fb = 1.0 + c_fb * ct_fb;
-                        double u_fb = s_fb * fast_rsqrt(s_fb);
-                        double t_sym_fb = t_fb + ct_fb / (u_fb + 1.0);
-
+                        double t_sym_ff, t_sym_fb;
+                        symmetrized_timestep(r2, inv_r, dx, dy, dz, dvx, dvy, dvz, G, mass_sum, t_sym_ff, t_sym_fb);
                         t_min_sq = Kokkos::fmin(t_min_sq,
                                    Kokkos::fmin(eta_ff_sq * t_sym_ff * t_sym_ff, eta_fb_sq * t_sym_fb * t_sym_fb));
                     }
@@ -1891,33 +1816,9 @@ void tree_global_self_acceleration_and_timestep(Particles& p, const Octree& tree
                             double dvx = pvx(j_orig) - vxi;
                             double dvy = pvy(j_orig) - vyi;
                             double dvz = pvz(j_orig) - vzi;
-                            double v_sq = dvx*dvx + dvy*dvy + dvz*dvz;
                             double mass_sum = mi + mj;
-                            double inv_Gm = 1.0 / (G * mass_sum + EPS);
-                            double inv_vsq = 1.0 / (v_sq + EPS);
-
-                            double r3 = r2 * r2 * inv_r;
-                            double t_ff_sq = r3 * inv_Gm;
-                            double t_fb_sq = r2 * inv_vsq;
-                            double t_ff = t_ff_sq * fast_rsqrt(t_ff_sq + EPS);
-                            double t_fb = t_fb_sq * fast_rsqrt(t_fb_sq + EPS);
-
-                            double inv_r2 = inv_r * inv_r;
-                            double r_dot_v = dx*dvx + dy*dvy + dz*dvz;
-
-                            double c_ff = 1.5 * r_dot_v * inv_r2;
-                            double c_fb = r_dot_v * inv_r2 * (1.0 + G * mass_sum * inv_r * inv_vsq);
-
-                            double ct_ff = c_ff * t_ff_sq;
-                            double s_ff = 1.0 + c_ff * ct_ff;
-                            double u_ff = s_ff * fast_rsqrt(s_ff);
-                            double t_sym_ff = t_ff + ct_ff / (u_ff + 1.0);
-
-                            double ct_fb = c_fb * t_fb_sq;
-                            double s_fb = 1.0 + c_fb * ct_fb;
-                            double u_fb = s_fb * fast_rsqrt(s_fb);
-                            double t_sym_fb = t_fb + ct_fb / (u_fb + 1.0);
-
+                            double t_sym_ff, t_sym_fb;
+                            symmetrized_timestep(r2, inv_r, dx, dy, dz, dvx, dvy, dvz, G, mass_sum, t_sym_ff, t_sym_fb);
                             t_min_sq = Kokkos::fmin(t_min_sq,
                                        Kokkos::fmin(eta_ff_sq * t_sym_ff * t_sym_ff, eta_fb_sq * t_sym_fb * t_sym_fb));
                         }
@@ -2486,33 +2387,9 @@ void tree_all_forces_and_timestep_on_subset(Particles& p, const Octree& tree,
                         double dvx = cell_vel_src(node, 0) - vxi;
                         double dvy = cell_vel_src(node, 1) - vyi;
                         double dvz = cell_vel_src(node, 2) - vzi;
-                        double v_sq = dvx*dvx + dvy*dvy + dvz*dvz;
                         double mass_sum = mi + cmass;
-                        double inv_Gm = 1.0 / (G * mass_sum + EPS);
-                        double inv_vsq = 1.0 / (v_sq + EPS);
-
-                        double r3 = r2 * r2 * inv_r;
-                        double t_ff_sq = r3 * inv_Gm;
-                        double t_fb_sq = r2 * inv_vsq;
-                        double t_ff = t_ff_sq * fast_rsqrt(t_ff_sq + EPS);
-                        double t_fb = t_fb_sq * fast_rsqrt(t_fb_sq + EPS);
-
-                        double inv_r2 = inv_r * inv_r;
-                        double r_dot_v = dx*dvx + dy*dvy + dz*dvz;
-
-                        double c_ff = 1.5 * r_dot_v * inv_r2;
-                        double c_fb = r_dot_v * inv_r2 * (1.0 + G * mass_sum * inv_r * inv_vsq);
-
-                        double ct_ff = c_ff * t_ff_sq;
-                        double s_ff = 1.0 + c_ff * ct_ff;
-                        double u_ff = s_ff * fast_rsqrt(s_ff);
-                        double t_sym_ff = t_ff + ct_ff / (u_ff + 1.0);
-
-                        double ct_fb = c_fb * t_fb_sq;
-                        double s_fb = 1.0 + c_fb * ct_fb;
-                        double u_fb = s_fb * fast_rsqrt(s_fb);
-                        double t_sym_fb = t_fb + ct_fb / (u_fb + 1.0);
-
+                        double t_sym_ff, t_sym_fb;
+                        symmetrized_timestep(r2, inv_r, dx, dy, dz, dvx, dvy, dvz, G, mass_sum, t_sym_ff, t_sym_fb);
                         t_min_sq = Kokkos::fmin(t_min_sq,
                                    Kokkos::fmin(eta_ff_sq * t_sym_ff * t_sym_ff, eta_fb_sq * t_sym_fb * t_sym_fb));
                     }
@@ -2541,33 +2418,9 @@ void tree_all_forces_and_timestep_on_subset(Particles& p, const Octree& tree,
                             double dvx = pvx(j_orig) - vxi;
                             double dvy = pvy(j_orig) - vyi;
                             double dvz = pvz(j_orig) - vzi;
-                            double v_sq = dvx*dvx + dvy*dvy + dvz*dvz;
                             double mass_sum = mi + mj;
-                            double inv_Gm = 1.0 / (G * mass_sum + EPS);
-                            double inv_vsq = 1.0 / (v_sq + EPS);
-
-                            double r3 = r2 * r2 * inv_r;
-                            double t_ff_sq = r3 * inv_Gm;
-                            double t_fb_sq = r2 * inv_vsq;
-                            double t_ff = t_ff_sq * fast_rsqrt(t_ff_sq + EPS);
-                            double t_fb = t_fb_sq * fast_rsqrt(t_fb_sq + EPS);
-
-                            double inv_r2 = inv_r * inv_r;
-                            double r_dot_v = dx*dvx + dy*dvy + dz*dvz;
-
-                            double c_ff = 1.5 * r_dot_v * inv_r2;
-                            double c_fb = r_dot_v * inv_r2 * (1.0 + G * mass_sum * inv_r * inv_vsq);
-
-                            double ct_ff = c_ff * t_ff_sq;
-                            double s_ff = 1.0 + c_ff * ct_ff;
-                            double u_ff = s_ff * fast_rsqrt(s_ff);
-                            double t_sym_ff = t_ff + ct_ff / (u_ff + 1.0);
-
-                            double ct_fb = c_fb * t_fb_sq;
-                            double s_fb = 1.0 + c_fb * ct_fb;
-                            double u_fb = s_fb * fast_rsqrt(s_fb);
-                            double t_sym_fb = t_fb + ct_fb / (u_fb + 1.0);
-
+                            double t_sym_ff, t_sym_fb;
+                            symmetrized_timestep(r2, inv_r, dx, dy, dz, dvx, dvy, dvz, G, mass_sum, t_sym_ff, t_sym_fb);
                             t_min_sq = Kokkos::fmin(t_min_sq,
                                        Kokkos::fmin(eta_ff_sq * t_sym_ff * t_sym_ff, eta_fb_sq * t_sym_fb * t_sym_fb));
                         }

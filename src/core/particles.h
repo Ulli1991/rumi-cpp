@@ -25,8 +25,8 @@ struct Particles {
     Kokkos::View<double*[4], Kokkos::LayoutRight> vel_packed;
 
     // Level partitioning (host-side)
-    int* level_start = nullptr;
-    int* level_count = nullptr;
+    std::vector<int> level_start;
+    std::vector<int> level_count;
     int n_levels = 0;
 
     // Cached device View for level timesteps (avoids reallocation every step)

@@ -233,16 +233,20 @@ void Octree::build(Particles& p, int start, int count, double theta_param) {
 
     n_cells = (int)cells.size();
 
-    // 5. Upload to device
-    cell_com = Kokkos::View<double*[4], Kokkos::LayoutRight>("cell_com", n_cells);
-    cell_vel = Kokkos::View<double*[3], Kokkos::LayoutRight>("cell_vel", n_cells);
-    cell_size_sq_theta = Kokkos::View<double*>("cell_size_sq_theta", n_cells);
-    cell_children = Kokkos::View<int*[8], Kokkos::LayoutRight>("cell_children", n_cells);
-    cell_pbeg = Kokkos::View<int*>("cell_pbeg", n_cells);
-    cell_pend = Kokkos::View<int*>("cell_pend", n_cells);
-    cell_is_leaf = Kokkos::View<int*>("cell_is_leaf", n_cells);
-    sorted_indices = Kokkos::View<int*>("sorted_indices", count);
-    sorted_pos = Kokkos::View<double*[4], Kokkos::LayoutRight>("sorted_pos", count);
+    // 5. Upload to device (only reallocate if capacity insufficient)
+    if ((int)cell_com.extent(0) < n_cells) {
+        cell_com = Kokkos::View<double*[4], Kokkos::LayoutRight>("cell_com", n_cells);
+        cell_vel = Kokkos::View<double*[3], Kokkos::LayoutRight>("cell_vel", n_cells);
+        cell_size_sq_theta = Kokkos::View<double*>("cell_size_sq_theta", n_cells);
+        cell_children = Kokkos::View<int*[8], Kokkos::LayoutRight>("cell_children", n_cells);
+        cell_pbeg = Kokkos::View<int*>("cell_pbeg", n_cells);
+        cell_pend = Kokkos::View<int*>("cell_pend", n_cells);
+        cell_is_leaf = Kokkos::View<int*>("cell_is_leaf", n_cells);
+    }
+    if ((int)sorted_indices.extent(0) < count) {
+        sorted_indices = Kokkos::View<int*>("sorted_indices", count);
+        sorted_pos = Kokkos::View<double*[4], Kokkos::LayoutRight>("sorted_pos", count);
+    }
 
     auto h_cell_com = Kokkos::create_mirror_view(cell_com);
     auto h_cell_vel = Kokkos::create_mirror_view(cell_vel);
@@ -314,47 +318,48 @@ void Octree::build(Particles& p, int start, int count, double theta_param) {
 void Octree::make_groups() {
     n_groups = (n_particles + n_group - 1) / n_group;
 
-    group_start = Kokkos::View<int*>("group_start", n_groups);
-    group_count = Kokkos::View<int*>("group_count", n_groups);
-    group_center = Kokkos::View<double*[3]>("group_center", n_groups);
-    group_size = Kokkos::View<double*[3]>("group_size", n_groups);
-
-    auto h_gs = Kokkos::create_mirror_view(group_start);
-    auto h_gc = Kokkos::create_mirror_view(group_count);
-    auto h_gcen = Kokkos::create_mirror_view(group_center);
-    auto h_gsz = Kokkos::create_mirror_view(group_size);
-
-    auto h_sp = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), sorted_pos);
-
-    for (int g = 0; g < n_groups; g++) {
-        int gs = g * n_group;
-        int ge = std::min(gs + n_group, n_particles);
-        int gc = ge - gs;
-
-        h_gs(g) = gs;
-        h_gc(g) = gc;
-
-        double xmin = h_sp(gs, 0), xmax = h_sp(gs, 0);
-        double ymin = h_sp(gs, 1), ymax = h_sp(gs, 1);
-        double zmin = h_sp(gs, 2), zmax = h_sp(gs, 2);
-        for (int i = gs + 1; i < ge; i++) {
-            xmin = std::min(xmin, h_sp(i, 0)); xmax = std::max(xmax, h_sp(i, 0));
-            ymin = std::min(ymin, h_sp(i, 1)); ymax = std::max(ymax, h_sp(i, 1));
-            zmin = std::min(zmin, h_sp(i, 2)); zmax = std::max(zmax, h_sp(i, 2));
-        }
-
-        h_gcen(g, 0) = 0.5 * (xmin + xmax);
-        h_gcen(g, 1) = 0.5 * (ymin + ymax);
-        h_gcen(g, 2) = 0.5 * (zmin + zmax);
-        h_gsz(g, 0) = 0.5 * (xmax - xmin);
-        h_gsz(g, 1) = 0.5 * (ymax - ymin);
-        h_gsz(g, 2) = 0.5 * (zmax - zmin);
+    // Pre-allocate: only reallocate if too small
+    if ((int)group_start.extent(0) < n_groups) {
+        group_start = Kokkos::View<int*>("group_start", n_groups);
+        group_count = Kokkos::View<int*>("group_count", n_groups);
+        group_center = Kokkos::View<double*[3]>("group_center", n_groups);
+        group_size = Kokkos::View<double*[3]>("group_size", n_groups);
     }
 
-    Kokkos::deep_copy(group_start, h_gs);
-    Kokkos::deep_copy(group_count, h_gc);
-    Kokkos::deep_copy(group_center, h_gcen);
-    Kokkos::deep_copy(group_size, h_gsz);
+    // Compute group bounding boxes on GPU directly from sorted_pos
+    auto d_gs = group_start;
+    auto d_gc = group_count;
+    auto d_gcen = group_center;
+    auto d_gsz = group_size;
+    auto d_sp = sorted_pos;
+    int np = n_particles;
+    int ng = n_group;
+
+    Kokkos::parallel_for("make_groups", n_groups, KOKKOS_LAMBDA(int g) {
+        int gs = g * ng;
+        int ge = (gs + ng < np) ? gs + ng : np;
+        int gc = ge - gs;
+
+        d_gs(g) = gs;
+        d_gc(g) = gc;
+
+        double xmin = d_sp(gs, 0), xmax = d_sp(gs, 0);
+        double ymin = d_sp(gs, 1), ymax = d_sp(gs, 1);
+        double zmin = d_sp(gs, 2), zmax = d_sp(gs, 2);
+        for (int i = gs + 1; i < ge; i++) {
+            double xi = d_sp(i, 0), yi = d_sp(i, 1), zi = d_sp(i, 2);
+            xmin = (xi < xmin) ? xi : xmin; xmax = (xi > xmax) ? xi : xmax;
+            ymin = (yi < ymin) ? yi : ymin; ymax = (yi > ymax) ? yi : ymax;
+            zmin = (zi < zmin) ? zi : zmin; zmax = (zi > zmax) ? zi : zmax;
+        }
+
+        d_gcen(g, 0) = 0.5 * (xmin + xmax);
+        d_gcen(g, 1) = 0.5 * (ymin + ymax);
+        d_gcen(g, 2) = 0.5 * (zmin + zmax);
+        d_gsz(g, 0) = 0.5 * (xmax - xmin);
+        d_gsz(g, 1) = 0.5 * (ymax - ymin);
+        d_gsz(g, 2) = 0.5 * (zmax - zmin);
+    });
 }
 
 // ==========================================================================

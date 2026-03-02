@@ -1,4 +1,5 @@
 #include "mstar.h"
+#include "subsystem.h"
 #include <cmath>
 #include <cstring>
 #include <algorithm>
@@ -187,12 +188,8 @@ void regularized_integrate(Subsystem& sub, Particles& p,
     auto h_vy = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vy);
     auto h_vz = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vz);
     auto h_m = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.mass);
-    auto h_pid = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.particle_id);
 
-    int max_pid = 0;
-    for (int i = 0; i < p.N; i++) max_pid = std::max(max_pid, h_pid(i));
-    std::vector<int> pid_to_idx(max_pid + 1, -1);
-    for (int i = 0; i < p.N; i++) pid_to_idx[h_pid(i)] = i;
+    const auto& pid_to_idx = g_subsystem_mgr.pid_to_idx();
 
     for (int b = 0; b < sub.n_bodies && b < MSTAR_MAX_BODIES; b++) {
         int idx = pid_to_idx[sub.particle_ids[b]];

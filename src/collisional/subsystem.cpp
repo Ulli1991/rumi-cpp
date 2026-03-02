@@ -13,6 +13,23 @@
 SubsystemManager g_subsystem_mgr;
 
 // ============================================================================
+// Cached pid → array index map
+// ============================================================================
+
+void SubsystemManager::rebuild_pid_to_idx(const Particles& p) {
+    auto h_pid = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.particle_id);
+    int max_pid = 0;
+    for (int i = 0; i < p.N; i++) max_pid = std::max(max_pid, h_pid(i));
+    if ((int)pid_to_idx_.size() < max_pid + 1) {
+        pid_to_idx_.resize(max_pid + 1, -1);
+    } else {
+        std::fill(pid_to_idx_.begin(), pid_to_idx_.end(), -1);
+    }
+    for (int i = 0; i < p.N; i++) pid_to_idx_[h_pid(i)] = i;
+    pid_to_idx_max_ = max_pid;
+}
+
+// ============================================================================
 // GPU buffer allocation
 // ============================================================================
 
@@ -128,11 +145,10 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
     auto h_pid = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.particle_id);
     auto h_dt  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.dt_adapt);
 
-    // Build mapping from particle_id to array index
-    int max_pid = 0;
-    for (int i = 0; i < p.N; i++) max_pid = std::max(max_pid, h_pid(i));
-    std::vector<int> pid_to_idx(max_pid + 1, -1);
-    for (int i = 0; i < p.N; i++) pid_to_idx[h_pid(i)] = i;
+    // Rebuild cached pid → index mapping
+    rebuild_pid_to_idx(p);
+    const auto& pid_to_idx = pid_to_idx_;
+    int max_pid = pid_to_idx_max_;
 
     // Sort pairs by (min_pid, max_pid) for determinism across MPI ranks
     struct PairInfo {
@@ -396,26 +412,22 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
 // ============================================================================
 
 void SubsystemManager::update_particle_flags(Particles& p) const {
-    if (active.empty()) return;
-
     // Reset all to -1
     auto sid = p.subsystem_id;
     int N = p.N;
     Kokkos::parallel_for("reset_sid", N, KOKKOS_LAMBDA(int i) { sid(i) = -1; });
 
-    // Build mapping on host: particle_id -> subsystem_id
-    auto h_pid = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.particle_id);
+    if (active.empty()) return;
+
+    // Use cached pid → index mapping (O(S*M) instead of O(N*S*M))
+    const auto& p2i = pid_to_idx_;
     auto h_sid = Kokkos::create_mirror_view(p.subsystem_id);
     for (int i = 0; i < N; i++) h_sid(i) = -1;
 
     for (const auto& sub : active) {
         for (int pid : sub.particle_ids) {
-            for (int i = 0; i < N; i++) {
-                if (h_pid(i) == pid) {
-                    h_sid(i) = sub.id;
-                    break;
-                }
-            }
+            int idx = (pid < (int)p2i.size()) ? p2i[pid] : -1;
+            if (idx >= 0) h_sid(idx) = sub.id;
         }
     }
     Kokkos::deep_copy(p.subsystem_id, h_sid);
@@ -438,13 +450,7 @@ void SubsystemManager::enforce_shared_timestep(Particles& p) const {
     if (active.empty()) return;
 
     auto h_dt = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.dt_adapt);
-    auto h_pid = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.particle_id);
-
-    // Build pid->idx mapping
-    int max_pid = 0;
-    for (int i = 0; i < p.N; i++) max_pid = std::max(max_pid, h_pid(i));
-    std::vector<int> pid_to_idx(max_pid + 1, -1);
-    for (int i = 0; i < p.N; i++) pid_to_idx[h_pid(i)] = i;
+    const auto& pid_to_idx = pid_to_idx_;
 
     // For each subsystem, find min dt and set all members to it
     for (const auto& sub : active) {
@@ -492,13 +498,7 @@ void SubsystemManager::apply_perturbation_timestep(Particles& p, double G, doubl
     auto h_az = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.az);
     auto h_m  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.mass);
     auto h_dt = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.dt_adapt);
-    auto h_pid = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.particle_id);
-
-    // Build pid->idx mapping
-    int max_pid = 0;
-    for (int i = 0; i < p.N; i++) max_pid = std::max(max_pid, h_pid(i));
-    std::vector<int> pid_to_idx(max_pid + 1, -1);
-    for (int i = 0; i < p.N; i++) pid_to_idx[h_pid(i)] = i;
+    const auto& pid_to_idx = pid_to_idx_;
 
     bool modified = false;
 
@@ -620,7 +620,7 @@ void SubsystemManager::apply_perturbation_timestep(Particles& p, double G, doubl
             std::vector<int> idxs;
             bool skip = false;
             for (int pid : sub.particle_ids) {
-                int idx = (pid <= max_pid) ? pid_to_idx[pid] : -1;
+                int idx = (pid < (int)pid_to_idx.size()) ? pid_to_idx[pid] : -1;
                 if (idx < 0) { skip = true; break; }
                 idxs.push_back(idx);
                 double m = h_m(idx);
@@ -692,7 +692,7 @@ void SubsystemManager::apply_perturbation_timestep(Particles& p, double G, doubl
 
         // Clamp dt_adapt of all members
         for (int pid : sub.particle_ids) {
-            int idx = (pid <= max_pid) ? pid_to_idx[pid] : -1;
+            int idx = (pid < (int)pid_to_idx.size()) ? pid_to_idx[pid] : -1;
             if (idx >= 0 && dt_pert < h_dt(idx)) {
                 h_dt(idx) = dt_pert;
                 modified = true;

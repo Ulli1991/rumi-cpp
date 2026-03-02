@@ -8,7 +8,7 @@
 #ifdef ENABLE_COLLISIONAL
 #include "collisional_config.h"
 #include "subsystem.h"
-#include "logh_gpu.h"
+#include "logh_batch.h"
 #include "post_newtonian.h"
 #include "secular.h"
 #include "mergers.h"
@@ -296,12 +296,7 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
     if (!p.collisional || g_subsystem_mgr.active.empty()) return;
 
     // Find which subsystems have ALL members in [start, start+count)
-    // Build pid->idx mapping on host
-    auto h_pid = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.particle_id);
-    int max_pid = 0;
-    for (int i = 0; i < p.N; i++) max_pid = std::max(max_pid, h_pid(i));
-    std::vector<int> pid_to_idx(max_pid + 1, -1);
-    for (int i = 0; i < p.N; i++) pid_to_idx[h_pid(i)] = i;
+    const auto& pid_to_idx = g_subsystem_mgr.pid_to_idx();
 
     // Filter: only subsystems fully contained in [start, start+count)
     std::vector<int> eligible;
@@ -310,7 +305,7 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
         const auto& sub = g_subsystem_mgr.active[s];
         bool all_in = true;
         for (int pid : sub.particle_ids) {
-            int idx = (pid <= max_pid) ? pid_to_idx[pid] : -1;
+            int idx = (pid < (int)pid_to_idx.size()) ? pid_to_idx[pid] : -1;
             if (idx < start || idx >= end) { all_in = false; break; }
         }
         if (all_in) eligible.push_back(s);
@@ -318,16 +313,18 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
 
     if (eligible.empty()) return;
 
+    // Single D2H copy of particle data — reused across reclassification, secular, and LogH
+    auto h_x  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.x);
+    auto h_y  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.y);
+    auto h_z  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.z);
+    auto h_vx = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vx);
+    auto h_vy = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vy);
+    auto h_vz = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vz);
+    auto h_m  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.mass);
+
     // Re-evaluate secular/LogH classification from current orbital state.
     // Subsystems persist across steps, so the detection-time is_secular may be stale.
     {
-        auto h_x  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.x);
-        auto h_y  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.y);
-        auto h_z  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.z);
-        auto h_vx = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vx);
-        auto h_vy = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vy);
-        auto h_vz = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vz);
-        auto h_m  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.mass);
 
         int n_orb_secular = g_collisional.n_orb_secular;
 
@@ -385,9 +382,9 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
                 }
                 if (inner_j < 0) continue;
 
-                int idx_i = (inner_i <= max_pid) ? pid_to_idx[inner_i] : -1;
-                int idx_j = (inner_j <= max_pid) ? pid_to_idx[inner_j] : -1;
-                int idx_o = (outer_pid <= max_pid) ? pid_to_idx[outer_pid] : -1;
+                int idx_i = (inner_i < (int)pid_to_idx.size()) ? pid_to_idx[inner_i] : -1;
+                int idx_j = (inner_j < (int)pid_to_idx.size()) ? pid_to_idx[inner_j] : -1;
+                int idx_o = (outer_pid < (int)pid_to_idx.size()) ? pid_to_idx[outer_pid] : -1;
                 if (idx_i < 0 || idx_j < 0 || idx_o < 0) continue;
 
                 double m1 = h_m(idx_i), m2 = h_m(idx_j), m3 = h_m(idx_o);
@@ -453,15 +450,6 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
 
     // --- Secular binaries: evolve on host ---
     if (!secular_idx.empty()) {
-        // Copy particle data to host
-        auto h_x  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.x);
-        auto h_y  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.y);
-        auto h_z  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.z);
-        auto h_vx = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vx);
-        auto h_vy = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vy);
-        auto h_vz = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vz);
-        auto h_m  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.mass);
-
         for (int s : secular_idx) {
             const auto& sub = g_subsystem_mgr.active[s];
             int idx0 = pid_to_idx[sub.particle_ids[0]];
@@ -522,14 +510,6 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
 
     // --- Secular triples: Kozai-Lidov + GW dissipation ---
     if (!secular_triple_idx.empty()) {
-        auto h_x  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.x);
-        auto h_y  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.y);
-        auto h_z  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.z);
-        auto h_vx = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vx);
-        auto h_vy = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vy);
-        auto h_vz = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vz);
-        auto h_m  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.mass);
-
         for (int s : secular_triple_idx) {
             g_subsystem_mgr.step_secular_triples++;
             const auto& sub = g_subsystem_mgr.active[s];
@@ -661,23 +641,25 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
             // Reconstruct absolute coordinates
             // Total CM
             double M_tot = M12 + m3;
-            double cm_tot_x = (M12*cm_x + m3*h_x(idx2)) / M_tot;
-            double cm_tot_y = (M12*cm_y + m3*h_y(idx2)) / M_tot;
-            double cm_tot_z = (M12*cm_z + m3*h_z(idx2)) / M_tot;
-            double cm_tot_vx = (M12*cm_vx + m3*h_vx(idx2)) / M_tot;
-            double cm_tot_vy = (M12*cm_vy + m3*h_vy(idx2)) / M_tot;
-            double cm_tot_vz = (M12*cm_vz + m3*h_vz(idx2)) / M_tot;
+            double cm_tot[3] = {
+                (M12*cm_x + m3*h_x(idx2)) / M_tot,
+                (M12*cm_y + m3*h_y(idx2)) / M_tot,
+                (M12*cm_z + m3*h_z(idx2)) / M_tot
+            };
+            double cm_tot_v[3] = {
+                (M12*cm_vx + m3*h_vx(idx2)) / M_tot,
+                (M12*cm_vy + m3*h_vy(idx2)) / M_tot,
+                (M12*cm_vz + m3*h_vz(idx2)) / M_tot
+            };
 
             // Drift total CM
-            cm_tot_x += cm_tot_vx * dt;
-            cm_tot_y += cm_tot_vy * dt;
-            cm_tot_z += cm_tot_vz * dt;
+            for (int k = 0; k < 3; k++) cm_tot[k] += cm_tot_v[k] * dt;
 
             // Outer orbit positions: CM_inner and particle 3
             double cm_in_new[3], v_cm_in_new[3];
             for (int k = 0; k < 3; k++) {
-                cm_in_new[k] = (&cm_tot_x)[k] - (m3/M_tot) * r_out_new[k];
-                v_cm_in_new[k] = (&cm_tot_vx)[k] - (m3/M_tot) * v_out_new[k];
+                cm_in_new[k] = cm_tot[k] - (m3/M_tot) * r_out_new[k];
+                v_cm_in_new[k] = cm_tot_v[k] - (m3/M_tot) * v_out_new[k];
             }
 
             // Inner binary: particle 0 and 1
@@ -695,12 +677,12 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
             h_vy(idx1) = v_cm_in_new[1] + (m1/M12)*v_in_new[1];
             h_vz(idx1) = v_cm_in_new[2] + (m1/M12)*v_in_new[2];
 
-            h_x(idx2) = cm_tot_x + (M12/M_tot)*r_out_new[0];
-            h_y(idx2) = cm_tot_y + (M12/M_tot)*r_out_new[1];
-            h_z(idx2) = cm_tot_z + (M12/M_tot)*r_out_new[2];
-            h_vx(idx2) = cm_tot_vx + (M12/M_tot)*v_out_new[0];
-            h_vy(idx2) = cm_tot_vy + (M12/M_tot)*v_out_new[1];
-            h_vz(idx2) = cm_tot_vz + (M12/M_tot)*v_out_new[2];
+            h_x(idx2) = cm_tot[0] + (M12/M_tot)*r_out_new[0];
+            h_y(idx2) = cm_tot[1] + (M12/M_tot)*r_out_new[1];
+            h_z(idx2) = cm_tot[2] + (M12/M_tot)*r_out_new[2];
+            h_vx(idx2) = cm_tot_v[0] + (M12/M_tot)*v_out_new[0];
+            h_vy(idx2) = cm_tot_v[1] + (M12/M_tot)*v_out_new[1];
+            h_vz(idx2) = cm_tot_v[2] + (M12/M_tot)*v_out_new[2];
         }
 
         Kokkos::deep_copy(p.x, h_x);
@@ -723,30 +705,24 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
         for (int s : logh_idx) {
             logh_mgr.active.push_back(g_subsystem_mgr.active[s]);
         }
+        logh_mgr.rebuild_pid_to_idx(p);
 
         const int n_sub = (int)logh_mgr.active.size();
         const double eta_restart = g_collisional.eta_restart;
         constexpr int MAX_SUBDIV = 8;  // max 2^8 = 256 sub-steps
 
         // Save pre-integration state for subsystem members (needed for restart)
+        // Reuse host mirrors from top of function (already up-to-date after secular evolution)
         struct SavedBody { double x, y, z, vx, vy, vz; };
         std::vector<std::vector<SavedBody>> saved_bodies(n_sub);
         std::vector<Subsystem> saved_subs(logh_mgr.active.begin(), logh_mgr.active.end());
-        {
-            auto hx  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.x);
-            auto hy  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.y);
-            auto hz  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.z);
-            auto hvx = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vx);
-            auto hvy = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vy);
-            auto hvz = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vz);
-            for (int si = 0; si < n_sub; si++) {
-                const auto& sub = logh_mgr.active[si];
-                saved_bodies[si].resize(sub.n_bodies);
-                for (int b = 0; b < sub.n_bodies; b++) {
-                    int idx = pid_to_idx[sub.particle_ids[b]];
-                    saved_bodies[si][b] = {hx(idx), hy(idx), hz(idx),
-                                           hvx(idx), hvy(idx), hvz(idx)};
-                }
+        for (int si = 0; si < n_sub; si++) {
+            const auto& sub = logh_mgr.active[si];
+            saved_bodies[si].resize(sub.n_bodies);
+            for (int b = 0; b < sub.n_bodies; b++) {
+                int idx = pid_to_idx[sub.particle_ids[b]];
+                saved_bodies[si][b] = {h_x(idx), h_y(idx), h_z(idx),
+                                       h_vx(idx), h_vy(idx), h_vz(idx)};
             }
         }
 
@@ -784,32 +760,33 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
                         (int)failed.size(), n_sub, eta_restart);
 
             // Helper: restore failed subsystems' particle state from saved copy
+            // Refresh host mirrors from device (LogH modified positions), then overwrite failed members
             auto restore_failed = [&]() {
-                auto hx  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.x);
-                auto hy  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.y);
-                auto hz  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.z);
-                auto hvx = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vx);
-                auto hvy = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vy);
-                auto hvz = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vz);
+                Kokkos::deep_copy(h_x, p.x);
+                Kokkos::deep_copy(h_y, p.y);
+                Kokkos::deep_copy(h_z, p.z);
+                Kokkos::deep_copy(h_vx, p.vx);
+                Kokkos::deep_copy(h_vy, p.vy);
+                Kokkos::deep_copy(h_vz, p.vz);
                 for (int si : failed) {
                     const auto& sub = saved_subs[si];
                     for (int b = 0; b < sub.n_bodies; b++) {
                         int idx = pid_to_idx[sub.particle_ids[b]];
-                        hx(idx)  = saved_bodies[si][b].x;
-                        hy(idx)  = saved_bodies[si][b].y;
-                        hz(idx)  = saved_bodies[si][b].z;
-                        hvx(idx) = saved_bodies[si][b].vx;
-                        hvy(idx) = saved_bodies[si][b].vy;
-                        hvz(idx) = saved_bodies[si][b].vz;
+                        h_x(idx)  = saved_bodies[si][b].x;
+                        h_y(idx)  = saved_bodies[si][b].y;
+                        h_z(idx)  = saved_bodies[si][b].z;
+                        h_vx(idx) = saved_bodies[si][b].vx;
+                        h_vy(idx) = saved_bodies[si][b].vy;
+                        h_vz(idx) = saved_bodies[si][b].vz;
                     }
                     logh_mgr.active[si] = saved_subs[si];
                 }
-                Kokkos::deep_copy(p.x, hx);
-                Kokkos::deep_copy(p.y, hy);
-                Kokkos::deep_copy(p.z, hz);
-                Kokkos::deep_copy(p.vx, hvx);
-                Kokkos::deep_copy(p.vy, hvy);
-                Kokkos::deep_copy(p.vz, hvz);
+                Kokkos::deep_copy(p.x, h_x);
+                Kokkos::deep_copy(p.y, h_y);
+                Kokkos::deep_copy(p.z, h_z);
+                Kokkos::deep_copy(p.vx, h_vx);
+                Kokkos::deep_copy(p.vy, h_vy);
+                Kokkos::deep_copy(p.vz, h_vz);
             };
 
             restore_failed();
@@ -821,6 +798,7 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
 
                 SubsystemManager retry_mgr;
                 for (int si : failed) retry_mgr.active.push_back(logh_mgr.active[si]);
+                retry_mgr.rebuild_pid_to_idx(p);
 
                 bool all_passed = true;
                 double worst_dE = 0;
@@ -1184,7 +1162,7 @@ static void hhs_fsi_step_dynamic_impl(Particles& p, int start, int count, double
 #endif
         // Step 2: Timestep computation (with subsystem exclusion active)
         g_profiler.start();
-        compute_timestep_subset(p, start, count, G, soft2, eta, true);
+        compute_timestep_subset(p, start, count, G, soft2, eta);
 #ifdef ENABLE_COLLISIONAL
         // Gradient timestep criteria (BIFROST Section 3.4.4)
         if (p.collisional && g_collisional.eta_grad > 0.0) {
@@ -2445,8 +2423,7 @@ static void self_acceleration_and_timestep_ring(DistributedParticles& dp, int st
 
 // Timestep: ALL i-particles from this rank's j-chunk, then allreduce(MIN)
 static void compute_timestep_ring(DistributedParticles& dp, int start, int count,
-                                   double G, double soft2, double eta,
-                                   bool symmetrize = false) {
+                                   double G, double soft2, double eta) {
     if (count <= 1) return;
 
     int j_start, j_count;
@@ -2471,8 +2448,6 @@ static void compute_timestep_ring(DistributedParticles& dp, int start, int count
     double eta_ff_v = eta;
     double eta_fb_v = eta;
 #endif
-    double eta_ff_sq = eta_ff_v * eta_ff_v;
-    double eta_fb_sq = eta_fb_v * eta_fb_v;
 
     using team_policy = Kokkos::TeamPolicy<>;
     using member_type = team_policy::member_type;
@@ -2509,8 +2484,7 @@ static void compute_timestep_ring(DistributedParticles& dp, int start, int count
 #endif
             }
 
-            double t_min_sq = 1e60;   // non-symmetrized path
-            double t_min_i = 1e30;    // symmetrized path
+            double t_min_i = 1e30;
 #ifdef ENABLE_COLLISIONAL
             double jerk_x = 0, jerk_y = 0, jerk_z = 0;
             double acc_xi = 0, acc_yi = 0, acc_zi = 0;  // fresh subset acceleration for jerk criterion
@@ -2556,7 +2530,8 @@ static void compute_timestep_ring(DistributedParticles& dp, int start, int count
                         double mj = tile(jb+3);
                         double mass_sum = mi + mj;
 
-                        if (symmetrize) {
+                        // Symmetrized timestep (always on)
+                        {
                             double inv_Gm = 1.0 / (G * mass_sum + EPS);
                             double inv_vsq = 1.0 / (v_sq + EPS);
                             double t_ff_sq = r3 * inv_Gm;
@@ -2581,11 +2556,6 @@ static void compute_timestep_ring(DistributedParticles& dp, int start, int count
                             double t_sym_fb = t_fb + ct_fb / (u_fb + 1.0);
 
                             t_min_i = Kokkos::fmin(t_min_i, Kokkos::fmin(eta_ff_v * t_sym_ff, eta_fb_v * t_sym_fb));
-                        } else {
-                            double t_ff_sq = r3 / (G * mass_sum + EPS);
-                            double t_fb_sq = r2s / (v_sq + EPS);
-                            double t_min_sq_pair = Kokkos::fmin(eta_ff_sq * t_ff_sq, eta_fb_sq * t_fb_sq);
-                            t_min_sq = Kokkos::fmin(t_min_sq, t_min_sq_pair);
                         }
 
 #ifdef ENABLE_COLLISIONAL
@@ -2611,7 +2581,7 @@ static void compute_timestep_ring(DistributedParticles& dp, int start, int count
             }
 
             if (ii < icnt) {
-                dt_f(i) = symmetrize ? t_min_i : Kokkos::sqrt(t_min_sq);
+                dt_f(i) = t_min_i;
 #ifdef ENABLE_COLLISIONAL
                 // Jerk timestep: dt_jerk = eta_j * |a| / |j| (BIFROST §3.4.5)
                 // Uses freshly accumulated subset acceleration, not stale p.ax/ay/az
@@ -3416,8 +3386,7 @@ static void cross_acceleration_and_gradient_distributed(DistributedParticles& dp
 
 // Distributed adaptive timestep computation - tiled GPU kernel
 static void compute_timestep_distributed(DistributedParticles& dp, int start, int count,
-                                      double G, double soft2, double eta,
-                                      bool symmetrize = true) {
+                                      double G, double soft2, double eta) {
     if (count <= 1) return;
 
 
@@ -3447,8 +3416,6 @@ static void compute_timestep_distributed(DistributedParticles& dp, int start, in
     double eta_ff_v = eta;
     double eta_fb_v = eta;
 #endif
-    double eta_ff_sq = eta_ff_v * eta_ff_v;
-    double eta_fb_sq = eta_fb_v * eta_fb_v;
 
     const int j_start = start;
     const int j_end = start + count;
@@ -3485,8 +3452,7 @@ static void compute_timestep_distributed(DistributedParticles& dp, int start, in
 #endif
             }
 
-            double t_min_sq = 1e60;   // non-symmetrized path
-            double t_min_i = 1e30;    // symmetrized path
+            double t_min_i = 1e30;
 #ifdef ENABLE_COLLISIONAL
             double jerk_x = 0, jerk_y = 0, jerk_z = 0;
             double acc_xi = 0, acc_yi = 0, acc_zi = 0;  // fresh subset acceleration for jerk criterion
@@ -3531,7 +3497,8 @@ static void compute_timestep_distributed(DistributedParticles& dp, int start, in
                         double mass_sum = mi + mj;
                         double r3 = r2s * r2s * inv_r;
 
-                        if (symmetrize) {
+                        // Symmetrized timestep (always on)
+                        {
                             double inv_Gm = 1.0 / (G * mass_sum + EPS);
                             double inv_vsq = 1.0 / (v_sq + EPS);
                             double t_ff_sq = r3 * inv_Gm;
@@ -3556,11 +3523,6 @@ static void compute_timestep_distributed(DistributedParticles& dp, int start, in
                             double t_sym_fb = t_fb + ct_fb / (u_fb + 1.0);
 
                             t_min_i = Kokkos::fmin(t_min_i, Kokkos::fmin(eta_ff_v * t_sym_ff, eta_fb_v * t_sym_fb));
-                        } else {
-                            double t_ff_sq = r3 / (G * mass_sum + EPS);
-                            double t_fb_sq = r2s / (v_sq + EPS);
-                            double t_min_sq_pair = Kokkos::fmin(eta_ff_sq * t_ff_sq, eta_fb_sq * t_fb_sq);
-                            t_min_sq = Kokkos::fmin(t_min_sq, t_min_sq_pair);
                         }
 
 #ifdef ENABLE_COLLISIONAL
@@ -3586,7 +3548,7 @@ static void compute_timestep_distributed(DistributedParticles& dp, int start, in
             }
 
             if (ii < slice_count) {
-                dt_f(i) = symmetrize ? t_min_i : Kokkos::sqrt(t_min_sq);
+                dt_f(i) = t_min_i;
 #ifdef ENABLE_COLLISIONAL
                 // Jerk timestep: dt_jerk = eta_j * |a| / |j| (BIFROST §3.4.5)
                 // Uses freshly accumulated subset acceleration, not stale p.ax/ay/az
@@ -4416,7 +4378,7 @@ static void hhs_fsi_recursive_local(
 #endif
         // Step 2: Timestep computation (with subsystem exclusion active)
         g_profiler.start();
-        compute_timestep_subset(p, start, count, G, soft2, eta, true);
+        compute_timestep_subset(p, start, count, G, soft2, eta);
 #ifdef ENABLE_COLLISIONAL
         // Gradient timestep criteria (BIFROST Section 3.4.4)
         if (p.collisional && g_collisional.eta_grad > 0.0) {
@@ -4702,9 +4664,9 @@ static void hhs_fsi_recursive_distributed(
             dp.local.pack_pos_range(start, count);
             dp.local.pack_vel_range(start, count);
 #ifdef MPI_TOPOLOGY_RING
-                compute_timestep_ring(dp, start, count, G, soft2, eta, true);
+                compute_timestep_ring(dp, start, count, G, soft2, eta);
 #else
-                compute_timestep_distributed(dp, start, count, G, soft2, eta, true);
+                compute_timestep_distributed(dp, start, count, G, soft2, eta);
 #endif
         }
 #ifdef ENABLE_COLLISIONAL

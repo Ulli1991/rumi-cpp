@@ -38,7 +38,7 @@ if(ENABLE_COLLISIONAL)
         ${SRC_DIR}/collisional/subsystem.cpp
         ${SRC_DIR}/collisional/logh.cpp
         ${SRC_DIR}/collisional/gbs.cpp
-        ${SRC_DIR}/collisional/logh_gpu.cpp
+        ${SRC_DIR}/collisional/logh_batch.cpp
         ${SRC_DIR}/collisional/secular.cpp
         ${SRC_DIR}/collisional/post_newtonian.cpp
         ${SRC_DIR}/collisional/mergers.cpp
@@ -62,7 +62,8 @@ if(ENABLE_COLLISIONAL)
     message(STATUS "Collisional (unsoftened direct N-body) support enabled")
 endif()
 target_link_libraries(nbody-kokkos Kokkos::kokkos)
-target_compile_options(nbody-kokkos PRIVATE -O3)
+target_compile_features(nbody-kokkos PRIVATE cxx_std_17)
+target_compile_options(nbody-kokkos PRIVATE -O3 -march=native)
 
 # Add MPI support if enabled
 if(USE_MPI)

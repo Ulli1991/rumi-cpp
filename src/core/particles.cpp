@@ -29,8 +29,8 @@ void Particles::allocate(int n, bool collisional_mode) {
         Kokkos::deep_copy(orig_index, h);
     }
 
-    level_start = nullptr;
-    level_count = nullptr;
+    level_start.clear();
+    level_count.clear();
     n_levels = 0;
 
     scratch1  = Kokkos::View<double*>("s1", n);
@@ -106,8 +106,8 @@ void Particles::deallocate() {
     spin_vec = Kokkos::View<double*[3], Kokkos::LayoutRight>();
     spin_mag = dt_level0 = grad_mag = Kokkos::View<double*>();
 
-    std::free(level_start); level_start = nullptr;
-    std::free(level_count); level_count = nullptr;
+    level_start.clear();
+    level_count.clear();
     N = 0; n_levels = 0;
     collisional = false;
 }
@@ -283,11 +283,9 @@ int Particles::compact_remove_zero_mass() {
 void Particles::partition_by_level() {
     if (N == 0 || n_levels == 0) return;
 
-    // Realloc level_count / level_start on host
-    std::free(level_count);
-    std::free(level_start);
-    level_count = static_cast<int*>(std::calloc(n_levels, sizeof(int)));
-    level_start = static_cast<int*>(std::calloc(n_levels, sizeof(int)));
+    // Resize level_count / level_start on host
+    level_count.assign(n_levels, 0);
+    level_start.assign(n_levels, 0);
 
     // Step 1: Count particles per level and compute prefix sums
     // Use prefix scans per level for deterministic counting

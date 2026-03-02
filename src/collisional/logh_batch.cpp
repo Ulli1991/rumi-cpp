@@ -1,4 +1,4 @@
-#include "logh_gpu.h"
+#include "logh_batch.h"
 #include "logh.h"
 #include "gbs.h"
 #include "collisional_config.h"
@@ -13,6 +13,12 @@ SubsystemBatch g_logh_batch;
 // ============================================================================
 
 void SubsystemBatch::allocate(int n_sub, int total_bodies) {
+    // Skip reallocation if existing views are large enough
+    if (flat_mass.extent(0) >= (size_t)total_bodies &&
+        n_bodies.extent(0) >= (size_t)n_sub) {
+        n_subsystems = n_sub;
+        return;
+    }
     n_subsystems = n_sub;
     n_bodies      = Kokkos::View<int*>("batch_nbod", n_sub);
     offset        = Kokkos::View<int*>("batch_off", n_sub);
@@ -50,13 +56,10 @@ void SubsystemBatch::pack(const SubsystemManager& mgr, const Particles& p,
     auto h_vy = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vy);
     auto h_vz = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vz);
     auto h_m  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.mass);
-    auto h_pid = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.particle_id);
 
-    // Build pid->idx
-    int max_pid = 0;
-    for (int i = 0; i < p.N; i++) max_pid = std::max(max_pid, h_pid(i));
-    std::vector<int> pid_to_idx(max_pid + 1, -1);
-    for (int i = 0; i < p.N; i++) pid_to_idx[h_pid(i)] = i;
+    // Use cached pid->idx from SubsystemManager
+    const auto& pid_to_idx = mgr.pid_to_idx();
+    int max_pid = mgr.pid_to_idx_max();
 
     // Pack on host
     auto h_nbod = Kokkos::create_mirror_view(n_bodies);
@@ -169,15 +172,12 @@ void SubsystemBatch::unpack(SubsystemManager& mgr, Particles& p) {
     auto h_vy = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vy);
     auto h_vz = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vz);
     auto h_m  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.mass);
-    auto h_pid = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.particle_id);
 
     // Also get flat_mass host mirror (has updated masses after mergers)
     auto h_mass_flat = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), flat_mass);
 
-    int max_pid = 0;
-    for (int i = 0; i < p.N; i++) max_pid = std::max(max_pid, h_pid(i));
-    std::vector<int> pid_to_idx(max_pid + 1, -1);
-    for (int i = 0; i < p.N; i++) pid_to_idx[h_pid(i)] = i;
+    // Use cached pid->idx from SubsystemManager
+    const auto& pid_to_idx = mgr.pid_to_idx();
 
     auto h_off = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), offset);
 

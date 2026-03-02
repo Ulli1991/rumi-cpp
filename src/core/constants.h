@@ -55,7 +55,7 @@ struct RawView {
 };
 
 // Tile size for shared memory tiling in all N^2 GPU kernels
-constexpr int TILE_SIZE = 256;
+constexpr int TILE_SIZE = 128;
 
 // Harmonic symmetrization factor for timestep (FROST paper Eq. 23)
 // f(d) = (d + sqrt(1 + d²) - 1) / d  for |d| > eps, else 1.0
@@ -66,6 +66,42 @@ KOKKOS_INLINE_FUNCTION double harmonic_sym_factor(double d) {
     double s = 1.0 + d2;
     double sqrt_s = s * fast_rsqrt(s);
     return (d + sqrt_s - 1.0) / d;
+}
+
+// Symmetrized pairwise timestep (FROST Eq. 23)
+// Computes t_ff and t_fb symmetrized by harmonic predictor.
+// r2 may be softened (r2+soft2) or raw. inv_r = 1/sqrt(r2).
+KOKKOS_INLINE_FUNCTION
+void symmetrized_timestep(double r2, double inv_r,
+                           double dx, double dy, double dz,
+                           double dvx, double dvy, double dvz,
+                           double G, double mass_sum,
+                           double& t_sym_ff, double& t_sym_fb) {
+    double v_sq = dvx*dvx + dvy*dvy + dvz*dvz;
+    double inv_Gm  = 1.0 / (G * mass_sum + EPS);
+    double inv_vsq = 1.0 / (v_sq + EPS);
+
+    double r3 = r2 * r2 * inv_r;
+    double t_ff_sq = r3 * inv_Gm;
+    double t_fb_sq = r2 * inv_vsq;
+    double t_ff = t_ff_sq * fast_rsqrt(t_ff_sq + EPS);
+    double t_fb = t_fb_sq * fast_rsqrt(t_fb_sq + EPS);
+
+    double inv_r2 = inv_r * inv_r;
+    double r_dot_v = dx*dvx + dy*dvy + dz*dvz;
+
+    double c_ff = 1.5 * r_dot_v * inv_r2;
+    double c_fb = r_dot_v * inv_r2 * (1.0 + G * mass_sum * inv_r * inv_vsq);
+
+    double ct_ff = c_ff * t_ff_sq;
+    double s_ff = 1.0 + c_ff * ct_ff;
+    double u_ff = s_ff * fast_rsqrt(s_ff);
+    t_sym_ff = t_ff + ct_ff / (u_ff + 1.0);
+
+    double ct_fb = c_fb * t_fb_sq;
+    double s_fb = 1.0 + c_fb * ct_fb;
+    double u_fb = s_fb * fast_rsqrt(s_fb);
+    t_sym_fb = t_fb + ct_fb / (u_fb + 1.0);
 }
 
 // Speed of light in code units (km/s)

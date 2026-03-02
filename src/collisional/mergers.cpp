@@ -120,14 +120,10 @@ std::vector<MergerEvent> detect_mergers(const SubsystemManager& mgr,
     auto h_vy = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vy);
     auto h_vz = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vz);
     auto h_m  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.mass);
-    auto h_pid = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.particle_id);
     auto h_stype = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.stellar_type);
     auto h_srad = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.stellar_radius);
 
-    int max_pid = 0;
-    for (int i = 0; i < p.N; i++) max_pid = std::max(max_pid, h_pid(i));
-    std::vector<int> pid_to_idx(max_pid + 1, -1);
-    for (int i = 0; i < p.N; i++) pid_to_idx[h_pid(i)] = i;
+    const auto& pid_to_idx = mgr.pid_to_idx();
 
     double R_sun_to_pc = 2.254e-8;  // R_sun in parsecs
 
@@ -221,14 +217,10 @@ void execute_merger(const MergerEvent& event, Particles& p,
     auto h_vy = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vy);
     auto h_vz = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vz);
     auto h_m  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.mass);
-    auto h_pid = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.particle_id);
     auto h_stype = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.stellar_type);
     auto h_spin = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.spin_vec);
 
-    int max_pid = 0;
-    for (int i = 0; i < p.N; i++) max_pid = std::max(max_pid, h_pid(i));
-    std::vector<int> pid_to_idx(max_pid + 1, -1);
-    for (int i = 0; i < p.N; i++) pid_to_idx[h_pid(i)] = i;
+    const auto& pid_to_idx = g_subsystem_mgr.pid_to_idx();
 
     int idx1 = pid_to_idx[event.pid1];
     int idx2 = pid_to_idx[event.pid2];

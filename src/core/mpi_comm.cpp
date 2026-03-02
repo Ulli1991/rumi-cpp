@@ -312,6 +312,15 @@ void DistributedParticles::distribute_initial(Particles& global_particles) {
 #endif
     }
 
+    // Pre-allocate persistent host-staged buffers
+    host_send_buf.resize(3 * (max_per_rank + 1));
+    host_recv_buf.resize(3 * N_total);
+    host_recv_ax.resize(N_total);
+    host_recv_ay.resize(N_total);
+    host_recv_az.resize(N_total);
+    host_send_dt.resize(max_per_rank + 1);
+    host_recv_dt.resize(N_total);
+
     MPI_Barrier(MPI_COMM_WORLD);
 #else
     // Non-MPI: just use global particles directly
@@ -426,32 +435,29 @@ void DistributedParticles::allgather_accelerations_subset(int start, int count) 
     auto h_az = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
         Kokkos::subview(local.az, Kokkos::make_pair(my_slice_start, my_slice_start + my_slice_count)));
 
-    // Pack interleaved
-    std::vector<double> send_buf(3 * my_slice_count);
+    // Pack interleaved (reuse persistent buffers)
     for (int i = 0; i < my_slice_count; i++) {
-        send_buf[3*i]   = h_ax(i);
-        send_buf[3*i+1] = h_ay(i);
-        send_buf[3*i+2] = h_az(i);
+        host_send_buf[3*i]   = h_ax(i);
+        host_send_buf[3*i+1] = h_ay(i);
+        host_send_buf[3*i+2] = h_az(i);
     }
 
-    std::vector<double> recv_buf(3 * count);
     g_profiler.mpi_start();
-    MPI_Allgatherv(send_buf.data(), 3 * my_slice_count, MPI_DOUBLE,
-                   recv_buf.data(), mpi_packed_counts.data(), mpi_packed_displs.data(), MPI_DOUBLE,
+    MPI_Allgatherv(host_send_buf.data(), 3 * my_slice_count, MPI_DOUBLE,
+                   host_recv_buf.data(), mpi_packed_counts.data(), mpi_packed_displs.data(), MPI_DOUBLE,
                    MPI_COMM_WORLD);
     g_profiler.mpi_stop();
 
     // Unpack and copy only the subset back to device
-    std::vector<double> recv_ax(count), recv_ay(count), recv_az(count);
     for (int i = 0; i < count; i++) {
-        recv_ax[i] = recv_buf[3*i];
-        recv_ay[i] = recv_buf[3*i+1];
-        recv_az[i] = recv_buf[3*i+2];
+        host_recv_ax[i] = host_recv_buf[3*i];
+        host_recv_ay[i] = host_recv_buf[3*i+1];
+        host_recv_az[i] = host_recv_buf[3*i+2];
     }
 
-    Kokkos::View<double*, Kokkos::HostSpace, Kokkos::MemoryUnmanaged> h_recv_ax(recv_ax.data(), count);
-    Kokkos::View<double*, Kokkos::HostSpace, Kokkos::MemoryUnmanaged> h_recv_ay(recv_ay.data(), count);
-    Kokkos::View<double*, Kokkos::HostSpace, Kokkos::MemoryUnmanaged> h_recv_az(recv_az.data(), count);
+    Kokkos::View<double*, Kokkos::HostSpace, Kokkos::MemoryUnmanaged> h_recv_ax(host_recv_ax.data(), count);
+    Kokkos::View<double*, Kokkos::HostSpace, Kokkos::MemoryUnmanaged> h_recv_ay(host_recv_ay.data(), count);
+    Kokkos::View<double*, Kokkos::HostSpace, Kokkos::MemoryUnmanaged> h_recv_az(host_recv_az.data(), count);
 
     Kokkos::deep_copy(Kokkos::subview(local.ax, Kokkos::make_pair(start, start + count)), h_recv_ax);
     Kokkos::deep_copy(Kokkos::subview(local.ay, Kokkos::make_pair(start, start + count)), h_recv_ay);
@@ -520,28 +526,26 @@ void DistributedParticles::iallgather_accelerations_subset(int start, int count,
     auto h_az = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
         Kokkos::subview(local.az, Kokkos::make_pair(my_slice_start, my_slice_start + my_slice_count)));
 
-    std::vector<double> send_buf(3 * my_slice_count);
+    // Reuse persistent buffers
     for (int i = 0; i < my_slice_count; i++) {
-        send_buf[3*i]   = h_ax(i);
-        send_buf[3*i+1] = h_ay(i);
-        send_buf[3*i+2] = h_az(i);
+        host_send_buf[3*i]   = h_ax(i);
+        host_send_buf[3*i+1] = h_ay(i);
+        host_send_buf[3*i+2] = h_az(i);
     }
 
-    std::vector<double> recv_buf(3 * count);
-    MPI_Allgatherv(send_buf.data(), 3 * my_slice_count, MPI_DOUBLE,
-                   recv_buf.data(), mpi_packed_counts.data(), mpi_packed_displs.data(), MPI_DOUBLE,
+    MPI_Allgatherv(host_send_buf.data(), 3 * my_slice_count, MPI_DOUBLE,
+                   host_recv_buf.data(), mpi_packed_counts.data(), mpi_packed_displs.data(), MPI_DOUBLE,
                    MPI_COMM_WORLD);
 
-    std::vector<double> recv_ax(count), recv_ay(count), recv_az(count);
     for (int i = 0; i < count; i++) {
-        recv_ax[i] = recv_buf[3*i];
-        recv_ay[i] = recv_buf[3*i+1];
-        recv_az[i] = recv_buf[3*i+2];
+        host_recv_ax[i] = host_recv_buf[3*i];
+        host_recv_ay[i] = host_recv_buf[3*i+1];
+        host_recv_az[i] = host_recv_buf[3*i+2];
     }
 
-    Kokkos::View<double*, Kokkos::HostSpace, Kokkos::MemoryUnmanaged> h_recv_ax(recv_ax.data(), count);
-    Kokkos::View<double*, Kokkos::HostSpace, Kokkos::MemoryUnmanaged> h_recv_ay(recv_ay.data(), count);
-    Kokkos::View<double*, Kokkos::HostSpace, Kokkos::MemoryUnmanaged> h_recv_az(recv_az.data(), count);
+    Kokkos::View<double*, Kokkos::HostSpace, Kokkos::MemoryUnmanaged> h_recv_ax(host_recv_ax.data(), count);
+    Kokkos::View<double*, Kokkos::HostSpace, Kokkos::MemoryUnmanaged> h_recv_ay(host_recv_ay.data(), count);
+    Kokkos::View<double*, Kokkos::HostSpace, Kokkos::MemoryUnmanaged> h_recv_az(host_recv_az.data(), count);
 
     Kokkos::deep_copy(Kokkos::subview(local.ax, Kokkos::make_pair(start, start + count)), h_recv_ax);
     Kokkos::deep_copy(Kokkos::subview(local.ay, Kokkos::make_pair(start, start + count)), h_recv_ay);
@@ -624,17 +628,16 @@ void DistributedParticles::allgather_timestep_subset(int start, int count) {
     auto h_dt = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
         Kokkos::subview(local.dt_adapt, Kokkos::make_pair(slice_start, slice_start + slice_count)));
 
-    std::vector<double> send_dt(slice_count);
-    for (int i = 0; i < slice_count; i++) send_dt[i] = h_dt(i);
+    // Reuse persistent buffers
+    for (int i = 0; i < slice_count; i++) host_send_dt[i] = h_dt(i);
 
-    std::vector<double> recv_dt(count);
     g_profiler.mpi_start();
-    MPI_Allgatherv(send_dt.data(), slice_count, MPI_DOUBLE,
-                   recv_dt.data(), mpi_counts.data(), mpi_displs.data(), MPI_DOUBLE,
+    MPI_Allgatherv(host_send_dt.data(), slice_count, MPI_DOUBLE,
+                   host_recv_dt.data(), mpi_counts.data(), mpi_displs.data(), MPI_DOUBLE,
                    MPI_COMM_WORLD);
     g_profiler.mpi_stop();
 
-    Kokkos::View<double*, Kokkos::HostSpace, Kokkos::MemoryUnmanaged> h_recv_dt(recv_dt.data(), count);
+    Kokkos::View<double*, Kokkos::HostSpace, Kokkos::MemoryUnmanaged> h_recv_dt(host_recv_dt.data(), count);
     Kokkos::deep_copy(Kokkos::subview(local.dt_adapt, Kokkos::make_pair(start, start + count)), h_recv_dt);
 #endif
 

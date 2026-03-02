@@ -66,6 +66,13 @@ struct SubsystemManager {
     std::vector<Subsystem> active;
     int next_id = 0;
 
+    // Cached particle_id → array index mapping (rebuilt per detect_from_pairs call)
+    std::vector<int> pid_to_idx_;
+    int pid_to_idx_max_ = 0;
+    void rebuild_pid_to_idx(const Particles& p);
+    const std::vector<int>& pid_to_idx() const { return pid_to_idx_; }
+    int pid_to_idx_max() const { return pid_to_idx_max_; }
+
     // GPU output buffer for neighbor pairs (written by pairwise kernels)
     Kokkos::View<int*>    ngb_pair_i;    // particle index i
     Kokkos::View<int*>    ngb_pair_j;    // particle index j

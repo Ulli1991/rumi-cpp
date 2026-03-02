@@ -277,6 +277,7 @@ struct TripleTracker {
 #include <string>
 #include <vector>
 #include <map>
+#include <set>
 #include <fstream>
 #include <chrono>
 #include <iostream>
@@ -287,6 +288,7 @@ struct TripleTracker {
 // ---------------------------------------------------------------------------
 struct Config {
     std::map<std::string, std::string> params;
+    mutable std::set<std::string> consumed_keys;
 
     void load(const std::string& filename) {
         std::ifstream f(filename);
@@ -312,16 +314,52 @@ struct Config {
     }
 
     std::string get_str(const std::string& key, const std::string& def) const {
+        consumed_keys.insert(key);
         auto it = params.find(key);
         return (it != params.end()) ? it->second : def;
     }
     double get_double(const std::string& key, double def) const {
+        consumed_keys.insert(key);
         auto it = params.find(key);
-        return (it != params.end()) ? std::atof(it->second.c_str()) : def;
+        if (it == params.end()) return def;
+        try {
+            return std::stod(it->second);
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "WARNING: Cannot parse '%s' as double for key '%s': %s\n",
+                         it->second.c_str(), key.c_str(), e.what());
+            return def;
+        }
     }
     int get_int(const std::string& key, int def) const {
+        consumed_keys.insert(key);
         auto it = params.find(key);
-        return (it != params.end()) ? std::atoi(it->second.c_str()) : def;
+        if (it == params.end()) return def;
+        try {
+            return std::stoi(it->second);
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "WARNING: Cannot parse '%s' as int for key '%s': %s\n",
+                         it->second.c_str(), key.c_str(), e.what());
+            return def;
+        }
+    }
+    bool get_bool(const std::string& key, bool def) const {
+        consumed_keys.insert(key);
+        auto it = params.find(key);
+        if (it == params.end()) return def;
+        const std::string& v = it->second;
+        if (v == "true" || v == "TRUE" || v == "True" || v == "1" || v == "yes") return true;
+        if (v == "false" || v == "FALSE" || v == "False" || v == "0" || v == "no") return false;
+        std::fprintf(stderr, "WARNING: Cannot parse '%s' as bool for key '%s', using default\n",
+                     v.c_str(), key.c_str());
+        return def;
+    }
+    void warn_unknown_keys() const {
+        for (const auto& kv : params) {
+            if (consumed_keys.find(kv.first) == consumed_keys.end()) {
+                std::fprintf(stderr, "WARNING: Unknown config key '%s' (value: '%s')\n",
+                             kv.first.c_str(), kv.second.c_str());
+            }
+        }
     }
 };
 
@@ -399,11 +437,11 @@ int main(int argc, char** argv) {
         std::string mass_dist = cfg.get_str("PLUMMER_MASS_DIST", "equal");
         double age_gyr      = cfg.get_double("PLUMMER_AGE_GYR", 1.0);
         double metallicity  = cfg.get_double("PLUMMER_METALLICITY", 0.02);
-        bool remove_bh      = (cfg.get_str("REMOVE_BH", "false") == "true");
+        bool remove_bh      = cfg.get_bool("REMOVE_BH", false);
         double binary_frac  = cfg.get_double("BINARY_FRAC", 0.0);
         double bin_a_min_au = cfg.get_double("BINARY_A_MIN_AU", 0.01);
         double bin_a_max_au = cfg.get_double("BINARY_A_MAX_AU", 100.0);
-        bool add_imbh       = (cfg.get_str("ADD_IMBH", "false") == "true");
+        bool add_imbh       = cfg.get_bool("ADD_IMBH", false);
         double imbh_m1      = cfg.get_double("IMBH_M1", 500.0);
         double imbh_m2      = cfg.get_double("IMBH_M2", 500.0);
         double imbh_a_pc    = cfg.get_double("IMBH_A_PC", 1e-4);
@@ -422,20 +460,20 @@ int main(int argc, char** argv) {
                                                 sse_ppisn_str, sse_ecsn_str,
                                                 sse_mxns_val, sse_flbv_val);
 
-        bool profiling_enabled = (cfg.get_str("PROFILING", "true") == "true");
-        serial_n2_gpu = std::stoi(cfg.get_str("SERIAL_N2_GPU", "0"));
-        serial_n2_cpu = std::stoi(cfg.get_str("SERIAL_N2_CPU", "0"));
-        use_integer_positions = (cfg.get_str("INTEGER_POSITIONS", "false") == "true");
+        bool profiling_enabled = cfg.get_bool("PROFILING", true);
+        serial_n2_gpu = cfg.get_int("SERIAL_N2_GPU", 0);
+        serial_n2_cpu = cfg.get_int("SERIAL_N2_CPU", 0);
+        use_integer_positions = cfg.get_bool("INTEGER_POSITIONS", false);
         double domain_halfsize = cfg.get_double("DOMAIN_HALFSIZE_PC", 200.0);
-        use_nonblocking_mpi = (cfg.get_str("MPI_NON_BLOCKING", "false") == "true");
+        use_nonblocking_mpi = cfg.get_bool("MPI_NON_BLOCKING", false);
 
         // Barnes-Hut tree configuration
-        use_tree = (cfg.get_str("USE_TREE", "false") == "true");
+        use_tree = cfg.get_bool("USE_TREE", false);
         tree_threshold = cfg.get_int("TREE_THRESHOLD", 10000);
         tree_theta = cfg.get_double("TREE_THETA", 0.5);
         tree_n_leaf = cfg.get_int("TREE_N_LEAF", 32);
         tree_n_group = cfg.get_int("TREE_N_GROUP", 64);
-        gadget4_cross = (cfg.get_str("GADGET4_CROSS", "false") == "true");
+        gadget4_cross = cfg.get_bool("GADGET4_CROSS", false);
 
 #ifdef ENABLE_COLLISIONAL
         // ETA_FF/ETA_FB always parsed (used by force kernels even without subsystems)
@@ -443,7 +481,7 @@ int main(int argc, char** argv) {
         g_collisional.eta_fb          = cfg.get_double("ETA_FB", 0.2);
 
         // Collisional (unsoftened direct N-body) configuration
-        g_collisional.enabled = (cfg.get_str("COLLISIONAL", "false") == "true");
+        g_collisional.enabled = cfg.get_bool("COLLISIONAL", false);
         if (g_collisional.enabled) {
             g_collisional.r_ngb           = cfg.get_double("R_NGB", 1e-3);
             g_collisional.r_ngb_max       = cfg.get_double("R_NGB_MAX", 0.1);
@@ -457,7 +495,7 @@ int main(int argc, char** argv) {
             g_collisional.pn_order        = cfg.get_int("PN_ORDER", 7);
             g_collisional.r_escape_rh     = cfg.get_double("R_ESCAPE_RH", 100.0);
             g_collisional.mstar_threshold = cfg.get_int("MSTAR_THRESHOLD", 8);
-            g_collisional.sse_enabled     = (cfg.get_str("SSE_ENABLED", "true") == "true");
+            g_collisional.sse_enabled     = cfg.get_bool("SSE_ENABLED", true);
             g_collisional.sse_metallicity = cfg.get_double("SSE_METALLICITY", 0.02);
             g_collisional.sse_wind        = sse_wind_str;
             g_collisional.sse_remnant     = sse_remnant_str;
@@ -475,6 +513,9 @@ int main(int argc, char** argv) {
             soft_pc = 0.0;
         }
 #endif
+
+        // Warn about unknown config keys (typos, deprecated options)
+        if (my_rank == 0) cfg.warn_unknown_keys();
 
         double G = G_CODE;
         double soft2 = soft_pc * soft_pc;

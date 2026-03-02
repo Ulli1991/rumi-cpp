@@ -68,17 +68,25 @@ struct StepProfiler {
     }
 
     void start(Timer ctx = NUM_TIMERS) {
+#ifndef DISABLE_PROFILING_FENCES
         t_start = std::chrono::high_resolution_clock::now();
         active_component = ctx;
+#else
+        (void)ctx;
+#endif
     }
 
     void stop(Timer t, long long n_pairs = 0) {
+#ifndef DISABLE_PROFILING_FENCES
         Kokkos::fence();  // ensure GPU work is complete before timing
         auto t_end = std::chrono::high_resolution_clock::now();
         elapsed[t] += std::chrono::duration<double>(t_end - t_start).count();
         counts[t]++;
         pairs[t] += n_pairs;
         active_component = NUM_TIMERS;
+#else
+        (void)t; (void)n_pairs;
+#endif
     }
 
     // MPI sub-timing: called from inside MPI communication functions
