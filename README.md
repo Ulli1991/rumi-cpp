@@ -17,7 +17,7 @@ Unsoftened direct N-body with close encounter handling for star cluster simulati
 - **Subsystem detection**: neighbor-based detection of close encounters (flybys, binaries, hierarchical triples)
 - **LogH regularization**: logarithmic Hamiltonian integrator with Gragg-Bulirsch-Stoer (GBS) extrapolation for subsystems, handling arbitrarily close encounters
 - **Secular binary evolution**: Gauss perturbation equations for wide, weakly-perturbed binaries
-- **Post-Newtonian corrections**: PN1, PN2, and PN2.5 for compact object dynamics
+- **Post-Newtonian corrections**: PN1 through PN3.5 for compact object dynamics
 - **Single stellar evolution** (SSE): C++ port of the Hurley et al. (2000) fitting formulae with modern prescriptions (Vink 2001 winds, Fryer 2012 remnant models, PPISN/PISN, ECSN)
 - **Merger detection and stellar merger trees**
 

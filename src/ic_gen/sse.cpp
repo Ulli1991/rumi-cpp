@@ -1638,11 +1638,6 @@ RemnantResult SSEContext::compute_remnant(double mc, double mcbagb,
         res.kw = 14;  // BH
     }
 
-    // DEBUG: print remnant properties
-    if (res.kw == 14 || (res.kw == 13 && res.mt > 1.8))
-        std::printf("REMNANT: mc=%.3f mcbagb=%.3f mt_pre=%.2f nsflag=%d fb=%.3f mt=%.3f kw=%d he=%d\n",
-                    mc, mcbagb, mt_presn, nsflag, fb, res.mt, res.kw, (int)from_he_star);
-
     return res;
 }
 
