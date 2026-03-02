@@ -136,12 +136,7 @@ void tree_self_acceleration(Particles& p, const Octree& tree,
                         double dy = ccy - yi;
                         double dz = ccz - zi;
                         double r2 = dx * dx + dy * dy + dz * dz + soft2;
-                        double inv_r = fast_rsqrt(r2);
-                        double inv_r3 = inv_r * inv_r * inv_r;
-                        double f = G * cmass * inv_r3;
-                        axi += f * dx;
-                        ayi += f * dy;
-                        azi += f * dz;
+                        gravity_interaction(dx, dy, dz, r2, G * cmass, axi, ayi, azi);
                     }
                 } else if (is_leaf) {
                     // Direct P2P: loop over all particles in this leaf cell
@@ -159,12 +154,7 @@ void tree_self_acceleration(Particles& p, const Octree& tree,
                             double dy = pjy - yi;
                             double dz = pjz - zi;
                             double r2 = dx * dx + dy * dy + dz * dz + soft2;
-                            double inv_r = fast_rsqrt(r2);
-                            double inv_r3 = inv_r * inv_r * inv_r;
-                            double f = G * mj * inv_r3;
-                            axi += f * dx;
-                            ayi += f * dy;
-                            azi += f * dz;
+                            gravity_interaction(dx, dy, dz, r2, G * mj, axi, ayi, azi);
                         }
                     }
                 } else {
@@ -318,12 +308,7 @@ void tree_self_acceleration_and_timestep(Particles& p, const Octree& tree,
                         double dy = ccy - yi;
                         double dz = ccz - zi;
                         double r2 = dx * dx + dy * dy + dz * dz + soft2;
-                        double inv_r = fast_rsqrt(r2);
-                        double inv_r3 = inv_r * inv_r * inv_r;
-                        double f = G * cmass * inv_r3;
-                        axi += f * dx;
-                        ayi += f * dy;
-                        azi += f * dz;
+                        double inv_r = gravity_interaction(dx, dy, dz, r2, G * cmass, axi, ayi, azi);
 
                         // Symmetrized monopole timestep (FROST Eq. 23)
                         double dvx = cell_vel_v(node, 0) - vxi;
@@ -347,12 +332,7 @@ void tree_self_acceleration_and_timestep(Particles& p, const Octree& tree,
                             double dy = pjy - yi;
                             double dz = pjz - zi;
                             double r2 = dx * dx + dy * dy + dz * dz + soft2;
-                            double inv_r = fast_rsqrt(r2);
-                            double inv_r3 = inv_r * inv_r * inv_r;
-                            double f = G * mj * inv_r3;
-                            axi += f * dx;
-                            ayi += f * dy;
-                            azi += f * dz;
+                            double inv_r = gravity_interaction(dx, dy, dz, r2, G * mj, axi, ayi, azi);
 
                             // Symmetrized pairwise timestep (FROST Eq. 23)
                             int j_orig = sorted_indices(j);
@@ -498,12 +478,7 @@ void tree_cross_acceleration(Particles& p,
                         double dy = ccy - yi;
                         double dz = ccz - zi;
                         double r2 = dx * dx + dy * dy + dz * dz + soft2;
-                        double inv_r = fast_rsqrt(r2);
-                        double inv_r3 = inv_r * inv_r * inv_r;
-                        double f = G * cmass * inv_r3;
-                        axi += f * dx;
-                        ayi += f * dy;
-                        azi += f * dz;
+                        gravity_interaction(dx, dy, dz, r2, G * cmass, axi, ayi, azi);
                     }
                 } else if (is_leaf) {
                     int lpbeg = j_cell_pbeg(node);
@@ -516,12 +491,7 @@ void tree_cross_acceleration(Particles& p,
                             double dy = pjy - yi;
                             double dz = pjz - zi;
                             double r2 = dx * dx + dy * dy + dz * dz + soft2;
-                            double inv_r = fast_rsqrt(r2);
-                            double inv_r3 = inv_r * inv_r * inv_r;
-                            double f = G * mj * inv_r3;
-                            axi += f * dx;
-                            ayi += f * dy;
-                            azi += f * dz;
+                            gravity_interaction(dx, dy, dz, r2, G * mj, axi, ayi, azi);
                         }
                     }
                 } else {
@@ -662,16 +632,7 @@ void tree_self_gradient_correction(Particles& p, const Octree& tree,
                         double daz = cell_accel_v(node, 2) - azi;
 
                         double r2 = dx * dx + dy * dy + dz * dz + soft2;
-                        double inv_r = fast_rsqrt(r2);
-                        double inv_r2 = inv_r * inv_r;
-                        double inv_r5 = inv_r2 * inv_r2 * inv_r;
-
-                        double r_dot_a = dx * dax + dy * day + dz * daz;
-                        double f = coeff * cmass * inv_r5;
-
-                        cx += f * (r2 * dax - 3.0 * r_dot_a * dx);
-                        cy += f * (r2 * day - 3.0 * r_dot_a * dy);
-                        cz += f * (r2 * daz - 3.0 * r_dot_a * dz);
+                        gradient_correction_interaction(dx, dy, dz, dax, day, daz, r2, coeff * cmass, cx, cy, cz);
                     }
                 } else if (is_leaf) {
                     // P2P jerk: per-particle accelerations
@@ -692,16 +653,7 @@ void tree_self_gradient_correction(Particles& p, const Octree& tree,
                             double daz = paz(j_orig) - azi;
 
                             double r2 = dx * dx + dy * dy + dz * dz + soft2;
-                            double inv_r = fast_rsqrt(r2);
-                            double inv_r2 = inv_r * inv_r;
-                            double inv_r5 = inv_r2 * inv_r2 * inv_r;
-
-                            double r_dot_a = dx * dax + dy * day + dz * daz;
-                            double f = coeff * mj * inv_r5;
-
-                            cx += f * (r2 * dax - 3.0 * r_dot_a * dx);
-                            cy += f * (r2 * day - 3.0 * r_dot_a * dy);
-                            cz += f * (r2 * daz - 3.0 * r_dot_a * dz);
+                            gradient_correction_interaction(dx, dy, dz, dax, day, daz, r2, coeff * mj, cx, cy, cz);
                         }
                     }
                 } else {
@@ -845,16 +797,7 @@ void tree_cross_gradient_correction(Particles& p,
                         double daz = j_cell_accel(node, 2) - azi;
 
                         double r2 = dx * dx + dy * dy + dz * dz + soft2;
-                        double inv_r = fast_rsqrt(r2);
-                        double inv_r2 = inv_r * inv_r;
-                        double inv_r5 = inv_r2 * inv_r2 * inv_r;
-
-                        double r_dot_a = dx * dax + dy * day + dz * daz;
-                        double f = coeff * cmass * inv_r5;
-
-                        cx += f * (r2 * dax - 3.0 * r_dot_a * dx);
-                        cy += f * (r2 * day - 3.0 * r_dot_a * dy);
-                        cz += f * (r2 * daz - 3.0 * r_dot_a * dz);
+                        gradient_correction_interaction(dx, dy, dz, dax, day, daz, r2, coeff * cmass, cx, cy, cz);
                     }
                 } else if (is_leaf) {
                     int lpbeg = j_cell_pbeg(node);
@@ -873,16 +816,7 @@ void tree_cross_gradient_correction(Particles& p,
                             double daz = paz(j_orig) - azi;
 
                             double r2 = dx * dx + dy * dy + dz * dz + soft2;
-                            double inv_r = fast_rsqrt(r2);
-                            double inv_r2 = inv_r * inv_r;
-                            double inv_r5 = inv_r2 * inv_r2 * inv_r;
-
-                            double r_dot_a = dx * dax + dy * day + dz * daz;
-                            double f = coeff * mj * inv_r5;
-
-                            cx += f * (r2 * dax - 3.0 * r_dot_a * dx);
-                            cy += f * (r2 * day - 3.0 * r_dot_a * dy);
-                            cz += f * (r2 * daz - 3.0 * r_dot_a * dz);
+                            gradient_correction_interaction(dx, dy, dz, dax, day, daz, r2, coeff * mj, cx, cy, cz);
                         }
                     }
                 } else {
@@ -1031,12 +965,7 @@ void tree_global_cross_acceleration(Particles& p, const Octree& tree,
                         double dy = ccy - yi;
                         double dz = ccz - zi;
                         double r2 = dx * dx + dy * dy + dz * dz + soft2;
-                        double inv_r = fast_rsqrt(r2);
-                        double inv_r3 = inv_r * inv_r * inv_r;
-                        double f = G * cmass * inv_r3;
-                        axi += f * dx;
-                        ayi += f * dy;
-                        azi += f * dz;
+                        gravity_interaction(dx, dy, dz, r2, G * cmass, axi, ayi, azi);
                     }
                 } else if (is_leaf) {
                     // P2P: only interact with SOURCE particles in leaf
@@ -1051,12 +980,7 @@ void tree_global_cross_acceleration(Particles& p, const Octree& tree,
                             double dy = pjy - yi;
                             double dz = pjz - zi;
                             double r2 = dx * dx + dy * dy + dz * dz + soft2;
-                            double inv_r = fast_rsqrt(r2);
-                            double inv_r3 = inv_r * inv_r * inv_r;
-                            double f = G * mj * inv_r3;
-                            axi += f * dx;
-                            ayi += f * dy;
-                            azi += f * dz;
+                            gravity_interaction(dx, dy, dz, r2, G * mj, axi, ayi, azi);
                         }
                     }
                 } else {
@@ -1213,16 +1137,7 @@ void tree_global_cross_gradient_correction(Particles& p, const Octree& tree,
                         double daz = cell_accel_src(node, 2) - azi;
 
                         double r2 = dx * dx + dy * dy + dz * dz + soft2;
-                        double inv_r = fast_rsqrt(r2);
-                        double inv_r2 = inv_r * inv_r;
-                        double inv_r5 = inv_r2 * inv_r2 * inv_r;
-
-                        double r_dot_a = dx * dax + dy * day + dz * daz;
-                        double f = coeff * cmass * inv_r5;
-
-                        cx += f * (r2 * dax - 3.0 * r_dot_a * dx);
-                        cy += f * (r2 * day - 3.0 * r_dot_a * dy);
-                        cz += f * (r2 * daz - 3.0 * r_dot_a * dz);
+                        gradient_correction_interaction(dx, dy, dz, dax, day, daz, r2, coeff * cmass, cx, cy, cz);
                     }
                 } else if (is_leaf) {
                     if (is_target) {
@@ -1242,16 +1157,7 @@ void tree_global_cross_gradient_correction(Particles& p, const Octree& tree,
                             double daz = paz(j_orig) - azi;
 
                             double r2 = dx * dx + dy * dy + dz * dz + soft2;
-                            double inv_r = fast_rsqrt(r2);
-                            double inv_r2 = inv_r * inv_r;
-                            double inv_r5 = inv_r2 * inv_r2 * inv_r;
-
-                            double r_dot_a = dx * dax + dy * day + dz * daz;
-                            double f = coeff * mj * inv_r5;
-
-                            cx += f * (r2 * dax - 3.0 * r_dot_a * dx);
-                            cy += f * (r2 * day - 3.0 * r_dot_a * dy);
-                            cz += f * (r2 * daz - 3.0 * r_dot_a * dz);
+                            gradient_correction_interaction(dx, dy, dz, dax, day, daz, r2, coeff * mj, cx, cy, cz);
                         }
                     }
                 } else {
@@ -1395,12 +1301,7 @@ void tree_global_self_acceleration(Particles& p, const Octree& tree,
                         double dy = ccy - yi;
                         double dz = ccz - zi;
                         double r2 = dx * dx + dy * dy + dz * dz + soft2;
-                        double inv_r = fast_rsqrt(r2);
-                        double inv_r3 = inv_r * inv_r * inv_r;
-                        double f = G * cmass * inv_r3;
-                        axi += f * dx;
-                        ayi += f * dy;
-                        azi += f * dz;
+                        gravity_interaction(dx, dy, dz, r2, G * cmass, axi, ayi, azi);
                     }
                 } else if (is_leaf) {
                     if (is_target) {
@@ -1415,12 +1316,7 @@ void tree_global_self_acceleration(Particles& p, const Octree& tree,
                             double dy = pjy - yi;
                             double dz = pjz - zi;
                             double r2 = dx * dx + dy * dy + dz * dz + soft2;
-                            double inv_r = fast_rsqrt(r2);
-                            double inv_r3 = inv_r * inv_r * inv_r;
-                            double f = G * mj * inv_r3;
-                            axi += f * dx;
-                            ayi += f * dy;
-                            azi += f * dz;
+                            gravity_interaction(dx, dy, dz, r2, G * mj, axi, ayi, azi);
                         }
                     }
                 } else {
@@ -1574,16 +1470,7 @@ void tree_global_self_gradient_correction(Particles& p, const Octree& tree,
                         double daz = cell_accel_src(node, 2) - azi;
 
                         double r2 = dx * dx + dy * dy + dz * dz + soft2;
-                        double inv_r = fast_rsqrt(r2);
-                        double inv_r2 = inv_r * inv_r;
-                        double inv_r5 = inv_r2 * inv_r2 * inv_r;
-
-                        double r_dot_a = dx * dax + dy * day + dz * daz;
-                        double f = coeff * cmass * inv_r5;
-
-                        cx += f * (r2 * dax - 3.0 * r_dot_a * dx);
-                        cy += f * (r2 * day - 3.0 * r_dot_a * dy);
-                        cz += f * (r2 * daz - 3.0 * r_dot_a * dz);
+                        gradient_correction_interaction(dx, dy, dz, dax, day, daz, r2, coeff * cmass, cx, cy, cz);
                     }
                 } else if (is_leaf) {
                     if (is_target) {
@@ -1604,16 +1491,7 @@ void tree_global_self_gradient_correction(Particles& p, const Octree& tree,
                             double daz = paz(j_orig) - azi;
 
                             double r2 = dx * dx + dy * dy + dz * dz + soft2;
-                            double inv_r = fast_rsqrt(r2);
-                            double inv_r2 = inv_r * inv_r;
-                            double inv_r5 = inv_r2 * inv_r2 * inv_r;
-
-                            double r_dot_a = dx * dax + dy * day + dz * daz;
-                            double f = coeff * mj * inv_r5;
-
-                            cx += f * (r2 * dax - 3.0 * r_dot_a * dx);
-                            cy += f * (r2 * day - 3.0 * r_dot_a * dy);
-                            cz += f * (r2 * daz - 3.0 * r_dot_a * dz);
+                            gradient_correction_interaction(dx, dy, dz, dax, day, daz, r2, coeff * mj, cx, cy, cz);
                         }
                     }
                 } else {
@@ -1774,12 +1652,7 @@ void tree_global_self_acceleration_and_timestep(Particles& p, const Octree& tree
                         double dy = ccy - yi;
                         double dz = ccz - zi;
                         double r2 = dx * dx + dy * dy + dz * dz + soft2;
-                        double inv_r = fast_rsqrt(r2);
-                        double inv_r3 = inv_r * inv_r * inv_r;
-                        double f = G * cmass * inv_r3;
-                        axi += f * dx;
-                        ayi += f * dy;
-                        azi += f * dz;
+                        double inv_r = gravity_interaction(dx, dy, dz, r2, G * cmass, axi, ayi, azi);
 
                         // Symmetrized monopole timestep
                         double dvx = cell_vel_src(node, 0) - vxi;
@@ -1804,12 +1677,7 @@ void tree_global_self_acceleration_and_timestep(Particles& p, const Octree& tree
                             double dy = pjy - yi;
                             double dz = pjz - zi;
                             double r2 = dx * dx + dy * dy + dz * dz + soft2;
-                            double inv_r = fast_rsqrt(r2);
-                            double inv_r3 = inv_r * inv_r * inv_r;
-                            double f = G * mj * inv_r3;
-                            axi += f * dx;
-                            ayi += f * dy;
-                            azi += f * dz;
+                            double inv_r = gravity_interaction(dx, dy, dz, r2, G * mj, axi, ayi, azi);
 
                             // Symmetrized pairwise timestep
                             int j_orig = sorted_indices(j);
@@ -2011,12 +1879,7 @@ void tree_all_forces_on_subset(Particles& p, const Octree& tree,
                         double dy = ccy - yi;
                         double dz = ccz - zi;
                         double r2 = dx * dx + dy * dy + dz * dz + soft2;
-                        double inv_r = fast_rsqrt(r2);
-                        double inv_r3 = inv_r * inv_r * inv_r;
-                        double f = G * cmass * inv_r3;
-                        axi += f * dx;
-                        ayi += f * dy;
-                        azi += f * dz;
+                        gravity_interaction(dx, dy, dz, r2, G * cmass, axi, ayi, azi);
                     }
                 } else if (is_leaf) {
                     if (is_target) {
@@ -2031,12 +1894,7 @@ void tree_all_forces_on_subset(Particles& p, const Octree& tree,
                             double dy = pjy - yi;
                             double dz = pjz - zi;
                             double r2 = dx * dx + dy * dy + dz * dz + soft2;
-                            double inv_r = fast_rsqrt(r2);
-                            double inv_r3 = inv_r * inv_r * inv_r;
-                            double f = G * mj * inv_r3;
-                            axi += f * dx;
-                            ayi += f * dy;
-                            azi += f * dz;
+                            gravity_interaction(dx, dy, dz, r2, G * mj, axi, ayi, azi);
                         }
                     }
                 } else {
@@ -2183,16 +2041,7 @@ void tree_all_gradient_on_subset(Particles& p, const Octree& tree,
                         double daz = cell_accel_src(node, 2) - azi;
 
                         double r2 = dx * dx + dy * dy + dz * dz + soft2;
-                        double inv_r = fast_rsqrt(r2);
-                        double inv_r2 = inv_r * inv_r;
-                        double inv_r5 = inv_r2 * inv_r2 * inv_r;
-
-                        double r_dot_a = dx * dax + dy * day + dz * daz;
-                        double f = coeff * cmass * inv_r5;
-
-                        cx += f * (r2 * dax - 3.0 * r_dot_a * dx);
-                        cy += f * (r2 * day - 3.0 * r_dot_a * dy);
-                        cz += f * (r2 * daz - 3.0 * r_dot_a * dz);
+                        gradient_correction_interaction(dx, dy, dz, dax, day, daz, r2, coeff * cmass, cx, cy, cz);
                     }
                 } else if (is_leaf) {
                     if (is_target) {
@@ -2213,16 +2062,7 @@ void tree_all_gradient_on_subset(Particles& p, const Octree& tree,
                             double daz = paz(j_orig) - azi;
 
                             double r2 = dx * dx + dy * dy + dz * dz + soft2;
-                            double inv_r = fast_rsqrt(r2);
-                            double inv_r2 = inv_r * inv_r;
-                            double inv_r5 = inv_r2 * inv_r2 * inv_r;
-
-                            double r_dot_a = dx * dax + dy * day + dz * daz;
-                            double f = coeff * mj * inv_r5;
-
-                            cx += f * (r2 * dax - 3.0 * r_dot_a * dx);
-                            cy += f * (r2 * day - 3.0 * r_dot_a * dy);
-                            cz += f * (r2 * daz - 3.0 * r_dot_a * dz);
+                            gradient_correction_interaction(dx, dy, dz, dax, day, daz, r2, coeff * mj, cx, cy, cz);
                         }
                     }
                 } else {
@@ -2376,12 +2216,7 @@ void tree_all_forces_and_timestep_on_subset(Particles& p, const Octree& tree,
                         double dy = ccy - yi;
                         double dz = ccz - zi;
                         double r2 = dx * dx + dy * dy + dz * dz + soft2;
-                        double inv_r = fast_rsqrt(r2);
-                        double inv_r3 = inv_r * inv_r * inv_r;
-                        double f = G * cmass * inv_r3;
-                        axi += f * dx;
-                        ayi += f * dy;
-                        azi += f * dz;
+                        double inv_r = gravity_interaction(dx, dy, dz, r2, G * cmass, axi, ayi, azi);
 
                         // Symmetrized monopole timestep
                         double dvx = cell_vel_src(node, 0) - vxi;
@@ -2406,12 +2241,7 @@ void tree_all_forces_and_timestep_on_subset(Particles& p, const Octree& tree,
                             double dy = pjy - yi;
                             double dz = pjz - zi;
                             double r2 = dx * dx + dy * dy + dz * dz + soft2;
-                            double inv_r = fast_rsqrt(r2);
-                            double inv_r3 = inv_r * inv_r * inv_r;
-                            double f = G * mj * inv_r3;
-                            axi += f * dx;
-                            ayi += f * dy;
-                            azi += f * dz;
+                            double inv_r = gravity_interaction(dx, dy, dz, r2, G * mj, axi, ayi, azi);
 
                             // Symmetrized pairwise timestep
                             int j_orig = sorted_indices(j);

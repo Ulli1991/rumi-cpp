@@ -103,12 +103,7 @@ static void compute_acceleration_and_timestep_impl(Particles& p, double G, doubl
                         double mj = tile(jb + 3);
                         double r2 = dx*dx + dy*dy + dz*dz;
                         double r2s = r2 + soft2;
-                        double inv_r = fast_rsqrt(r2s);
-                        double inv_r3 = inv_r * inv_r * inv_r;
-
-                        axi += G * mj * inv_r3 * dx;
-                        ayi += G * mj * inv_r3 * dy;
-                        azi += G * mj * inv_r3 * dz;
+                        double inv_r = gravity_interaction(dx, dy, dz, r2s, G * mj, axi, ayi, azi);
 
                         // Adaptive timestep: reuse inv_r, no extra sqrt
                         double dvx = tile(jb + 4) - vxi;
@@ -197,10 +192,7 @@ static void self_acceleration_impl(Particles& p, int start, int count,
                         double dy = tile(jb+1) - yi;
                         double dz = tile(jb+2) - zi;
                         double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                        double inv_r = fast_rsqrt(r2);
-                        double inv_r3 = inv_r * inv_r * inv_r;
-                        double fj = G * tile(jb+3) * inv_r3;
-                        axi += fj * dx; ayi += fj * dy; azi += fj * dz;
+                        gravity_interaction(dx, dy, dz, r2, G * tile(jb+3), axi, ayi, azi);
                     }
                 }
                 team.team_barrier();
@@ -291,14 +283,7 @@ static void self_gradient_correction_impl(Particles& p, int start, int count,
                         double day = tile(jb+5) - ayi0;
                         double daz = tile(jb+6) - azi0;
                         double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                        double inv_r = fast_rsqrt(r2);
-                        double inv_r2 = inv_r * inv_r;
-                        double inv_r5 = inv_r2 * inv_r2 * inv_r;
-                        double r_dot_a = dx*dax + dy*day + dz*daz;
-                        double f = coeff * tile(jb+3) * inv_r5;
-                        cx += f * (r2 * dax - 3.0 * r_dot_a * dx);
-                        cy += f * (r2 * day - 3.0 * r_dot_a * dy);
-                        cz += f * (r2 * daz - 3.0 * r_dot_a * dz);
+                        gradient_correction_interaction(dx, dy, dz, dax, day, daz, r2, coeff * tile(jb+3), cx, cy, cz);
                     }
                 }
                 team.team_barrier();
@@ -374,10 +359,7 @@ static void cross_acceleration_impl(Particles& p,
                         double dy = tile(jb+1) - yi;
                         double dz = tile(jb+2) - zi;
                         double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                        double inv_r = fast_rsqrt(r2);
-                        double inv_r3 = inv_r * inv_r * inv_r;
-                        double fj = G * tile(jb+3) * inv_r3;
-                        axi += fj * dx; ayi += fj * dy; azi += fj * dz;
+                        gravity_interaction(dx, dy, dz, r2, G * tile(jb+3), axi, ayi, azi);
                     }
                 }
                 team.team_barrier();
@@ -418,10 +400,7 @@ static void cross_acceleration_impl(Particles& p,
                         double dy = tile(ib+1) - yj;
                         double dz = tile(ib+2) - zj;
                         double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                        double inv_r = fast_rsqrt(r2);
-                        double inv_r3 = inv_r * inv_r * inv_r;
-                        double fi = G * tile(ib+3) * inv_r3;
-                        axj += fi * dx; ayj += fi * dy; azj += fi * dz;
+                        gravity_interaction(dx, dy, dz, r2, G * tile(ib+3), axj, ayj, azj);
                     }
                 }
                 team.team_barrier();
@@ -520,14 +499,7 @@ static void cross_gradient_correction_impl(Particles& p,
                         double day = tile(jb+5) - ayi0;
                         double daz = tile(jb+6) - azi0;
                         double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                        double inv_r = fast_rsqrt(r2);
-                        double inv_r2 = inv_r * inv_r;
-                        double inv_r5 = inv_r2 * inv_r2 * inv_r;
-                        double r_dot_a = dx*dax + dy*day + dz*daz;
-                        double f = coeff * tile(jb+3) * inv_r5;
-                        cx += f * (r2 * dax - 3.0 * r_dot_a * dx);
-                        cy += f * (r2 * day - 3.0 * r_dot_a * dy);
-                        cz += f * (r2 * daz - 3.0 * r_dot_a * dz);
+                        gradient_correction_interaction(dx, dy, dz, dax, day, daz, r2, coeff * tile(jb+3), cx, cy, cz);
                     }
                 }
                 team.team_barrier();
@@ -582,14 +554,7 @@ static void cross_gradient_correction_impl(Particles& p,
                         double day = tile(ib+5) - ayj0;
                         double daz = tile(ib+6) - azj0;
                         double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                        double inv_r = fast_rsqrt(r2);
-                        double inv_r2 = inv_r * inv_r;
-                        double inv_r5 = inv_r2 * inv_r2 * inv_r;
-                        double r_dot_a = dx*dax + dy*day + dz*daz;
-                        double f = coeff * tile(ib+3) * inv_r5;
-                        cx += f * (r2 * dax - 3.0 * r_dot_a * dx);
-                        cy += f * (r2 * day - 3.0 * r_dot_a * dy);
-                        cz += f * (r2 * daz - 3.0 * r_dot_a * dz);
+                        gradient_correction_interaction(dx, dy, dz, dax, day, daz, r2, coeff * tile(ib+3), cx, cy, cz);
                     }
                 }
                 team.team_barrier();
@@ -853,11 +818,7 @@ static void self_acceleration_and_timestep_impl(Particles& p, int start, int cou
                         double mj = tile(jb+3);
                         double r2 = dx*dx + dy*dy + dz*dz;
                         double r2s = r2 + soft2;
-                        double inv_r = fast_rsqrt(r2s);
-                        double inv_r3 = inv_r * inv_r * inv_r;
-
-                        double fj = G * mj * inv_r3;
-                        axi += fj * dx; ayi += fj * dy; azi += fj * dz;
+                        double inv_r = gravity_interaction(dx, dy, dz, r2s, G * mj, axi, ayi, azi);
 
                         // Symmetrized timestep
                         double dvx = tile(jb+4) - vxi;

@@ -48,20 +48,48 @@ void SubsystemBatch::pack(const SubsystemManager& mgr, const Particles& p,
 
     allocate(n_sub, total);
 
-    // Copy particle data to host
-    auto h_x  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.x);
-    auto h_y  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.y);
-    auto h_z  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.z);
-    auto h_vx = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vx);
-    auto h_vy = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vy);
-    auto h_vz = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vz);
-    auto h_m  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.mass);
-
     // Use cached pid->idx from SubsystemManager
     const auto& pid_to_idx = mgr.pid_to_idx();
-    int max_pid = mgr.pid_to_idx_max();
 
-    // Pack on host
+    // Collect unique particle indices for selective gather (avoid full-array D2H)
+    std::vector<int> member_indices;
+    std::unordered_map<int, int> idx_to_local;
+    for (const auto& sub : mgr.active) {
+        for (int b = 0; b < sub.n_bodies; b++) {
+            int idx = pid_to_idx[sub.particle_ids[b]];
+            if (idx_to_local.find(idx) == idx_to_local.end()) {
+                idx_to_local[idx] = (int)member_indices.size();
+                member_indices.push_back(idx);
+            }
+        }
+    }
+    int n_mem = (int)member_indices.size();
+
+    // Upload indices to device, gather only needed particle data
+    // Buffer layout per member: x,y,z,vx,vy,vz,mass,spin_x,spin_y,spin_z,stype_as_double (11 doubles)
+    constexpr int PACK_STRIDE = 11;
+    Kokkos::View<int*> d_idx("pack_idx", n_mem);
+    Kokkos::View<double*> d_buf("pack_gather", n_mem * PACK_STRIDE);
+    {
+        auto h_idx = Kokkos::create_mirror_view(d_idx);
+        for (int i = 0; i < n_mem; i++) h_idx(i) = member_indices[i];
+        Kokkos::deep_copy(d_idx, h_idx);
+    }
+    auto px = p.x; auto py = p.y; auto pz = p.z;
+    auto pvx = p.vx; auto pvy = p.vy; auto pvz = p.vz;
+    auto pm = p.mass; auto pspin = p.spin_vec; auto pstype = p.stellar_type;
+    Kokkos::parallel_for("pack_gather", n_mem, KOKKOS_LAMBDA(int i) {
+        int k = d_idx(i);
+        int base = i * PACK_STRIDE;
+        d_buf(base + 0) = px(k);  d_buf(base + 1) = py(k);  d_buf(base + 2) = pz(k);
+        d_buf(base + 3) = pvx(k); d_buf(base + 4) = pvy(k); d_buf(base + 5) = pvz(k);
+        d_buf(base + 6) = pm(k);
+        d_buf(base + 7) = pspin(k, 0); d_buf(base + 8) = pspin(k, 1); d_buf(base + 9) = pspin(k, 2);
+        d_buf(base + 10) = static_cast<double>(pstype(k));
+    });
+    auto h_buf = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), d_buf);
+
+    // Pack on host using gathered data
     auto h_nbod = Kokkos::create_mirror_view(n_bodies);
     auto h_off  = Kokkos::create_mirror_view(offset);
     auto h_dt   = Kokkos::create_mirror_view(dt_target);
@@ -97,25 +125,24 @@ void SubsystemBatch::pack(const SubsystemManager& mgr, const Particles& p,
         stored_scales_set[s] = mgr.active[s].scales_set;
     }
 
-    // Read spin vectors and stellar types for 2-body BH binaries
-    auto h_spin = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.spin_vec);
-    auto h_stype = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.stellar_type);
+    // Read spin vectors and stellar types from gathered buffer
     for (int s = 0; s < n_sub; s++) {
         const auto& sub = mgr.active[s];
         if (sub.n_bodies == 2) {
-            int idx0 = pid_to_idx[sub.particle_ids[0]];
-            int idx1 = pid_to_idx[sub.particle_ids[1]];
-            stored_stellar_type[s*2+0] = h_stype(idx0);
-            stored_stellar_type[s*2+1] = h_stype(idx1);
-            bool bh0 = (h_stype(idx0) == 14), bh1 = (h_stype(idx1) == 14);
+            int li0 = idx_to_local[pid_to_idx[sub.particle_ids[0]]];
+            int li1 = idx_to_local[pid_to_idx[sub.particle_ids[1]]];
+            stored_stellar_type[s*2+0] = static_cast<int>(h_buf(li0 * PACK_STRIDE + 10));
+            stored_stellar_type[s*2+1] = static_cast<int>(h_buf(li1 * PACK_STRIDE + 10));
+            bool bh0 = (stored_stellar_type[s*2+0] == 14);
+            bool bh1 = (stored_stellar_type[s*2+1] == 14);
             if (bh0 || bh1) {
                 has_stored_spins[s] = true;
-                stored_spins[s*6+0] = h_spin(idx0, 0);
-                stored_spins[s*6+1] = h_spin(idx0, 1);
-                stored_spins[s*6+2] = h_spin(idx0, 2);
-                stored_spins[s*6+3] = h_spin(idx1, 0);
-                stored_spins[s*6+4] = h_spin(idx1, 1);
-                stored_spins[s*6+5] = h_spin(idx1, 2);
+                stored_spins[s*6+0] = h_buf(li0 * PACK_STRIDE + 7);
+                stored_spins[s*6+1] = h_buf(li0 * PACK_STRIDE + 8);
+                stored_spins[s*6+2] = h_buf(li0 * PACK_STRIDE + 9);
+                stored_spins[s*6+3] = h_buf(li1 * PACK_STRIDE + 7);
+                stored_spins[s*6+4] = h_buf(li1 * PACK_STRIDE + 8);
+                stored_spins[s*6+5] = h_buf(li1 * PACK_STRIDE + 9);
             }
         }
     }
@@ -128,15 +155,15 @@ void SubsystemBatch::pack(const SubsystemManager& mgr, const Particles& p,
         h_dt(s) = dt;
 
         for (int b = 0; b < sub.n_bodies; b++) {
-            int idx = pid_to_idx[sub.particle_ids[b]];
-            h_pos((off + b) * 3 + 0) = h_x(idx);
-            h_pos((off + b) * 3 + 1) = h_y(idx);
-            h_pos((off + b) * 3 + 2) = h_z(idx);
-            h_vel((off + b) * 3 + 0) = h_vx(idx);
-            h_vel((off + b) * 3 + 1) = h_vy(idx);
-            h_vel((off + b) * 3 + 2) = h_vz(idx);
-            h_mass(off + b) = h_m(idx);
-            // No external perturbation inside LogH — handled by FSI kicks
+            int li = idx_to_local[pid_to_idx[sub.particle_ids[b]]];
+            int base = li * PACK_STRIDE;
+            h_pos((off + b) * 3 + 0) = h_buf(base + 0);
+            h_pos((off + b) * 3 + 1) = h_buf(base + 1);
+            h_pos((off + b) * 3 + 2) = h_buf(base + 2);
+            h_vel((off + b) * 3 + 0) = h_buf(base + 3);
+            h_vel((off + b) * 3 + 1) = h_buf(base + 4);
+            h_vel((off + b) * 3 + 2) = h_buf(base + 5);
+            h_mass(off + b) = h_buf(base + 6);
             h_ext((off + b) * 3 + 0) = 0.0;
             h_ext((off + b) * 3 + 1) = 0.0;
             h_ext((off + b) * 3 + 2) = 0.0;
@@ -162,48 +189,71 @@ void SubsystemBatch::unpack(SubsystemManager& mgr, Particles& p) {
     int n_sub = (int)mgr.active.size();
     if (n_sub == 0) return;
 
-    auto h_pos_out = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), flat_pos_out);
-    auto h_vel_out = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), flat_vel_out);
-
-    auto h_x  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.x);
-    auto h_y  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.y);
-    auto h_z  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.z);
-    auto h_vx = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vx);
-    auto h_vy = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vy);
-    auto h_vz = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vz);
-    auto h_m  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.mass);
-
-    // Also get flat_mass host mirror (has updated masses after mergers)
-    auto h_mass_flat = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), flat_mass);
-
-    // Use cached pid->idx from SubsystemManager
     const auto& pid_to_idx = mgr.pid_to_idx();
 
+    // D2H the small LogH output arrays (subsystem-sized, not N-sized)
+    auto h_pos_out = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), flat_pos_out);
+    auto h_vel_out = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), flat_vel_out);
+    auto h_mass_flat = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), flat_mass);
     auto h_off = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), offset);
 
+    // Collect unique particle indices and build scatter buffer on host
+    // Buffer layout: x,y,z,vx,vy,vz,mass (7 doubles per member)
+    constexpr int UNPACK_STRIDE = 7;
+    std::vector<int> member_indices;
+    std::unordered_map<int, int> idx_to_local;
+    for (const auto& sub : mgr.active) {
+        for (int b = 0; b < sub.n_bodies; b++) {
+            int idx = pid_to_idx[sub.particle_ids[b]];
+            if (idx_to_local.find(idx) == idx_to_local.end()) {
+                idx_to_local[idx] = (int)member_indices.size();
+                member_indices.push_back(idx);
+            }
+        }
+    }
+    int n_mem = (int)member_indices.size();
+
+    // Build scatter buffer from LogH output
+    std::vector<double> scatter_buf(n_mem * UNPACK_STRIDE);
     for (int s = 0; s < n_sub; s++) {
         const auto& sub = mgr.active[s];
         int off = h_off(s);
-
         for (int b = 0; b < sub.n_bodies; b++) {
-            int idx = pid_to_idx[sub.particle_ids[b]];
-            h_x(idx)  = h_pos_out((off + b) * 3 + 0);
-            h_y(idx)  = h_pos_out((off + b) * 3 + 1);
-            h_z(idx)  = h_pos_out((off + b) * 3 + 2);
-            h_vx(idx) = h_vel_out((off + b) * 3 + 0);
-            h_vy(idx) = h_vel_out((off + b) * 3 + 1);
-            h_vz(idx) = h_vel_out((off + b) * 3 + 2);
-            h_m(idx) = h_mass_flat(off + b);
+            int li = idx_to_local[pid_to_idx[sub.particle_ids[b]]];
+            int base = li * UNPACK_STRIDE;
+            scatter_buf[base + 0] = h_pos_out((off + b) * 3 + 0);
+            scatter_buf[base + 1] = h_pos_out((off + b) * 3 + 1);
+            scatter_buf[base + 2] = h_pos_out((off + b) * 3 + 2);
+            scatter_buf[base + 3] = h_vel_out((off + b) * 3 + 0);
+            scatter_buf[base + 4] = h_vel_out((off + b) * 3 + 1);
+            scatter_buf[base + 5] = h_vel_out((off + b) * 3 + 2);
+            scatter_buf[base + 6] = h_mass_flat(off + b);
         }
     }
 
-    Kokkos::deep_copy(p.x, h_x);
-    Kokkos::deep_copy(p.y, h_y);
-    Kokkos::deep_copy(p.z, h_z);
-    Kokkos::deep_copy(p.vx, h_vx);
-    Kokkos::deep_copy(p.vy, h_vy);
-    Kokkos::deep_copy(p.vz, h_vz);
-    Kokkos::deep_copy(p.mass, h_m);
+    // Upload scatter buffer + indices to device
+    Kokkos::View<int*> d_idx("unpack_idx", n_mem);
+    Kokkos::View<double*> d_buf("unpack_scatter", n_mem * UNPACK_STRIDE);
+    {
+        auto h_idx = Kokkos::create_mirror_view(d_idx);
+        auto h_buf = Kokkos::create_mirror_view(d_buf);
+        for (int i = 0; i < n_mem; i++) h_idx(i) = member_indices[i];
+        std::memcpy(h_buf.data(), scatter_buf.data(), n_mem * UNPACK_STRIDE * sizeof(double));
+        Kokkos::deep_copy(d_idx, h_idx);
+        Kokkos::deep_copy(d_buf, h_buf);
+    }
+
+    // Scatter kernel: write only modified particles back to device arrays
+    auto px = p.x; auto py = p.y; auto pz = p.z;
+    auto pvx = p.vx; auto pvy = p.vy; auto pvz = p.vz;
+    auto pm = p.mass;
+    Kokkos::parallel_for("unpack_scatter", n_mem, KOKKOS_LAMBDA(int i) {
+        int k = d_idx(i);
+        int base = i * UNPACK_STRIDE;
+        px(k) = d_buf(base + 0); py(k) = d_buf(base + 1); pz(k) = d_buf(base + 2);
+        pvx(k) = d_buf(base + 3); pvy(k) = d_buf(base + 4); pvz(k) = d_buf(base + 5);
+        pm(k) = d_buf(base + 6);
+    });
 
     // Write persistent B, auxiliary velocities, and scales back to subsystems
     for (int s = 0; s < n_sub; s++) {
@@ -220,24 +270,36 @@ void SubsystemBatch::unpack(SubsystemManager& mgr, Particles& p) {
         mgr.active[s].scales_set = stored_scales_set[s];
     }
 
-    // Write evolved spins back to particles
-    auto h_spin = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.spin_vec);
-    bool spins_changed = false;
+    // Write evolved spins back to particles via small scatter
+    std::vector<int> spin_indices;
+    std::vector<double> spin_values;
     for (int s = 0; s < n_sub; s++) {
         if (!has_stored_spins[s] || mgr.active[s].n_bodies != 2) continue;
         const auto& sub = mgr.active[s];
         int idx0 = pid_to_idx[sub.particle_ids[0]];
         int idx1 = pid_to_idx[sub.particle_ids[1]];
-        h_spin(idx0, 0) = stored_spins[s*6+0];
-        h_spin(idx0, 1) = stored_spins[s*6+1];
-        h_spin(idx0, 2) = stored_spins[s*6+2];
-        h_spin(idx1, 0) = stored_spins[s*6+3];
-        h_spin(idx1, 1) = stored_spins[s*6+4];
-        h_spin(idx1, 2) = stored_spins[s*6+5];
-        spins_changed = true;
+        spin_indices.push_back(idx0);
+        spin_values.insert(spin_values.end(), {stored_spins[s*6+0], stored_spins[s*6+1], stored_spins[s*6+2]});
+        spin_indices.push_back(idx1);
+        spin_values.insert(spin_values.end(), {stored_spins[s*6+3], stored_spins[s*6+4], stored_spins[s*6+5]});
     }
-    if (spins_changed) {
-        Kokkos::deep_copy(p.spin_vec, h_spin);
+    if (!spin_indices.empty()) {
+        int n_spin = (int)spin_indices.size();
+        Kokkos::View<int*> d_si("spin_idx", n_spin);
+        Kokkos::View<double*> d_sv("spin_val", n_spin * 3);
+        auto h_si = Kokkos::create_mirror_view(d_si);
+        auto h_sv = Kokkos::create_mirror_view(d_sv);
+        for (int i = 0; i < n_spin; i++) h_si(i) = spin_indices[i];
+        std::memcpy(h_sv.data(), spin_values.data(), n_spin * 3 * sizeof(double));
+        Kokkos::deep_copy(d_si, h_si);
+        Kokkos::deep_copy(d_sv, h_sv);
+        auto pspin = p.spin_vec;
+        Kokkos::parallel_for("spin_scatter", n_spin, KOKKOS_LAMBDA(int i) {
+            int k = d_si(i);
+            pspin(k, 0) = d_sv(i * 3 + 0);
+            pspin(k, 1) = d_sv(i * 3 + 1);
+            pspin(k, 2) = d_sv(i * 3 + 2);
+        });
     }
 }
 
@@ -420,7 +482,6 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
         }
 
         double E0_norm = T_norm + U_norm;
-        double B_init_norm = state.B;  // save B before integration
         double Omega_norm = T_norm + state.B;
 
         // Save initial state for PN energy comparison after integration

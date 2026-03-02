@@ -104,6 +104,36 @@ void symmetrized_timestep(double r2, double inv_r,
     t_sym_fb = t_fb + ct_fb / (u_fb + 1.0);
 }
 
+// Gravity interaction: accumulate force from one source particle.
+// Returns inv_r (reusable for timestep computation).
+KOKKOS_INLINE_FUNCTION
+double gravity_interaction(double dx, double dy, double dz,
+                           double r2_soft, double G_mj,
+                           double& ax, double& ay, double& az) {
+    double inv_r = fast_rsqrt(r2_soft);
+    double f = G_mj * inv_r * inv_r * inv_r;
+    ax += f * dx;
+    ay += f * dy;
+    az += f * dz;
+    return inv_r;
+}
+
+// Gradient correction interaction: accumulate jerk-based correction from one source.
+KOKKOS_INLINE_FUNCTION
+void gradient_correction_interaction(double dx, double dy, double dz,
+                                      double dax, double day, double daz,
+                                      double r2_soft, double coeff_mj,
+                                      double& cx, double& cy, double& cz) {
+    double inv_r = fast_rsqrt(r2_soft);
+    double inv_r2 = inv_r * inv_r;
+    double inv_r5 = inv_r2 * inv_r2 * inv_r;
+    double r_dot_a = dx * dax + dy * day + dz * daz;
+    double f = coeff_mj * inv_r5;
+    cx += f * (r2_soft * dax - 3.0 * r_dot_a * dx);
+    cy += f * (r2_soft * day - 3.0 * r_dot_a * dy);
+    cz += f * (r2_soft * daz - 3.0 * r_dot_a * dz);
+}
+
 // Speed of light in code units (km/s)
 constexpr double C_CODE = 299792.458;
 
