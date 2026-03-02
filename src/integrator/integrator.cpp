@@ -332,8 +332,8 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
             auto& sub = g_subsystem_mgr.active[s];
 
             if (sub.n_bodies == 2) {
-                int idx_i = pid_to_idx[sub.particle_ids[0]];
-                int idx_j = pid_to_idx[sub.particle_ids[1]];
+                int idx_i = g_subsystem_mgr.safe_pid_to_idx(sub.particle_ids[0]);
+                int idx_j = g_subsystem_mgr.safe_pid_to_idx(sub.particle_ids[1]);
                 if (idx_i < 0 || idx_j < 0) continue;
 
                 double rx = h_x(idx_j) - h_x(idx_i);
@@ -452,8 +452,9 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
     if (!secular_idx.empty()) {
         for (int s : secular_idx) {
             const auto& sub = g_subsystem_mgr.active[s];
-            int idx0 = pid_to_idx[sub.particle_ids[0]];
-            int idx1 = pid_to_idx[sub.particle_ids[1]];
+            int idx0 = g_subsystem_mgr.safe_pid_to_idx(sub.particle_ids[0]);
+            int idx1 = g_subsystem_mgr.safe_pid_to_idx(sub.particle_ids[1]);
+            if (idx0 < 0 || idx1 < 0) continue;
 
             double p1[3] = {h_x(idx0), h_y(idx0), h_z(idx0)};
             double v1[3] = {h_vx(idx0), h_vy(idx0), h_vz(idx0)};
@@ -516,9 +517,10 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
             if (sub.n_bodies != 3) continue;
 
             // Identify inner binary (first two PIDs) and outer companion (third)
-            int idx0 = pid_to_idx[sub.particle_ids[0]];
-            int idx1 = pid_to_idx[sub.particle_ids[1]];
-            int idx2 = pid_to_idx[sub.particle_ids[2]];
+            int idx0 = g_subsystem_mgr.safe_pid_to_idx(sub.particle_ids[0]);
+            int idx1 = g_subsystem_mgr.safe_pid_to_idx(sub.particle_ids[1]);
+            int idx2 = g_subsystem_mgr.safe_pid_to_idx(sub.particle_ids[2]);
+            if (idx0 < 0 || idx1 < 0 || idx2 < 0) continue;
 
             double m1 = h_m(idx0), m2 = h_m(idx1), m3 = h_m(idx2);
             double mu_in = G * (m1 + m2);
@@ -720,7 +722,8 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
             const auto& sub = logh_mgr.active[si];
             saved_bodies[si].resize(sub.n_bodies);
             for (int b = 0; b < sub.n_bodies; b++) {
-                int idx = pid_to_idx[sub.particle_ids[b]];
+                int idx = g_subsystem_mgr.safe_pid_to_idx(sub.particle_ids[b]);
+                if (idx < 0) continue;
                 saved_bodies[si][b] = {h_x(idx), h_y(idx), h_z(idx),
                                        h_vx(idx), h_vy(idx), h_vz(idx)};
             }
@@ -771,7 +774,8 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
                 for (int si : failed) {
                     const auto& sub = saved_subs[si];
                     for (int b = 0; b < sub.n_bodies; b++) {
-                        int idx = pid_to_idx[sub.particle_ids[b]];
+                        int idx = g_subsystem_mgr.safe_pid_to_idx(sub.particle_ids[b]);
+                        if (idx < 0) continue;
                         h_x(idx)  = saved_bodies[si][b].x;
                         h_y(idx)  = saved_bodies[si][b].y;
                         h_z(idx)  = saved_bodies[si][b].z;
@@ -3387,6 +3391,7 @@ static void cross_acceleration_and_gradient_distributed(DistributedParticles& dp
 // Distributed adaptive timestep computation - tiled GPU kernel
 static void compute_timestep_distributed(DistributedParticles& dp, int start, int count,
                                       double G, double soft2, double eta) {
+    (void)eta;
     if (count <= 1) return;
 
 
@@ -3894,6 +3899,8 @@ static void cpu_kick(CpuSubset& s, int start, int count, double kick_dt) {
 // CPU timestep computation (N3L: upper triangle, squared-space)
 static void cpu_compute_timestep(CpuSubset& s, int start, int count,
                                  double G, double soft2, double eta) {
+    (void)soft2;
+    (void)eta;
 #ifdef ENABLE_COLLISIONAL
     double eta_ff_v = g_collisional.eta_ff;
     double eta_fb_v = g_collisional.eta_fb;
@@ -4526,6 +4533,7 @@ static void cross_acceleration_global_tree(Particles& p,
                                             int slow_start, int slow_count,
                                             int fast_start, int fast_count,
                                             double G, double soft2) {
+    (void)fast_start;
     if (slow_count <= 0 || fast_count <= 0) return;
 
     // slow ← fast (source_flag=1 means fast sources, target=slow)
@@ -4542,6 +4550,7 @@ static void cross_acceleration_and_gradient_global_tree(Particles& p,
                                                          int slow_start, int slow_count,
                                                          int fast_start, int fast_count,
                                                          double G, double soft2, double dt) {
+    (void)fast_start;
     if (slow_count <= 0 || fast_count <= 0) return;
 
     // Cross-forces (overwrites ax/ay/az for both subsets)

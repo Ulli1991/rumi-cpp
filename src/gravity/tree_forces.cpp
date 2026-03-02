@@ -20,6 +20,7 @@
 void tree_self_acceleration(Particles& p, const Octree& tree,
                             int start, int count, double G, double soft2,
                             int group_offset, int num_groups_param) {
+    (void)start;
     if (count <= 0 || tree.n_cells == 0) return;
 
     const int n_groups = (num_groups_param >= 0) ? num_groups_param : tree.n_groups;
@@ -199,6 +200,8 @@ void tree_self_acceleration_and_timestep(Particles& p, const Octree& tree,
                                           int start, int count,
                                           double G, double soft2, double eta,
                                           int group_offset, int num_groups_param) {
+    (void)start;
+    (void)eta;
     if (count <= 0 || tree.n_cells == 0) return;
 
     const int n_groups = (num_groups_param >= 0) ? num_groups_param : tree.n_groups;
@@ -1530,6 +1533,7 @@ void tree_global_self_gradient_correction(Particles& p, const Octree& tree,
 void tree_global_self_acceleration_and_timestep(Particles& p, const Octree& tree,
                                                  int subset_flag,
                                                  double G, double soft2, double eta) {
+    (void)eta;
     if (tree.n_particles <= 0 || tree.n_cells == 0) return;
 
     const int n_groups = tree.n_groups;
@@ -2095,6 +2099,7 @@ void tree_all_gradient_on_subset(Particles& p, const Octree& tree,
 // Uses cell_com + cell_vel (total). Results OVERWRITE p.ax, p.ay, p.az, p.dt_adapt.
 void tree_all_forces_and_timestep_on_subset(Particles& p, const Octree& tree,
                                              double G, double soft2, double eta) {
+    (void)eta;
     if (tree.n_particles <= 0 || tree.n_cells == 0) return;
 
     const int n_groups = tree.n_groups;

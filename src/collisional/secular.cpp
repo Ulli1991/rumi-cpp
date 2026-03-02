@@ -397,6 +397,7 @@ void secular_evolve_triple(SecularTriple& tri, double dt, double G, double c_cod
 // ============================================================================
 
 bool should_be_secular(const Subsystem& sub, double dt_step, int n_orb_threshold) {
+    (void)dt_step;
     if (sub.type != SubsystemType::BINARY && sub.type != SubsystemType::TRIPLE_STABLE)
         return false;
     return sub.n_orb_per_dt >= n_orb_threshold;

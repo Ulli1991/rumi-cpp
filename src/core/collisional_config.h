@@ -1,6 +1,10 @@
 #pragma once
 
 #include <string>
+#include <cstdio>
+#include <cstdlib>
+#include <algorithm>
+#include <initializer_list>
 
 // Collisional N-body configuration (BIFROST-style)
 // All parameters under "Unsoftened direct N-body options" in config file
@@ -50,6 +54,27 @@ struct CollisionalConfig {
     double c_code = 0.0;              // speed of light in code units
 
     void compute_derived() {
+        // Validate parameters
+        auto check = [](bool cond, const char* msg) {
+            if (!cond) { std::fprintf(stderr, "CollisionalConfig error: %s\n", msg); std::exit(1); }
+        };
+        check(r_ngb > 0, "r_ngb must be > 0");
+        check(r_ngb_max >= r_ngb, "r_ngb_max must be >= r_ngb");
+        check(eta_gbs > 0, "eta_gbs must be > 0");
+        check(eta_ff > 0, "eta_ff must be > 0");
+        check(eta_fb > 0, "eta_fb must be > 0");
+        check(eta_pert > 0, "eta_pert must be > 0");
+
+        auto one_of = [](const std::string& val, std::initializer_list<const char*> opts, const char* name) {
+            for (auto o : opts) if (val == o) return;
+            std::fprintf(stderr, "CollisionalConfig error: unknown %s '%s'\n", name, val.c_str());
+            std::exit(1);
+        };
+        one_of(sse_wind, {"HURLEY","HURLEY_LBV","VINK","VINK_NO_BISTAB"}, "SSE_WIND_MODEL");
+        one_of(sse_remnant, {"HURLEY","BELCZYNSKI02","BELCZYNSKI08","FRYER_RAPID","FRYER_DELAYED","ELDRIDGE_TOUT"}, "SSE_REMNANT_MODEL");
+        one_of(sse_ppisn, {"NONE","STRONG","MODERATE","WEAK"}, "SSE_PPISN_MODEL");
+        one_of(sse_ecsn, {"OFF","ON"}, "SSE_ECSN_MODEL");
+
         r_ngb_sq = r_ngb * r_ngb;
         r_ngb_max_sq = r_ngb_max * r_ngb_max;
         // Speed of light: 299792.458 km/s in code velocity units (1 km/s)

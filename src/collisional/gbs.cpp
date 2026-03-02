@@ -23,6 +23,7 @@ void GBSIntegrator::pack_state(const LogHState& state, double* y, int& dim) {
 }
 
 void GBSIntegrator::unpack_state(const double* y, int dim, LogHState& state) {
+    (void)dim;
     int idx = 0;
     int n = state.n_bodies;
     for (int i = 0; i < n * 3; i++) state.pos[i] = y[idx++];

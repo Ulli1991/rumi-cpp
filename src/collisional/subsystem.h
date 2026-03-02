@@ -73,6 +73,11 @@ struct SubsystemManager {
     const std::vector<int>& pid_to_idx() const { return pid_to_idx_; }
     int pid_to_idx_max() const { return pid_to_idx_max_; }
 
+    // Bounds-checked lookup: returns array index for particle ID, or -1 if invalid
+    int safe_pid_to_idx(int pid) const {
+        return (pid >= 0 && pid < (int)pid_to_idx_.size()) ? pid_to_idx_[pid] : -1;
+    }
+
     // GPU output buffer for neighbor pairs (written by pairwise kernels)
     Kokkos::View<int*>    ngb_pair_i;    // particle index i
     Kokkos::View<int*>    ngb_pair_j;    // particle index j

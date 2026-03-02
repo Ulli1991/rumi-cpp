@@ -103,6 +103,8 @@ bool SubsystemManager::mardling_stability(double a_in, double e_in,
 void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
                                           double r_ngb, double r_ngb_max,
                                           int n_orb_secular) {
+    (void)r_ngb;
+    (void)r_ngb_max;
     // BIFROST Section 3.5: fresh detection at each HHS level.
     // Save existing subsystems for persistent state transfer, then start fresh.
     std::vector<Subsystem> old_active = std::move(active);
@@ -187,21 +189,16 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
         uf.unite(pr.pid_lo, pr.pid_hi);
     }
 
-    // Build components from ALL pairs (bound and unbound)
-    std::map<int, std::vector<int>> components;
+    // Build components from ALL pairs in single pass via reverse map (O(P))
+    std::map<int, std::set<int>> comp_members;
     for (auto& pr : pairs) {
         int root = uf.find(pr.pid_lo);
-        if (components.find(root) == components.end()) {
-            // Collect all members
-            std::set<int> members;
-            for (auto& pr2 : pairs) {
-                if (uf.find(pr2.pid_lo) == root) {
-                    members.insert(pr2.pid_lo);
-                    members.insert(pr2.pid_hi);
-                }
-            }
-            components[root] = std::vector<int>(members.begin(), members.end());
-        }
+        comp_members[root].insert(pr.pid_lo);
+        comp_members[root].insert(pr.pid_hi);
+    }
+    std::map<int, std::vector<int>> components;
+    for (auto& [root, members_set] : comp_members) {
+        components[root] = std::vector<int>(members_set.begin(), members_set.end());
     }
 
     // Build lookup from sorted pid set → old subsystem for persistent state transfer
@@ -438,6 +435,7 @@ void SubsystemManager::update_particle_flags(Particles& p) const {
 // ============================================================================
 
 void SubsystemManager::remap_indices(const Particles& p) {
+    (void)p;
     // Subsystem tracks permanent particle_ids, not array indices.
     // No remapping needed — we always look up by particle_id.
 }

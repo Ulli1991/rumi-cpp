@@ -63,7 +63,20 @@ if(ENABLE_COLLISIONAL)
 endif()
 target_link_libraries(nbody-kokkos Kokkos::kokkos)
 target_compile_features(nbody-kokkos PRIVATE cxx_std_17)
-target_compile_options(nbody-kokkos PRIVATE -O3 -march=native)
+
+# Build type: Release (default), RelWithDebInfo, Debug
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+endif()
+message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
+
+# Per-build-type optimization flags
+target_compile_options(nbody-kokkos PRIVATE
+    -Wall -Wextra -Wno-unknown-pragmas
+    $<$<CONFIG:Release>:-O3 -march=native>
+    $<$<CONFIG:RelWithDebInfo>:-O2 -g -march=native>
+    $<$<CONFIG:Debug>:-g -O0>
+)
 
 # Add MPI support if enabled
 if(USE_MPI)

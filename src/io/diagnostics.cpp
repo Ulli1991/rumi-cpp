@@ -171,6 +171,7 @@ static double vec_mag(double x, double y, double z) {
 void compute_errors(const DiagnosticState& cur, const DiagnosticState& ini,
                     const Particles& p, bool is_cluster,
                     double& dE, double& dP, double& dL) {
+    (void)is_cluster;
     // Conserved quantity: E_total + all energy sinks (GW, mergers, escapers, SSE mass loss)
     double E_cur = cur.E_total;
     double E_ini = ini.E_total;
@@ -199,6 +200,7 @@ void compute_errors(const DiagnosticState& cur, const DiagnosticState& ini,
 void print_timebin_table(const Particles& p, const std::vector<double>& levels,
                          double dE, double dP, double dL,
                          double t_myr, int step, bool is_cluster) {
+    (void)is_cluster;
     int nl = (int)levels.size();
 
     // Mirror level to host for counting

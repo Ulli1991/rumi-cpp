@@ -39,6 +39,7 @@ void SubsystemBatch::allocate(int n_sub, int total_bodies) {
 
 void SubsystemBatch::pack(const SubsystemManager& mgr, const Particles& p,
                            double G, double dt) {
+    (void)G;
     int n_sub = (int)mgr.active.size();
     if (n_sub == 0) return;
 
@@ -52,17 +53,20 @@ void SubsystemBatch::pack(const SubsystemManager& mgr, const Particles& p,
     const auto& pid_to_idx = mgr.pid_to_idx();
 
     // Collect unique particle indices for selective gather (avoid full-array D2H)
-    std::vector<int> member_indices;
-    std::unordered_map<int, int> idx_to_local;
+    // Cache for reuse in unpack()
+    cached_member_indices.clear();
+    cached_idx_to_local.clear();
     for (const auto& sub : mgr.active) {
         for (int b = 0; b < sub.n_bodies; b++) {
             int idx = pid_to_idx[sub.particle_ids[b]];
-            if (idx_to_local.find(idx) == idx_to_local.end()) {
-                idx_to_local[idx] = (int)member_indices.size();
-                member_indices.push_back(idx);
+            if (cached_idx_to_local.find(idx) == cached_idx_to_local.end()) {
+                cached_idx_to_local[idx] = (int)cached_member_indices.size();
+                cached_member_indices.push_back(idx);
             }
         }
     }
+    auto& member_indices = cached_member_indices;
+    auto& idx_to_local = cached_idx_to_local;
     int n_mem = (int)member_indices.size();
 
     // Upload indices to device, gather only needed particle data
@@ -100,8 +104,17 @@ void SubsystemBatch::pack(const SubsystemManager& mgr, const Particles& p,
 
     // Copy persistent B values, auxiliary velocities, and normalization scales from subsystems
     stored_B.resize(n_sub);
-    stored_aux_vel.resize(n_sub);
     has_stored_aux_vel.resize(n_sub);
+    // Compute flat offsets for aux_vel
+    stored_aux_vel_offsets.resize(n_sub);
+    {
+        int aux_off = 0;
+        for (int s = 0; s < n_sub; s++) {
+            stored_aux_vel_offsets[s] = aux_off;
+            aux_off += mgr.active[s].n_bodies;
+        }
+        stored_aux_vel.resize(aux_off * 3);
+    }
     stored_spins.resize(n_sub * 6, 0.0);
     has_stored_spins.resize(n_sub, false);
     stored_stellar_type.resize(n_sub * 2, 0);
@@ -113,9 +126,9 @@ void SubsystemBatch::pack(const SubsystemManager& mgr, const Particles& p,
     for (int s = 0; s < n_sub; s++) {
         stored_B[s] = mgr.active[s].B_phys;
         has_stored_aux_vel[s] = mgr.active[s].has_aux_vel;
-        stored_aux_vel[s].resize(mgr.active[s].n_bodies * 3);
         if (mgr.active[s].has_aux_vel) {
-            std::memcpy(stored_aux_vel[s].data(), mgr.active[s].aux_vel_phys,
+            int av_off = stored_aux_vel_offsets[s] * 3;
+            std::memcpy(&stored_aux_vel[av_off], mgr.active[s].aux_vel_phys,
                         mgr.active[s].n_bodies * 3 * sizeof(double));
         }
         stored_V_scale[s] = mgr.active[s].V_scale;
@@ -197,20 +210,10 @@ void SubsystemBatch::unpack(SubsystemManager& mgr, Particles& p) {
     auto h_mass_flat = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), flat_mass);
     auto h_off = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), offset);
 
-    // Collect unique particle indices and build scatter buffer on host
-    // Buffer layout: x,y,z,vx,vy,vz,mass (7 doubles per member)
+    // Reuse cached member indices from pack() (avoids recomputation and rehashing)
     constexpr int UNPACK_STRIDE = 7;
-    std::vector<int> member_indices;
-    std::unordered_map<int, int> idx_to_local;
-    for (const auto& sub : mgr.active) {
-        for (int b = 0; b < sub.n_bodies; b++) {
-            int idx = pid_to_idx[sub.particle_ids[b]];
-            if (idx_to_local.find(idx) == idx_to_local.end()) {
-                idx_to_local[idx] = (int)member_indices.size();
-                member_indices.push_back(idx);
-            }
-        }
-    }
+    auto& member_indices = cached_member_indices;
+    auto& idx_to_local = cached_idx_to_local;
     int n_mem = (int)member_indices.size();
 
     // Build scatter buffer from LogH output
@@ -260,7 +263,8 @@ void SubsystemBatch::unpack(SubsystemManager& mgr, Particles& p) {
         mgr.active[s].B_phys = stored_B[s];
         mgr.active[s].has_aux_vel = has_stored_aux_vel[s];
         if (has_stored_aux_vel[s]) {
-            std::memcpy(mgr.active[s].aux_vel_phys, stored_aux_vel[s].data(),
+            int av_off = stored_aux_vel_offsets[s] * 3;
+            std::memcpy(mgr.active[s].aux_vel_phys, &stored_aux_vel[av_off],
                         mgr.active[s].n_bodies * 3 * sizeof(double));
         }
         mgr.active[s].V_scale = stored_V_scale[s];
@@ -438,10 +442,11 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
             state.use_aux_vel = true;
             if (batch.has_stored_aux_vel[s]) {
                 // Restore from previous call: same normalization as vel
+                int av_off = batch.stored_aux_vel_offsets[s] * 3;
                 for (int b = 0; b < nb; b++) {
-                    state.aux_vel[b*3+0] = (batch.stored_aux_vel[s][b*3+0] - cm_vx) / V_scale;
-                    state.aux_vel[b*3+1] = (batch.stored_aux_vel[s][b*3+1] - cm_vy) / V_scale;
-                    state.aux_vel[b*3+2] = (batch.stored_aux_vel[s][b*3+2] - cm_vz) / V_scale;
+                    state.aux_vel[b*3+0] = (batch.stored_aux_vel[av_off + b*3+0] - cm_vx) / V_scale;
+                    state.aux_vel[b*3+1] = (batch.stored_aux_vel[av_off + b*3+1] - cm_vy) / V_scale;
+                    state.aux_vel[b*3+2] = (batch.stored_aux_vel[av_off + b*3+2] - cm_vz) / V_scale;
                 }
             } else {
                 // First call: initialize w = v
@@ -529,10 +534,11 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
         batch.stored_B[s] = state.B;
         if (state.use_aux_vel) {
             batch.has_stored_aux_vel[s] = true;
+            int av_off = batch.stored_aux_vel_offsets[s] * 3;
             for (int b = 0; b < nb; b++) {
-                batch.stored_aux_vel[s][b*3+0] = state.aux_vel[b*3+0] * V_scale + cm_vx;
-                batch.stored_aux_vel[s][b*3+1] = state.aux_vel[b*3+1] * V_scale + cm_vy;
-                batch.stored_aux_vel[s][b*3+2] = state.aux_vel[b*3+2] * V_scale + cm_vz;
+                batch.stored_aux_vel[av_off + b*3+0] = state.aux_vel[b*3+0] * V_scale + cm_vx;
+                batch.stored_aux_vel[av_off + b*3+1] = state.aux_vel[b*3+1] * V_scale + cm_vy;
+                batch.stored_aux_vel[av_off + b*3+2] = state.aux_vel[b*3+2] * V_scale + cm_vz;
             }
         }
 

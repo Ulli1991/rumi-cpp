@@ -106,62 +106,56 @@ void DistributedParticles::distribute_initial(Particles& global_particles) {
     local.allocate(N_total, (bool)coll_flag);
 
     // Step 4: Broadcast ALL particles from rank 0 to all ranks
-    if (my_rank == 0) {
-        // Copy to host for broadcast
-        auto h_x = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), global_particles.x);
-        auto h_y = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), global_particles.y);
-        auto h_z = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), global_particles.z);
-        auto h_vx = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), global_particles.vx);
-        auto h_vy = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), global_particles.vy);
-        auto h_vz = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), global_particles.vz);
-        auto h_ax = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), global_particles.ax);
-        auto h_ay = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), global_particles.ay);
-        auto h_az = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), global_particles.az);
-        auto h_mass = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), global_particles.mass);
-        auto h_dt = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), global_particles.dt_adapt);
-        auto h_level = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), global_particles.level);
-        auto h_orig = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), global_particles.orig_index);
-        auto h_ix = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), global_particles.ix);
-        auto h_iy = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), global_particles.iy);
-        auto h_iz = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), global_particles.iz);
+    // Pack 11 double fields into 1 broadcast, 2 int fields into 1, 3 int64 fields into 1
+    {
+        constexpr int N_DBL_FIELDS = 11;  // x,y,z,vx,vy,vz,ax,ay,az,mass,dt
+        constexpr int N_INT_FIELDS = 2;   // level, orig_index
+        constexpr int N_I64_FIELDS = 3;   // ix, iy, iz
 
-        // Broadcast each array
-        MPI_Bcast(h_x.data(), N_total, MPI_DOUBLE, 0, MPI_COMM_WORLD);
-        MPI_Bcast(h_y.data(), N_total, MPI_DOUBLE, 0, MPI_COMM_WORLD);
-        MPI_Bcast(h_z.data(), N_total, MPI_DOUBLE, 0, MPI_COMM_WORLD);
-        MPI_Bcast(h_vx.data(), N_total, MPI_DOUBLE, 0, MPI_COMM_WORLD);
-        MPI_Bcast(h_vy.data(), N_total, MPI_DOUBLE, 0, MPI_COMM_WORLD);
-        MPI_Bcast(h_vz.data(), N_total, MPI_DOUBLE, 0, MPI_COMM_WORLD);
-        MPI_Bcast(h_ax.data(), N_total, MPI_DOUBLE, 0, MPI_COMM_WORLD);
-        MPI_Bcast(h_ay.data(), N_total, MPI_DOUBLE, 0, MPI_COMM_WORLD);
-        MPI_Bcast(h_az.data(), N_total, MPI_DOUBLE, 0, MPI_COMM_WORLD);
-        MPI_Bcast(h_mass.data(), N_total, MPI_DOUBLE, 0, MPI_COMM_WORLD);
-        MPI_Bcast(h_dt.data(), N_total, MPI_DOUBLE, 0, MPI_COMM_WORLD);
-        MPI_Bcast(h_level.data(), N_total, MPI_INT, 0, MPI_COMM_WORLD);
-        MPI_Bcast(h_orig.data(), N_total, MPI_INT, 0, MPI_COMM_WORLD);
-        MPI_Bcast(h_ix.data(), N_total, MPI_INT64_T, 0, MPI_COMM_WORLD);
-        MPI_Bcast(h_iy.data(), N_total, MPI_INT64_T, 0, MPI_COMM_WORLD);
-        MPI_Bcast(h_iz.data(), N_total, MPI_INT64_T, 0, MPI_COMM_WORLD);
+        std::vector<double> dbl_buf(N_DBL_FIELDS * (size_t)N_total);
+        std::vector<int> int_buf(N_INT_FIELDS * (size_t)N_total);
+        std::vector<int64_t> i64_buf(N_I64_FIELDS * (size_t)N_total);
 
-        // Copy to device
-        Kokkos::deep_copy(local.x, h_x);
-        Kokkos::deep_copy(local.y, h_y);
-        Kokkos::deep_copy(local.z, h_z);
-        Kokkos::deep_copy(local.vx, h_vx);
-        Kokkos::deep_copy(local.vy, h_vy);
-        Kokkos::deep_copy(local.vz, h_vz);
-        Kokkos::deep_copy(local.ax, h_ax);
-        Kokkos::deep_copy(local.ay, h_ay);
-        Kokkos::deep_copy(local.az, h_az);
-        Kokkos::deep_copy(local.mass, h_mass);
-        Kokkos::deep_copy(local.dt_adapt, h_dt);
-        Kokkos::deep_copy(local.level, h_level);
-        Kokkos::deep_copy(local.orig_index, h_orig);
-        Kokkos::deep_copy(local.ix, h_ix);
-        Kokkos::deep_copy(local.iy, h_iy);
-        Kokkos::deep_copy(local.iz, h_iz);
-    } else {
-        // Other ranks: allocate host buffers and receive broadcast
+        Particles& src = (my_rank == 0) ? global_particles : local;
+
+        // Rank 0: copy from device to packed host buffers
+        if (my_rank == 0) {
+            auto h_x = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), src.x);
+            auto h_y = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), src.y);
+            auto h_z = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), src.z);
+            auto h_vx = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), src.vx);
+            auto h_vy = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), src.vy);
+            auto h_vz = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), src.vz);
+            auto h_ax = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), src.ax);
+            auto h_ay = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), src.ay);
+            auto h_az = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), src.az);
+            auto h_mass = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), src.mass);
+            auto h_dt = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), src.dt_adapt);
+            auto h_level = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), src.level);
+            auto h_orig = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), src.orig_index);
+            auto h_ix = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), src.ix);
+            auto h_iy = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), src.iy);
+            auto h_iz = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), src.iz);
+            for (int i = 0; i < N_total; i++) {
+                double* dp = &dbl_buf[i * N_DBL_FIELDS];
+                dp[0]=h_x(i); dp[1]=h_y(i); dp[2]=h_z(i);
+                dp[3]=h_vx(i); dp[4]=h_vy(i); dp[5]=h_vz(i);
+                dp[6]=h_ax(i); dp[7]=h_ay(i); dp[8]=h_az(i);
+                dp[9]=h_mass(i); dp[10]=h_dt(i);
+                int_buf[i*N_INT_FIELDS+0] = h_level(i);
+                int_buf[i*N_INT_FIELDS+1] = h_orig(i);
+                i64_buf[i*N_I64_FIELDS+0] = h_ix(i);
+                i64_buf[i*N_I64_FIELDS+1] = h_iy(i);
+                i64_buf[i*N_I64_FIELDS+2] = h_iz(i);
+            }
+        }
+
+        // 3 broadcasts instead of 16
+        MPI_Bcast(dbl_buf.data(), N_DBL_FIELDS * N_total, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+        MPI_Bcast(int_buf.data(), N_INT_FIELDS * N_total, MPI_INT, 0, MPI_COMM_WORLD);
+        MPI_Bcast(i64_buf.data(), N_I64_FIELDS * N_total, MPI_INT64_T, 0, MPI_COMM_WORLD);
+
+        // Unpack into per-field host mirrors and copy to device
         auto h_x = Kokkos::create_mirror_view(local.x);
         auto h_y = Kokkos::create_mirror_view(local.y);
         auto h_z = Kokkos::create_mirror_view(local.z);
@@ -178,26 +172,18 @@ void DistributedParticles::distribute_initial(Particles& global_particles) {
         auto h_ix = Kokkos::create_mirror_view(local.ix);
         auto h_iy = Kokkos::create_mirror_view(local.iy);
         auto h_iz = Kokkos::create_mirror_view(local.iz);
-
-        // Receive broadcast
-        MPI_Bcast(h_x.data(), N_total, MPI_DOUBLE, 0, MPI_COMM_WORLD);
-        MPI_Bcast(h_y.data(), N_total, MPI_DOUBLE, 0, MPI_COMM_WORLD);
-        MPI_Bcast(h_z.data(), N_total, MPI_DOUBLE, 0, MPI_COMM_WORLD);
-        MPI_Bcast(h_vx.data(), N_total, MPI_DOUBLE, 0, MPI_COMM_WORLD);
-        MPI_Bcast(h_vy.data(), N_total, MPI_DOUBLE, 0, MPI_COMM_WORLD);
-        MPI_Bcast(h_vz.data(), N_total, MPI_DOUBLE, 0, MPI_COMM_WORLD);
-        MPI_Bcast(h_ax.data(), N_total, MPI_DOUBLE, 0, MPI_COMM_WORLD);
-        MPI_Bcast(h_ay.data(), N_total, MPI_DOUBLE, 0, MPI_COMM_WORLD);
-        MPI_Bcast(h_az.data(), N_total, MPI_DOUBLE, 0, MPI_COMM_WORLD);
-        MPI_Bcast(h_mass.data(), N_total, MPI_DOUBLE, 0, MPI_COMM_WORLD);
-        MPI_Bcast(h_dt.data(), N_total, MPI_DOUBLE, 0, MPI_COMM_WORLD);
-        MPI_Bcast(h_level.data(), N_total, MPI_INT, 0, MPI_COMM_WORLD);
-        MPI_Bcast(h_orig.data(), N_total, MPI_INT, 0, MPI_COMM_WORLD);
-        MPI_Bcast(h_ix.data(), N_total, MPI_INT64_T, 0, MPI_COMM_WORLD);
-        MPI_Bcast(h_iy.data(), N_total, MPI_INT64_T, 0, MPI_COMM_WORLD);
-        MPI_Bcast(h_iz.data(), N_total, MPI_INT64_T, 0, MPI_COMM_WORLD);
-
-        // Copy to device
+        for (int i = 0; i < N_total; i++) {
+            const double* dp = &dbl_buf[i * N_DBL_FIELDS];
+            h_x(i)=dp[0]; h_y(i)=dp[1]; h_z(i)=dp[2];
+            h_vx(i)=dp[3]; h_vy(i)=dp[4]; h_vz(i)=dp[5];
+            h_ax(i)=dp[6]; h_ay(i)=dp[7]; h_az(i)=dp[8];
+            h_mass(i)=dp[9]; h_dt(i)=dp[10];
+            h_level(i) = int_buf[i*N_INT_FIELDS+0];
+            h_orig(i) = int_buf[i*N_INT_FIELDS+1];
+            h_ix(i) = i64_buf[i*N_I64_FIELDS+0];
+            h_iy(i) = i64_buf[i*N_I64_FIELDS+1];
+            h_iz(i) = i64_buf[i*N_I64_FIELDS+2];
+        }
         Kokkos::deep_copy(local.x, h_x);
         Kokkos::deep_copy(local.y, h_y);
         Kokkos::deep_copy(local.z, h_z);
@@ -216,9 +202,14 @@ void DistributedParticles::distribute_initial(Particles& global_particles) {
         Kokkos::deep_copy(local.iz, h_iz);
     }
 
-    // Broadcast collisional fields if enabled
+    // Broadcast collisional fields if enabled (packed: 6 doubles + 3 ints → 2 broadcasts)
     if (local.collisional) {
-        // Use same rank0-sends / others-receive pattern as main particle data
+        constexpr int N_COLL_DBL = 6;  // mzams, sage, srad, lum, cmass, smag
+        constexpr int N_COLL_INT = 3;  // pid, sid, stype
+
+        std::vector<double> coll_dbl(N_COLL_DBL * (size_t)N_total);
+        std::vector<int> coll_int(N_COLL_INT * (size_t)N_total);
+
         Particles& src = (my_rank == 0) ? global_particles : local;
         if (my_rank == 0) {
             auto h_pid = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), src.particle_id);
@@ -230,53 +221,43 @@ void DistributedParticles::distribute_initial(Particles& global_particles) {
             auto h_lum = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), src.luminosity);
             auto h_cmass = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), src.core_mass);
             auto h_smag = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), src.spin_mag);
-            MPI_Bcast(h_pid.data(), N_total, MPI_INT, 0, MPI_COMM_WORLD);
-            MPI_Bcast(h_sid.data(), N_total, MPI_INT, 0, MPI_COMM_WORLD);
-            MPI_Bcast(h_stype.data(), N_total, MPI_INT, 0, MPI_COMM_WORLD);
-            MPI_Bcast(h_mzams.data(), N_total, MPI_DOUBLE, 0, MPI_COMM_WORLD);
-            MPI_Bcast(h_sage.data(), N_total, MPI_DOUBLE, 0, MPI_COMM_WORLD);
-            MPI_Bcast(h_srad.data(), N_total, MPI_DOUBLE, 0, MPI_COMM_WORLD);
-            MPI_Bcast(h_lum.data(), N_total, MPI_DOUBLE, 0, MPI_COMM_WORLD);
-            MPI_Bcast(h_cmass.data(), N_total, MPI_DOUBLE, 0, MPI_COMM_WORLD);
-            MPI_Bcast(h_smag.data(), N_total, MPI_DOUBLE, 0, MPI_COMM_WORLD);
-            Kokkos::deep_copy(local.particle_id, h_pid);
-            Kokkos::deep_copy(local.subsystem_id, h_sid);
-            Kokkos::deep_copy(local.stellar_type, h_stype);
-            Kokkos::deep_copy(local.m_zams, h_mzams);
-            Kokkos::deep_copy(local.stellar_age, h_sage);
-            Kokkos::deep_copy(local.stellar_radius, h_srad);
-            Kokkos::deep_copy(local.luminosity, h_lum);
-            Kokkos::deep_copy(local.core_mass, h_cmass);
-            Kokkos::deep_copy(local.spin_mag, h_smag);
-        } else {
-            auto h_pid = Kokkos::create_mirror_view(local.particle_id);
-            auto h_sid = Kokkos::create_mirror_view(local.subsystem_id);
-            auto h_stype = Kokkos::create_mirror_view(local.stellar_type);
-            auto h_mzams = Kokkos::create_mirror_view(local.m_zams);
-            auto h_sage = Kokkos::create_mirror_view(local.stellar_age);
-            auto h_srad = Kokkos::create_mirror_view(local.stellar_radius);
-            auto h_lum = Kokkos::create_mirror_view(local.luminosity);
-            auto h_cmass = Kokkos::create_mirror_view(local.core_mass);
-            auto h_smag = Kokkos::create_mirror_view(local.spin_mag);
-            MPI_Bcast(h_pid.data(), N_total, MPI_INT, 0, MPI_COMM_WORLD);
-            MPI_Bcast(h_sid.data(), N_total, MPI_INT, 0, MPI_COMM_WORLD);
-            MPI_Bcast(h_stype.data(), N_total, MPI_INT, 0, MPI_COMM_WORLD);
-            MPI_Bcast(h_mzams.data(), N_total, MPI_DOUBLE, 0, MPI_COMM_WORLD);
-            MPI_Bcast(h_sage.data(), N_total, MPI_DOUBLE, 0, MPI_COMM_WORLD);
-            MPI_Bcast(h_srad.data(), N_total, MPI_DOUBLE, 0, MPI_COMM_WORLD);
-            MPI_Bcast(h_lum.data(), N_total, MPI_DOUBLE, 0, MPI_COMM_WORLD);
-            MPI_Bcast(h_cmass.data(), N_total, MPI_DOUBLE, 0, MPI_COMM_WORLD);
-            MPI_Bcast(h_smag.data(), N_total, MPI_DOUBLE, 0, MPI_COMM_WORLD);
-            Kokkos::deep_copy(local.particle_id, h_pid);
-            Kokkos::deep_copy(local.subsystem_id, h_sid);
-            Kokkos::deep_copy(local.stellar_type, h_stype);
-            Kokkos::deep_copy(local.m_zams, h_mzams);
-            Kokkos::deep_copy(local.stellar_age, h_sage);
-            Kokkos::deep_copy(local.stellar_radius, h_srad);
-            Kokkos::deep_copy(local.luminosity, h_lum);
-            Kokkos::deep_copy(local.core_mass, h_cmass);
-            Kokkos::deep_copy(local.spin_mag, h_smag);
+            for (int i = 0; i < N_total; i++) {
+                double* dp = &coll_dbl[i * N_COLL_DBL];
+                dp[0]=h_mzams(i); dp[1]=h_sage(i); dp[2]=h_srad(i);
+                dp[3]=h_lum(i); dp[4]=h_cmass(i); dp[5]=h_smag(i);
+                int* ip = &coll_int[i * N_COLL_INT];
+                ip[0]=h_pid(i); ip[1]=h_sid(i); ip[2]=h_stype(i);
+            }
         }
+
+        MPI_Bcast(coll_dbl.data(), N_COLL_DBL * N_total, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+        MPI_Bcast(coll_int.data(), N_COLL_INT * N_total, MPI_INT, 0, MPI_COMM_WORLD);
+
+        auto h_pid = Kokkos::create_mirror_view(local.particle_id);
+        auto h_sid = Kokkos::create_mirror_view(local.subsystem_id);
+        auto h_stype = Kokkos::create_mirror_view(local.stellar_type);
+        auto h_mzams = Kokkos::create_mirror_view(local.m_zams);
+        auto h_sage = Kokkos::create_mirror_view(local.stellar_age);
+        auto h_srad = Kokkos::create_mirror_view(local.stellar_radius);
+        auto h_lum = Kokkos::create_mirror_view(local.luminosity);
+        auto h_cmass = Kokkos::create_mirror_view(local.core_mass);
+        auto h_smag = Kokkos::create_mirror_view(local.spin_mag);
+        for (int i = 0; i < N_total; i++) {
+            const double* dp = &coll_dbl[i * N_COLL_DBL];
+            h_mzams(i)=dp[0]; h_sage(i)=dp[1]; h_srad(i)=dp[2];
+            h_lum(i)=dp[3]; h_cmass(i)=dp[4]; h_smag(i)=dp[5];
+            const int* ip = &coll_int[i * N_COLL_INT];
+            h_pid(i)=ip[0]; h_sid(i)=ip[1]; h_stype(i)=ip[2];
+        }
+        Kokkos::deep_copy(local.particle_id, h_pid);
+        Kokkos::deep_copy(local.subsystem_id, h_sid);
+        Kokkos::deep_copy(local.stellar_type, h_stype);
+        Kokkos::deep_copy(local.m_zams, h_mzams);
+        Kokkos::deep_copy(local.stellar_age, h_sage);
+        Kokkos::deep_copy(local.stellar_radius, h_srad);
+        Kokkos::deep_copy(local.luminosity, h_lum);
+        Kokkos::deep_copy(local.core_mass, h_cmass);
+        Kokkos::deep_copy(local.spin_mag, h_smag);
     }
 
     // Pre-allocate MPI communication buffers to avoid cudaMalloc per allgather

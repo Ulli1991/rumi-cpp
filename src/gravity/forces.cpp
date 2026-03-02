@@ -15,6 +15,7 @@
 // ==========================================================================
 template<bool COLL>
 static void compute_acceleration_and_timestep_impl(Particles& p, double G, double soft2, double eta) {
+    (void)eta;
     const int N = p.N;
     RawView px{p.x.data()}, py{p.y.data()}, pz{p.z.data()};
     RawView pvx{p.vx.data()}, pvy{p.vy.data()}, pvz{p.vz.data()};
@@ -583,6 +584,7 @@ void cross_gradient_correction(Particles& p, int a_start, int a_count,
 template<bool COLL>
 static void compute_timestep_subset_impl(Particles& p, int start, int count,
                           double G, double soft2, double eta) {
+    (void)eta;
     if (count <= 1) return;  // No pairs to consider
 
     RawView px{p.x.data()}, py{p.y.data()}, pz{p.z.data()};
@@ -750,6 +752,7 @@ void compute_timestep_subset(Particles& p, int start, int count,
 template<bool COLL>
 static void self_acceleration_and_timestep_impl(Particles& p, int start, int count,
                                      double G, double soft2, double eta) {
+    (void)eta;
     RawView px{p.x.data()}, py{p.y.data()}, pz{p.z.data()};
     RawView pvx{p.vx.data()}, pvy{p.vy.data()}, pvz{p.vz.data()};
     RawView pax{p.ax.data()}, pay{p.ay.data()}, paz{p.az.data()};

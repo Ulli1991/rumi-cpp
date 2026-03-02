@@ -5,6 +5,7 @@
 
 void advance_stellar_evolution(Particles& p, SSEContext& sse, double dt_myr,
                                 EnergyBookkeeping& books, double G) {
+    (void)G;
     if (dt_myr <= 0.0) return;
 
     int N = p.N;

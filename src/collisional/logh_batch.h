@@ -36,8 +36,10 @@ struct SubsystemBatch {
     std::vector<double> stored_B;
 
     // Persistent auxiliary velocities for PN (code units, including CM).
-    // Flat: stored_aux_vel[s][b*3+c] for subsystem s, body b, component c.
-    std::vector<std::vector<double>> stored_aux_vel;
+    // Flat layout: stored_aux_vel[offset[s] * 3 + b*3 + c]
+    // stored_aux_vel_offsets[s] = starting body index for subsystem s
+    std::vector<double> stored_aux_vel;
+    std::vector<int> stored_aux_vel_offsets;
     std::vector<bool> has_stored_aux_vel;
 
     // Persistent spin vectors for BH binaries (2-body only, code units)
@@ -49,6 +51,10 @@ struct SubsystemBatch {
     // Persistent normalization scales (computed once per subsystem, fixed thereafter)
     std::vector<double> stored_V_scale, stored_R_scale, stored_T_scale, stored_E_scale;
     std::vector<bool> stored_scales_set;
+
+    // Cached member indices from pack() — reused by unpack() to avoid recomputation
+    std::vector<int> cached_member_indices;
+    std::unordered_map<int, int> cached_idx_to_local;
 
     // Output statistics (filled by logh_integrate_batch_gpu)
     int stat_total_gbs = 0;        // total GBS steps across all subsystems

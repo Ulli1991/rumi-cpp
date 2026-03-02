@@ -85,6 +85,7 @@ struct BinaryTracker {
     }
 
     void update(Particles& p, double G, double t_code) {
+        (void)G;
         if (!initialized || p.N != 2) return;
         auto h_x = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.x);
         auto h_y = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.y);
@@ -172,6 +173,7 @@ struct TripleTracker {
     void compute_elements(Particles& p, double G,
                           OrbitalElements& oe_in, OrbitalElements& oe_out,
                           double& i_mut, double& C_K) {
+        (void)G;
         // Look up particles by permanent ID (survives partition_by_level reordering)
         int i0 = find_by_pid(p, 0);  // inner body 1
         int i1 = find_by_pid(p, 1);  // inner body 2

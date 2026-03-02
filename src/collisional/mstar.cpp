@@ -168,6 +168,7 @@ void mstar_leapfrog_step(MSTARState& state, double ds, double G) {
 void regularized_integrate(Subsystem& sub, Particles& p,
                            double G, double dt, double eta_gbs,
                            int mstar_threshold) {
+    (void)eta_gbs;
     if (sub.n_bodies <= mstar_threshold) {
         // Use LogH (handled by logh_gpu batch integration)
         return;

@@ -1462,6 +1462,8 @@ label_100:
 RemnantResult SSEContext::compute_remnant(double mc, double mcbagb,
                                           double mt_presn, double mass0,
                                           bool from_he_star) const {
+    (void)mass0;
+    (void)from_he_star;
     const int nsflag = static_cast<int>(cfg_.remnant);
     RemnantResult res;
     res.fbfac = 0.0;

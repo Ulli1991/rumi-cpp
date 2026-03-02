@@ -35,7 +35,8 @@ double gw_coalescence_time(double a, double e, double m1, double m2,
 // ============================================================================
 
 double tidal_disruption_radius(double m_star, double R_star, double M_bh) {
-    // R_td = 1.3 * ((m_star + M_bh) / m_star)^{1/3} * R_star
+    // R_td = η * ((m_star + M_bh) / m_star)^{1/3} * R_star
+    // η = 1.3: numerical prefactor from Rees (1988, Nature 333, 523)
     // R_star should be in the same units as positions (pc)
     return 1.3 * std::cbrt((m_star + M_bh) / m_star) * R_star;
 }
@@ -47,12 +48,16 @@ double tidal_disruption_radius(double m_star, double R_star, double M_bh) {
 void bh_bh_remnant(double m1, double m2, const double chi1[3], const double chi2[3],
                    const double L_orb[3], double& m_rem, double chi_rem[3],
                    double v_kick[3], double G, double c_code) {
+    (void)chi1;
+    (void)chi2;
+    (void)G;
+    (void)c_code;
     double M = m1 + m2;
     double eta = m1 * m2 / (M * M);
     double q = std::min(m1, m2) / std::max(m1, m2);
     double delta_m = std::fabs(m1 - m2) / M;
 
-    // Radiated energy fraction (Barausse+ 2012 fit)
+    // Radiated energy fraction (Barausse, Morozova & Rezzolla 2012, ApJ 758, 63)
     double E_rad_frac = 0.0547 * eta * (1.0 - 0.5 * delta_m * delta_m);
     m_rem = M * (1.0 - E_rad_frac);
 
@@ -72,10 +77,10 @@ void bh_bh_remnant(double m1, double m2, const double chi1[3], const double chi2
         chi_rem[2] = chi_f_mag;
     }
 
-    // GW kick (Campanelli+ 2007 / Lousto+ 2012 simplified)
+    // GW kick (Campanelli+ 2007, PRL 98, 231102; Lousto+ 2012, PRD 85, 084015)
     // v_kick ~ A * eta^2 * delta_m * (1 + B * delta_m)
     // Maximum kick ~5000 km/s for edge cases, typically ~200-500 km/s
-    double A = 12000.0;  // km/s
+    double A = 12000.0;  // km/s — calibrated from NR simulations (Lousto+ 2012)
     double B = -0.93;
     double v_kick_mag = A * eta * eta * delta_m * (1.0 + B * delta_m);
 
@@ -309,6 +314,7 @@ void execute_merger(const MergerEvent& event, Particles& p,
 
 int remove_escapers(Particles& p, double G, double r_escape_rh,
                     SubsystemManager& sm, EnergyBookkeeping& books) {
+    (void)sm;
     if (p.N < 10) return 0;  // too few particles for meaningful escape detection
 
     // Copy to host
