@@ -601,12 +601,13 @@ void SubsystemManager::apply_perturbation_timestep(Particles& p, double G, doubl
             }
 
             // dt_pert = η * min{ |a/ȧ|, |1/ė| }
+            double dt_a = 1e30, dt_e = 1e30;
             if (std::fabs(adot) > 1e-30)
-                dt_pert = std::min(dt_pert, std::fabs(a / adot));
+                dt_a = std::fabs(a / adot);
             if (std::fabs(edot) > 1e-30)
-                dt_pert = std::min(dt_pert, 1.0 / std::fabs(edot));
+                dt_e = 1.0 / std::fabs(edot);
+            dt_pert = std::min(dt_a, dt_e) * eta_pert;
 
-            dt_pert *= eta_pert;
 
         } else {
             // --- N>2 body: |E/Ė| and |L/L̇| from tidal perturbation ---

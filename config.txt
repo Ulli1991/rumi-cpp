@@ -43,6 +43,7 @@ TREE_N_GROUP = 64                         	# Particles per traversal group
 COLLISIONAL = true 				# Master switch to enable proper collional treatment of the Nbody system
 R_NGB = 1e-3                        		# Neighbor search radius (pc) for subsystem detection
 R_NGB_MAX = 0.1                     		# Max distance for orbital element check (pc)
+ETA_PERT = 0.02					# Perturbation timestep eta for subsystems (BIFROST Eq. 30)
 ETA_GBS = 1e-10                     		# GBS extrapolation accuracy for LogH integrator
 ETA_RESTART = 1e-4				# Energy error threshold for adaptive restart (BIFROST §3.19)
 N_ORB_SECULAR = 3                   		# Orbits/timestep threshold for secular evolution

@@ -223,6 +223,7 @@ static void self_gradient_correction_impl(Particles& p, int start, int count,
     RawView pgmag = COLL ? RawView{p.grad_mag.data()} : RawView{nullptr};
     const int* sid_raw = COLL ? p.subsystem_id.data() : nullptr;
     const double coeff = G * dt * dt * GRAD_COEFF;
+    const double inv_dt2 = 1.0 / (dt * dt);
 
     // Snapshot accelerations into scratch
     RawView ax0{p.scratch1.data()}, ay0{p.scratch2.data()}, az0{p.scratch3.data()};
@@ -291,7 +292,7 @@ static void self_gradient_correction_impl(Particles& p, int start, int count,
             }
             if (ii < count) {
                 pax(i) += cx; pay(i) += cy; paz(i) += cz;
-                if (COLL) pgmag(i) = Kokkos::sqrt(cx*cx + cy*cy + cz*cz);
+                if (COLL) pgmag(i) = Kokkos::sqrt(cx*cx + cy*cy + cz*cz) * inv_dt2;
             }
         });
 
@@ -434,6 +435,7 @@ static void cross_gradient_correction_impl(Particles& p,
     RawView pgmag = COLL ? RawView{p.grad_mag.data()} : RawView{nullptr};
     const int* sid_raw = COLL ? p.subsystem_id.data() : nullptr;
     const double coeff = G * dt * dt * GRAD_COEFF;
+    const double inv_dt2 = 1.0 / (dt * dt);
 
     // Snapshot accelerations
     RawView ax0_a{p.scratch1.data()}, ay0_a{p.scratch2.data()}, az0_a{p.scratch3.data()};
@@ -507,7 +509,7 @@ static void cross_gradient_correction_impl(Particles& p,
             }
             if (ii < a_count) {
                 pax(i) += cx; pay(i) += cy; paz(i) += cz;
-                if (COLL) pgmag(i) = Kokkos::sqrt(cx*cx + cy*cy + cz*cz);
+                if (COLL) pgmag(i) = Kokkos::sqrt(cx*cx + cy*cy + cz*cz) * inv_dt2;
             }
         });
     // B from A: tile over A particles
@@ -562,7 +564,7 @@ static void cross_gradient_correction_impl(Particles& p,
             }
             if (ii < b_count) {
                 pax(j) += cx; pay(j) += cy; paz(j) += cz;
-                if (COLL) pgmag(j) = Kokkos::sqrt(cx*cx + cy*cy + cz*cz);
+                if (COLL) pgmag(j) = Kokkos::sqrt(cx*cx + cy*cy + cz*cz) * inv_dt2;
             }
         });
 

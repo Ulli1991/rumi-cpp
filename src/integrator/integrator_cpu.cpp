@@ -194,6 +194,19 @@ static void cpu_self_grad(CpuSubset& s, int start, int count,
             s.ax[j] -= fi * term_x; s.ay[j] -= fi * term_y; s.az[j] -= fi * term_z;
         }
     }
+#ifdef ENABLE_COLLISIONAL
+    // Store bare |g'| = |correction| / dt² for gradient timestep criteria
+    if (s.collisional) {
+        double inv_dt2 = 1.0 / (dt * dt);
+        for (int ii = 0; ii < count; ii++) {
+            int i = start + ii;
+            double cx = s.ax[i] - ax0[ii];
+            double cy = s.ay[i] - ay0[ii];
+            double cz = s.az[i] - az0[ii];
+            s.grad_mag[i] = std::sqrt(cx*cx + cy*cy + cz*cz) * inv_dt2;
+        }
+    }
+#endif
 }
 
 // CPU cross-acceleration (N3L, no kick)
@@ -257,6 +270,26 @@ static void cpu_cross_grad(CpuSubset& s,
             s.ax[j] -= fi * term_x; s.ay[j] -= fi * term_y; s.az[j] -= fi * term_z;
         }
     }
+#ifdef ENABLE_COLLISIONAL
+    // Store bare |g'| = |correction| / dt² for gradient timestep criteria
+    if (s.collisional) {
+        double inv_dt2 = 1.0 / (grad_dt * grad_dt);
+        for (int ii = 0; ii < a_count; ii++) {
+            int i = a_start + ii;
+            double cx = s.ax[i] - ax0_a[ii];
+            double cy = s.ay[i] - ay0_a[ii];
+            double cz = s.az[i] - az0_a[ii];
+            s.grad_mag[i] = std::sqrt(cx*cx + cy*cy + cz*cz) * inv_dt2;
+        }
+        for (int jj = 0; jj < b_count; jj++) {
+            int j = b_start + jj;
+            double cx = s.ax[j] - ax0_b[jj];
+            double cy = s.ay[j] - ay0_b[jj];
+            double cz = s.az[j] - az0_b[jj];
+            s.grad_mag[j] = std::sqrt(cx*cx + cy*cy + cz*cz) * inv_dt2;
+        }
+    }
+#endif
 }
 
 // CPU drift
@@ -554,13 +587,14 @@ static void cpu_fsi_step(CpuSubset& s, Particles& p, int start, int count,
     }
     cpu_kick(s, start, count, dt * FSI_KICK);
 #ifdef ENABLE_COLLISIONAL
-    cpu_drift_field_only(s, start, count, dt * FSI_DRIFT);
+    // H_S (dt/2) then T' drift (dt/2) — BIFROST Algorithm 1 ordering
     if (s.collisional && !g_subsystem_mgr.active.empty()) {
         int dev_start = s.device_start + start;
         cpu_sync_to_device(s, p, start, dev_start, count);
         advance_subsystems_in_range(p, dev_start, count, G, dt * FSI_DRIFT);
         cpu_sync_pos_vel_from_device(s, p, start, dev_start, count);
     }
+    cpu_drift_field_only(s, start, count, dt * FSI_DRIFT);
 #else
     cpu_drift(s, start, count, dt * FSI_DRIFT);
 #endif
@@ -568,13 +602,14 @@ static void cpu_fsi_step(CpuSubset& s, Particles& p, int start, int count,
     cpu_self_grad(s, start, count, G, soft2, dt);
     cpu_kick(s, start, count, dt * FSI_MOD_KICK);
 #ifdef ENABLE_COLLISIONAL
-    cpu_drift_field_only(s, start, count, dt * FSI_DRIFT);
+    // H_S (dt/2) then T' drift (dt/2) — BIFROST Algorithm 1 ordering
     if (s.collisional && !g_subsystem_mgr.active.empty()) {
         int dev_start = s.device_start + start;
         cpu_sync_to_device(s, p, start, dev_start, count);
         advance_subsystems_in_range(p, dev_start, count, G, dt * FSI_DRIFT);
         cpu_sync_pos_vel_from_device(s, p, start, dev_start, count);
     }
+    cpu_drift_field_only(s, start, count, dt * FSI_DRIFT);
 #else
     cpu_drift(s, start, count, dt * FSI_DRIFT);
 #endif
@@ -620,14 +655,15 @@ static void cpu_hhs_recursive(CpuSubset& s, Particles& p, int start, int count,
         // Step 2: CPU timestep (with subsystem exclusion via s.sid)
         cpu_compute_timestep(s, start, count, G, soft2, eta);
 #ifdef ENABLE_COLLISIONAL
-        // Gradient timestep criteria (BIFROST Section 3.4.4)
+        // Gradient + v/a timestep criteria (BIFROST Section 3.4.4, Eq. 24/26/27)
         if (s.collisional && g_collisional.eta_grad > 0.0) {
             double eta_g = g_collisional.eta_grad;
+            double eta_va = eta;  // v/a criterion uses general eta (0.2)
             for (int i = start; i < start + count; i++) {
+                double a_mag = std::sqrt(s.ax[i]*s.ax[i] + s.ay[i]*s.ay[i] + s.az[i]*s.az[i]);
+                double v_mag = std::sqrt(s.vx[i]*s.vx[i] + s.vy[i]*s.vy[i] + s.vz[i]*s.vz[i]);
                 double g = s.grad_mag[i];
                 if (g > EPS) {
-                    double a_mag = std::sqrt(s.ax[i]*s.ax[i] + s.ay[i]*s.ay[i] + s.az[i]*s.az[i]);
-                    double v_mag = std::sqrt(s.vx[i]*s.vx[i] + s.vy[i]*s.vy[i] + s.vz[i]*s.vz[i]);
                     if (a_mag > EPS) {
                         double dt_g2 = eta_g * std::sqrt(a_mag / g);
                         if (dt_g2 < s.dt_adapt[i]) s.dt_adapt[i] = dt_g2;
@@ -636,6 +672,11 @@ static void cpu_hhs_recursive(CpuSubset& s, Particles& p, int start, int count,
                         double dt_g1 = eta_g * std::cbrt(v_mag / g);
                         if (dt_g1 < s.dt_adapt[i]) s.dt_adapt[i] = dt_g1;
                     }
+                }
+                // v/a criterion (BIFROST Eq. 24)
+                if (a_mag > EPS && v_mag > EPS) {
+                    double dt_va = eta_va * v_mag / a_mag;
+                    if (dt_va < s.dt_adapt[i]) s.dt_adapt[i] = dt_va;
                 }
             }
         }

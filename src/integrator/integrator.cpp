@@ -873,15 +873,15 @@ void fsi_step(Particles& p, int start, int count,
         g_profiler.stop(StepProfiler::DRIFT_KICK);
     }
 
-    // T drift (dt/2) — field particles only if subsystems active
+    // H_S (dt/2) then T' drift (dt/2) — BIFROST Algorithm 1 ordering
     g_profiler.start();
 #ifdef ENABLE_COLLISIONAL
     if (p.collisional && !g_subsystem_mgr.active.empty()) {
-        drift_field_only(p, start, count, dt * FSI_DRIFT);
-        g_profiler.stop(StepProfiler::DRIFT_KICK);
-        g_profiler.start();
         advance_subsystems_in_range(p, start, count, G, dt * FSI_DRIFT);
         g_profiler.stop(StepProfiler::SUBSYSTEM_INTEG);
+        g_profiler.start();
+        drift_field_only(p, start, count, dt * FSI_DRIFT);
+        g_profiler.stop(StepProfiler::DRIFT_KICK);
     } else
 #endif
     {
@@ -918,15 +918,15 @@ void fsi_step(Particles& p, int start, int count,
         g_profiler.stop(StepProfiler::DRIFT_KICK);
     }
 
-    // T drift (dt/2) — field particles only if subsystems active
+    // H_S (dt/2) then T' drift (dt/2) — BIFROST Algorithm 1 ordering
     g_profiler.start();
 #ifdef ENABLE_COLLISIONAL
     if (p.collisional && !g_subsystem_mgr.active.empty()) {
-        drift_field_only(p, start, count, dt * FSI_DRIFT);
-        g_profiler.stop(StepProfiler::DRIFT_KICK);
-        g_profiler.start();
         advance_subsystems_in_range(p, start, count, G, dt * FSI_DRIFT);
         g_profiler.stop(StepProfiler::SUBSYSTEM_INTEG);
+        g_profiler.start();
+        drift_field_only(p, start, count, dt * FSI_DRIFT);
+        g_profiler.stop(StepProfiler::DRIFT_KICK);
     } else
 #endif
     {
@@ -1142,19 +1142,20 @@ static void hhs_fsi_step_dynamic_impl(Particles& p, int start, int count, double
         g_profiler.start();
         compute_timestep_subset(p, start, count, G, soft2, eta);
 #ifdef ENABLE_COLLISIONAL
-        // Gradient timestep criteria (BIFROST Section 3.4.4)
+        // Gradient + v/a timestep criteria (BIFROST Section 3.4.4, Eq. 24/26/27)
         if (p.collisional && g_collisional.eta_grad > 0.0) {
             auto dt_f = p.dt_adapt;
             auto gm = p.grad_mag;
             RawView agx{p.ax.data()}, agy{p.ay.data()}, agz{p.az.data()};
             RawView vvx{p.vx.data()}, vvy{p.vy.data()}, vvz{p.vz.data()};
             double eta_g = g_collisional.eta_grad;
+            double eta_va = eta;  // v/a criterion uses general eta (0.2)
             Kokkos::parallel_for("dt_grad", count, KOKKOS_LAMBDA(int ii) {
                 int i = start + ii;
+                double a_mag = Kokkos::sqrt(agx(i)*agx(i) + agy(i)*agy(i) + agz(i)*agz(i));
+                double v_mag = Kokkos::sqrt(vvx(i)*vvx(i) + vvy(i)*vvy(i) + vvz(i)*vvz(i));
                 double g = gm(i);
                 if (g > EPS) {
-                    double a_mag = Kokkos::sqrt(agx(i)*agx(i) + agy(i)*agy(i) + agz(i)*agz(i));
-                    double v_mag = Kokkos::sqrt(vvx(i)*vvx(i) + vvy(i)*vvy(i) + vvz(i)*vvz(i));
                     if (a_mag > EPS) {
                         double dt_g2 = eta_g * Kokkos::sqrt(a_mag / g);
                         if (dt_g2 < dt_f(i)) dt_f(i) = dt_g2;
@@ -1163,6 +1164,11 @@ static void hhs_fsi_step_dynamic_impl(Particles& p, int start, int count, double
                         double dt_g1 = eta_g * Kokkos::cbrt(v_mag / g);
                         if (dt_g1 < dt_f(i)) dt_f(i) = dt_g1;
                     }
+                }
+                // v/a criterion (BIFROST Eq. 24)
+                if (a_mag > EPS && v_mag > EPS) {
+                    double dt_va = eta_va * v_mag / a_mag;
+                    if (dt_va < dt_f(i)) dt_f(i) = dt_va;
                 }
             });
         }
@@ -1460,6 +1466,7 @@ static void self_gradient_correction_distributed(DistributedParticles& dp, int s
 #endif
 
     const double coeff = G * grad_dt * grad_dt * GRAD_COEFF;
+    const double inv_dt2 = 1.0 / (grad_dt * grad_dt);
     const int j_start = start;
     const int j_end = start + count;
 
@@ -1550,7 +1557,7 @@ static void self_gradient_correction_distributed(DistributedParticles& dp, int s
                 pay(i) = ayi + cy;
                 paz(i) = azi + cz;
 #ifdef ENABLE_COLLISIONAL
-                if (coll) pgmag(i) = Kokkos::sqrt(cx*cx + cy*cy + cz*cz);
+                if (coll) pgmag(i) = Kokkos::sqrt(cx*cx + cy*cy + cz*cz) * inv_dt2;
 #endif
             }
         });
@@ -1630,15 +1637,15 @@ static void fsi_step_distributed(DistributedParticles& dp, int start, int count,
             g_profiler.stop(StepProfiler::DRIFT_KICK);
         }
 
-        // T drift (dt/2) — field particles only if subsystems active
+        // H_S (dt/2) then T' drift (dt/2) — BIFROST Algorithm 1 ordering
         g_profiler.start();
 #ifdef ENABLE_COLLISIONAL
         if (dp.local.collisional && !g_subsystem_mgr.active.empty()) {
-            drift_field_only(dp.local, start, count, dt * FSI_DRIFT);
-            g_profiler.stop(StepProfiler::DRIFT_KICK);
-            g_profiler.start();
             advance_subsystems_in_range(dp.local, start, count, G, dt * FSI_DRIFT);
             g_profiler.stop(StepProfiler::SUBSYSTEM_INTEG);
+            g_profiler.start();
+            drift_field_only(dp.local, start, count, dt * FSI_DRIFT);
+            g_profiler.stop(StepProfiler::DRIFT_KICK);
         } else
 #endif
         {
@@ -1665,15 +1672,15 @@ static void fsi_step_distributed(DistributedParticles& dp, int start, int count,
         kick_velocities(dp.local, start, count, dt * FSI_MOD_KICK);
         g_profiler.stop(StepProfiler::DRIFT_KICK);
 
-        // T drift (dt/2) — field particles only if subsystems active
+        // H_S (dt/2) then T' drift (dt/2) — BIFROST Algorithm 1 ordering
         g_profiler.start();
 #ifdef ENABLE_COLLISIONAL
         if (dp.local.collisional && !g_subsystem_mgr.active.empty()) {
-            drift_field_only(dp.local, start, count, dt * FSI_DRIFT);
-            g_profiler.stop(StepProfiler::DRIFT_KICK);
-            g_profiler.start();
             advance_subsystems_in_range(dp.local, start, count, G, dt * FSI_DRIFT);
             g_profiler.stop(StepProfiler::SUBSYSTEM_INTEG);
+            g_profiler.start();
+            drift_field_only(dp.local, start, count, dt * FSI_DRIFT);
+            g_profiler.stop(StepProfiler::DRIFT_KICK);
         } else
 #endif
         {
@@ -1736,15 +1743,15 @@ static void fsi_step_distributed(DistributedParticles& dp, int start, int count,
         g_profiler.stop(StepProfiler::DRIFT_KICK);
     }
 
-    // T drift (dt/2) — field particles only if subsystems active
+    // H_S (dt/2) then T' drift (dt/2) — BIFROST Algorithm 1 ordering
     g_profiler.start();
 #ifdef ENABLE_COLLISIONAL
     if (dp.local.collisional && !g_subsystem_mgr.active.empty()) {
-        drift_field_only(dp.local, start, count, dt * FSI_DRIFT);
-        g_profiler.stop(StepProfiler::DRIFT_KICK);
-        g_profiler.start();
         advance_subsystems_in_range(dp.local, start, count, G, dt * FSI_DRIFT);
         g_profiler.stop(StepProfiler::SUBSYSTEM_INTEG);
+        g_profiler.start();
+        drift_field_only(dp.local, start, count, dt * FSI_DRIFT);
+        g_profiler.stop(StepProfiler::DRIFT_KICK);
     } else
 #endif
     {
@@ -1800,15 +1807,15 @@ static void fsi_step_distributed(DistributedParticles& dp, int start, int count,
         g_profiler.stop(StepProfiler::DRIFT_KICK);
     }
 
-    // T drift (dt/2) — field particles only if subsystems active
+    // H_S (dt/2) then T' drift (dt/2) — BIFROST Algorithm 1 ordering
     g_profiler.start();
 #ifdef ENABLE_COLLISIONAL
     if (dp.local.collisional && !g_subsystem_mgr.active.empty()) {
-        drift_field_only(dp.local, start, count, dt * FSI_DRIFT);
-        g_profiler.stop(StepProfiler::DRIFT_KICK);
-        g_profiler.start();
         advance_subsystems_in_range(dp.local, start, count, G, dt * FSI_DRIFT);
         g_profiler.stop(StepProfiler::SUBSYSTEM_INTEG);
+        g_profiler.start();
+        drift_field_only(dp.local, start, count, dt * FSI_DRIFT);
+        g_profiler.stop(StepProfiler::DRIFT_KICK);
     } else
 #endif
     {
@@ -2508,19 +2515,20 @@ static void hhs_fsi_recursive_local(
         g_profiler.start();
         compute_timestep_subset(p, start, count, G, soft2, eta);
 #ifdef ENABLE_COLLISIONAL
-        // Gradient timestep criteria (BIFROST Section 3.4.4)
+        // Gradient + v/a timestep criteria (BIFROST Section 3.4.4, Eq. 24/26/27)
         if (p.collisional && g_collisional.eta_grad > 0.0) {
             auto dt_f = p.dt_adapt;
             auto gm = p.grad_mag;
             RawView agx{p.ax.data()}, agy{p.ay.data()}, agz{p.az.data()};
             RawView vvx{p.vx.data()}, vvy{p.vy.data()}, vvz{p.vz.data()};
             double eta_g = g_collisional.eta_grad;
+            double eta_va = eta;  // v/a criterion uses general eta (0.2)
             Kokkos::parallel_for("dt_grad_local", count, KOKKOS_LAMBDA(int ii) {
                 int i = start + ii;
+                double a_mag = Kokkos::sqrt(agx(i)*agx(i) + agy(i)*agy(i) + agz(i)*agz(i));
+                double v_mag = Kokkos::sqrt(vvx(i)*vvx(i) + vvy(i)*vvy(i) + vvz(i)*vvz(i));
                 double g = gm(i);
                 if (g > EPS) {
-                    double a_mag = Kokkos::sqrt(agx(i)*agx(i) + agy(i)*agy(i) + agz(i)*agz(i));
-                    double v_mag = Kokkos::sqrt(vvx(i)*vvx(i) + vvy(i)*vvy(i) + vvz(i)*vvz(i));
                     if (a_mag > EPS) {
                         double dt_g2 = eta_g * Kokkos::sqrt(a_mag / g);
                         if (dt_g2 < dt_f(i)) dt_f(i) = dt_g2;
@@ -2529,6 +2537,11 @@ static void hhs_fsi_recursive_local(
                         double dt_g1 = eta_g * Kokkos::cbrt(v_mag / g);
                         if (dt_g1 < dt_f(i)) dt_f(i) = dt_g1;
                     }
+                }
+                // v/a criterion (BIFROST Eq. 24)
+                if (a_mag > EPS && v_mag > EPS) {
+                    double dt_va = eta_va * v_mag / a_mag;
+                    if (dt_va < dt_f(i)) dt_f(i) = dt_va;
                 }
             });
         }
@@ -2792,19 +2805,20 @@ static void hhs_fsi_recursive_distributed(
             compute_timestep_distributed(dp, start, count, G, soft2, eta);
         }
 #ifdef ENABLE_COLLISIONAL
-        // Gradient timestep criterion (BIFROST Section 3.4.4)
+        // Gradient + v/a timestep criteria (BIFROST Section 3.4.4, Eq. 24/26/27)
         if (dp.local.collisional && g_collisional.eta_grad > 0.0) {
             auto dt_f = dp.local.dt_adapt;
             auto gm = dp.local.grad_mag;
             RawView agx{dp.local.ax.data()}, agy{dp.local.ay.data()}, agz{dp.local.az.data()};
             RawView vvx{dp.local.vx.data()}, vvy{dp.local.vy.data()}, vvz{dp.local.vz.data()};
             double eta_g = g_collisional.eta_grad;
+            double eta_va = eta;  // v/a criterion uses general eta (0.2)
             Kokkos::parallel_for("dt_grad_dist", count, KOKKOS_LAMBDA(int ii) {
                 int i = start + ii;
+                double a_mag = Kokkos::sqrt(agx(i)*agx(i) + agy(i)*agy(i) + agz(i)*agz(i));
+                double v_mag = Kokkos::sqrt(vvx(i)*vvx(i) + vvy(i)*vvy(i) + vvz(i)*vvz(i));
                 double g = gm(i);
                 if (g > EPS) {
-                    double a_mag = Kokkos::sqrt(agx(i)*agx(i) + agy(i)*agy(i) + agz(i)*agz(i));
-                    double v_mag = Kokkos::sqrt(vvx(i)*vvx(i) + vvy(i)*vvy(i) + vvz(i)*vvz(i));
                     if (a_mag > EPS) {
                         double dt_g2 = eta_g * Kokkos::sqrt(a_mag / g);
                         if (dt_g2 < dt_f(i)) dt_f(i) = dt_g2;
@@ -2813,6 +2827,11 @@ static void hhs_fsi_recursive_distributed(
                         double dt_g1 = eta_g * Kokkos::cbrt(v_mag / g);
                         if (dt_g1 < dt_f(i)) dt_f(i) = dt_g1;
                     }
+                }
+                // v/a criterion (BIFROST Eq. 24)
+                if (a_mag > EPS && v_mag > EPS) {
+                    double dt_va = eta_va * v_mag / a_mag;
+                    if (dt_va < dt_f(i)) dt_f(i) = dt_va;
                 }
             });
         }
