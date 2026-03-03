@@ -1450,118 +1450,132 @@ static void self_gradient_correction_distributed(DistributedParticles& dp, int s
                                                   double G, double soft2, double grad_dt) {
     if (count <= 0) return;
 
+#ifdef ENABLE_COLLISIONAL
+    // Save pre-correction accelerations so we can compute grad_mag identically
+    // on all ranks after the allgather (avoids MPI divergence from partial grad_mag)
+    static Kokkos::View<double*> ax_save("ax_save_grad", 0);
+    static Kokkos::View<double*> ay_save("ay_save_grad", 0);
+    static Kokkos::View<double*> az_save("az_save_grad", 0);
+    bool need_grad_mag = dp.local.collisional;
+    if (need_grad_mag) {
+        if ((int)ax_save.extent(0) < count) {
+            Kokkos::realloc(ax_save, count);
+            Kokkos::realloc(ay_save, count);
+            Kokkos::realloc(az_save, count);
+        }
+        Kokkos::deep_copy(Kokkos::subview(ax_save, Kokkos::make_pair(0, count)),
+                          Kokkos::subview(dp.local.ax, Kokkos::make_pair(start, start + count)));
+        Kokkos::deep_copy(Kokkos::subview(ay_save, Kokkos::make_pair(0, count)),
+                          Kokkos::subview(dp.local.ay, Kokkos::make_pair(start, start + count)));
+        Kokkos::deep_copy(Kokkos::subview(az_save, Kokkos::make_pair(0, count)),
+                          Kokkos::subview(dp.local.az, Kokkos::make_pair(start, start + count)));
+    }
+#endif
+
     int slice_start, slice_count;
     dp.get_force_slice(start, count, slice_start, slice_count);
-    if (slice_count == 0) {
-        dp.allgather_accelerations_subset(start, count);
-        return;
-    }
 
-    auto pos = dp.local.pos_packed;
-    RawView pax{dp.local.ax.data()}, pay{dp.local.ay.data()}, paz{dp.local.az.data()};
+    if (slice_count > 0) {
+        auto pos = dp.local.pos_packed;
+        RawView pax{dp.local.ax.data()}, pay{dp.local.ay.data()}, paz{dp.local.az.data()};
 #ifdef ENABLE_COLLISIONAL
-    const int* sid_raw = dp.local.subsystem_id.data();
-    bool coll = dp.local.collisional;
-    RawView pgmag{coll ? dp.local.grad_mag.data() : nullptr};
+        const int* sid_raw = dp.local.subsystem_id.data();
+        bool coll = dp.local.collisional;
 #endif
 
-    const double coeff = G * grad_dt * grad_dt * GRAD_COEFF;
-    const double inv_dt2 = 1.0 / (grad_dt * grad_dt);
-    const int j_start = start;
-    const int j_end = start + count;
+        const double coeff = G * grad_dt * grad_dt * GRAD_COEFF;
+        const int j_start = start;
+        const int j_end = start + count;
 
-    using team_policy = Kokkos::TeamPolicy<>;
-    using member_type = team_policy::member_type;
-    using scratch_space = Kokkos::DefaultExecutionSpace::scratch_memory_space;
+        using team_policy = Kokkos::TeamPolicy<>;
+        using member_type = team_policy::member_type;
+        using scratch_space = Kokkos::DefaultExecutionSpace::scratch_memory_space;
 
-    size_t scratch_size = TILE_SIZE * 7 * sizeof(double);
-    int num_teams = (slice_count + TILE_SIZE - 1) / TILE_SIZE;
+        size_t scratch_size = TILE_SIZE * 7 * sizeof(double);
+        int num_teams = (slice_count + TILE_SIZE - 1) / TILE_SIZE;
 
-    Kokkos::parallel_for("dist_grad_tiled",
-        team_policy(num_teams, TILE_SIZE).set_scratch_size(0, Kokkos::PerTeam(scratch_size)),
-        KOKKOS_LAMBDA(const member_type& team) {
-            int ii = team.league_rank() * TILE_SIZE + team.team_rank();
-            int i = slice_start + ii;
+        Kokkos::parallel_for("dist_grad_tiled",
+            team_policy(num_teams, TILE_SIZE).set_scratch_size(0, Kokkos::PerTeam(scratch_size)),
+            KOKKOS_LAMBDA(const member_type& team) {
+                int ii = team.league_rank() * TILE_SIZE + team.team_rank();
+                int i = slice_start + ii;
 
-            Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                tile(team.team_scratch(0), TILE_SIZE * 7);
+                Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
+                    tile(team.team_scratch(0), TILE_SIZE * 7);
 
-            double xi = 0, yi = 0, zi = 0;
-            double axi = 0, ayi = 0, azi = 0;
+                double xi = 0, yi = 0, zi = 0;
+                double axi = 0, ayi = 0, azi = 0;
 #ifdef ENABLE_COLLISIONAL
-            int sid_i = -1;
+                int sid_i = -1;
 #endif
-
-            if (ii < slice_count) {
-                double mi_pad;
-                load4(&pos(i, 0), xi, yi, zi, mi_pad);
-                axi = pax(i); ayi = pay(i); azi = paz(i);
-#ifdef ENABLE_COLLISIONAL
-                if (coll) sid_i = sid_raw[i];
-#endif
-            }
-
-            double cx = 0, cy = 0, cz = 0;
-
-            for (int tile_start = j_start; tile_start < j_end; tile_start += TILE_SIZE) {
-                int tile_end = (tile_start + TILE_SIZE < j_end) ? tile_start + TILE_SIZE : j_end;
-                int tile_count = tile_end - tile_start;
-
-                int t = team.team_rank();
-                if (t < tile_count) {
-                    int idx = tile_start + t;
-                    int base = t * 7;
-                    load4(&pos(idx, 0), tile(base), tile(base+1), tile(base+2), tile(base+3));
-                    tile(base + 4) = pax(idx);
-                    tile(base + 5) = pay(idx);
-                    tile(base + 6) = paz(idx);
-                }
-                team.team_barrier();
 
                 if (ii < slice_count) {
-                    for (int jt = 0; jt < tile_count; jt++) {
-                        int j = tile_start + jt;
-                        if (j == i) continue;
+                    double mi_pad;
+                    load4(&pos(i, 0), xi, yi, zi, mi_pad);
+                    axi = pax(i); ayi = pay(i); azi = paz(i);
 #ifdef ENABLE_COLLISIONAL
-                        if (coll && sid_i >= 0 && sid_raw[j] == sid_i) continue;
+                    if (coll) sid_i = sid_raw[i];
 #endif
-
-
-                        int jb = jt * 7;
-                        double dx = tile(jb    ) - xi;
-                        double dy = tile(jb + 1) - yi;
-                        double dz = tile(jb + 2) - zi;
-
-                        double dax = tile(jb + 4) - axi;
-                        double day = tile(jb + 5) - ayi;
-                        double daz = tile(jb + 6) - azi;
-
-                        double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                        double inv_r = fast_rsqrt(r2);
-                        double inv_r2 = inv_r * inv_r;
-                        double inv_r5 = inv_r2 * inv_r2 * inv_r;
-
-                        double r_dot_a = dx*dax + dy*day + dz*daz;
-                        double f = coeff * tile(jb + 3) * inv_r5;
-
-                        cx += f * (r2 * dax - 3.0 * r_dot_a * dx);
-                        cy += f * (r2 * day - 3.0 * r_dot_a * dy);
-                        cz += f * (r2 * daz - 3.0 * r_dot_a * dz);
-                    }
                 }
-                team.team_barrier();
-            }
 
-            if (ii < slice_count) {
-                pax(i) = axi + cx;
-                pay(i) = ayi + cy;
-                paz(i) = azi + cz;
+                double cx = 0, cy = 0, cz = 0;
+
+                for (int tile_start = j_start; tile_start < j_end; tile_start += TILE_SIZE) {
+                    int tile_end = (tile_start + TILE_SIZE < j_end) ? tile_start + TILE_SIZE : j_end;
+                    int tile_count = tile_end - tile_start;
+
+                    int t = team.team_rank();
+                    if (t < tile_count) {
+                        int idx = tile_start + t;
+                        int base = t * 7;
+                        load4(&pos(idx, 0), tile(base), tile(base+1), tile(base+2), tile(base+3));
+                        tile(base + 4) = pax(idx);
+                        tile(base + 5) = pay(idx);
+                        tile(base + 6) = paz(idx);
+                    }
+                    team.team_barrier();
+
+                    if (ii < slice_count) {
+                        for (int jt = 0; jt < tile_count; jt++) {
+                            int j = tile_start + jt;
+                            if (j == i) continue;
 #ifdef ENABLE_COLLISIONAL
-                if (coll) pgmag(i) = Kokkos::sqrt(cx*cx + cy*cy + cz*cz) * inv_dt2;
+                            if (coll && sid_i >= 0 && sid_raw[j] == sid_i) continue;
 #endif
-            }
-        });
-    Kokkos::fence();
+
+                            int jb = jt * 7;
+                            double dx = tile(jb    ) - xi;
+                            double dy = tile(jb + 1) - yi;
+                            double dz = tile(jb + 2) - zi;
+
+                            double dax = tile(jb + 4) - axi;
+                            double day = tile(jb + 5) - ayi;
+                            double daz = tile(jb + 6) - azi;
+
+                            double r2 = dx*dx + dy*dy + dz*dz + soft2;
+                            double inv_r = fast_rsqrt(r2);
+                            double inv_r2 = inv_r * inv_r;
+                            double inv_r5 = inv_r2 * inv_r2 * inv_r;
+
+                            double r_dot_a = dx*dax + dy*day + dz*daz;
+                            double f = coeff * tile(jb + 3) * inv_r5;
+
+                            cx += f * (r2 * dax - 3.0 * r_dot_a * dx);
+                            cy += f * (r2 * day - 3.0 * r_dot_a * dy);
+                            cz += f * (r2 * daz - 3.0 * r_dot_a * dz);
+                        }
+                    }
+                    team.team_barrier();
+                }
+
+                if (ii < slice_count) {
+                    pax(i) = axi + cx;
+                    pay(i) = ayi + cy;
+                    paz(i) = azi + cz;
+                }
+            });
+        Kokkos::fence();
+    }
 
     // Allgather corrected accelerations
     if (use_nonblocking_mpi) {
@@ -1570,6 +1584,30 @@ static void self_gradient_correction_distributed(DistributedParticles& dp, int s
     } else {
         dp.allgather_accelerations_subset(start, count);
     }
+
+#ifdef ENABLE_COLLISIONAL
+    // Compute grad_mag from acceleration difference — identical on all ranks
+    // (the kernel only wrote corrections for the local slice, but after allgather
+    // all ranks have the same corrected accelerations, so this is consistent)
+    if (need_grad_mag) {
+        auto ax_v = dp.local.ax;
+        auto ay_v = dp.local.ay;
+        auto az_v = dp.local.az;
+        auto gm = dp.local.grad_mag;
+        double inv_dt2 = 1.0 / (grad_dt * grad_dt);
+        int s = start;
+        auto axs = ax_save;
+        auto ays = ay_save;
+        auto azs = az_save;
+        Kokkos::parallel_for("compute_grad_mag_dist", count, KOKKOS_LAMBDA(int ii) {
+            double dx = ax_v(s + ii) - axs(ii);
+            double dy = ay_v(s + ii) - ays(ii);
+            double dz = az_v(s + ii) - azs(ii);
+            gm(s + ii) = Kokkos::sqrt(dx*dx + dy*dy + dz*dz) * inv_dt2;
+        });
+        Kokkos::fence();
+    }
+#endif
 }
 
 
