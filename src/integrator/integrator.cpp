@@ -20,6 +20,7 @@
 #endif
 #include <Kokkos_Core.hpp>
 #include <vector>
+#include <set>
 #include <cfloat>
 #include <cmath>
 #include <cstring>
@@ -261,6 +262,94 @@ void drift_field_only(Particles& p, int start, int count, double dt) {
             pz(i) += pvz(i) * dt;
         });
     }
+}
+
+// =============================================================================
+// Energy diagnostic for LogH coupling: compute energy contribution of
+// subsystem members (T_sub + U_internal + U_cross) to detect coupling errors.
+// T_sub = kinetic energy of member particles (absolute, not CM-relative)
+// U_internal = PE between member pairs (within each subsystem)
+// U_cross = PE between members and all non-member particles
+// ΔE from LogH = E_after - E_before. Should be small if coupling is correct.
+// Cost: O(N_members * N_total) for cross term — ~2e7 ops, negligible.
+// =============================================================================
+struct LogHEnergyDiag {
+    double T_sub;
+    double U_internal;
+    double U_cross;
+    double total() const { return T_sub + U_internal + U_cross; }
+};
+
+static LogHEnergyDiag compute_logh_energy_diag(
+    Particles& p, double G, const SubsystemManager& mgr)
+{
+    LogHEnergyDiag diag{0, 0, 0};
+    if (mgr.active.empty()) return diag;
+
+    Kokkos::fence();
+    int N = p.N;
+    auto h_x  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.x);
+    auto h_y  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.y);
+    auto h_z  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.z);
+    auto h_vx = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vx);
+    auto h_vy = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vy);
+    auto h_vz = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vz);
+    auto h_m  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.mass);
+
+    // Collect unique member indices
+    const auto& pid_map = g_subsystem_mgr.pid_to_idx();
+    std::set<int> member_set;
+    for (const auto& sub : mgr.active) {
+        for (int pid : sub.particle_ids) {
+            int idx = (pid < (int)pid_map.size()) ? pid_map[pid] : -1;
+            if (idx >= 0) member_set.insert(idx);
+        }
+    }
+    std::vector<int> members(member_set.begin(), member_set.end());
+    int n_mem = (int)members.size();
+
+    // Membership lookup
+    std::vector<bool> is_mem(N, false);
+    for (int i : members) is_mem[i] = true;
+
+    // T_sub: KE of subsystem members
+    for (int i : members) {
+        double v2 = h_vx(i)*h_vx(i) + h_vy(i)*h_vy(i) + h_vz(i)*h_vz(i);
+        diag.T_sub += 0.5 * h_m(i) * v2;
+    }
+
+    // U_internal: PE between member pairs (only same-subsystem pairs)
+    for (const auto& sub : mgr.active) {
+        for (int a = 0; a < sub.n_bodies; a++) {
+            int idx_a = (sub.particle_ids[a] < (int)pid_map.size()) ?
+                         pid_map[sub.particle_ids[a]] : -1;
+            if (idx_a < 0) continue;
+            for (int b = a + 1; b < sub.n_bodies; b++) {
+                int idx_b = (sub.particle_ids[b] < (int)pid_map.size()) ?
+                             pid_map[sub.particle_ids[b]] : -1;
+                if (idx_b < 0) continue;
+                double dx = h_x(idx_b) - h_x(idx_a);
+                double dy = h_y(idx_b) - h_y(idx_a);
+                double dz = h_z(idx_b) - h_z(idx_a);
+                double r = std::sqrt(dx*dx + dy*dy + dz*dz);
+                diag.U_internal -= G * h_m(idx_a) * h_m(idx_b) / r;
+            }
+        }
+    }
+
+    // U_cross: PE between members and non-members
+    for (int i : members) {
+        for (int j = 0; j < N; j++) {
+            if (is_mem[j]) continue;
+            double dx = h_x(j) - h_x(i);
+            double dy = h_y(j) - h_y(i);
+            double dz = h_z(j) - h_z(i);
+            double r = std::sqrt(dx*dx + dy*dy + dz*dz);
+            diag.U_cross -= G * h_m(i) * h_m(j) / r;
+        }
+    }
+
+    return diag;
 }
 
 void advance_subsystems_in_range(Particles& p, int start, int count,
@@ -703,6 +792,9 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
             }
         }
 
+        // Energy diagnostic: measure before LogH
+        auto E_diag_before = compute_logh_energy_diag(p, G, logh_mgr);
+
         // Initial batch integration
         g_logh_batch.pack(logh_mgr, p, G, dt);
         logh_integrate_batch_gpu(g_logh_batch, G, g_collisional.eta_gbs);
@@ -818,6 +910,22 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
 
             if (!failed.empty())
                 std::printf("  LogH restart: GAVE UP after %d subdivisions\n", MAX_SUBDIV);
+        }
+
+        // Energy diagnostic: measure after LogH
+        {
+            auto E_diag_after = compute_logh_energy_diag(p, G, logh_mgr);
+            double dE_total = E_diag_after.total() - E_diag_before.total();
+            double dT = E_diag_after.T_sub - E_diag_before.T_sub;
+            double dU_int = E_diag_after.U_internal - E_diag_before.U_internal;
+            double dU_cross = E_diag_after.U_cross - E_diag_before.U_cross;
+            // Normalize by |E_before| for relative error
+            double E_abs = std::fabs(E_diag_before.total());
+            if (E_abs < 1e-30) E_abs = 1.0;
+            std::printf("    LogH energy diag (%d subs, dt=%.3e): dE=%.6e (rel=%.3e)"
+                        "  dT=%.3e dU_int=%.3e dU_cross=%.3e\n",
+                        n_sub, dt, dE_total, dE_total / E_abs,
+                        dT, dU_int, dU_cross);
         }
 
         // Propagate persistent state back from logh_mgr to g_subsystem_mgr

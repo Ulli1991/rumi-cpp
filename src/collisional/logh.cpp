@@ -136,13 +136,13 @@ void logh_leapfrog_step(LogHState& state, double ds, double G) {
     int n = state.n_bodies;
     int n3 = n * 3;
 
-    // Compute accelerations at current positions
+    // Compute internal Newtonian accelerations at current positions
     double accel[LOGH_MAX_BODIES * 3];
     logh_internal_accel(state, G, accel);
 
     double ds_half = 0.5 * ds;
 
-    // ====== First half-kick: exact implicit midpoint via cubic solve ======
+    // First half-kick: exact implicit midpoint via cubic solve
     {
         double Omega0 = logh_kinetic_energy(state) + state.B;
         double C = 0.0, D = 0.0;
@@ -166,18 +166,17 @@ void logh_leapfrog_step(LogHState& state, double ds, double G) {
             state.vel[i] += ds_half * accel[i] * inv_Omega;
     }
 
-    // ====== Drift: x += ds * v / Omega,  t += ds / Omega ======
-    // v is constant during drift, so Omega is constant and explicit
+    // Drift
     double Omega_half = logh_kinetic_energy(state) + state.B;
     double inv_Omega_half = 1.0 / Omega_half;
     for (int i = 0; i < n3; i++)
         state.pos[i] += ds * state.vel[i] * inv_Omega_half;
     state.t += ds * inv_Omega_half;
 
-    // ====== Recompute accelerations at new positions ======
+    // Recompute accelerations
     logh_internal_accel(state, G, accel);
 
-    // ====== Second half-kick: exact implicit midpoint via cubic solve ======
+    // Second half-kick
     {
         double Omega0 = logh_kinetic_energy(state) + state.B;
         double C = 0.0, D = 0.0;
@@ -369,8 +368,9 @@ void logh_leapfrog_step_pn(LogHState& state, double ds, double G,
     double pn[LOGH_MAX_BODIES * 3];
 
     // ============ FIRST HALF-KICK: K(ds/2) = K_aux(ds/4) · K_phys(ds/2) · K_aux(ds/4) ============
-    // BIFROST Eq. (5): dw/ds = (1/Ω)[a + f + g(v)],  dv/ds = (1/Ω)[a + f + g(w)]
+    // BIFROST Eq. (5): dw/ds = (1/Ω)[a + g(v)],  dv/ds = (1/Ω)[a + g(w)]
     // K_aux kicks w by [a + g(v)],  K_phys kicks v by [a + g(w)]
+    // External perturbations handled via FSI kicks, not inside LogH.
 
     // K_aux(ds/4): w += (ds/4) * [a + g(v)] / Omega   [EXPLICIT: v,B unchanged → Ω constant]
     {
@@ -417,7 +417,7 @@ void logh_leapfrog_step_pn(LogHState& state, double ds, double G,
             state.aux_vel[i] += ds_quarter * (accel[i] + pn[i]) * inv_Omega;
     }
 
-    // K_phys(ds/2): cubic solve
+    // K_phys(ds/2): cubic solve with PN
     compute_pn_all_pairs(state, state.aux_vel, G, c_code, pn_order, pn);
     k_phys_cubic(state, accel, pn, ds_half, G);
 

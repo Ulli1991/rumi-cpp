@@ -193,12 +193,11 @@ void Checkpoint::restore(Particles& p, SubsystemManager& mgr,
 }
 
 // ============================================================================
-// Compute energy error for adaptive restart check (BIFROST §3.19)
-// Pure function — no side effects.
+// Compute total energy E = KE + PE + sinks (BIFROST §3.18 bookkeeping)
 // ============================================================================
 
-double compute_energy_error(const Particles& p, const EnergyBookkeeping& books,
-                            double E_initial, double G, double soft2) {
+double compute_total_energy(const Particles& p, const EnergyBookkeeping& books,
+                            double G, double soft2) {
     double KE = 0;
     auto pvx = p.vx; auto pvy = p.vy; auto pvz = p.vz;
     auto pm = p.mass;
@@ -210,9 +209,17 @@ double compute_energy_error(const Particles& p, const EnergyBookkeeping& books,
             lKE += 0.5 * pm(i) * v2;
         }, KE);
 
-    // Use tiled PE kernel (same as diagnostics) instead of raw N² loop
     double PE = compute_potential_energy_tiled(p, G, soft2, 0, N);
+    return KE + PE + books.total_sink();
+}
 
-    double E_total = KE + PE + books.total_sink();
-    return std::fabs((E_total - E_initial) / (std::fabs(E_initial) + 1e-30));
+// ============================================================================
+// Compute energy error for adaptive restart check (BIFROST §3.19)
+// Returns |E_now - E_ref| / |E_norm|
+// ============================================================================
+
+double compute_energy_error(const Particles& p, const EnergyBookkeeping& books,
+                            double E_initial, double G, double soft2) {
+    double E_now = compute_total_energy(p, books, G, soft2);
+    return std::fabs((E_now - E_initial) / (std::fabs(E_initial) + 1e-30));
 }

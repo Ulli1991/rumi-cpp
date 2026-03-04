@@ -100,7 +100,6 @@ void SubsystemBatch::pack(const SubsystemManager& mgr, const Particles& p,
     auto h_pos  = Kokkos::create_mirror_view(flat_pos);
     auto h_vel  = Kokkos::create_mirror_view(flat_vel);
     auto h_mass = Kokkos::create_mirror_view(flat_mass);
-    auto h_ext  = Kokkos::create_mirror_view(flat_ext_accel);
 
     // Copy persistent B values, auxiliary velocities, and normalization scales from subsystems
     stored_B.resize(n_sub);
@@ -167,6 +166,7 @@ void SubsystemBatch::pack(const SubsystemManager& mgr, const Particles& p,
         h_off(s) = off;
         h_dt(s) = dt;
 
+        // Pack pos/vel/mass from gathered buffer
         for (int b = 0; b < sub.n_bodies; b++) {
             int li = idx_to_local[pid_to_idx[sub.particle_ids[b]]];
             int base = li * PACK_STRIDE;
@@ -177,9 +177,6 @@ void SubsystemBatch::pack(const SubsystemManager& mgr, const Particles& p,
             h_vel((off + b) * 3 + 1) = h_buf(base + 4);
             h_vel((off + b) * 3 + 2) = h_buf(base + 5);
             h_mass(off + b) = h_buf(base + 6);
-            h_ext((off + b) * 3 + 0) = 0.0;
-            h_ext((off + b) * 3 + 1) = 0.0;
-            h_ext((off + b) * 3 + 2) = 0.0;
         }
         off += sub.n_bodies;
     }
@@ -191,7 +188,6 @@ void SubsystemBatch::pack(const SubsystemManager& mgr, const Particles& p,
     Kokkos::deep_copy(flat_pos, h_pos);
     Kokkos::deep_copy(flat_vel, h_vel);
     Kokkos::deep_copy(flat_mass, h_mass);
-    Kokkos::deep_copy(flat_ext_accel, h_ext);
 }
 
 // ============================================================================

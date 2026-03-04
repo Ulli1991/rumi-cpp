@@ -41,6 +41,10 @@ struct Checkpoint {
                  EnergyBookkeeping& books) const;
 };
 
+// Compute total energy E = KE + PE + sinks (BIFROST §3.18 bookkeeping).
+double compute_total_energy(const Particles& p, const EnergyBookkeeping& books,
+                            double G, double soft2);
+
 // Compute relative energy error |dE/E| for adaptive restart check (BIFROST §3.19).
 // Pure function — no side effects. Caller handles restart logic.
 double compute_energy_error(const Particles& p, const EnergyBookkeeping& books,
