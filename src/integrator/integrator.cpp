@@ -201,6 +201,40 @@ void compute_acceleration_and_timestep_distributed(DistributedParticles& dp,
 }
 
 
+// Debug: check for duplicate positions in the global tail of the particle array
+// Uses FULL array copy (not subview) to match diagnostic's copy method
+static int g_dup_check_step = 0;
+static void check_tail_duplicates(Particles& p, int start, int count, const char* label, int depth = -1) {
+#ifdef ENABLE_COLLISIONAL
+    if (!p.collisional) return;
+    if (g_dup_check_step > 3) return;  // only first few steps
+    int N = p.N;
+    int tail = std::max(0, N - 50);
+    Kokkos::fence();
+    auto hx = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.x);
+    auto hy = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.y);
+    auto hz = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.z);
+    auto hpid = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.particle_id);
+    auto hvx = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vx);
+    auto hvy = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vy);
+    auto hvz = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vz);
+    for (int i = tail; i < N; i++) {
+        for (int j = i+1; j < N; j++) {
+            double dx = hx(j)-hx(i), dy = hy(j)-hy(i), dz = hz(j)-hz(i);
+            if (dx*dx + dy*dy + dz*dz < 1e-30) {
+                std::printf("  *** DUP@%s(d=%d): [%d,%d) gidx %d(pid=%d) == gidx %d(pid=%d) "
+                            "pos=(%.15e,%.15e,%.15e) v_i=(%.6e,%.6e,%.6e) v_j=(%.6e,%.6e,%.6e)\n",
+                            label, depth, start, start+count,
+                            i, hpid(i), j, hpid(j),
+                            hx(i), hy(i), hz(i),
+                            hvx(i), hvy(i), hvz(i),
+                            hvx(j), hvy(j), hvz(j));
+            }
+        }
+    }
+#endif
+}
+
 // Helper: drift positions for [start, start+count)
 // Not static - also used by distributed FSI
 void drift(Particles& p, int start, int count, double dt) {
@@ -338,13 +372,25 @@ static LogHEnergyDiag compute_logh_energy_diag(
     }
 
     // U_cross: PE between members and non-members
+    auto h_pid = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.particle_id);
+    auto h_sid = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.subsystem_id);
     for (int i : members) {
         for (int j = 0; j < N; j++) {
             if (is_mem[j]) continue;
             double dx = h_x(j) - h_x(i);
             double dy = h_y(j) - h_y(i);
             double dz = h_z(j) - h_z(i);
-            double r = std::sqrt(dx*dx + dy*dy + dz*dz);
+            double r2 = dx*dx + dy*dy + dz*dz;
+            double r = std::sqrt(r2);
+            if (r2 < 1e-30) {
+                std::printf("  *** R=0 COLLISION: idx=%d(pid=%d,sid=%d,m=%.4e) vs idx=%d(pid=%d,sid=%d,m=%.4e)\n"
+                            "      pos_i=(%.15e,%.15e,%.15e) vel_i=(%.6e,%.6e,%.6e)\n"
+                            "      pos_j=(%.15e,%.15e,%.15e) vel_j=(%.6e,%.6e,%.6e)\n",
+                            i, h_pid(i), h_sid(i), h_m(i),
+                            j, h_pid(j), h_sid(j), h_m(j),
+                            h_x(i), h_y(i), h_z(i), h_vx(i), h_vy(i), h_vz(i),
+                            h_x(j), h_y(j), h_z(j), h_vx(j), h_vy(j), h_vz(j));
+            }
             diag.U_cross -= G * h_m(i) * h_m(j) / r;
         }
     }
@@ -355,6 +401,10 @@ static LogHEnergyDiag compute_logh_energy_diag(
 void advance_subsystems_in_range(Particles& p, int start, int count,
                                   double G, double dt) {
     if (!p.collisional || g_subsystem_mgr.active.empty()) return;
+
+    // Rebuild pid→idx mapping: partition_by_pivot() reorders particles,
+    // making the mapping from detect_from_pairs() stale.
+    g_subsystem_mgr.rebuild_pid_to_idx(p);
 
     // Find which subsystems have ALL members in [start, start+count)
     const auto& pid_to_idx = g_subsystem_mgr.pid_to_idx();
@@ -1354,6 +1404,10 @@ static void hhs_fsi_step_dynamic_impl(Particles& p, int start, int count, double
         return;
     }
 
+    // Save this level's subsystem state before recursive calls can overwrite it.
+    // g_subsystem_mgr is global, so deeper HHS levels overwrite it during detection.
+    auto saved_active = g_subsystem_mgr.active;
+
     // HHS-FSI structure (Algorithm 4 / Eq. 40)
     // 1. Cross-Newton kick (dt/6)
     g_profiler.start();
@@ -1369,6 +1423,10 @@ static void hhs_fsi_step_dynamic_impl(Particles& p, int start, int count, double
 
     // 3. Recurse on fast (first half) with pivot/2 — always compute fresh timesteps
     hhs_fsi_step_dynamic_impl(p, fast_start, fast_count, pivot_dt * 0.5, G, soft2, dt_min, eta, false, depth + 1);
+
+    // Restore this level's subsystem state after recursion overwrote it
+    g_subsystem_mgr.active = saved_active;
+    g_subsystem_mgr.update_particle_flags(p);
 
     // 4. Cross-gradient kick (2dt/3)
     g_profiler.start();
@@ -1387,6 +1445,10 @@ static void hhs_fsi_step_dynamic_impl(Particles& p, int start, int count, double
         double sub_pivot = pivot_dt * 0.5;
         hhs_fsi_step_dynamic_impl(p, fast_start, fast_count, sub_pivot, G, soft2, dt_min, eta, false, depth + 1);
     }
+
+    // Restore again for the second half-step on slow
+    g_subsystem_mgr.active = saved_active;
+    g_subsystem_mgr.update_particle_flags(p);
 
     // 6. FSI half-step on slow
     fsi_step(p, slow_start, slow_count, G, soft2, pivot_dt * 0.5);
@@ -2875,6 +2937,7 @@ static void hhs_fsi_recursive_distributed(
     }
     g_subset_hist.record(SubsetHistogram::DISTRIBUTED, count);
 
+    check_tail_duplicates(dp.local, start, count, "REC_ENTRY", depth);
 
     // Below threshold: skip MPI, all ranks compute full N² locally
     if (serial_n2_gpu > 0 && count <= serial_n2_gpu) {
@@ -3041,10 +3104,10 @@ static void hhs_fsi_recursive_distributed(
     g_profiler.start();
     int slow_count = partition_by_pivot(dp.local, start, count, pivot_dt);
     g_profiler.stop(StepProfiler::PARTITION);
+    check_tail_duplicates(dp.local, start, count, "AFTER_PART", depth);
     int slow_start = start;
     int fast_start = start + slow_count;
     int fast_count = count - slow_count;
-
 
     // Global tree available for sub-calls (either built here or inherited)
     bool tree_for_subs = global_tree_available || tree_built_for_subset;
@@ -3107,6 +3170,9 @@ static void hhs_fsi_recursive_distributed(
         g_profiler.stop(StepProfiler::TREE_MAINT);
     }
 
+    // Save this level's subsystem state before recursive calls can overwrite it.
+    auto saved_active_dist = g_subsystem_mgr.active;
+
     // Step 1: Cross-force S<->F then kick (dt/6)
     g_profiler.start();
     if (use_tree_cross) {
@@ -3130,11 +3196,17 @@ static void hhs_fsi_recursive_distributed(
     } else {
         fsi_step_distributed(dp, slow_start, slow_count, G, soft2, pivot_dt * 0.5);
     }
+    check_tail_duplicates(dp.local, start, count, "AFTER_S2_fsi_slow", depth);
 
     // Step 3: Recurse on fast (first half) — always compute fresh timesteps
     hhs_fsi_recursive_distributed(dp, fast_start, fast_count, pivot_dt * 0.5,
                                   G, soft2, dt_min, eta, false,
                                   tree_for_subs, depth + 1);
+    check_tail_duplicates(dp.local, start, count, "AFTER_S3_rec_fast1", depth);
+
+    // Restore this level's subsystem state after recursion overwrote it
+    g_subsystem_mgr.active = saved_active_dist;
+    g_subsystem_mgr.update_particle_flags(dp.local);
 
     // Restore tree state after steps 2-3 (positions and flags changed by drifts/recursion)
     if (use_tree_cross || use_tree_self) {
@@ -3170,6 +3242,11 @@ static void hhs_fsi_recursive_distributed(
                                       G, soft2, dt_min, eta, false,
                                       tree_for_subs, depth + 1);
     }
+    check_tail_duplicates(dp.local, start, count, "AFTER_S5_rec_fast2", depth);
+
+    // Restore again for the second half-step on slow
+    g_subsystem_mgr.active = saved_active_dist;
+    g_subsystem_mgr.update_particle_flags(dp.local);
 
     // Restore tree state for step 6 (self-force on slow) and step 7 (cross-force)
     if (use_tree_cross || use_tree_self) {
@@ -3189,6 +3266,7 @@ static void hhs_fsi_recursive_distributed(
     } else {
         fsi_step_distributed(dp, slow_start, slow_count, G, soft2, pivot_dt * 0.5);
     }
+    check_tail_duplicates(dp.local, start, count, "AFTER_S6_fsi_slow2", depth);
 
     // Refresh tree for step 7 cross-force (step 6 FSI drifted slow particles)
     if (use_tree_cross) {
@@ -3223,6 +3301,7 @@ void hhs_fsi_step_distributed(DistributedParticles& dp, double pivot_dt,
 
     // Reset debug counters
     g_hhs_counters.reset();
+    g_dup_check_step++;
 
 #ifdef ENABLE_COLLISIONAL
     if (dp.local.collisional) g_subsystem_mgr.reset_step_diagnostics();

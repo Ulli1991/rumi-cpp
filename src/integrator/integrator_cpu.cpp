@@ -750,6 +750,9 @@ static void cpu_hhs_recursive(CpuSubset& s, Particles& p, int start, int count,
         return;
     }
 
+    // Save this level's subsystem state before recursive calls can overwrite it.
+    auto saved_active_cpu = g_subsystem_mgr.active;
+
     // Step 1: Cross-kick (dt/6)
     cpu_cross_acc(s, slow_start, slow_count, fast_start, fast_count, G, soft2);
     cpu_kick(s, slow_start, slow_count, pivot_dt * FSI_KICK);
@@ -761,6 +764,10 @@ static void cpu_hhs_recursive(CpuSubset& s, Particles& p, int start, int count,
     // Step 3: Recurse on fast (first half)
     cpu_hhs_recursive(s, p, fast_start, fast_count, pivot_dt * 0.5, G, soft2, dt_min, eta, false, depth + 1);
 
+    // Restore this level's subsystem state after recursion overwrote it
+    g_subsystem_mgr.active = saved_active_cpu;
+    g_subsystem_mgr.update_particle_flags(p);
+
     // Step 4: Cross-gradient kick (2dt/3)
     cpu_cross_acc(s, slow_start, slow_count, fast_start, fast_count, G, soft2);
     cpu_cross_grad(s, slow_start, slow_count, fast_start, fast_count, G, soft2, pivot_dt);
@@ -769,6 +776,10 @@ static void cpu_hhs_recursive(CpuSubset& s, Particles& p, int start, int count,
 
     // Step 5: Recurse on fast (second half)
     cpu_hhs_recursive(s, p, fast_start, fast_count, pivot_dt * 0.5, G, soft2, dt_min, eta, false, depth + 1);
+
+    // Restore again for the second half-step on slow
+    g_subsystem_mgr.active = saved_active_cpu;
+    g_subsystem_mgr.update_particle_flags(p);
 
     // Step 6: FSI half-step on slow
     cpu_fsi_step(s, p, slow_start, slow_count, G, soft2, pivot_dt * 0.5);

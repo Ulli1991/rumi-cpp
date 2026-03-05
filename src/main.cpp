@@ -617,6 +617,32 @@ int main(int argc, char** argv) {
             std::fflush(stdout);
         }
 
+        // Check for duplicate positions in initial conditions (sort-based O(N log N))
+        if (my_rank == 0) {
+            Particles& check_p = use_distributed ? dp.local : p;
+            auto hx = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), check_p.x);
+            auto hy = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), check_p.y);
+            auto hz = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), check_p.z);
+            std::vector<int> idx(check_p.N);
+            std::iota(idx.begin(), idx.end(), 0);
+            std::sort(idx.begin(), idx.end(), [&](int a, int b) {
+                if (hx(a) != hx(b)) return hx(a) < hx(b);
+                if (hy(a) != hy(b)) return hy(a) < hy(b);
+                return hz(a) < hz(b);
+            });
+            int n_dup = 0;
+            for (int k = 1; k < check_p.N; k++) {
+                int i = idx[k-1], j = idx[k];
+                if (hx(i) == hx(j) && hy(i) == hy(j) && hz(i) == hz(j)) {
+                    std::printf("  IC DUPLICATE: idx %d and %d at (%.15e, %.15e, %.15e)\n",
+                                i, j, hx(i), hy(i), hz(i));
+                    if (++n_dup >= 20) break;
+                }
+            }
+            if (n_dup == 0)
+                std::printf("  IC check: no duplicate positions found\n");
+        }
+
         bool is_cluster = (test == "plummer");
 
         // Get particle count (local or total depending on mode)
