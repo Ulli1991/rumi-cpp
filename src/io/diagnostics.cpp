@@ -336,15 +336,21 @@ void print_subsystem_diagnostics(const Particles& p, double G) {
         }
 
         // Print main line
-        std::printf("  %-4d %-6s %3d %12.4e %12.4e %12.4e %12.4e %12.4e",
-                    sub.id, type_str, sub.n_bodies,
-                    oe.a, oe.e, oe.omega, P_yr, r_peri);
-        if (is_bh_pair) {
-            std::printf(" %10.4f %10.4f %8.4f", chi1, chi2, sdotl);
+        if (sub.type == SubsystemType::FLYBY) {
+            std::printf("  %-4d %-6s %3d %12s %12s %12s %12s %12s %10s %10s %8s\n",
+                        sub.id, type_str, sub.n_bodies,
+                        "--", "--", "--", "--", "--", "--", "--", "--");
         } else {
-            std::printf(" %10s %10s %8s", "--", "--", "--");
+            std::printf("  %-4d %-6s %3d %12.4e %12.4e %12.4e %12.4e %12.4e",
+                        sub.id, type_str, sub.n_bodies,
+                        oe.a, oe.e, oe.omega, P_yr, r_peri);
+            if (is_bh_pair) {
+                std::printf(" %10.4f %10.4f %8.4f", chi1, chi2, sdotl);
+            } else {
+                std::printf(" %10s %10s %8s", "--", "--", "--");
+            }
+            std::printf("\n");
         }
-        std::printf("\n");
 
         // For triples: print outer orbit on a second line
         if ((sub.type == SubsystemType::TRIPLE_STABLE ||

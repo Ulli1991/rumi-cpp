@@ -1,4 +1,5 @@
 #include "particles.h"
+#include <numeric>
 #include "forces.h"
 #include "integrator.h"
 #include "timestep.h"
@@ -490,7 +491,7 @@ int main(int argc, char** argv) {
             g_collisional.eta_jerk        = cfg.get_double("ETA_JERK", 0.1);
             g_collisional.eta_gbs         = cfg.get_double("ETA_GBS", 1e-10);
             g_collisional.eta_pert        = cfg.get_double("ETA_PERT", 0.02);
-            g_collisional.eta_restart     = cfg.get_double("ETA_RESTART", 1e-6);
+            g_collisional.eta_restart     = cfg.get_double("ETA_RESTART", 0.0);
             g_collisional.n_orb_secular   = cfg.get_int("N_ORB_SECULAR", 3);
             g_collisional.m_pn            = cfg.get_double("M_PN", 5.0);
             g_collisional.pn_order        = cfg.get_int("PN_ORDER", 7);
