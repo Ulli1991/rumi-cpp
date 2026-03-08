@@ -101,8 +101,7 @@ void SubsystemBatch::pack(const SubsystemManager& mgr, const Particles& p,
     auto h_vel  = Kokkos::create_mirror_view(flat_vel);
     auto h_mass = Kokkos::create_mirror_view(flat_mass);
 
-    // Copy persistent B values, auxiliary velocities, and normalization scales from subsystems
-    stored_B.resize(n_sub);
+    // Copy persistent auxiliary velocities and normalization scales from subsystems
     has_stored_aux_vel.resize(n_sub);
     // Compute flat offsets for aux_vel
     stored_aux_vel_offsets.resize(n_sub);
@@ -123,7 +122,6 @@ void SubsystemBatch::pack(const SubsystemManager& mgr, const Particles& p,
     stored_E_scale.resize(n_sub);
     stored_scales_set.resize(n_sub);
     for (int s = 0; s < n_sub; s++) {
-        stored_B[s] = mgr.active[s].B_phys;
         has_stored_aux_vel[s] = mgr.active[s].has_aux_vel;
         if (mgr.active[s].has_aux_vel) {
             int av_off = stored_aux_vel_offsets[s] * 3;
@@ -254,9 +252,8 @@ void SubsystemBatch::unpack(SubsystemManager& mgr, Particles& p) {
         pm(k) = d_buf(base + 6);
     });
 
-    // Write persistent B, auxiliary velocities, and scales back to subsystems
+    // Write persistent auxiliary velocities and scales back to subsystems
     for (int s = 0; s < n_sub; s++) {
-        mgr.active[s].B_phys = stored_B[s];
         mgr.active[s].has_aux_vel = has_stored_aux_vel[s];
         if (has_stored_aux_vel[s]) {
             int av_off = stored_aux_vel_offsets[s] * 3;
@@ -341,7 +338,6 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
     double max_dE = 0.0;
     double min_dE = 1e30;
     int cap_hit = 0;
-    batch.omega_skipped.assign(n_sub, false);
 
     for (int s = 0; s < n_sub; s++) {
         int nb = h_nbod(s);
@@ -521,9 +517,8 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
             h_mass(off + b) = state.mass[b] * M_total;
         }
 
-        // B is always recomputed fresh — no persistence needed.
         // Store auxiliary velocities and scales for persistence across calls.
-        batch.stored_B[s] = NAN;  // signal: always recompute
+        // (B is always recomputed fresh from current T+U — no persistence needed.)
         if (state.use_aux_vel) {
             batch.has_stored_aux_vel[s] = true;
             int av_off = batch.stored_aux_vel_offsets[s] * 3;

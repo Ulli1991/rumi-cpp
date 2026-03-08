@@ -483,11 +483,10 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
         Kokkos::deep_copy(Kokkos::subview(p.vy, rng), h_vy);
         Kokkos::deep_copy(Kokkos::subview(p.vz, rng), h_vz);
 
-        // Clear B_phys and aux_vel for secular subsystems (not used by secular path;
-        // if subsystem transitions back to LogH, NAN/false triggers fresh init)
+        // Clear aux_vel for secular subsystems (not used by secular path;
+        // if subsystem transitions back to LogH, false triggers fresh init)
         for (int s : secular_idx) {
             auto& dst = g_subsystem_mgr.active[s];
-            dst.B_phys = NAN;
             dst.has_aux_vel = false;
         }
     }
@@ -679,7 +678,6 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
 
         for (int s : secular_triple_idx) {
             auto& dst = g_subsystem_mgr.active[s];
-            dst.B_phys = NAN;
             dst.has_aux_vel = false;
         }
     }
@@ -830,10 +828,10 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
         }
 
         // Propagate persistent state back from logh_mgr to g_subsystem_mgr
+        // (B is always recomputed fresh — only aux_vel and scales need persistence)
         for (int i = 0; i < n_sub; i++) {
             auto& dst = g_subsystem_mgr.active[logh_idx[i]];
             const auto& src = logh_mgr.active[i];
-            dst.B_phys = src.B_phys;
             dst.has_aux_vel = src.has_aux_vel;
             if (src.has_aux_vel) {
                 std::memcpy(dst.aux_vel_phys, src.aux_vel_phys,
@@ -845,8 +843,6 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
             dst.E_scale = src.E_scale;
             dst.scales_set = src.scales_set;
         }
-
-        // (Omega guard removed — B is always recomputed fresh, so Omega = -U > 0 always)
     }
 }
 #endif

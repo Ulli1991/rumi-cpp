@@ -202,7 +202,7 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
     }
 
     // Build lookup from sorted pid set → old subsystem for persistent state transfer
-    // (B_phys, aux_vel, normalization scales carried over for identical member sets)
+    // (aux_vel, normalization scales carried over for identical member sets)
     auto make_key = [](const std::vector<int>& pids) -> std::vector<int> {
         std::vector<int> k = pids;
         std::sort(k.begin(), k.end());
@@ -232,7 +232,6 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
         if (it != old_by_pids.end()) {
             // Same members — carry over persistent LogH state
             sub.id = it->second->id;
-            sub.B_phys = it->second->B_phys;
             sub.has_aux_vel = it->second->has_aux_vel;
             std::memcpy(sub.aux_vel_phys, it->second->aux_vel_phys, sizeof(sub.aux_vel_phys));
             // Carry over fixed normalization scales

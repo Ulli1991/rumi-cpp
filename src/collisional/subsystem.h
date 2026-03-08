@@ -38,12 +38,6 @@ struct Subsystem {
     bool is_secular;                     // orbit-averaged evolution
     int n_orb_per_dt;                    // orbits per FSI timestep
 
-    // Persistent binding energy B in LogH internal (normalized) units.
-    // NAN = not yet initialized (compute from -(T+U) on first LogH call).
-    // Carried across LogH calls to properly track PN energy exchange.
-    // Uses fixed normalization scales (V_scale etc.) so no unit conversion drift.
-    double B_phys = NAN;
-
     // Persistent auxiliary velocities for PN (code units, including CM).
     // The Hellström & Mikkola extended phase space method requires w ≠ v
     // after the first integration step. Re-initializing w = v each call

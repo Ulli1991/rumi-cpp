@@ -31,10 +31,6 @@ struct SubsystemBatch {
     Kokkos::View<double*> energy_error;   // |dE/E| per subsystem
     Kokkos::View<int*>    converged;      // 1 if GBS converged
 
-    // Persistent binding energy B in physical units (one per subsystem).
-    // Threaded through pack→integrate→unpack to carry B across LogH calls.
-    std::vector<double> stored_B;
-
     // Persistent auxiliary velocities for PN (code units, including CM).
     // Flat layout: stored_aux_vel[offset[s] * 3 + b*3 + c]
     // stored_aux_vel_offsets[s] = starting body index for subsystem s
@@ -62,10 +58,6 @@ struct SubsystemBatch {
     double stat_best_dE = 1e30;    // best |dE/E|
     int stat_cap_hit = 0;          // subsystems that hit GBS step limit
 
-    // Subsystems skipped due to Omega guard (tidal perturbation overwhelmed binding).
-    // Caller should dissolve these — their members are returned unchanged.
-    std::vector<bool> omega_skipped;
-
     // Allocate buffers
     void allocate(int n_sub, int total_bodies);
 
@@ -73,7 +65,7 @@ struct SubsystemBatch {
     void pack(const SubsystemManager& mgr, const Particles& p,
               double G, double dt);
 
-    // Unpack results back into Particles and write B_phys back to subsystems
+    // Unpack results back into Particles
     void unpack(SubsystemManager& mgr, Particles& p);
 };
 

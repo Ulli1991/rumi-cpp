@@ -60,7 +60,7 @@ EQUALS = =
 CMAKE_SOURCE_DIR = /u/uli/cpp-nbody
 
 # The top-level build directory on which CMake was run.
-CMAKE_BINARY_DIR = /u/uli/cpp-nbody
+CMAKE_BINARY_DIR = /raven/u/uli/cpp-nbody
 
 #=============================================================================
 # Targets provided globally by CMake.
@@ -87,9 +87,9 @@ rebuild_cache/fast: rebuild_cache
 
 # The main all target
 all: cmake_check_build_system
-	$(CMAKE_COMMAND) -E cmake_progress_start /u/uli/cpp-nbody/CMakeFiles /u/uli/cpp-nbody//CMakeFiles/progress.marks
+	$(CMAKE_COMMAND) -E cmake_progress_start /raven/u/uli/cpp-nbody/CMakeFiles /raven/u/uli/cpp-nbody//CMakeFiles/progress.marks
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 all
-	$(CMAKE_COMMAND) -E cmake_progress_start /u/uli/cpp-nbody/CMakeFiles 0
+	$(CMAKE_COMMAND) -E cmake_progress_start /raven/u/uli/cpp-nbody/CMakeFiles 0
 .PHONY : all
 
 # The main clean target
