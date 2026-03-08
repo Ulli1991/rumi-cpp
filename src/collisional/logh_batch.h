@@ -62,6 +62,10 @@ struct SubsystemBatch {
     double stat_best_dE = 1e30;    // best |dE/E|
     int stat_cap_hit = 0;          // subsystems that hit GBS step limit
 
+    // Subsystems skipped due to Omega guard (tidal perturbation overwhelmed binding).
+    // Caller should dissolve these — their members are returned unchanged.
+    std::vector<bool> omega_skipped;
+
     // Allocate buffers
     void allocate(int n_sub, int total_bodies);
 

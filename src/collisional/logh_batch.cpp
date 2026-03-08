@@ -341,6 +341,7 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
     double max_dE = 0.0;
     double min_dE = 1e30;
     int cap_hit = 0;
+    batch.omega_skipped.assign(n_sub, false);
 
     for (int s = 0; s < n_sub; s++) {
         int nb = h_nbod(s);
@@ -467,35 +468,18 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
             state.spin2[2] = batch.stored_spins[s*6+5];
         }
 
-        // Initialize B in normalized units.
-        // Persistent B is stored directly in these fixed normalized units — no
-        // conversion needed since scales are fixed. This eliminates the drift
-        // that occurred when E_scale changed between calls.
+        // Always recompute B = -(T+U) from current state.
+        // Between LogH calls, FSI kicks change particle velocities (T changes)
+        // while a persisted B would reflect the old state, driving Omega = T+B
+        // negative.  Recomputing B fresh gives Omega = -U > 0 always.
+        // All information about previous PN evolution is already encoded in the
+        // current positions and velocities, so nothing is lost.
         double T_norm = logh_kinetic_energy(state);
         double U_norm = logh_potential_energy(state, G_norm);
-
-        if (std::isnan(batch.stored_B[s])) {
-            // First call: B = -(T+U). PN forces adjust B naturally via dB/ds.
-            state.B = -U_norm - T_norm;
-        } else {
-            // Persistent B — already in these fixed normalized units, no conversion
-            state.B = batch.stored_B[s];
-        }
+        state.B = -U_norm - T_norm;
 
         double E0_norm = T_norm + U_norm;
-        double Omega_norm = T_norm + state.B;
-
-        // Guard: between LogH calls, external kicks change T while B is
-        // fixed. This can drive Omega = T + B to near-zero or negative,
-        // making the LogH EOM singular (all terms ∝ 1/Omega).
-        // Reset B = -(T+U) to restore Omega = -U > 0.
-        double minus_U = -U_norm;  // always > 0 (gravitational potential)
-        if (Omega_norm < 0.01 * minus_U || Omega_norm <= 0.0) {
-            std::printf("    LogH: resetting B for sub %d (Omega=%.3e, -U=%.3e)\n",
-                        s, Omega_norm, minus_U);
-            state.B = -U_norm - T_norm;
-            Omega_norm = minus_U;
-        }
+        double Omega_norm = T_norm + state.B;  // == -U_norm, always > 0
 
         // Save initial state for PN energy comparison after integration
         double state_init_pos[LOGH_MAX_BODIES * 3];
@@ -537,9 +521,9 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
             h_mass(off + b) = state.mass[b] * M_total;
         }
 
-        // Store updated B and auxiliary velocities for persistence across calls
-        // B stays in fixed normalized units — no E_scale conversion needed
-        batch.stored_B[s] = state.B;
+        // B is always recomputed fresh — no persistence needed.
+        // Store auxiliary velocities and scales for persistence across calls.
+        batch.stored_B[s] = NAN;  // signal: always recompute
         if (state.use_aux_vel) {
             batch.has_stored_aux_vel[s] = true;
             int av_off = batch.stored_aux_vel_offsets[s] * 3;

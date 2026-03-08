@@ -45,7 +45,7 @@ R_NGB = 1e-3                        		# Neighbor search radius (pc) for subsyste
 R_NGB_MAX = 0.1                     		# Max distance for orbital element check (pc)
 ETA_PERT = 0.02					# Perturbation timestep eta for subsystems (BIFROST Eq. 30)
 ETA_GBS = 1e-10                     		# GBS extrapolation accuracy for LogH integrator
-ETA_RESTART = 0				# Disabled — step-level restart uses O(N²) PE, too expensive. Per-subsystem restart still active.
+ETA_RESTART = 1e-8				# Per-subsystem LogH restart threshold + step-level restart
 N_ORB_SECULAR = 3                   		# Orbits/timestep threshold for secular evolution
 M_PN = 5.0                          		# Minimum mass (M_sun) for PN corrections
 PN_ORDER = 31                        		# PN bitmask: 1=PN1, 2=PN2, 4=PN2.5 (7=all up to PN2.5) — DISABLED for energy test

@@ -845,6 +845,8 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
             dst.E_scale = src.E_scale;
             dst.scales_set = src.scales_set;
         }
+
+        // (Omega guard removed — B is always recomputed fresh, so Omega = -U > 0 always)
     }
 }
 #endif
