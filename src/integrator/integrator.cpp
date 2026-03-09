@@ -1281,27 +1281,25 @@ static void self_gradient_correction_distributed(DistributedParticles& dp, int s
                                                   double G, double soft2, double grad_dt) {
     if (count <= 0) return;
 
-#ifdef ENABLE_COLLISIONAL
-    // Save pre-correction accelerations so we can compute grad_mag identically
-    // on all ranks after the allgather (avoids MPI divergence from partial grad_mag)
+    // Snapshot pre-correction accelerations for the full range.
+    // The gradient kernel reads j-particle accelerations while writing corrected
+    // i-particle accelerations to the same array — without a snapshot, j-particles
+    // in the local MPI slice can read partially-corrected values (data race),
+    // breaking the antisymmetry corr_ij = -corr_ji and violating momentum conservation.
     static Kokkos::View<double*> ax_save("ax_save_grad", 0);
     static Kokkos::View<double*> ay_save("ay_save_grad", 0);
     static Kokkos::View<double*> az_save("az_save_grad", 0);
-    bool need_grad_mag = dp.local.collisional;
-    if (need_grad_mag) {
-        if ((int)ax_save.extent(0) < count) {
-            Kokkos::realloc(ax_save, count);
-            Kokkos::realloc(ay_save, count);
-            Kokkos::realloc(az_save, count);
-        }
-        Kokkos::deep_copy(Kokkos::subview(ax_save, Kokkos::make_pair(0, count)),
-                          Kokkos::subview(dp.local.ax, Kokkos::make_pair(start, start + count)));
-        Kokkos::deep_copy(Kokkos::subview(ay_save, Kokkos::make_pair(0, count)),
-                          Kokkos::subview(dp.local.ay, Kokkos::make_pair(start, start + count)));
-        Kokkos::deep_copy(Kokkos::subview(az_save, Kokkos::make_pair(0, count)),
-                          Kokkos::subview(dp.local.az, Kokkos::make_pair(start, start + count)));
+    if ((int)ax_save.extent(0) < count) {
+        Kokkos::realloc(ax_save, count);
+        Kokkos::realloc(ay_save, count);
+        Kokkos::realloc(az_save, count);
     }
-#endif
+    Kokkos::deep_copy(Kokkos::subview(ax_save, Kokkos::make_pair(0, count)),
+                      Kokkos::subview(dp.local.ax, Kokkos::make_pair(start, start + count)));
+    Kokkos::deep_copy(Kokkos::subview(ay_save, Kokkos::make_pair(0, count)),
+                      Kokkos::subview(dp.local.ay, Kokkos::make_pair(start, start + count)));
+    Kokkos::deep_copy(Kokkos::subview(az_save, Kokkos::make_pair(0, count)),
+                      Kokkos::subview(dp.local.az, Kokkos::make_pair(start, start + count)));
 
     int slice_start, slice_count;
     dp.get_force_slice(start, count, slice_start, slice_count);
@@ -1309,6 +1307,8 @@ static void self_gradient_correction_distributed(DistributedParticles& dp, int s
     if (slice_count > 0) {
         auto pos = dp.local.pos_packed;
         RawView pax{dp.local.ax.data()}, pay{dp.local.ay.data()}, paz{dp.local.az.data()};
+        // Snapshot views for race-free j-particle acceleration reads
+        RawView sax{ax_save.data()}, say{ay_save.data()}, saz{az_save.data()};
 #ifdef ENABLE_COLLISIONAL
         const int* sid_raw = dp.local.subsystem_id.data();
         bool coll = dp.local.collisional;
@@ -1343,7 +1343,8 @@ static void self_gradient_correction_distributed(DistributedParticles& dp, int s
                 if (ii < slice_count) {
                     double mi_pad;
                     load4(&pos(i, 0), xi, yi, zi, mi_pad);
-                    axi = pax(i); ayi = pay(i); azi = paz(i);
+                    // Read from snapshot (i is in [start, start+count))
+                    axi = sax(i - j_start); ayi = say(i - j_start); azi = saz(i - j_start);
 #ifdef ENABLE_COLLISIONAL
                     if (coll) sid_i = sid_raw[i];
 #endif
@@ -1360,9 +1361,10 @@ static void self_gradient_correction_distributed(DistributedParticles& dp, int s
                         int idx = tile_start + t;
                         int base = t * 7;
                         load4(&pos(idx, 0), tile(base), tile(base+1), tile(base+2), tile(base+3));
-                        tile(base + 4) = pax(idx);
-                        tile(base + 5) = pay(idx);
-                        tile(base + 6) = paz(idx);
+                        // Load from snapshot to avoid data race with corrected accelerations
+                        tile(base + 4) = sax(idx - j_start);
+                        tile(base + 5) = say(idx - j_start);
+                        tile(base + 6) = saz(idx - j_start);
                     }
                     team.team_barrier();
 
@@ -1418,9 +1420,7 @@ static void self_gradient_correction_distributed(DistributedParticles& dp, int s
 
 #ifdef ENABLE_COLLISIONAL
     // Compute grad_mag from acceleration difference — identical on all ranks
-    // (the kernel only wrote corrections for the local slice, but after allgather
-    // all ranks have the same corrected accelerations, so this is consistent)
-    if (need_grad_mag) {
+    if (dp.local.collisional) {
         auto ax_v = dp.local.ax;
         auto ay_v = dp.local.ay;
         auto az_v = dp.local.az;
@@ -1936,6 +1936,39 @@ static void cross_acceleration_and_gradient_distributed(DistributedParticles& dp
 
     const double coeff = G * dt * dt * GRAD_COEFF;
 
+    // Snapshot accelerations for both slow and fast ranges BEFORE gradient kernels.
+    // The slow-from-fast kernel modifies slow accelerations; without a snapshot the
+    // fast-from-slow kernel would read corrected (not original) slow values, breaking
+    // the antisymmetry corr_ij = -corr_ji and violating momentum conservation.
+    static Kokkos::View<double*> ax_snap_s("ax_snap_cross_s", 0);
+    static Kokkos::View<double*> ay_snap_s("ay_snap_cross_s", 0);
+    static Kokkos::View<double*> az_snap_s("az_snap_cross_s", 0);
+    static Kokkos::View<double*> ax_snap_f("ax_snap_cross_f", 0);
+    static Kokkos::View<double*> ay_snap_f("ay_snap_cross_f", 0);
+    static Kokkos::View<double*> az_snap_f("az_snap_cross_f", 0);
+    if ((int)ax_snap_s.extent(0) < slow_count) {
+        Kokkos::realloc(ax_snap_s, slow_count);
+        Kokkos::realloc(ay_snap_s, slow_count);
+        Kokkos::realloc(az_snap_s, slow_count);
+    }
+    if ((int)ax_snap_f.extent(0) < fast_count) {
+        Kokkos::realloc(ax_snap_f, fast_count);
+        Kokkos::realloc(ay_snap_f, fast_count);
+        Kokkos::realloc(az_snap_f, fast_count);
+    }
+    RawView sax_s{ax_snap_s.data()}, say_s{ay_snap_s.data()}, saz_s{az_snap_s.data()};
+    RawView sax_f{ax_snap_f.data()}, say_f{ay_snap_f.data()}, saz_f{az_snap_f.data()};
+    Kokkos::parallel_for("snap_cross_slow", slow_count, KOKKOS_LAMBDA(int ii) {
+        sax_s(ii) = pax(slow_start + ii);
+        say_s(ii) = pay(slow_start + ii);
+        saz_s(ii) = paz(slow_start + ii);
+    });
+    Kokkos::parallel_for("snap_cross_fast", fast_count, KOKKOS_LAMBDA(int ii) {
+        sax_f(ii) = pax(fast_start + ii);
+        say_f(ii) = pay(fast_start + ii);
+        saz_f(ii) = paz(fast_start + ii);
+    });
+
     using team_policy = Kokkos::TeamPolicy<>;
     using member_type = team_policy::member_type;
     using scratch_space = Kokkos::DefaultExecutionSpace::scratch_memory_space;
@@ -1970,7 +2003,7 @@ static void cross_acceleration_and_gradient_distributed(DistributedParticles& dp
                 if (ii < slice_count) {
                     double mi_pad;
                     load4(&pos(i, 0), xi, yi, zi, mi_pad);
-                    axi = pax(i); ayi = pay(i); azi = paz(i);
+                    axi = sax_s(i - slow_start); ayi = say_s(i - slow_start); azi = saz_s(i - slow_start);
 #ifdef ENABLE_COLLISIONAL
                     if (coll) sid_i = sid_raw[i];
 #endif
@@ -1987,9 +2020,9 @@ static void cross_acceleration_and_gradient_distributed(DistributedParticles& dp
                         int idx = tile_st + t;
                         int tb = t * 7;
                         load4(&pos(idx, 0), tile(tb), tile(tb+1), tile(tb+2), tile(tb+3));
-                        tile(tb+4) = pax(idx);
-                        tile(tb+5) = pay(idx);
-                        tile(tb+6) = paz(idx);
+                        tile(tb+4) = sax_f(idx - fast_start);
+                        tile(tb+5) = say_f(idx - fast_start);
+                        tile(tb+6) = saz_f(idx - fast_start);
                     }
                     team.team_barrier();
 
@@ -2061,7 +2094,7 @@ static void cross_acceleration_and_gradient_distributed(DistributedParticles& dp
                 if (ii < slice_count_f) {
                     double mi_pad;
                     load4(&pos(i, 0), xi, yi, zi, mi_pad);
-                    axi = pax(i); ayi = pay(i); azi = paz(i);
+                    axi = sax_f(i - fast_start); ayi = say_f(i - fast_start); azi = saz_f(i - fast_start);
 #ifdef ENABLE_COLLISIONAL
                     if (coll) sid_i = sid_raw[i];
 #endif
@@ -2078,9 +2111,9 @@ static void cross_acceleration_and_gradient_distributed(DistributedParticles& dp
                         int idx = tile_st + t;
                         int tb = t * 7;
                         load4(&pos(idx, 0), tile(tb), tile(tb+1), tile(tb+2), tile(tb+3));
-                        tile(tb+4) = pax(idx);
-                        tile(tb+5) = pay(idx);
-                        tile(tb+6) = paz(idx);
+                        tile(tb+4) = sax_s(idx - slow_start);
+                        tile(tb+5) = say_s(idx - slow_start);
+                        tile(tb+6) = saz_s(idx - slow_start);
                     }
                     team.team_barrier();
 
