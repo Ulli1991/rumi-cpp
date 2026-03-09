@@ -8,6 +8,8 @@
 
 SubsystemBatch g_logh_batch;
 
+constexpr int GBS_MAX_STEPS = 1000;
+
 // ============================================================================
 // Allocate batch buffers
 // ============================================================================
@@ -26,7 +28,6 @@ void SubsystemBatch::allocate(int n_sub, int total_bodies) {
     flat_pos      = Kokkos::View<double*>("batch_pos", total_bodies * 3);
     flat_vel      = Kokkos::View<double*>("batch_vel", total_bodies * 3);
     flat_mass     = Kokkos::View<double*>("batch_mass", total_bodies);
-    flat_ext_accel = Kokkos::View<double*>("batch_ext", total_bodies * 3);
     flat_pos_out  = Kokkos::View<double*>("batch_pos_out", total_bodies * 3);
     flat_vel_out  = Kokkos::View<double*>("batch_vel_out", total_bodies * 3);
     energy_error  = Kokkos::View<double*>("batch_eerr", n_sub);
@@ -495,7 +496,7 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
             double Omega_cur = logh_kinetic_energy(state) + state.B;
             double ds_est = (Omega_cur > 1e-30) ? dt_norm * Omega_cur : dt_norm;
             n_gbs_steps = gbs.integrate_to_time(state, dt_norm, G_norm, ds_est,
-                                                 c_norm, pn_order, 1000);
+                                                 c_norm, pn_order, GBS_MAX_STEPS);
         }
 
         // ==================================================================
@@ -554,12 +555,12 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
             dE_rel = std::fabs((Ef_norm - E0_norm) / (std::fabs(E0_norm) + 1e-30));
         }
         h_eerr(s) = dE_rel;
-        h_conv(s) = (n_gbs_steps < 1000) ? 1 : 0;
+        h_conv(s) = (n_gbs_steps < GBS_MAX_STEPS) ? 1 : 0;
 
         total_gbs_steps += n_gbs_steps;
         if (dE_rel > max_dE) max_dE = dE_rel;
         if (dE_rel < min_dE) min_dE = dE_rel;
-        if (n_gbs_steps >= 1000) cap_hit++;
+        if (n_gbs_steps >= GBS_MAX_STEPS) cap_hit++;
     }
 
     // Store stats for caller (printed in step summary, not here)

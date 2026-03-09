@@ -223,6 +223,16 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
     auto h_vy = Kokkos::create_mirror_view(Kokkos::HostSpace(), p.vy);
     auto h_vz = Kokkos::create_mirror_view(Kokkos::HostSpace(), p.vz);
 
+    // Helper: min dt_adapt over subsystem members (used for binary, triple, multiplet)
+    auto min_dt_members = [&](const Subsystem& s) {
+        double dt_min = 1e30;
+        for (int pid : s.particle_ids) {
+            int idx = pid_to_idx[pid];
+            if (idx >= 0) dt_min = std::min(dt_min, h_dt(idx));
+        }
+        return dt_min;
+    };
+
     for (auto& [root, members] : components) {
         // Check if this component exactly matches an existing subsystem
         auto key = make_key(members);
@@ -276,15 +286,7 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
             }
 
             sub.type = pair_bound ? SubsystemType::BINARY : SubsystemType::FLYBY;
-            // Record min(dt_adapt) at detection — before exclusion strips internal pairs
-            {
-                double dt_detect = 1e30;
-                for (int pid : sub.particle_ids) {
-                    int idx = pid_to_idx[pid];
-                    if (idx >= 0) dt_detect = std::min(dt_detect, h_dt(idx));
-                }
-                sub.dt_sub = dt_detect;
-            }
+            sub.dt_sub = min_dt_members(sub);
         } else if (sub.n_bodies == 3) {
             // Triple — check stability
             // Find the tightest pair (inner binary)
@@ -377,26 +379,10 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
             } else {
                 sub.type = SubsystemType::TRIPLE_UNSTABLE;
             }
-            // Record min(dt_adapt) at detection — before exclusion strips internal pairs
-            {
-                double dt_detect = 1e30;
-                for (int pid : sub.particle_ids) {
-                    int idx = pid_to_idx[pid];
-                    if (idx >= 0) dt_detect = std::min(dt_detect, h_dt(idx));
-                }
-                sub.dt_sub = dt_detect;
-            }
+            sub.dt_sub = min_dt_members(sub);
         } else {
             sub.type = SubsystemType::MULTIPLET;
-            // Record min(dt_adapt) at detection — before exclusion strips internal pairs
-            {
-                double dt_detect = 1e30;
-                for (int pid : sub.particle_ids) {
-                    int idx = pid_to_idx[pid];
-                    if (idx >= 0) dt_detect = std::min(dt_detect, h_dt(idx));
-                }
-                sub.dt_sub = dt_detect;
-            }
+            sub.dt_sub = min_dt_members(sub);
         }
 
         active.push_back(sub);
@@ -456,12 +442,6 @@ void SubsystemManager::enforce_shared_timestep(Particles& p) const {
             int idx = pid_to_idx[pid];
             if (idx >= 0) dt_min = std::min(dt_min, h_dt(idx));
         }
-
-        // dt_sub clamp DISABLED for testing — see if natural timestep criteria
-        // handle this case without needing the detection-time floor.
-        // if (sub.dt_sub > 0.0 && sub.dt_sub < 1e30) {
-        //     dt_min = std::min(dt_min, sub.dt_sub);
-        // }
 
         for (int pid : sub.particle_ids) {
             int idx = pid_to_idx[pid];

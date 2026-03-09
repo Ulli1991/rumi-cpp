@@ -21,7 +21,6 @@ struct SubsystemBatch {
     Kokkos::View<double*> flat_pos;       // [x,y,z] interleaved
     Kokkos::View<double*> flat_vel;       // [vx,vy,vz] interleaved
     Kokkos::View<double*> flat_mass;
-    Kokkos::View<double*> flat_ext_accel; // external accelerations [ax,ay,az]
 
     // Output: updated positions and velocities (same layout)
     Kokkos::View<double*> flat_pos_out;

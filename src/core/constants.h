@@ -135,6 +135,20 @@ void gradient_correction_interaction(double dx, double dy, double dz,
     cz += f * (r2_soft * daz - 3.0 * r_dot_a * dz);
 }
 
+// MAC test: improved Barnes-Hut using group bounding box.
+// Returns true if cell is distant enough to use monopole approximation.
+KOKKOS_INLINE_FUNCTION
+bool mac_accept(double gcx, double gcy, double gcz,
+                double gsx, double gsy, double gsz,
+                double ccx, double ccy, double ccz,
+                double size_sq_th) {
+    double drx = Kokkos::fmax(Kokkos::fabs(gcx - ccx) - gsx, 0.0);
+    double dry = Kokkos::fmax(Kokkos::fabs(gcy - ccy) - gsy, 0.0);
+    double drz = Kokkos::fmax(Kokkos::fabs(gcz - ccz) - gsz, 0.0);
+    double dist_sq = drx * drx + dry * dry + drz * drz;
+    return (size_sq_th < dist_sq) && (dist_sq > 0.0);
+}
+
 // Speed of light in code units (km/s)
 constexpr double C_CODE = 299792.458;
 
