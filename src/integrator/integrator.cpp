@@ -1119,204 +1119,16 @@ static int partition_by_pivot(Particles& p, int start, int count, double pivot) 
     return slow_count;
 }
 
-// ==========================================================================
-// HHS-FSI with dynamic pivot-based partitioning (per paper's Algorithm 4)
-// ==========================================================================
-static void hhs_fsi_step_dynamic_impl(Particles& p, int start, int count, double pivot_dt,
-                          double G, double soft2, double dt_min,
-                          double eta, bool dt_valid, int depth = 0) {
-    if (count == 0) return;
-
-    // BIFROST Section 3.5: fresh neighbor search + subsystem detection at each level,
-    // then timestep assignment with subsystem exclusion.
-    if (!dt_valid && count > 1) {
-#ifdef ENABLE_COLLISIONAL
-        // Step 1: Standalone neighbor search (no subsystem exclusion, no forces)
-        if (p.collisional) {
-            g_profiler.start();
-            g_subsystem_mgr.reset_ngb_count();
-            neighbor_search_subset(p, start, count, G,
-                                   g_collisional.r_ngb, g_collisional.r_ngb_max, pivot_dt);
-            g_subsystem_mgr.detect_from_pairs(p, G, pivot_dt,
-                                               g_collisional.r_ngb, g_collisional.r_ngb_max,
-                                               g_collisional.n_orb_secular);
-            g_subsystem_mgr.update_particle_flags(p);
-            g_subsystem_mgr.accumulate_diagnostics();
-            g_profiler.stop(StepProfiler::SUBSYSTEM_DETECT);
-        }
-#endif
-        // Step 2: Timestep computation (with subsystem exclusion active)
-        g_profiler.start();
-        compute_timestep_subset(p, start, count, G, soft2, eta);
-#ifdef ENABLE_COLLISIONAL
-        // Gradient + v/a timestep criteria (BIFROST Section 3.4.4, Eq. 24/26/27)
-        if (p.collisional && g_collisional.eta_grad > 0.0) {
-            auto dt_f = p.dt_adapt;
-            auto gm = p.grad_mag;
-            RawView agx{p.ax.data()}, agy{p.ay.data()}, agz{p.az.data()};
-            RawView vvx{p.vx.data()}, vvy{p.vy.data()}, vvz{p.vz.data()};
-            double eta_g = g_collisional.eta_grad;
-            double eta_va = eta;  // v/a criterion uses general eta (0.2)
-            Kokkos::parallel_for("dt_grad", count, KOKKOS_LAMBDA(int ii) {
-                int i = start + ii;
-                double a_mag = Kokkos::sqrt(agx(i)*agx(i) + agy(i)*agy(i) + agz(i)*agz(i));
-                double v_mag = Kokkos::sqrt(vvx(i)*vvx(i) + vvy(i)*vvy(i) + vvz(i)*vvz(i));
-                double g = gm(i);
-                if (g > EPS) {
-                    if (a_mag > EPS) {
-                        double dt_g2 = eta_g * Kokkos::sqrt(a_mag / g);
-                        if (dt_g2 < dt_f(i)) dt_f(i) = dt_g2;
-                    }
-                    if (v_mag > EPS) {
-                        double dt_g1 = eta_g * Kokkos::cbrt(v_mag / g);
-                        if (dt_g1 < dt_f(i)) dt_f(i) = dt_g1;
-                    }
-                }
-                // v/a criterion (BIFROST Eq. 24)
-                if (a_mag > EPS && v_mag > EPS) {
-                    double dt_va = eta_va * v_mag / a_mag;
-                    if (dt_va < dt_f(i)) dt_f(i) = dt_va;
-                }
-            });
-        }
-        // Level-0 clamping (BIFROST Section 3.4.1)
-        if (p.collisional && depth > 0) {
-            auto dt_f = p.dt_adapt;
-            auto dt_l0 = p.dt_level0;
-            Kokkos::parallel_for("clamp_dt_level0", count, KOKKOS_LAMBDA(int ii) {
-                int i = start + ii;
-                if (dt_f(i) > dt_l0(i)) dt_f(i) = dt_l0(i);
-            });
-        }
-#endif
-        g_profiler.stop(StepProfiler::ADAPTIVE_DT);
-#ifdef ENABLE_COLLISIONAL
-        // Step 3: Subsystem timestep adjustments
-        if (p.collisional) {
-            g_subsystem_mgr.enforce_shared_timestep(p);
-            g_subsystem_mgr.apply_perturbation_timestep(p, G, g_collisional.eta_pert);
-
-            // Level-0 store: capture dt AFTER subsystem adjustments
-            if (depth == 0) {
-                auto dt_f = p.dt_adapt;
-                auto dt_l0 = p.dt_level0;
-                Kokkos::parallel_for("copy_dt_level0", count, KOKKOS_LAMBDA(int ii) {
-                    int i = start + ii;
-                    dt_l0(i) = dt_f(i);
-                });
-            }
-
-            // Merger detection at every HHS level (BIFROST §3.14)
-            if (g_collisional.c_code > 0.0) {
-                auto mergers = detect_mergers(g_subsystem_mgr, p, G,
-                                               g_collisional.c_code, pivot_dt);
-                for (const auto& ev : mergers) {
-                    auto* sub = find_subsystem_for_merger(g_subsystem_mgr, ev);
-                    if (sub) g_merger_tree.record(ev, *sub, g_sim_time);
-                    execute_merger(ev, p, g_subsystem_mgr, g_energy_books,
-                                   G, g_collisional.c_code);
-                }
-                g_subsystem_mgr.step_mergers += (int)mergers.size();
-                if (!mergers.empty()) {
-                    int n_removed = p.compact_remove_zero_mass();
-                    count -= n_removed;
-                    if (count <= 0) return;
-                    g_subsystem_mgr.update_particle_flags(p);
-                }
-            }
-        }
-#endif
-    }
-
-    // Partition into slow (dt >= pivot) and fast (dt < pivot)
-    g_profiler.start();
-    int slow_count = partition_by_pivot(p, start, count, pivot_dt);
-    g_profiler.stop(StepProfiler::PARTITION);
-    int slow_start = start;
-    int fast_start = start + slow_count;
-    int fast_count = count - slow_count;
-
-    // Base case: no fast particles or at minimum timestep
-    if (fast_count == 0 || pivot_dt * 0.5 < dt_min) {
-        fsi_step(p, start, count, G, soft2, pivot_dt);
-        return;
-    }
-
-    // Base case: all particles are fast (no slow particles)
-    // Partition was a no-op, so dt_adapt values are still valid.
-    if (slow_count == 0) {
-        double sub_pivot = pivot_dt * 0.5;
-        hhs_fsi_step_dynamic_impl(p, start, count, sub_pivot,
-                                  G, soft2, dt_min, eta, true, depth + 1);
-        hhs_fsi_step_dynamic_impl(p, start, count, sub_pivot,
-                                  G, soft2, dt_min, eta, false, depth + 1);
-        return;
-    }
-
-    // Save this level's subsystem state before recursive calls can overwrite it.
-    // g_subsystem_mgr is global, so deeper HHS levels overwrite it during detection.
-    auto saved_active = g_subsystem_mgr.active;
-
-    // HHS-FSI structure (Algorithm 4 / Eq. 40)
-    // 1. Cross-Newton kick (dt/6)
-    g_profiler.start();
-    cross_acceleration(p, slow_start, slow_count, fast_start, fast_count, G, soft2);
-    g_profiler.stop(StepProfiler::CROSS_FORCE);
-    g_profiler.start();
-    kick_velocities(p, slow_start, slow_count, pivot_dt * FSI_KICK);
-    kick_velocities(p, fast_start, fast_count, pivot_dt * FSI_KICK);
-    g_profiler.stop(StepProfiler::DRIFT_KICK);
-
-    // 2. FSI half-step on slow
-    fsi_step(p, slow_start, slow_count, G, soft2, pivot_dt * 0.5);
-
-    // 3. Recurse on fast (first half) with pivot/2 — always compute fresh timesteps
-    hhs_fsi_step_dynamic_impl(p, fast_start, fast_count, pivot_dt * 0.5, G, soft2, dt_min, eta, false, depth + 1);
-
-    // Restore this level's subsystem state after recursion overwrote it
-    g_subsystem_mgr.active = saved_active;
-    g_subsystem_mgr.update_particle_flags(p);
-
-    // 4. Cross-gradient kick (2dt/3)
-    g_profiler.start();
-    cross_acceleration(p, slow_start, slow_count, fast_start, fast_count, G, soft2);
-    g_profiler.stop(StepProfiler::CROSS_FORCE);
-    g_profiler.start();
-    cross_gradient_correction(p, slow_start, slow_count, fast_start, fast_count, G, soft2, pivot_dt);
-    g_profiler.stop(StepProfiler::CROSS_GRAD);
-    g_profiler.start();
-    kick_velocities(p, slow_start, slow_count, pivot_dt * FSI_MOD_KICK);
-    kick_velocities(p, fast_start, fast_count, pivot_dt * FSI_MOD_KICK);
-    g_profiler.stop(StepProfiler::DRIFT_KICK);
-
-    // 5. Recurse on fast (second half)
-    {
-        double sub_pivot = pivot_dt * 0.5;
-        hhs_fsi_step_dynamic_impl(p, fast_start, fast_count, sub_pivot, G, soft2, dt_min, eta, false, depth + 1);
-    }
-
-    // Restore again for the second half-step on slow
-    g_subsystem_mgr.active = saved_active;
-    g_subsystem_mgr.update_particle_flags(p);
-
-    // 6. FSI half-step on slow
-    fsi_step(p, slow_start, slow_count, G, soft2, pivot_dt * 0.5);
-
-    // 7. Cross-Newton kick (dt/6)
-    g_profiler.start();
-    cross_acceleration(p, slow_start, slow_count, fast_start, fast_count, G, soft2);
-    g_profiler.stop(StepProfiler::CROSS_FORCE);
-    g_profiler.start();
-    kick_velocities(p, slow_start, slow_count, pivot_dt * FSI_KICK);
-    kick_velocities(p, fast_start, fast_count, pivot_dt * FSI_KICK);
-    g_profiler.stop(StepProfiler::DRIFT_KICK);
-}
+// Forward declaration: unified HHS-FSI recursion (defined after all helper functions)
+static void hhs_fsi_recursive(Particles& p, DistributedParticles* dp,
+    int start, int count, double pivot_dt,
+    double G, double soft2, double dt_min, double eta,
+    bool dt_valid, bool global_tree_available = false, int depth = 0);
 
 void hhs_fsi_step_dynamic(Particles& p, int start, int count, double pivot_dt,
                           double G, double soft2, double dt_min,
                           double eta) {
-    hhs_fsi_step_dynamic_impl(p, start, count, pivot_dt, G, soft2, dt_min, eta,
-                              false);
+    hhs_fsi_recursive(p, nullptr, start, count, pivot_dt, G, soft2, dt_min, eta, false);
 }
 
 // =============================================================================
@@ -2514,204 +2326,7 @@ static void compute_timestep_distributed(DistributedParticles& dp, int start, in
 
 // CPU serial path: CpuSubset + all cpu_* functions in integrator_cpu.cpp
 // (hhs_fsi_recursive_cpu declared in integrator_cpu.h)
-// =============================================================================
-// Local (non-distributed) HHS-FSI recursion for small subsets
-// Same algorithm as the distributed version, but all ranks compute full N²
-// locally without MPI allgather. Uses non-caching cross-kicks.
-// =============================================================================
-static void hhs_fsi_recursive_local(
-    Particles& p,
-    int start, int count,
-    double pivot_dt,
-    double G, double soft2,
-    double dt_min, double eta,
-    bool dt_valid,
-    int local_depth = 0) {
-
-    if (count == 0) return;
-    ScopedDepthTimer _depth_timer(local_depth);
-    g_hhs_counters.local++;
-    if (local_depth < HHSCounters::MAX_DEPTH) {
-        g_hhs_counters.local_depth_calls[local_depth]++;
-        g_hhs_counters.local_depth_count[local_depth] += count;
-    }
-    g_subset_hist.record(SubsetHistogram::LOCAL_GPU, count);
-
-
-    // CPU serial path for very small subsets
-    if (serial_n2_cpu > 0 && count <= serial_n2_cpu) {
-        g_hhs_counters.cpu++;
-        hhs_fsi_recursive_cpu(p, start, count, pivot_dt, G, soft2, dt_min, eta, dt_valid, local_depth);
-        return;
-    }
-
-    // Base case: at minimum timestep, use FSI on the subset (force N² — no tree in serial path)
-    if (pivot_dt * 0.5 < dt_min) {
-        fsi_step(p, start, count, G, soft2, pivot_dt, false, /*force_direct_n2=*/true);
-        return;
-    }
-
-    // BIFROST Section 3.5: fresh neighbor search + subsystem detection, then timestep
-    if (!dt_valid && count > 1) {
-#ifdef ENABLE_COLLISIONAL
-        // Step 1: Standalone neighbor search (no subsystem exclusion)
-        if (p.collisional) {
-            g_profiler.start();
-            g_subsystem_mgr.reset_ngb_count();
-            neighbor_search_subset(p, start, count, G,
-                                   g_collisional.r_ngb, g_collisional.r_ngb_max, pivot_dt);
-            g_subsystem_mgr.detect_from_pairs(p, G, pivot_dt,
-                                               g_collisional.r_ngb, g_collisional.r_ngb_max,
-                                               g_collisional.n_orb_secular);
-            g_subsystem_mgr.update_particle_flags(p);
-            g_subsystem_mgr.accumulate_diagnostics();
-            g_profiler.stop(StepProfiler::SUBSYSTEM_DETECT);
-        }
-#endif
-        // Step 2: Timestep computation (with subsystem exclusion active)
-        g_profiler.start();
-        compute_timestep_subset(p, start, count, G, soft2, eta);
-#ifdef ENABLE_COLLISIONAL
-        // Gradient + v/a timestep criteria (BIFROST Section 3.4.4, Eq. 24/26/27)
-        if (p.collisional && g_collisional.eta_grad > 0.0) {
-            auto dt_f = p.dt_adapt;
-            auto gm = p.grad_mag;
-            RawView agx{p.ax.data()}, agy{p.ay.data()}, agz{p.az.data()};
-            RawView vvx{p.vx.data()}, vvy{p.vy.data()}, vvz{p.vz.data()};
-            double eta_g = g_collisional.eta_grad;
-            double eta_va = eta;  // v/a criterion uses general eta (0.2)
-            Kokkos::parallel_for("dt_grad_local", count, KOKKOS_LAMBDA(int ii) {
-                int i = start + ii;
-                double a_mag = Kokkos::sqrt(agx(i)*agx(i) + agy(i)*agy(i) + agz(i)*agz(i));
-                double v_mag = Kokkos::sqrt(vvx(i)*vvx(i) + vvy(i)*vvy(i) + vvz(i)*vvz(i));
-                double g = gm(i);
-                if (g > EPS) {
-                    if (a_mag > EPS) {
-                        double dt_g2 = eta_g * Kokkos::sqrt(a_mag / g);
-                        if (dt_g2 < dt_f(i)) dt_f(i) = dt_g2;
-                    }
-                    if (v_mag > EPS) {
-                        double dt_g1 = eta_g * Kokkos::cbrt(v_mag / g);
-                        if (dt_g1 < dt_f(i)) dt_f(i) = dt_g1;
-                    }
-                }
-                // v/a criterion (BIFROST Eq. 24)
-                if (a_mag > EPS && v_mag > EPS) {
-                    double dt_va = eta_va * v_mag / a_mag;
-                    if (dt_va < dt_f(i)) dt_f(i) = dt_va;
-                }
-            });
-        }
-        // Level-0 clamping (local path is always at depth > 0)
-        if (p.collisional) {
-            auto dt_f = p.dt_adapt;
-            auto dt_l0 = p.dt_level0;
-            Kokkos::parallel_for("clamp_dt_level0_local", count, KOKKOS_LAMBDA(int ii) {
-                int i = start + ii;
-                if (dt_f(i) > dt_l0(i)) dt_f(i) = dt_l0(i);
-            });
-        }
-#endif
-        g_profiler.stop(StepProfiler::ADAPTIVE_DT);
-#ifdef ENABLE_COLLISIONAL
-        // Step 3: Subsystem timestep adjustments
-        if (p.collisional) {
-            g_subsystem_mgr.enforce_shared_timestep(p);
-            g_subsystem_mgr.apply_perturbation_timestep(p, G, g_collisional.eta_pert);
-
-            // Merger detection (BIFROST §3.14)
-            if (g_collisional.c_code > 0.0) {
-                auto mergers = detect_mergers(g_subsystem_mgr, p, G,
-                                               g_collisional.c_code, pivot_dt);
-                for (const auto& ev : mergers) {
-                    auto* sub = find_subsystem_for_merger(g_subsystem_mgr, ev);
-                    if (sub) g_merger_tree.record(ev, *sub, g_sim_time);
-                    execute_merger(ev, p, g_subsystem_mgr, g_energy_books,
-                                   G, g_collisional.c_code);
-                }
-                g_subsystem_mgr.step_mergers += (int)mergers.size();
-                if (!mergers.empty()) {
-                    int n_removed = p.compact_remove_zero_mass();
-                    count -= n_removed;
-                    if (count <= 0) return;
-                    g_subsystem_mgr.update_particle_flags(p);
-                }
-            }
-        }
-#endif
-    }
-
-    // Partition into slow (dt >= pivot) and fast (dt < pivot)
-    g_profiler.start();
-    int slow_count = partition_by_pivot(p, start, count, pivot_dt);
-    g_profiler.stop(StepProfiler::PARTITION);
-    int slow_start = start;
-    int fast_start = start + slow_count;
-    int fast_count = count - slow_count;
-
-    // Base case: all particles are slow
-    if (fast_count == 0) {
-        fsi_step(p, start, count, G, soft2, pivot_dt, false, /*force_direct_n2=*/true);
-        return;
-    }
-
-    // Base case: all particles are fast
-    // Partition was a no-op (line 754 early return), so dt_adapt values are still valid.
-    // First call reuses parent timesteps; second call recomputes (particles evolved).
-    if (slow_count == 0) {
-        g_hhs_counters.slow0_local++;
-        double sub_pivot = pivot_dt * 0.5;
-        hhs_fsi_recursive_local(p, start, count, sub_pivot,
-                                G, soft2, dt_min, eta, true, local_depth + 1);
-        hhs_fsi_recursive_local(p, start, count, sub_pivot,
-                                G, soft2, dt_min, eta, false, local_depth + 1);
-        return;
-    }
-
-    // Step 1: Cross-kick S<->F (dt/6)
-    g_profiler.start();
-    cross_acceleration(p, slow_start, slow_count, fast_start, fast_count, G, soft2);
-    g_profiler.stop(StepProfiler::CROSS_FORCE);
-    g_profiler.start();
-    kick_velocities(p, slow_start, slow_count, pivot_dt * FSI_KICK);
-    kick_velocities(p, fast_start, fast_count, pivot_dt * FSI_KICK);
-    g_profiler.stop(StepProfiler::DRIFT_KICK);
-
-    // Step 2: FSI half-step on slow (force N² — no tree in serial path)
-    fsi_step(p, slow_start, slow_count, G, soft2, pivot_dt * 0.5, false, /*force_direct_n2=*/true);
-
-    // Step 3: Recurse on fast (first half)
-    hhs_fsi_recursive_local(p, fast_start, fast_count, pivot_dt * 0.5,
-                            G, soft2, dt_min, eta, false, local_depth + 1);
-
-    // Step 4: Cross-gradient kick (2dt/3)
-    g_profiler.start();
-    cross_acceleration(p, slow_start, slow_count, fast_start, fast_count, G, soft2);
-    g_profiler.stop(StepProfiler::CROSS_FORCE);
-    g_profiler.start();
-    cross_gradient_correction(p, slow_start, slow_count, fast_start, fast_count, G, soft2, pivot_dt);
-    g_profiler.stop(StepProfiler::CROSS_GRAD);
-    g_profiler.start();
-    kick_velocities(p, slow_start, slow_count, pivot_dt * FSI_MOD_KICK);
-    kick_velocities(p, fast_start, fast_count, pivot_dt * FSI_MOD_KICK);
-    g_profiler.stop(StepProfiler::DRIFT_KICK);
-
-    // Step 5: Recurse on fast (second half)
-    hhs_fsi_recursive_local(p, fast_start, fast_count, pivot_dt * 0.5,
-                            G, soft2, dt_min, eta, false, local_depth + 1);
-
-    // Step 6: FSI half-step on slow (force N² — no tree in serial path)
-    fsi_step(p, slow_start, slow_count, G, soft2, pivot_dt * 0.5, false, /*force_direct_n2=*/true);
-
-    // Step 7: Cross-kick S<->F (dt/6)
-    g_profiler.start();
-    cross_acceleration(p, slow_start, slow_count, fast_start, fast_count, G, soft2);
-    g_profiler.stop(StepProfiler::CROSS_FORCE);
-    g_profiler.start();
-    kick_velocities(p, slow_start, slow_count, pivot_dt * FSI_KICK);
-    kick_velocities(p, fast_start, fast_count, pivot_dt * FSI_KICK);
-    g_profiler.stop(StepProfiler::DRIFT_KICK);
-}
+// hhs_fsi_recursive_local removed — merged into hhs_fsi_recursive
 
 // =============================================================================
 // Tree-based cross-force using global tree with dual monopoles
@@ -2759,56 +2374,65 @@ static void cross_acceleration_and_gradient_global_tree(Particles& p,
 }
 
 // =============================================================================
-// Recursive distributed HHS-FSI implementation (Algorithm 4 from FROST paper)
-// Scatter-compute-gather paradigm with one global tree.
+// Unified HHS-FSI recursion (Algorithm 4 from FROST paper)
 //
-// All ranks run IDENTICAL code for partitioning, drifts, kicks.
-// Only force computation is distributed, with Allgather after each.
-// When global_tree_available=true, self-forces and timesteps use the global
-// tree with subset monopoles, eliminating per-level tree rebuilds.
+// Single function handles all GPU paths: MPI-distributed, local GPU, and tree.
+// dp == nullptr → single-rank mode (no MPI, no tree).
+// dp != nullptr → dispatch MPI vs local GPU based on count vs serial_n2_gpu.
+// Tree operations require dp != nullptr (tree_threshold >> serial_n2_gpu).
+// CPU serial path (count <= serial_n2_cpu) delegated to hhs_fsi_recursive_cpu.
 // =============================================================================
-static void hhs_fsi_recursive_distributed(
-    DistributedParticles& dp,
-    int start, int count,           // Subset of particles to integrate
-    double pivot_dt,                // Current pivot timestep
+static void hhs_fsi_recursive(
+    Particles& p,
+    DistributedParticles* dp,
+    int start, int count,
+    double pivot_dt,
     double G, double soft2,
     double dt_min, double eta,
     bool dt_valid,
-    bool global_tree_available = false,
-    int depth = 0) {
+    bool global_tree_available,
+    int depth) {
 
     if (count == 0) return;
-    g_hhs_counters.distributed++;
+
+    // Dispatch flags: MPI for large subsets when distributed
+    bool use_mpi = dp && (serial_n2_gpu == 0 || count > serial_n2_gpu);
+    bool tree_eligible = dp && use_tree && count >= tree_threshold;
+
+    // Counters
+    if (use_mpi) g_hhs_counters.distributed++;
+    else g_hhs_counters.local++;
     if (depth > g_hhs_counters.max_depth) g_hhs_counters.max_depth = depth;
     if (depth < HHSCounters::MAX_DEPTH) {
-        g_hhs_counters.dist_depth_calls[depth]++;
-        g_hhs_counters.dist_depth_count[depth] += count;
+        if (use_mpi) {
+            g_hhs_counters.dist_depth_calls[depth]++;
+            g_hhs_counters.dist_depth_count[depth] += count;
+        } else {
+            g_hhs_counters.local_depth_calls[depth]++;
+            g_hhs_counters.local_depth_count[depth] += count;
+        }
     }
-    g_subset_hist.record(SubsetHistogram::DISTRIBUTED, count);
+    g_subset_hist.record(use_mpi ? SubsetHistogram::DISTRIBUTED : SubsetHistogram::LOCAL_GPU, count);
 
-    // Below threshold: skip MPI, all ranks compute full N² locally
-    if (serial_n2_gpu > 0 && count <= serial_n2_gpu) {
-        hhs_fsi_recursive_local(dp.local, start, count, pivot_dt,
-                                G, soft2, dt_min, eta, dt_valid, depth);
-        // Re-sync packed views: local path modifies SoA directly without updating pos_packed
-        dp.local.pack_pos_range(start, count);
+    // CPU serial for very small subsets
+    if (serial_n2_cpu > 0 && count <= serial_n2_cpu) {
+        g_hhs_counters.cpu++;
+        hhs_fsi_recursive_cpu(p, start, count, pivot_dt, G, soft2, dt_min, eta, dt_valid, depth);
+        if (dp) p.pack_pos_range(start, count);
         return;
     }
 
-    // Whether this subset is large enough for tree operations
-    bool tree_eligible = use_tree && count >= tree_threshold;
-
     // Base case: at minimum timestep, use FSI on the subset
     if (pivot_dt * 0.5 < dt_min) {
-        if (global_tree_available && tree_eligible) {
-            // Mark active range and use global tree for self-force
+        if (dp && global_tree_available && tree_eligible) {
             g_profiler.start();
-            g_octree.update_subsets(dp.local, start, count);
+            g_octree.update_subsets(p, start, count);
             g_profiler.stop(StepProfiler::TREE_MAINT);
-            fsi_step_distributed(dp, start, count, G, soft2, pivot_dt,
-                                 false, false, 0);
+            fsi_step_distributed(*dp, start, count, G, soft2, pivot_dt, false, false, 0);
+        } else if (use_mpi) {
+            fsi_step_distributed(*dp, start, count, G, soft2, pivot_dt);
         } else {
-            fsi_step_distributed(dp, start, count, G, soft2, pivot_dt);
+            fsi_step(p, start, count, G, soft2, pivot_dt, false, true);
         }
         return;
     }
@@ -2819,15 +2443,15 @@ static void hhs_fsi_recursive_distributed(
     if (!dt_valid && count > 1) {
 #ifdef ENABLE_COLLISIONAL
         // Step 1: Standalone neighbor search + detection (before timestep)
-        if (dp.local.collisional) {
+        if (p.collisional) {
             g_profiler.start();
             g_subsystem_mgr.reset_ngb_count();
-            neighbor_search_subset(dp.local, start, count, G,
+            neighbor_search_subset(p, start, count, G,
                                    g_collisional.r_ngb, g_collisional.r_ngb_max, pivot_dt);
-            g_subsystem_mgr.detect_from_pairs(dp.local, G, pivot_dt,
+            g_subsystem_mgr.detect_from_pairs(p, G, pivot_dt,
                                                g_collisional.r_ngb, g_collisional.r_ngb_max,
                                                g_collisional.n_orb_secular);
-            g_subsystem_mgr.update_particle_flags(dp.local);
+            g_subsystem_mgr.update_particle_flags(p);
             g_subsystem_mgr.accumulate_diagnostics();
             if (depth < HHSCounters::MAX_DEPTH)
                 g_hhs_counters.dist_depth_ngb_pairs[depth] += g_subsystem_mgr.last_level_pairs;
@@ -2837,39 +2461,41 @@ static void hhs_fsi_recursive_distributed(
         // Step 2: Timestep computation (with subsystem exclusion active)
         g_profiler.start();
         if (global_tree_available && tree_eligible) {
-            g_octree.update_subsets(dp.local, start, count);
-            tree_global_self_acceleration_and_timestep(dp.local, g_octree, 0, G, soft2, eta);
-            tree_momentum_correction(dp.local, start, count);
+            g_octree.update_subsets(p, start, count);
+            tree_global_self_acceleration_and_timestep(p, g_octree, 0, G, soft2, eta);
+            tree_momentum_correction(p, start, count);
             forces_valid = true;
         } else if (!global_tree_available && tree_eligible) {
             g_octree.n_leaf = tree_n_leaf;
             g_octree.n_group = tree_n_group;
-            g_octree.build(dp.local, start, count, tree_theta);
+            g_octree.build(p, start, count, tree_theta);
             int my_g_off, my_g_cnt;
             get_tree_group_range(g_octree, my_g_off, my_g_cnt);
-            zero_accelerations(dp.local, start, count);
-            init_timesteps_max(dp.local, start, count);
-            tree_self_acceleration_and_timestep(dp.local, g_octree, start, count, G, soft2, eta, my_g_off, my_g_cnt);
-            dp.allreduce_accelerations_subset(start, count);
-            dp.allreduce_timestep_subset(start, count);
-            tree_momentum_correction(dp.local, start, count);
+            zero_accelerations(p, start, count);
+            init_timesteps_max(p, start, count);
+            tree_self_acceleration_and_timestep(p, g_octree, start, count, G, soft2, eta, my_g_off, my_g_cnt);
+            dp->allreduce_accelerations_subset(start, count);
+            dp->allreduce_timestep_subset(start, count);
+            tree_momentum_correction(p, start, count);
             forces_valid = true;
             tree_built_for_subset = true;
+        } else if (use_mpi) {
+            p.pack_pos_range(start, count);
+            p.pack_vel_range(start, count);
+            compute_timestep_distributed(*dp, start, count, G, soft2, eta);
         } else {
-            dp.local.pack_pos_range(start, count);
-            dp.local.pack_vel_range(start, count);
-            compute_timestep_distributed(dp, start, count, G, soft2, eta);
+            compute_timestep_subset(p, start, count, G, soft2, eta);
         }
 #ifdef ENABLE_COLLISIONAL
         // Gradient + v/a timestep criteria (BIFROST Section 3.4.4, Eq. 24/26/27)
-        if (dp.local.collisional && g_collisional.eta_grad > 0.0) {
-            auto dt_f = dp.local.dt_adapt;
-            auto gm = dp.local.grad_mag;
-            RawView agx{dp.local.ax.data()}, agy{dp.local.ay.data()}, agz{dp.local.az.data()};
-            RawView vvx{dp.local.vx.data()}, vvy{dp.local.vy.data()}, vvz{dp.local.vz.data()};
+        if (p.collisional && g_collisional.eta_grad > 0.0) {
+            auto dt_f = p.dt_adapt;
+            auto gm = p.grad_mag;
+            RawView agx{p.ax.data()}, agy{p.ay.data()}, agz{p.az.data()};
+            RawView vvx{p.vx.data()}, vvy{p.vy.data()}, vvz{p.vz.data()};
             double eta_g = g_collisional.eta_grad;
-            double eta_va = eta;  // v/a criterion uses general eta (0.2)
-            Kokkos::parallel_for("dt_grad_dist", count, KOKKOS_LAMBDA(int ii) {
+            double eta_va = eta;
+            Kokkos::parallel_for("dt_grad", count, KOKKOS_LAMBDA(int ii) {
                 int i = start + ii;
                 double a_mag = Kokkos::sqrt(agx(i)*agx(i) + agy(i)*agy(i) + agz(i)*agz(i));
                 double v_mag = Kokkos::sqrt(vvx(i)*vvx(i) + vvy(i)*vvy(i) + vvz(i)*vvz(i));
@@ -2884,7 +2510,6 @@ static void hhs_fsi_recursive_distributed(
                         if (dt_g1 < dt_f(i)) dt_f(i) = dt_g1;
                     }
                 }
-                // v/a criterion (BIFROST Eq. 24)
                 if (a_mag > EPS && v_mag > EPS) {
                     double dt_va = eta_va * v_mag / a_mag;
                     if (dt_va < dt_f(i)) dt_f(i) = dt_va;
@@ -2892,11 +2517,11 @@ static void hhs_fsi_recursive_distributed(
             });
         }
         // Level-0 clamping (BIFROST Section 3.4.1)
-        if (dp.local.collisional && depth > 0) {
-            auto dt_f = dp.local.dt_adapt;
-            auto dt_l0 = dp.local.dt_level0;
+        if (p.collisional && depth > 0) {
+            auto dt_f = p.dt_adapt;
+            auto dt_l0 = p.dt_level0;
             int n_clamped = 0;
-            Kokkos::parallel_reduce("clamp_dt_level0_dist", count,
+            Kokkos::parallel_reduce("clamp_dt_level0", count,
                 KOKKOS_LAMBDA(int ii, int& cnt) {
                     int i = start + ii;
                     if (dt_f(i) > dt_l0(i)) {
@@ -2910,15 +2535,15 @@ static void hhs_fsi_recursive_distributed(
         g_profiler.stop(StepProfiler::ADAPTIVE_DT, (long long)count * count);
 #ifdef ENABLE_COLLISIONAL
         // Step 3: Subsystem timestep adjustments
-        if (dp.local.collisional) {
-            g_subsystem_mgr.enforce_shared_timestep(dp.local);
-            g_subsystem_mgr.apply_perturbation_timestep(dp.local, G, g_collisional.eta_pert);
+        if (p.collisional) {
+            g_subsystem_mgr.enforce_shared_timestep(p);
+            g_subsystem_mgr.apply_perturbation_timestep(p, G, g_collisional.eta_pert);
 
             // Level-0 store: capture dt AFTER subsystem adjustments
             if (depth == 0) {
-                auto dt_f = dp.local.dt_adapt;
-                auto dt_l0 = dp.local.dt_level0;
-                Kokkos::parallel_for("copy_dt_level0_dist", count, KOKKOS_LAMBDA(int ii) {
+                auto dt_f = p.dt_adapt;
+                auto dt_l0 = p.dt_level0;
+                Kokkos::parallel_for("copy_dt_level0", count, KOKKOS_LAMBDA(int ii) {
                     int i = start + ii;
                     dt_l0(i) = dt_f(i);
                 });
@@ -2926,20 +2551,20 @@ static void hhs_fsi_recursive_distributed(
 
             // Merger detection at every HHS level (BIFROST §3.14)
             if (g_collisional.c_code > 0.0) {
-                auto mergers = detect_mergers(g_subsystem_mgr, dp.local, G,
+                auto mergers = detect_mergers(g_subsystem_mgr, p, G,
                                                g_collisional.c_code, pivot_dt);
                 for (const auto& ev : mergers) {
                     auto* sub = find_subsystem_for_merger(g_subsystem_mgr, ev);
                     if (sub) g_merger_tree.record(ev, *sub, g_sim_time);
-                    execute_merger(ev, dp.local, g_subsystem_mgr, g_energy_books,
+                    execute_merger(ev, p, g_subsystem_mgr, g_energy_books,
                                    G, g_collisional.c_code);
                 }
                 g_subsystem_mgr.step_mergers += (int)mergers.size();
                 if (!mergers.empty()) {
-                    int n_removed = dp.local.compact_remove_zero_mass();
+                    int n_removed = p.compact_remove_zero_mass();
                     count -= n_removed;
                     if (count <= 0) return;
-                    g_subsystem_mgr.update_particle_flags(dp.local);
+                    g_subsystem_mgr.update_particle_flags(p);
                 }
             }
         }
@@ -2947,185 +2572,184 @@ static void hhs_fsi_recursive_distributed(
     }
 
     // Partition into slow (dt >= pivot) and fast (dt < pivot)
-    // All ranks do identical partitioning (deterministic)
     g_profiler.start();
-    int slow_count = partition_by_pivot(dp.local, start, count, pivot_dt);
+    int slow_count = partition_by_pivot(p, start, count, pivot_dt);
     g_profiler.stop(StepProfiler::PARTITION);
     int slow_start = start;
     int fast_start = start + slow_count;
     int fast_count = count - slow_count;
 
-    // Global tree available for sub-calls (either built here or inherited)
+    // Tree availability for sub-calls (either built here or inherited)
     bool tree_for_subs = global_tree_available || tree_built_for_subset;
 
-    // Base case: all particles are slow (no fast particles)
-    // Reuse fused forces for first FSI kick (saves one N² pass)
+    // Base case: all particles are slow — reuse fused forces for first FSI kick
     if (fast_count == 0) {
-        if (global_tree_available && tree_eligible) {
-            // Flags set by timestep's update_subsets — [start, count) is flag=0
-            fsi_step_distributed(dp, start, count, G, soft2, pivot_dt,
+        if (dp && global_tree_available && tree_eligible) {
+            fsi_step_distributed(*dp, start, count, G, soft2, pivot_dt,
                                  forces_valid, false, 0);
-        } else {
-            // tree_built_for_subset: tree is valid for subset, use old tree_prebuilt path
-            fsi_step_distributed(dp, start, count, G, soft2, pivot_dt,
+        } else if (use_mpi) {
+            fsi_step_distributed(*dp, start, count, G, soft2, pivot_dt,
                                  forces_valid, tree_built_for_subset);
+        } else {
+            fsi_step(p, start, count, G, soft2, pivot_dt, forces_valid, true);
         }
         return;
     }
 
-    // Base case: all particles are fast (no slow particles)
-    // Partition was a no-op (line 754 early return), so dt_adapt values are still valid.
-    // First call reuses parent timesteps; second call recomputes (particles evolved).
+    // Base case: all particles are fast
     if (slow_count == 0) {
-        g_hhs_counters.slow0_dist++;
+        if (use_mpi) g_hhs_counters.slow0_dist++;
+        else g_hhs_counters.slow0_local++;
         double sub_pivot = pivot_dt * 0.5;
-        hhs_fsi_recursive_distributed(dp, start, count, sub_pivot,
-                                      G, soft2, dt_min, eta, true,
-                                      tree_for_subs, depth + 1);
-        hhs_fsi_recursive_distributed(dp, start, count, sub_pivot,
-                                      G, soft2, dt_min, eta, false,
-                                      tree_for_subs, depth + 1);
+        hhs_fsi_recursive(p, dp, start, count, sub_pivot,
+                          G, soft2, dt_min, eta, true, tree_for_subs, depth + 1);
+        hhs_fsi_recursive(p, dp, start, count, sub_pivot,
+                          G, soft2, dt_min, eta, false, tree_for_subs, depth + 1);
         return;
     }
 
     long long cross_pairs = 2LL * slow_count * fast_count;
 
-    // Re-sync packed positions after partition reorder
-    dp.local.pack_pos_range(start, count);
+    // Re-sync packed positions after partition reorder (only needed for MPI)
+    if (use_mpi) p.pack_pos_range(start, count);
 
     // ==========================================================================
     // ALGORITHM 4: HHS-FSI with slow (S) and fast (F) particles
     // ==========================================================================
 
-    // use_tree_cross: use global tree for cross-forces via dual monopoles.
-    // With 3-flag system (0=slow, 1=fast, 2=other), this works at ALL recursion depths.
-    // Only worth it above tree_threshold — below that, direct N² is faster than tree overhead.
+    // Tree flags for cross-force and self-force
     bool use_tree_cross = tree_for_subs && use_tree && count >= tree_threshold;
-
-    // use_tree_self: use global tree for self-forces on slow subset
     bool use_tree_self = tree_for_subs && use_tree && slow_count >= tree_threshold;
 
-    // Mark slow/fast/other in global tree (3-flag for cross, 2-flag fallback otherwise)
+    // Mark slow/fast/other in global tree
     if (use_tree_cross || use_tree_self) {
         g_profiler.start();
-        if (use_tree_cross) {
-            g_octree.update_subsets_3flag(dp.local, start, count, slow_count);
-        } else {
-            g_octree.update_subsets(dp.local, slow_start, slow_count);
-        }
+        if (use_tree_cross)
+            g_octree.update_subsets_3flag(p, start, count, slow_count);
+        else
+            g_octree.update_subsets(p, slow_start, slow_count);
         g_profiler.stop(StepProfiler::TREE_MAINT);
     }
 
-    // Save this level's subsystem state before recursive calls can overwrite it.
-    auto saved_active_dist = g_subsystem_mgr.active;
+    // Save subsystem state before recursive calls can overwrite it
+    auto saved_active = g_subsystem_mgr.active;
 
     // Step 1: Cross-force S<->F then kick (dt/6)
     g_profiler.start();
     if (use_tree_cross) {
-        cross_acceleration_global_tree(dp.local, slow_start, slow_count,
+        cross_acceleration_global_tree(p, slow_start, slow_count,
                                         fast_start, fast_count, G, soft2);
+    } else if (use_mpi) {
+        p.pack_pos_range(slow_start, slow_count + fast_count);
+        cross_acceleration_distributed(*dp, slow_start, slow_count, fast_start, fast_count, G, soft2);
     } else {
-        dp.local.pack_pos_range(slow_start, slow_count + fast_count);
-        cross_acceleration_distributed(dp, slow_start, slow_count, fast_start, fast_count, G, soft2);
+        cross_acceleration(p, slow_start, slow_count, fast_start, fast_count, G, soft2);
     }
     g_profiler.stop(StepProfiler::CROSS_FORCE, cross_pairs);
     g_profiler.start();
-    kick_velocities(dp.local, slow_start, slow_count, pivot_dt * FSI_KICK);
-    kick_velocities(dp.local, fast_start, fast_count, pivot_dt * FSI_KICK);
+    kick_velocities(p, slow_start, slow_count, pivot_dt * FSI_KICK);
+    kick_velocities(p, fast_start, fast_count, pivot_dt * FSI_KICK);
     g_profiler.stop(StepProfiler::DRIFT_KICK);
 
     // Step 2: FSI half-step on slow
-    // flag=0 = slow (from update_subsets above), so global_tree_subset=0 is correct
     if (use_tree_self || use_tree_cross) {
-        fsi_step_distributed(dp, slow_start, slow_count, G, soft2, pivot_dt * 0.5,
+        fsi_step_distributed(*dp, slow_start, slow_count, G, soft2, pivot_dt * 0.5,
                              false, false, 0);
+    } else if (use_mpi) {
+        fsi_step_distributed(*dp, slow_start, slow_count, G, soft2, pivot_dt * 0.5);
     } else {
-        fsi_step_distributed(dp, slow_start, slow_count, G, soft2, pivot_dt * 0.5);
+        fsi_step(p, slow_start, slow_count, G, soft2, pivot_dt * 0.5, false, true);
     }
-    // Step 3: Recurse on fast (first half) — always compute fresh timesteps
-    hhs_fsi_recursive_distributed(dp, fast_start, fast_count, pivot_dt * 0.5,
-                                  G, soft2, dt_min, eta, false,
-                                  tree_for_subs, depth + 1);
-    // Restore this level's subsystem state after recursion overwrote it
-    g_subsystem_mgr.active = saved_active_dist;
-    g_subsystem_mgr.update_particle_flags(dp.local);
 
-    // Restore tree state after steps 2-3 (positions and flags changed by drifts/recursion)
+    // Step 3: Recurse on fast (first half) — always compute fresh timesteps
+    hhs_fsi_recursive(p, dp, fast_start, fast_count, pivot_dt * 0.5,
+                      G, soft2, dt_min, eta, false, tree_for_subs, depth + 1);
+
+    // Restore subsystem state after recursion overwrote it
+    g_subsystem_mgr.active = saved_active;
+    g_subsystem_mgr.update_particle_flags(p);
+
+    // Restore tree state after steps 2-3
     if (use_tree_cross || use_tree_self) {
         g_profiler.start();
-        if (use_tree_cross) {
-            g_octree.update_subsets_3flag(dp.local, start, count, slow_count);
-        } else {
-            g_octree.update_subsets(dp.local, slow_start, slow_count);
-        }
+        if (use_tree_cross)
+            g_octree.update_subsets_3flag(p, start, count, slow_count);
+        else
+            g_octree.update_subsets(p, slow_start, slow_count);
         g_profiler.stop(StepProfiler::TREE_MAINT);
     }
 
     // Step 4: Cross-kick S<->F with gradient (2dt/3)
+    // Re-sync packed positions: step 3's recursion may have run locally (use_mpi=false)
+    // modifying SoA positions via drifts without updating pos_packed.
+    if (use_mpi) p.pack_pos_range(slow_start, slow_count + fast_count);
     g_profiler.start();
     if (use_tree_cross) {
-        cross_acceleration_and_gradient_global_tree(dp.local, slow_start, slow_count,
+        cross_acceleration_and_gradient_global_tree(p, slow_start, slow_count,
                                                      fast_start, fast_count, G, soft2, pivot_dt);
+    } else if (use_mpi) {
+        cross_acceleration_and_gradient_distributed(*dp, slow_start, slow_count,
+                                                    fast_start, fast_count, G, soft2, pivot_dt);
     } else {
-        cross_acceleration_and_gradient_distributed(dp, slow_start, slow_count,
-                                                    fast_start, fast_count,
-                                                    G, soft2, pivot_dt);
+        cross_acceleration(p, slow_start, slow_count, fast_start, fast_count, G, soft2);
+        cross_gradient_correction(p, slow_start, slow_count, fast_start, fast_count, G, soft2, pivot_dt);
     }
     g_profiler.stop(StepProfiler::CROSS_GRAD, cross_pairs * 2);
     g_profiler.start();
-    kick_velocities(dp.local, slow_start, slow_count, pivot_dt * FSI_MOD_KICK);
-    kick_velocities(dp.local, fast_start, fast_count, pivot_dt * FSI_MOD_KICK);
+    kick_velocities(p, slow_start, slow_count, pivot_dt * FSI_MOD_KICK);
+    kick_velocities(p, fast_start, fast_count, pivot_dt * FSI_MOD_KICK);
     g_profiler.stop(StepProfiler::DRIFT_KICK);
 
     // Step 5: Recurse on fast (second half)
-    {
-        double sub_pivot = pivot_dt * 0.5;
-        hhs_fsi_recursive_distributed(dp, fast_start, fast_count, sub_pivot,
-                                      G, soft2, dt_min, eta, false,
-                                      tree_for_subs, depth + 1);
-    }
-    // Restore again for the second half-step on slow
-    g_subsystem_mgr.active = saved_active_dist;
-    g_subsystem_mgr.update_particle_flags(dp.local);
+    hhs_fsi_recursive(p, dp, fast_start, fast_count, pivot_dt * 0.5,
+                      G, soft2, dt_min, eta, false, tree_for_subs, depth + 1);
 
-    // Restore tree state for step 6 (self-force on slow) and step 7 (cross-force)
+    // Restore again for the second half-step on slow
+    g_subsystem_mgr.active = saved_active;
+    g_subsystem_mgr.update_particle_flags(p);
+
+    // Restore tree state for step 6 and 7
     if (use_tree_cross || use_tree_self) {
         g_profiler.start();
-        if (use_tree_cross) {
-            g_octree.update_subsets_3flag(dp.local, start, count, slow_count);
-        } else {
-            g_octree.update_subsets(dp.local, slow_start, slow_count);
-        }
+        if (use_tree_cross)
+            g_octree.update_subsets_3flag(p, start, count, slow_count);
+        else
+            g_octree.update_subsets(p, slow_start, slow_count);
         g_profiler.stop(StepProfiler::TREE_MAINT);
     }
 
     // Step 6: FSI half-step on slow
     if (use_tree_self || use_tree_cross) {
-        fsi_step_distributed(dp, slow_start, slow_count, G, soft2, pivot_dt * 0.5,
+        fsi_step_distributed(*dp, slow_start, slow_count, G, soft2, pivot_dt * 0.5,
                              false, false, 0);
+    } else if (use_mpi) {
+        fsi_step_distributed(*dp, slow_start, slow_count, G, soft2, pivot_dt * 0.5);
     } else {
-        fsi_step_distributed(dp, slow_start, slow_count, G, soft2, pivot_dt * 0.5);
+        fsi_step(p, slow_start, slow_count, G, soft2, pivot_dt * 0.5, false, true);
     }
+
     // Refresh tree for step 7 cross-force (step 6 FSI drifted slow particles)
     if (use_tree_cross) {
         g_profiler.start();
-        g_octree.update_subsets_3flag(dp.local, start, count, slow_count);
+        g_octree.update_subsets_3flag(p, start, count, slow_count);
         g_profiler.stop(StepProfiler::TREE_MAINT);
     }
 
     // Step 7: Cross-force S<->F then kick (dt/6)
     g_profiler.start();
     if (use_tree_cross) {
-        cross_acceleration_global_tree(dp.local, slow_start, slow_count,
+        cross_acceleration_global_tree(p, slow_start, slow_count,
                                         fast_start, fast_count, G, soft2);
+    } else if (use_mpi) {
+        p.pack_pos_range(slow_start, slow_count + fast_count);
+        cross_acceleration_distributed(*dp, slow_start, slow_count, fast_start, fast_count, G, soft2);
     } else {
-        dp.local.pack_pos_range(slow_start, slow_count + fast_count);
-        cross_acceleration_distributed(dp, slow_start, slow_count, fast_start, fast_count, G, soft2);
+        cross_acceleration(p, slow_start, slow_count, fast_start, fast_count, G, soft2);
     }
     g_profiler.stop(StepProfiler::CROSS_FORCE, cross_pairs);
     g_profiler.start();
-    kick_velocities(dp.local, slow_start, slow_count, pivot_dt * FSI_KICK);
-    kick_velocities(dp.local, fast_start, fast_count, pivot_dt * FSI_KICK);
+    kick_velocities(p, slow_start, slow_count, pivot_dt * FSI_KICK);
+    kick_velocities(p, fast_start, fast_count, pivot_dt * FSI_KICK);
     g_profiler.stop(StepProfiler::DRIFT_KICK);
 }
 
@@ -3160,17 +2784,10 @@ void hhs_fsi_step_distributed(DistributedParticles& dp, double pivot_dt,
     }
 #endif
 
-    if (!is_distributed) {
-        // Single rank: use standard HHS (uses efficient fused kernels)
-        hhs_fsi_step_dynamic(dp.local, 0, dp.N_total, pivot_dt, G, soft2, dt_min, eta);
-    }
-#ifdef USE_MPI
-    else {
-        // Standard HHS-FSI with explicit cross-forces
-        hhs_fsi_recursive_distributed(dp, 0, dp.N_total, pivot_dt,
-                                      G, soft2, dt_min, eta, false);
-    }
-#endif
+    // Unified recursion: dp != nullptr enables MPI dispatch for large subsets
+    // Single-rank mode: MPI allgather is a no-op, all forces use local GPU
+    hhs_fsi_recursive(dp.local, is_distributed ? &dp : nullptr,
+                      0, dp.N_total, pivot_dt, G, soft2, dt_min, eta, false);
 
     // Global PN1.0 half-kick after FSI (BIFROST Section 3.7)
 #ifdef ENABLE_COLLISIONAL
