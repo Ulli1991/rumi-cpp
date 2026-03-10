@@ -21,6 +21,9 @@ struct StepProfiler {
         TREE_MAINT,
         SUBSYSTEM_DETECT,
         SUBSYSTEM_INTEG,
+        SUBSYSTEM_DT,
+        SUBSYSTEM_BOOKKEEP,
+        ENERGY_CHECK,
         PACK_DATA,
         NUM_TIMERS
     };
@@ -37,6 +40,9 @@ struct StepProfiler {
             "Tree maintenance",
             "Subsystem detect",
             "Subsystem integ",
+            "Subsystem timestep",
+            "Subsystem bookkeep",
+            "Energy check",
             "Pack data"
         };
         return names[i];

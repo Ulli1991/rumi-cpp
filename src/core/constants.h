@@ -105,6 +105,15 @@ void symmetrized_timestep(double r2, double inv_r,
     t_sym_fb = t_fb + ct_fb / (u_fb + 1.0);
 }
 
+// Kahan (compensated) summation: reduces accumulation error from O(N*eps) to O(eps).
+KOKKOS_INLINE_FUNCTION
+void kahan_add(double& sum, double& comp, double val) {
+    double y = val - comp;
+    double t = sum + y;
+    comp = (t - sum) - y;
+    sum = t;
+}
+
 // Gravity interaction: accumulate force from one source particle.
 // Returns inv_r (reusable for timestep computation).
 KOKKOS_INLINE_FUNCTION
@@ -116,6 +125,20 @@ double gravity_interaction(double dx, double dy, double dz,
     ax += f * dx;
     ay += f * dy;
     az += f * dz;
+    return inv_r;
+}
+
+// Gravity interaction with Kahan summation for improved momentum conservation.
+KOKKOS_INLINE_FUNCTION
+double gravity_interaction_kahan(double dx, double dy, double dz,
+                                  double r2_soft, double G_mj,
+                                  double& ax, double& ay, double& az,
+                                  double& cx, double& cy, double& cz) {
+    double inv_r = fast_rsqrt(r2_soft);
+    double f = G_mj * inv_r * inv_r * inv_r;
+    kahan_add(ax, cx, f * dx);
+    kahan_add(ay, cy, f * dy);
+    kahan_add(az, cz, f * dz);
     return inv_r;
 }
 
@@ -133,6 +156,23 @@ void gradient_correction_interaction(double dx, double dy, double dz,
     cx += f * (r2_soft * dax - 3.0 * r_dot_a * dx);
     cy += f * (r2_soft * day - 3.0 * r_dot_a * dy);
     cz += f * (r2_soft * daz - 3.0 * r_dot_a * dz);
+}
+
+// Gradient correction with Kahan summation.
+KOKKOS_INLINE_FUNCTION
+void gradient_correction_interaction_kahan(double dx, double dy, double dz,
+                                            double dax, double day, double daz,
+                                            double r2_soft, double coeff_mj,
+                                            double& cx, double& cy, double& cz,
+                                            double& kcx, double& kcy, double& kcz) {
+    double inv_r = fast_rsqrt(r2_soft);
+    double inv_r2 = inv_r * inv_r;
+    double inv_r5 = inv_r2 * inv_r2 * inv_r;
+    double r_dot_a = dx * dax + dy * day + dz * daz;
+    double f = coeff_mj * inv_r5;
+    kahan_add(cx, kcx, f * (r2_soft * dax - 3.0 * r_dot_a * dx));
+    kahan_add(cy, kcy, f * (r2_soft * day - 3.0 * r_dot_a * dy));
+    kahan_add(cz, kcz, f * (r2_soft * daz - 3.0 * r_dot_a * dz));
 }
 
 // MAC test: improved Barnes-Hut using group bounding box.

@@ -25,13 +25,15 @@ static void compute_acceleration_and_timestep_impl(Particles& p, double G, doubl
     // Collisional: subsystem exclusion (raw pointer to avoid View capture overhead)
     const int* sid_raw = COLL ? p.subsystem_id.data() : nullptr;
 
-    // Capture eta_ff²/eta_fb² for per-criterion timestep scaling
+    // Capture eta parameters for timestep criteria
 #ifdef ENABLE_COLLISIONAL
-    double eta_ff_sq = g_collisional.eta_ff * g_collisional.eta_ff;
-    double eta_fb_sq = g_collisional.eta_fb * g_collisional.eta_fb;
+    double eta_ff_v = g_collisional.eta_ff;
+    double eta_fb_v = g_collisional.eta_fb;
+    double eta_jerk_val = g_collisional.eta_jerk;
+    double eta_va = g_collisional.eta_ff;  // v/a criterion uses general eta
 #else
-    double eta_ff_sq = eta * eta;
-    double eta_fb_sq = eta * eta;
+    double eta_ff_v = eta;
+    double eta_fb_v = eta;
 #endif
 
     // Tiled version using shared memory with packed vector loads
@@ -72,7 +74,11 @@ static void compute_acceleration_and_timestep_impl(Particles& p, double G, doubl
             }
 
             double axi = 0, ayi = 0, azi = 0;
-            double t_min_i = DBL_MAX;
+            double kx = 0, ky = 0, kz = 0;
+            double t_min_i = 1e30;
+#ifdef ENABLE_COLLISIONAL
+            double jerk_x = 0, jerk_y = 0, jerk_z = 0;
+#endif
 
             for (int tile_start = 0; tile_start < N; tile_start += TILE_SIZE) {
                 int tile_end = (tile_start + TILE_SIZE < N) ? tile_start + TILE_SIZE : N;
@@ -104,21 +110,31 @@ static void compute_acceleration_and_timestep_impl(Particles& p, double G, doubl
                         double mj = tile(jb + 3);
                         double r2 = dx*dx + dy*dy + dz*dz;
                         double r2s = r2 + soft2;
-                        double inv_r = gravity_interaction(dx, dy, dz, r2s, G * mj, axi, ayi, azi);
+                        double inv_r = gravity_interaction_kahan(dx, dy, dz, r2s, G * mj, axi, ayi, azi, kx, ky, kz);
 
-                        // Adaptive timestep: reuse inv_r, no extra sqrt
+                        // Symmetrized pairwise timestep
                         double dvx = tile(jb + 4) - vxi;
                         double dvy = tile(jb + 5) - vyi;
                         double dvz = tile(jb + 6) - vzi;
-                        double v_sq = dvx*dvx + dvy*dvy + dvz*dvz;
                         double mass_sum = mi + mj;
+                        double t_sym_ff, t_sym_fb;
+                        symmetrized_timestep(r2s, inv_r, dx, dy, dz, dvx, dvy, dvz,
+                                             G, mass_sum, t_sym_ff, t_sym_fb);
+                        t_min_i = Kokkos::fmin(t_min_i,
+                                    Kokkos::fmin(eta_ff_v * t_sym_ff, eta_fb_v * t_sym_fb));
 
-                        // r2s^1.5 = r2s * r2s * inv_r (reuses rsqrt)
-                        double r3 = r2s * r2s * inv_r;
-                        double t_ff_sq = r3 / (G * mass_sum + EPS);
-                        double t_fb_sq = r2s / (v_sq + EPS);
-                        double t_min_sq_pair = Kokkos::fmin(eta_ff_sq * t_ff_sq, eta_fb_sq * t_fb_sq);
-                        t_min_i = Kokkos::fmin(t_min_i, t_min_sq_pair);
+#ifdef ENABLE_COLLISIONAL
+                        // Jerk accumulation for jerk criterion (Eq. 29)
+                        if (COLL) {
+                            double inv_r3 = inv_r * inv_r * inv_r;
+                            double rdotv = dx*dvx + dy*dvy + dz*dvz;
+                            double fac1 = G * mj * inv_r3;
+                            double fac2 = 3.0 * rdotv * inv_r * inv_r;
+                            jerk_x += fac1 * (dvx - fac2 * dx);
+                            jerk_y += fac1 * (dvy - fac2 * dy);
+                            jerk_z += fac1 * (dvz - fac2 * dz);
+                        }
+#endif
                     }
                 }
                 team.team_barrier();
@@ -126,7 +142,25 @@ static void compute_acceleration_and_timestep_impl(Particles& p, double G, doubl
 
             if (i < N) {
                 pax(i) = axi; pay(i) = ayi; paz(i) = azi;
-                dt_f(i) = Kokkos::sqrt(t_min_i);
+
+#ifdef ENABLE_COLLISIONAL
+                if (COLL) {
+                    // Jerk criterion: dt_jerk = eta_j * |a| / |j| (Eq. 29)
+                    double a_mag = Kokkos::sqrt(axi*axi + ayi*ayi + azi*azi);
+                    double j_mag = Kokkos::sqrt(jerk_x*jerk_x + jerk_y*jerk_y + jerk_z*jerk_z);
+                    if (j_mag > EPS && a_mag > EPS) {
+                        double dt_jerk = eta_jerk_val * a_mag / j_mag;
+                        t_min_i = Kokkos::fmin(t_min_i, dt_jerk);
+                    }
+                    // v/a criterion: dt_va = eta * |v| / |a| (Eq. 24)
+                    double v_mag = Kokkos::sqrt(vxi*vxi + vyi*vyi + vzi*vzi);
+                    if (a_mag > EPS && v_mag > EPS) {
+                        double dt_va = eta_va * v_mag / a_mag;
+                        t_min_i = Kokkos::fmin(t_min_i, dt_va);
+                    }
+                }
+#endif
+                dt_f(i) = t_min_i;
             }
         });
 
@@ -171,6 +205,7 @@ static void self_acceleration_impl(Particles& p, int start, int count,
             int sid_i = -1;
             if (ii < count) { xi = px(i); yi = py(i); zi = pz(i); if (COLL) sid_i = sid_raw[i]; }
             double axi = 0, ayi = 0, azi = 0;
+            double kx = 0, ky = 0, kz = 0;  // Kahan compensation
 
             for (int tile_start = start; tile_start < end; tile_start += TILE_SIZE) {
                 int tile_count = ((tile_start + TILE_SIZE) < end) ? TILE_SIZE : (end - tile_start);
@@ -193,7 +228,7 @@ static void self_acceleration_impl(Particles& p, int start, int count,
                         double dy = tile(jb+1) - yi;
                         double dz = tile(jb+2) - zi;
                         double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                        gravity_interaction(dx, dy, dz, r2, G * tile(jb+3), axi, ayi, azi);
+                        gravity_interaction_kahan(dx, dy, dz, r2, G * tile(jb+3), axi, ayi, azi, kx, ky, kz);
                     }
                 }
                 team.team_barrier();
@@ -257,6 +292,7 @@ static void self_gradient_correction_impl(Particles& p, int start, int count,
                 if (COLL) sid_i = sid_raw[i];
             }
             double cx = 0, cy = 0, cz = 0;
+            double kcx = 0, kcy = 0, kcz = 0;
 
             for (int tile_idx = 0; tile_idx < count; tile_idx += TILE_SIZE) {
                 int tile_count = ((tile_idx + TILE_SIZE) < count) ? TILE_SIZE : (count - tile_idx);
@@ -285,7 +321,7 @@ static void self_gradient_correction_impl(Particles& p, int start, int count,
                         double day = tile(jb+5) - ayi0;
                         double daz = tile(jb+6) - azi0;
                         double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                        gradient_correction_interaction(dx, dy, dz, dax, day, daz, r2, coeff * tile(jb+3), cx, cy, cz);
+                        gradient_correction_interaction_kahan(dx, dy, dz, dax, day, daz, r2, coeff * tile(jb+3), cx, cy, cz, kcx, kcy, kcz);
                     }
                 }
                 team.team_barrier();
@@ -341,6 +377,7 @@ static void cross_acceleration_impl(Particles& p,
             int sid_i = -1;
             if (ii < a_count) { xi = px(i); yi = py(i); zi = pz(i); if (COLL) sid_i = sid_raw[i]; }
             double axi = 0, ayi = 0, azi = 0;
+            double kx = 0, ky = 0, kz = 0;
 
             for (int tile_start = b_start; tile_start < b_end; tile_start += TILE_SIZE) {
                 int tile_count = ((tile_start + TILE_SIZE) < b_end) ? TILE_SIZE : (b_end - tile_start);
@@ -361,7 +398,7 @@ static void cross_acceleration_impl(Particles& p,
                         double dy = tile(jb+1) - yi;
                         double dz = tile(jb+2) - zi;
                         double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                        gravity_interaction(dx, dy, dz, r2, G * tile(jb+3), axi, ayi, azi);
+                        gravity_interaction_kahan(dx, dy, dz, r2, G * tile(jb+3), axi, ayi, azi, kx, ky, kz);
                     }
                 }
                 team.team_barrier();
@@ -382,6 +419,7 @@ static void cross_acceleration_impl(Particles& p,
             int sid_j = -1;
             if (ii < b_count) { xj = px(j); yj = py(j); zj = pz(j); if (COLL) sid_j = sid_raw[j]; }
             double axj = 0, ayj = 0, azj = 0;
+            double kx = 0, ky = 0, kz = 0;
 
             for (int tile_start = a_start; tile_start < a_end; tile_start += TILE_SIZE) {
                 int tile_count = ((tile_start + TILE_SIZE) < a_end) ? TILE_SIZE : (a_end - tile_start);
@@ -402,7 +440,7 @@ static void cross_acceleration_impl(Particles& p,
                         double dy = tile(ib+1) - yj;
                         double dz = tile(ib+2) - zj;
                         double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                        gravity_interaction(dx, dy, dz, r2, G * tile(ib+3), axj, ayj, azj);
+                        gravity_interaction_kahan(dx, dy, dz, r2, G * tile(ib+3), axj, ayj, azj, kx, ky, kz);
                     }
                 }
                 team.team_barrier();
@@ -476,6 +514,7 @@ static void cross_gradient_correction_impl(Particles& p,
                 if (COLL) sid_i = sid_raw[i];
             }
             double cx = 0, cy = 0, cz = 0;
+            double kcx = 0, kcy = 0, kcz = 0;
 
             for (int tile_idx = 0; tile_idx < b_count; tile_idx += TILE_SIZE) {
                 int tile_count = ((tile_idx + TILE_SIZE) < b_count) ? TILE_SIZE : (b_count - tile_idx);
@@ -502,7 +541,7 @@ static void cross_gradient_correction_impl(Particles& p,
                         double day = tile(jb+5) - ayi0;
                         double daz = tile(jb+6) - azi0;
                         double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                        gradient_correction_interaction(dx, dy, dz, dax, day, daz, r2, coeff * tile(jb+3), cx, cy, cz);
+                        gradient_correction_interaction_kahan(dx, dy, dz, dax, day, daz, r2, coeff * tile(jb+3), cx, cy, cz, kcx, kcy, kcz);
                     }
                 }
                 team.team_barrier();
@@ -531,6 +570,7 @@ static void cross_gradient_correction_impl(Particles& p,
                 if (COLL) sid_j = sid_raw[j];
             }
             double cx = 0, cy = 0, cz = 0;
+            double kcx = 0, kcy = 0, kcz = 0;
 
             for (int tile_idx = 0; tile_idx < a_count; tile_idx += TILE_SIZE) {
                 int tile_count = ((tile_idx + TILE_SIZE) < a_count) ? TILE_SIZE : (a_count - tile_idx);
@@ -557,7 +597,7 @@ static void cross_gradient_correction_impl(Particles& p,
                         double day = tile(ib+5) - ayj0;
                         double daz = tile(ib+6) - azj0;
                         double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                        gradient_correction_interaction(dx, dy, dz, dax, day, daz, r2, coeff * tile(ib+3), cx, cy, cz);
+                        gradient_correction_interaction_kahan(dx, dy, dz, dax, day, daz, r2, coeff * tile(ib+3), cx, cy, cz, kcx, kcy, kcz);
                     }
                 }
                 team.team_barrier();
@@ -796,6 +836,7 @@ static void self_acceleration_and_timestep_impl(Particles& p, int start, int cou
                 if (COLL) sid_i = sid_raw[i];
             }
             double axi = 0, ayi = 0, azi = 0;
+            double kx = 0, ky = 0, kz = 0;
             double t_min_i = 1e30;
 
             for (int tile_start = start; tile_start < end; tile_start += TILE_SIZE) {
@@ -823,7 +864,7 @@ static void self_acceleration_and_timestep_impl(Particles& p, int start, int cou
                         double mj = tile(jb+3);
                         double r2 = dx*dx + dy*dy + dz*dz;
                         double r2s = r2 + soft2;
-                        double inv_r = gravity_interaction(dx, dy, dz, r2s, G * mj, axi, ayi, azi);
+                        double inv_r = gravity_interaction_kahan(dx, dy, dz, r2s, G * mj, axi, ayi, azi, kx, ky, kz);
 
                         // Symmetrized timestep
                         double dvx = tile(jb+4) - vxi;

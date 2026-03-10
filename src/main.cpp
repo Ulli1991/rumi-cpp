@@ -883,7 +883,9 @@ int main(int argc, char** argv) {
                     // BIFROST Eq.: |ΔE_s/E| = |E(t) - E(t-τ)| / |E(t₀)|
                     //   numerator: per-step change (E_after - E_step_start)
                     //   denominator: initial energy E(t₀) = diag0.E_total
+                    g_profiler.start();
                     double E_step_start = compute_total_energy(work_p, g_energy_books, G, soft2);
+                    g_profiler.stop(StepProfiler::ENERGY_CHECK);
 
                     // Save originals ONCE before the loop
                     double eta_ff_orig   = g_collisional.eta_ff;
@@ -909,7 +911,9 @@ int main(int argc, char** argv) {
                         }
 
                         // Per-step error: |E(t) - E(t-τ)| / |E(t₀)|  (BIFROST §3.19)
+                        g_profiler.start();
                         double E_after = compute_total_energy(work_p, g_energy_books, G, soft2);
+                        g_profiler.stop(StepProfiler::ENERGY_CHECK);
                         double dE = std::fabs((E_after - E_step_start) / (std::fabs(diag0.E_total) + 1e-30));
 
                         if (dE < g_collisional.eta_restart) {

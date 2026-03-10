@@ -95,13 +95,17 @@ void compute_acceleration_and_timestep_distributed(DistributedParticles& dp,
     RawView pax{dp.local.ax.data()}, pay{dp.local.ay.data()}, paz{dp.local.az.data()};
     RawView dt_f{dp.local.dt_adapt.data()};
 
-    // Capture eta_ff²/eta_fb² for per-criterion timestep scaling
+    // Capture eta parameters for timestep criteria
 #ifdef ENABLE_COLLISIONAL
-    double eta_ff_sq = g_collisional.eta_ff * g_collisional.eta_ff;
-    double eta_fb_sq = g_collisional.eta_fb * g_collisional.eta_fb;
+    double eta_ff_v = g_collisional.eta_ff;
+    double eta_fb_v = g_collisional.eta_fb;
+    double eta_jerk_val = g_collisional.eta_jerk;
+    double eta_va = g_collisional.eta_ff;  // v/a criterion uses general eta
+    bool coll = dp.local.collisional;
 #else
-    double eta_ff_sq = eta * eta;
-    double eta_fb_sq = eta * eta;
+    double eta_ff_v = eta;
+    double eta_fb_v = eta;
+    (void)eta;
 #endif
 
     // Tiled GPU kernel: each team handles TILE_SIZE i-particles from my slice
@@ -131,7 +135,11 @@ void compute_acceleration_and_timestep_distributed(DistributedParticles& dp,
             }
 
             double axi = 0, ayi = 0, azi = 0;
-            double t_min_i = DBL_MAX;
+            double kx = 0, ky = 0, kz = 0;
+            double t_min_i = 1e30;
+#ifdef ENABLE_COLLISIONAL
+            double jerk_x = 0, jerk_y = 0, jerk_z = 0;
+#endif
 
             for (int tile_start = 0; tile_start < N; tile_start += TILE_SIZE) {
                 int tile_end = (tile_start + TILE_SIZE < N) ? tile_start + TILE_SIZE : N;
@@ -162,22 +170,32 @@ void compute_acceleration_and_timestep_distributed(DistributedParticles& dp,
                         double inv_r = fast_rsqrt(r2s);
                         double inv_r3 = inv_r * inv_r * inv_r;
 
-                        axi += G * mj * inv_r3 * dx;
-                        ayi += G * mj * inv_r3 * dy;
-                        azi += G * mj * inv_r3 * dz;
+                        kahan_add(axi, kx, G * mj * inv_r3 * dx);
+                        kahan_add(ayi, ky, G * mj * inv_r3 * dy);
+                        kahan_add(azi, kz, G * mj * inv_r3 * dz);
 
-                        // Adaptive timestep: reuse inv_r, no extra sqrt
+                        // Symmetrized pairwise timestep
                         double dvx = tile(jb + 4) - vxi;
                         double dvy = tile(jb + 5) - vyi;
                         double dvz = tile(jb + 6) - vzi;
-                        double v_sq = dvx*dvx + dvy*dvy + dvz*dvz;
                         double mass_sum = mi + mj;
+                        double t_sym_ff, t_sym_fb;
+                        symmetrized_timestep(r2s, inv_r, dx, dy, dz, dvx, dvy, dvz,
+                                             G, mass_sum, t_sym_ff, t_sym_fb);
+                        t_min_i = Kokkos::fmin(t_min_i,
+                                    Kokkos::fmin(eta_ff_v * t_sym_ff, eta_fb_v * t_sym_fb));
 
-                        double r3 = r2s * r2s * inv_r;
-                        double t_ff_sq = r3 / (G * mass_sum + EPS);
-                        double t_fb_sq = r2s / (v_sq + EPS);
-                        double t_min_sq_pair = Kokkos::fmin(eta_ff_sq * t_ff_sq, eta_fb_sq * t_fb_sq);
-                        t_min_i = Kokkos::fmin(t_min_i, t_min_sq_pair);
+#ifdef ENABLE_COLLISIONAL
+                        // Jerk accumulation for jerk criterion (Eq. 29)
+                        if (coll) {
+                            double rdotv = dx*dvx + dy*dvy + dz*dvz;
+                            double fac1 = G * mj * inv_r3;
+                            double fac2 = 3.0 * rdotv * inv_r * inv_r;
+                            jerk_x += fac1 * (dvx - fac2 * dx);
+                            jerk_y += fac1 * (dvy - fac2 * dy);
+                            jerk_z += fac1 * (dvz - fac2 * dz);
+                        }
+#endif
                     }
                 }
                 team.team_barrier();
@@ -187,7 +205,25 @@ void compute_acceleration_and_timestep_distributed(DistributedParticles& dp,
                 pax(i) = axi;
                 pay(i) = ayi;
                 paz(i) = azi;
-                dt_f(i) = Kokkos::sqrt(t_min_i);
+
+#ifdef ENABLE_COLLISIONAL
+                if (coll) {
+                    // Jerk criterion: dt_jerk = eta_j * |a| / |j| (Eq. 29)
+                    double a_mag = Kokkos::sqrt(axi*axi + ayi*ayi + azi*azi);
+                    double j_mag = Kokkos::sqrt(jerk_x*jerk_x + jerk_y*jerk_y + jerk_z*jerk_z);
+                    if (j_mag > EPS && a_mag > EPS) {
+                        double dt_jerk = eta_jerk_val * a_mag / j_mag;
+                        t_min_i = Kokkos::fmin(t_min_i, dt_jerk);
+                    }
+                    // v/a criterion: dt_va = eta * |v| / |a| (Eq. 24)
+                    double v_mag = Kokkos::sqrt(vxi*vxi + vyi*vyi + vzi*vzi);
+                    if (a_mag > EPS && v_mag > EPS) {
+                        double dt_va = eta_va * v_mag / a_mag;
+                        t_min_i = Kokkos::fmin(t_min_i, dt_va);
+                    }
+                }
+#endif
+                dt_f(i) = t_min_i;
             }
         });
     Kokkos::fence();
@@ -1217,6 +1253,7 @@ static void self_acceleration_distributed(DistributedParticles& dp, int start, i
             }
 
             double axi = 0, ayi = 0, azi = 0;
+            double kx = 0, ky = 0, kz = 0;
 
             for (int tile_start = j_start; tile_start < j_end; tile_start += TILE_SIZE) {
                 int tile_end = (tile_start + TILE_SIZE < j_end) ? tile_start + TILE_SIZE : j_end;
@@ -1249,9 +1286,9 @@ static void self_acceleration_distributed(DistributedParticles& dp, int start, i
                         double inv_r3 = inv_r * inv_r * inv_r;
                         double mj_inv_r3 = G * tile(jb + 3) * inv_r3;
 
-                        axi += mj_inv_r3 * dx;
-                        ayi += mj_inv_r3 * dy;
-                        azi += mj_inv_r3 * dz;
+                        kahan_add(axi, kx, mj_inv_r3 * dx);
+                        kahan_add(ayi, ky, mj_inv_r3 * dy);
+                        kahan_add(azi, kz, mj_inv_r3 * dz);
                     }
                 }
                 team.team_barrier();
@@ -1351,6 +1388,7 @@ static void self_gradient_correction_distributed(DistributedParticles& dp, int s
                 }
 
                 double cx = 0, cy = 0, cz = 0;
+                double kcx = 0, kcy = 0, kcz = 0;
 
                 for (int tile_start = j_start; tile_start < j_end; tile_start += TILE_SIZE) {
                     int tile_end = (tile_start + TILE_SIZE < j_end) ? tile_start + TILE_SIZE : j_end;
@@ -1393,9 +1431,9 @@ static void self_gradient_correction_distributed(DistributedParticles& dp, int s
                             double r_dot_a = dx*dax + dy*day + dz*daz;
                             double f = coeff * tile(jb + 3) * inv_r5;
 
-                            cx += f * (r2 * dax - 3.0 * r_dot_a * dx);
-                            cy += f * (r2 * day - 3.0 * r_dot_a * dy);
-                            cz += f * (r2 * daz - 3.0 * r_dot_a * dz);
+                            kahan_add(cx, kcx, f * (r2 * dax - 3.0 * r_dot_a * dx));
+                            kahan_add(cy, kcy, f * (r2 * day - 3.0 * r_dot_a * dy));
+                            kahan_add(cz, kcz, f * (r2 * daz - 3.0 * r_dot_a * dz));
                         }
                     }
                     team.team_barrier();
@@ -1578,7 +1616,9 @@ static void fsi_step_distributed(DistributedParticles& dp, int start, int count,
     long long self_pairs = (long long)count * count;
 
     // Sync packed positions for vectorized kernel loads
+    g_profiler.start();
     dp.local.pack_pos_range(start, count);
+    g_profiler.stop(StepProfiler::PACK_DATA);
 
     // U kick (dt/6) - force then kick (separate, matching FROST)
     if (forces_valid) {
@@ -1777,6 +1817,7 @@ static void cross_acceleration_distributed(DistributedParticles& dp,
                 }
 
                 double axi = 0, ayi = 0, azi = 0;
+                double kx = 0, ky = 0, kz = 0;
 
                 for (int tile_st = f_start; tile_st < f_end; tile_st += TILE_SIZE) {
                     int tile_end = (tile_st + TILE_SIZE < f_end) ? tile_st + TILE_SIZE : f_end;
@@ -1808,9 +1849,9 @@ static void cross_acceleration_distributed(DistributedParticles& dp,
                             double inv_r3 = inv_r * inv_r * inv_r;
                             double mj_inv_r3 = G * tile(jb + 3) * inv_r3;
 
-                            axi += mj_inv_r3 * dx;
-                            ayi += mj_inv_r3 * dy;
-                            azi += mj_inv_r3 * dz;
+                            kahan_add(axi, kx, mj_inv_r3 * dx);
+                            kahan_add(ayi, ky, mj_inv_r3 * dy);
+                            kahan_add(azi, kz, mj_inv_r3 * dz);
                         }
                     }
                     team.team_barrier();
@@ -1857,6 +1898,7 @@ static void cross_acceleration_distributed(DistributedParticles& dp,
                 }
 
                 double axi = 0, ayi = 0, azi = 0;
+                double kx = 0, ky = 0, kz = 0;
 
                 for (int tile_st = s_start; tile_st < s_end; tile_st += TILE_SIZE) {
                     int tile_end = (tile_st + TILE_SIZE < s_end) ? tile_st + TILE_SIZE : s_end;
@@ -1887,9 +1929,9 @@ static void cross_acceleration_distributed(DistributedParticles& dp,
                             double inv_r3 = inv_r * inv_r * inv_r;
                             double mj_inv_r3 = G * tile(jb+3) * inv_r3;
 
-                            axi += mj_inv_r3 * dx;
-                            ayi += mj_inv_r3 * dy;
-                            azi += mj_inv_r3 * dz;
+                            kahan_add(axi, kx, mj_inv_r3 * dx);
+                            kahan_add(ayi, ky, mj_inv_r3 * dy);
+                            kahan_add(azi, kz, mj_inv_r3 * dz);
                         }
                     }
                     team.team_barrier();
@@ -2010,6 +2052,7 @@ static void cross_acceleration_and_gradient_distributed(DistributedParticles& dp
                 }
 
                 double cx = 0, cy = 0, cz = 0;
+                double kcx = 0, kcy = 0, kcz = 0;
 
                 for (int tile_st = f_start; tile_st < f_end; tile_st += TILE_SIZE) {
                     int tile_end = (tile_st + TILE_SIZE < f_end) ? tile_st + TILE_SIZE : f_end;
@@ -2050,9 +2093,9 @@ static void cross_acceleration_and_gradient_distributed(DistributedParticles& dp
                             double r_dot_a = dx*dax + dy*day + dz*daz;
                             double f = coeff * tile(jb+3) * inv_r5;
 
-                            cx += f * (r2 * dax - 3.0 * r_dot_a * dx);
-                            cy += f * (r2 * day - 3.0 * r_dot_a * dy);
-                            cz += f * (r2 * daz - 3.0 * r_dot_a * dz);
+                            kahan_add(cx, kcx, f * (r2 * dax - 3.0 * r_dot_a * dx));
+                            kahan_add(cy, kcy, f * (r2 * day - 3.0 * r_dot_a * dy));
+                            kahan_add(cz, kcz, f * (r2 * daz - 3.0 * r_dot_a * dz));
                         }
                     }
                     team.team_barrier();
@@ -2101,6 +2144,7 @@ static void cross_acceleration_and_gradient_distributed(DistributedParticles& dp
                 }
 
                 double cx = 0, cy = 0, cz = 0;
+                double kcx = 0, kcy = 0, kcz = 0;
 
                 for (int tile_st = s_start; tile_st < s_end; tile_st += TILE_SIZE) {
                     int tile_end = (tile_st + TILE_SIZE < s_end) ? tile_st + TILE_SIZE : s_end;
@@ -2142,9 +2186,9 @@ static void cross_acceleration_and_gradient_distributed(DistributedParticles& dp
                             double r_dot_a = dx*dax + dy*day + dz*daz;
                             double f = coeff * tile(jb+3) * inv_r5;
 
-                            cx += f * (r2 * dax - 3.0 * r_dot_a * dx);
-                            cy += f * (r2 * day - 3.0 * r_dot_a * dy);
-                            cz += f * (r2 * daz - 3.0 * r_dot_a * dz);
+                            kahan_add(cx, kcx, f * (r2 * dax - 3.0 * r_dot_a * dx));
+                            kahan_add(cy, kcy, f * (r2 * day - 3.0 * r_dot_a * dy));
+                            kahan_add(cz, kcz, f * (r2 * daz - 3.0 * r_dot_a * dz));
                         }
                     }
                     team.team_barrier();
@@ -2569,6 +2613,7 @@ static void hhs_fsi_recursive(
 #ifdef ENABLE_COLLISIONAL
         // Step 3: Subsystem timestep adjustments
         if (p.collisional) {
+            g_profiler.start();
             g_subsystem_mgr.enforce_shared_timestep(p);
             g_subsystem_mgr.apply_perturbation_timestep(p, G, g_collisional.eta_pert);
 
@@ -2600,6 +2645,7 @@ static void hhs_fsi_recursive(
                     g_subsystem_mgr.update_particle_flags(p);
                 }
             }
+            g_profiler.stop(StepProfiler::SUBSYSTEM_DT);
         }
 #endif
     }
@@ -2644,7 +2690,11 @@ static void hhs_fsi_recursive(
     long long cross_pairs = 2LL * slow_count * fast_count;
 
     // Re-sync packed positions after partition reorder (only needed for MPI)
-    if (use_mpi) p.pack_pos_range(start, count);
+    if (use_mpi) {
+        g_profiler.start();
+        p.pack_pos_range(start, count);
+        g_profiler.stop(StepProfiler::PACK_DATA);
+    }
 
     // ==========================================================================
     // ALGORITHM 4: HHS-FSI with slow (S) and fast (F) particles
@@ -2699,8 +2749,10 @@ static void hhs_fsi_recursive(
                       G, soft2, dt_min, eta, false, tree_for_subs, depth + 1);
 
     // Restore subsystem state after recursion overwrote it
+    g_profiler.start();
     g_subsystem_mgr.active = saved_active;
     g_subsystem_mgr.update_particle_flags(p);
+    g_profiler.stop(StepProfiler::SUBSYSTEM_BOOKKEEP);
 
     // Restore tree state after steps 2-3
     if (use_tree_cross || use_tree_self) {
@@ -2715,7 +2767,11 @@ static void hhs_fsi_recursive(
     // Step 4: Cross-kick S<->F with gradient (2dt/3)
     // Re-sync packed positions: step 3's recursion may have run locally (use_mpi=false)
     // modifying SoA positions via drifts without updating pos_packed.
-    if (use_mpi) p.pack_pos_range(slow_start, slow_count + fast_count);
+    if (use_mpi) {
+        g_profiler.start();
+        p.pack_pos_range(slow_start, slow_count + fast_count);
+        g_profiler.stop(StepProfiler::PACK_DATA);
+    }
     g_profiler.start();
     if (use_tree_cross) {
         cross_acceleration_and_gradient_global_tree(p, slow_start, slow_count,
@@ -2738,8 +2794,10 @@ static void hhs_fsi_recursive(
                       G, soft2, dt_min, eta, false, tree_for_subs, depth + 1);
 
     // Restore again for the second half-step on slow
+    g_profiler.start();
     g_subsystem_mgr.active = saved_active;
     g_subsystem_mgr.update_particle_flags(p);
+    g_profiler.stop(StepProfiler::SUBSYSTEM_BOOKKEEP);
 
     // Restore tree state for step 6 and 7
     if (use_tree_cross || use_tree_self) {
