@@ -541,6 +541,7 @@ static void cpu_sync_to_device(CpuSubset& s, Particles& p, int cpu_start, int de
     Kokkos::deep_copy(Kokkos::subview(p.mass, Kokkos::pair<int,int>(dev_start, dev_start+count)), h_m);
     Kokkos::deep_copy(Kokkos::subview(p.dt_adapt, Kokkos::pair<int,int>(dev_start, dev_start+count)), h_dt);
     Kokkos::deep_copy(Kokkos::subview(p.subsystem_id, Kokkos::pair<int,int>(dev_start, dev_start+count)), h_sid);
+    p.zero_kick_compensation(dev_start, count);  // velocities replaced by the CPU path's own
     Kokkos::fence();
 }
 

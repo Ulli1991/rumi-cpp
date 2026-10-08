@@ -1095,6 +1095,17 @@ static int partition_by_pivot(Particles& p, int start, int count, double pivot) 
         pix(dst) = tl1(ii); piy(dst) = tl2(ii); piz(dst) = tl3(ii);
     });
 
+    // Kick compensation follows its particle (t1-t3 are free after the copy-back)
+    RawView pcx{p.cvx.data()}, pcy{p.cvy.data()}, pcz{p.cvz.data()};
+    Kokkos::parallel_for("gather_comp", count, KOKKOS_LAMBDA(int ii) {
+        int src = perm(ii);
+        t1(ii) = pcx(src); t2(ii) = pcy(src); t3(ii) = pcz(src);
+    });
+    Kokkos::parallel_for("copy_comp", count, KOKKOS_LAMBDA(int ii) {
+        int dst = start + ii;
+        pcx(dst) = t1(ii); pcy(dst) = t2(ii); pcz(dst) = t3(ii);
+    });
+
 #ifdef ENABLE_COLLISIONAL
     // Second pass: permute collisional-only fields
     if (p.collisional) {
@@ -1185,12 +1196,14 @@ void hhs_fsi_step_dynamic(Particles& p, int start, int count, double pivot_dt,
 void kick_velocities(Particles& p, int start, int count, double dt) {
     RawView pvx{p.vx.data()}, pvy{p.vy.data()}, pvz{p.vz.data()};
     RawView pax{p.ax.data()}, pay{p.ay.data()}, paz{p.az.data()};
+    RawView cvx{p.cvx.data()}, cvy{p.cvy.data()}, cvz{p.cvz.data()};
 
+    // Compensated: a plain v += a dt rounds at ~eps|v| per kick and sets the energy floor
     Kokkos::parallel_for("kick", count, KOKKOS_LAMBDA(int ii) {
         int i = start + ii;
-        pvx(i) += pax(i) * dt;
-        pvy(i) += pay(i) * dt;
-        pvz(i) += paz(i) * dt;
+        kahan_add(pvx(i), cvx(i), pax(i) * dt);
+        kahan_add(pvy(i), cvy(i), pay(i) * dt);
+        kahan_add(pvz(i), cvz(i), paz(i) * dt);
     });
 }
 

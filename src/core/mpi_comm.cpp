@@ -190,6 +190,7 @@ void DistributedParticles::distribute_initial(Particles& global_particles) {
         Kokkos::deep_copy(local.vx, h_vx);
         Kokkos::deep_copy(local.vy, h_vy);
         Kokkos::deep_copy(local.vz, h_vz);
+        local.zero_kick_compensation();   // received velocities carry no local compensation
         Kokkos::deep_copy(local.ax, h_ax);
         Kokkos::deep_copy(local.ay, h_ay);
         Kokkos::deep_copy(local.az, h_az);

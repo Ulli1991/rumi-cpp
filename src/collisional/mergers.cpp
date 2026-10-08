@@ -301,6 +301,7 @@ void execute_merger(const MergerEvent& event, Particles& p,
     Kokkos::deep_copy(p.vx, h_vx);
     Kokkos::deep_copy(p.vy, h_vy);
     Kokkos::deep_copy(p.vz, h_vz);
+    p.zero_kick_compensation();   // merger remnant velocity is new
     Kokkos::deep_copy(p.mass, h_m);
     Kokkos::deep_copy(p.stellar_type, h_stype);
     Kokkos::deep_copy(p.spin_vec, h_spin);

@@ -11,6 +11,7 @@ struct Particles {
     Kokkos::View<double*> x, y, z;
     Kokkos::View<int64_t*> ix, iy, iz;   // Integer positions (source of truth when enabled)
     Kokkos::View<double*> vx, vy, vz;
+    Kokkos::View<double*> cvx, cvy, cvz;  // Kahan compensation of the kicks (0 is always valid)
     Kokkos::View<double*> ax, ay, az;
     Kokkos::View<double*> mass;
     Kokkos::View<double*> dt_adapt;
@@ -80,4 +81,5 @@ struct Particles {
     // Remove particles with mass==0, compact remaining, update N
     // Returns number of particles removed
     int compact_remove_zero_mass();
+    void zero_kick_compensation(int start = 0, int count = -1);  // after velocities are overwritten
 };

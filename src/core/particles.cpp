@@ -11,6 +11,9 @@ void Particles::allocate(int n, bool collisional_mode) {
     vx = Kokkos::View<double*>("vx", n);
     vy = Kokkos::View<double*>("vy", n);
     vz = Kokkos::View<double*>("vz", n);
+    cvx = Kokkos::View<double*>("cvx", n);
+    cvy = Kokkos::View<double*>("cvy", n);
+    cvz = Kokkos::View<double*>("cvz", n);
     ax = Kokkos::View<double*>("ax", n);
     ay = Kokkos::View<double*>("ay", n);
     az = Kokkos::View<double*>("az", n);
@@ -84,6 +87,7 @@ void Particles::deallocate() {
     // Kokkos Views are reference-counted; reassigning releases memory
     x = y = z = Kokkos::View<double*>();
     vx = vy = vz = Kokkos::View<double*>();
+    cvx = cvy = cvz = Kokkos::View<double*>();
     ax = ay = az = Kokkos::View<double*>();
     mass = dt_adapt = Kokkos::View<double*>();
     level = orig_index = Kokkos::View<int*>();
@@ -211,6 +215,9 @@ int Particles::compact_remove_zero_mass() {
     auto h_ix = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), ix);
     auto h_iy = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), iy);
     auto h_iz = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), iz);
+    auto h_cvx = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), cvx);
+    auto h_cvy = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), cvy);
+    auto h_cvz = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), cvz);
 
     // Compact in-place on host mirrors
     for (int j = 0; j < N_new; j++) {
@@ -222,7 +229,9 @@ int Particles::compact_remove_zero_mass() {
         h_m(j) = h_m(src); h_dt(j) = h_dt(src);
         h_lev(j) = h_lev(src); h_orig(j) = h_orig(src);
         h_ix(j) = h_ix(src); h_iy(j) = h_iy(src); h_iz(j) = h_iz(src);
+        h_cvx(j) = h_cvx(src); h_cvy(j) = h_cvy(src); h_cvz(j) = h_cvz(src);
     }
+    Kokkos::deep_copy(cvx, h_cvx); Kokkos::deep_copy(cvy, h_cvy); Kokkos::deep_copy(cvz, h_cvz);
 
     // Copy back to device
     Kokkos::deep_copy(x, h_x); Kokkos::deep_copy(y, h_y); Kokkos::deep_copy(z, h_z);
@@ -357,6 +366,16 @@ void Particles::partition_by_level() {
         pix(i) = tl1(i); piy(i) = tl2(i); piz(i) = tl3(i);
     });
 
+    // Kick compensation follows its particle (t1-t3 are free after the copy-back)
+    auto pcx = cvx; auto pcy = cvy; auto pcz = cvz;
+    Kokkos::parallel_for("gather_comp", NN, KOKKOS_LAMBDA(int i) {
+        int src = perm(i);
+        t1(i) = pcx(src); t2(i) = pcy(src); t3(i) = pcz(src);
+    });
+    Kokkos::parallel_for("copy_comp", NN, KOKKOS_LAMBDA(int i) {
+        pcx(i) = t1(i); pcy(i) = t2(i); pcz(i) = t3(i);
+    });
+
 
     // Second pass: permute collisional-only fields (avoids overhead in softened mode)
     if (collisional) {
@@ -412,4 +431,12 @@ void Particles::partition_by_level() {
             pspin(i, 2) = t3(i);
         });
     }
+}
+
+void Particles::zero_kick_compensation(int start, int count) {
+    if (count < 0) count = N - start;
+    auto c0 = cvx; auto c1 = cvy; auto c2 = cvz;
+    Kokkos::parallel_for("zero_kick_comp", count, KOKKOS_LAMBDA(int ii) {
+        c0(start + ii) = 0.0; c1(start + ii) = 0.0; c2(start + ii) = 0.0;
+    });
 }

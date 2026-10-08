@@ -133,6 +133,7 @@ void Checkpoint::restore(Particles& p, SubsystemManager& mgr,
     Kokkos::deep_copy(p.vx, h_vx);
     Kokkos::deep_copy(p.vy, h_vy);
     Kokkos::deep_copy(p.vz, h_vz);
+    p.zero_kick_compensation();   // restored velocities; compensation is not checkpointed
     Kokkos::deep_copy(p.ax, h_ax);
     Kokkos::deep_copy(p.ay, h_ay);
     Kokkos::deep_copy(p.az, h_az);

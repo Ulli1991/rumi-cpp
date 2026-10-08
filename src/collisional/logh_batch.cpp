@@ -244,12 +244,14 @@ void SubsystemBatch::unpack(SubsystemManager& mgr, Particles& p) {
     // Scatter kernel: write only modified particles back to device arrays
     auto px = p.x; auto py = p.y; auto pz = p.z;
     auto pvx = p.vx; auto pvy = p.vy; auto pvz = p.vz;
+    auto pcx = p.cvx; auto pcy = p.cvy; auto pcz = p.cvz;
     auto pm = p.mass;
     Kokkos::parallel_for("unpack_scatter", n_mem, KOKKOS_LAMBDA(int i) {
         int k = d_idx(i);
         int base = i * UNPACK_STRIDE;
         px(k) = d_buf(base + 0); py(k) = d_buf(base + 1); pz(k) = d_buf(base + 2);
         pvx(k) = d_buf(base + 3); pvy(k) = d_buf(base + 4); pvz(k) = d_buf(base + 5);
+        pcx(k) = 0.0; pcy(k) = 0.0; pcz(k) = 0.0;  // velocity replaced by the subsystem integrator
         pm(k) = d_buf(base + 6);
     });
 
