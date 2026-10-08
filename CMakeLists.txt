@@ -97,3 +97,11 @@ if(DISABLE_PROFILING_FENCES)
     target_compile_definitions(nbody-kokkos PRIVATE DISABLE_PROFILING_FENCES)
     message(STATUS "Profiling fences disabled")
 endif()
+
+# Tests: `ctest --test-dir <build>` runs each case through tests/run_case.py
+enable_testing()
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+foreach(case kepler_e09 kepler_e0)
+    add_test(NAME ${case} COMMAND Python3::Interpreter ${CMAKE_SOURCE_DIR}/tests/run_case.py
+             $<TARGET_FILE:nbody-kokkos> ${case})
+endforeach()
