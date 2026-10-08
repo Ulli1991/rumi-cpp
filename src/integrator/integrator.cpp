@@ -181,7 +181,7 @@ void compute_acceleration_and_timestep_distributed(DistributedParticles& dp,
                         double mass_sum = mi + mj;
                         double t_sym_ff, t_sym_fb;
                         symmetrized_timestep(r2s, inv_r, dx, dy, dz, dvx, dvy, dvz,
-                                             G, mass_sum, t_sym_ff, t_sym_fb);
+                                             G, mass_sum, eta_ff_v, eta_fb_v, t_sym_ff, t_sym_fb);
                         t_min_i = Kokkos::fmin(t_min_i,
                                     Kokkos::fmin(eta_ff_v * t_sym_ff, eta_fb_v * t_sym_fb));
 

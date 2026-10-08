@@ -119,7 +119,7 @@ static void compute_acceleration_and_timestep_impl(Particles& p, double G, doubl
                         double mass_sum = mi + mj;
                         double t_sym_ff, t_sym_fb;
                         symmetrized_timestep(r2s, inv_r, dx, dy, dz, dvx, dvy, dvz,
-                                             G, mass_sum, t_sym_ff, t_sym_fb);
+                                             G, mass_sum, eta_ff_v, eta_fb_v, t_sym_ff, t_sym_fb);
                         t_min_i = Kokkos::fmin(t_min_i,
                                     Kokkos::fmin(eta_ff_v * t_sym_ff, eta_fb_v * t_sym_fb));
 
@@ -733,7 +733,7 @@ static void compute_timestep_subset_impl(Particles& p, int start, int count,
 
                         // Symmetrized timestep (always on)
                         double t_sym_ff, t_sym_fb;
-                        symmetrized_timestep(r2s, inv_r, dx, dy, dz, dvx, dvy, dvz, G, mass_sum, t_sym_ff, t_sym_fb);
+                        symmetrized_timestep(r2s, inv_r, dx, dy, dz, dvx, dvy, dvz, G, mass_sum, eta_ff_v, eta_fb_v, t_sym_ff, t_sym_fb);
                         t_min_i = Kokkos::fmin(t_min_i, Kokkos::fmin(eta_ff_v * t_sym_ff, eta_fb_v * t_sym_fb));
 
                         // Jerk + acceleration accumulation (collisional only)
@@ -872,7 +872,7 @@ static void self_acceleration_and_timestep_impl(Particles& p, int start, int cou
                         double dvz = tile(jb+6) - vzi;
                         double mass_sum = mi_val + mj;
                         double t_sym_ff, t_sym_fb;
-                        symmetrized_timestep(r2s, inv_r, dx, dy, dz, dvx, dvy, dvz, G, mass_sum, t_sym_ff, t_sym_fb);
+                        symmetrized_timestep(r2s, inv_r, dx, dy, dz, dvx, dvy, dvz, G, mass_sum, eta_ff_v, eta_fb_v, t_sym_ff, t_sym_fb);
                         t_min_i = Kokkos::fmin(t_min_i, Kokkos::fmin(eta_ff_v * t_sym_ff, eta_fb_v * t_sym_fb));
                     }
                 }

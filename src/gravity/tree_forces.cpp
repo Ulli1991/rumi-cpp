@@ -239,7 +239,7 @@ static void tree_walk(const TreeWalkData& d, const char* name) {
                                 double dvy = cvel(node, 1) - vyi;
                                 double dvz = cvel(node, 2) - vzi;
                                 double t_ff, t_fb;
-                                symmetrized_timestep(r2, inv_r, dx, dy, dz, dvx, dvy, dvz, G, mi + cmass, t_ff, t_fb);
+                                symmetrized_timestep(r2, inv_r, dx, dy, dz, dvx, dvy, dvz, G, mi + cmass, Kokkos::sqrt(eta_ff_sq), Kokkos::sqrt(eta_fb_sq), t_ff, t_fb);
                                 t_min_sq = Kokkos::fmin(t_min_sq,
                                     Kokkos::fmin(eta_ff_sq * t_ff * t_ff, eta_fb_sq * t_fb * t_fb));
                             }
@@ -286,7 +286,7 @@ static void tree_walk(const TreeWalkData& d, const char* name) {
                                     double dvy = pvy(j_orig) - vyi;
                                     double dvz = pvz(j_orig) - vzi;
                                     double t_ff, t_fb;
-                                    symmetrized_timestep(r2, inv_r, dx, dy, dz, dvx, dvy, dvz, G, mi + mj, t_ff, t_fb);
+                                    symmetrized_timestep(r2, inv_r, dx, dy, dz, dvx, dvy, dvz, G, mi + mj, Kokkos::sqrt(eta_ff_sq), Kokkos::sqrt(eta_fb_sq), t_ff, t_fb);
                                     t_min_sq = Kokkos::fmin(t_min_sq,
                                         Kokkos::fmin(eta_ff_sq * t_ff * t_ff, eta_fb_sq * t_fb * t_fb));
                                 }

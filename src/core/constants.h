@@ -55,8 +55,13 @@ struct RawView {
     KOKKOS_INLINE_FUNCTION double& operator()(int i) const { return ptr[i]; }
 };
 
-// Tile size for shared memory tiling in all N^2 GPU kernels
+// Tile size for shared memory tiling in all N^2 kernels; it is also their team size. Host backends
+// cap teams (Serial at 1, OpenMP at the thread count), so they run the same kernels untiled.
+#if defined(KOKKOS_ENABLE_CUDA) || defined(KOKKOS_ENABLE_HIP) || defined(KOKKOS_ENABLE_SYCL)
 constexpr int TILE_SIZE = 128;
+#else
+constexpr int TILE_SIZE = 1;
+#endif
 
 // Harmonic symmetrization factor for timestep (FROST paper Eq. 23)
 // f(d) = (d + sqrt(1 + d²) - 1) / d  for |d| > eps, else 1.0
@@ -76,7 +81,7 @@ KOKKOS_INLINE_FUNCTION
 void symmetrized_timestep(double r2, double inv_r,
                            double dx, double dy, double dz,
                            double dvx, double dvy, double dvz,
-                           double G, double mass_sum,
+                           double G, double mass_sum, double eta_ff, double eta_fb,
                            double& t_sym_ff, double& t_sym_fb) {
     double v_sq = dvx*dvx + dvy*dvy + dvz*dvz;
     double inv_Gm  = 1.0 / (G * mass_sum + EPS);
@@ -94,13 +99,15 @@ void symmetrized_timestep(double r2, double inv_r,
     double c_ff = 1.5 * r_dot_v * inv_r2;
     double c_fb = r_dot_v * inv_r2 * (1.0 + G * mass_sum * inv_r * inv_vsq);
 
-    double ct_ff = c_ff * t_ff_sq;
-    double s_ff = 1.0 + c_ff * ct_ff;
+    // Eq. 49 acts on the step eta*t, whose derivative is eta*dt/dt (FROST sec. 4.2); callers multiply
+    // the result by eta, so the correction term carries one factor eta and d = c*eta*t.
+    double ct_ff = c_ff * t_ff_sq * eta_ff;
+    double s_ff = 1.0 + c_ff * ct_ff * eta_ff;
     double u_ff = s_ff * fast_rsqrt(s_ff);
     t_sym_ff = t_ff + ct_ff / (u_ff + 1.0);
 
-    double ct_fb = c_fb * t_fb_sq;
-    double s_fb = 1.0 + c_fb * ct_fb;
+    double ct_fb = c_fb * t_fb_sq * eta_fb;
+    double s_fb = 1.0 + c_fb * ct_fb * eta_fb;
     double u_fb = s_fb * fast_rsqrt(s_fb);
     t_sym_fb = t_fb + ct_fb / (u_fb + 1.0);
 }
