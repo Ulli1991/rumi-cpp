@@ -394,6 +394,8 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
 // ============================================================================
 
 void SubsystemManager::update_particle_flags(Particles& p) const {
+    // subsystem_id exists only in collisional mode; the HHS recursion calls this unconditionally
+    if (!p.collisional) return;
     // Reset all to -1
     auto sid = p.subsystem_id;
     int N = p.N;
