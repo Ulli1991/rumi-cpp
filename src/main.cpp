@@ -826,7 +826,18 @@ int main(int argc, char** argv) {
         };
 
         if (integrator == "fsi") {
+            // All particles at the fastest occupied level (FROST sec. 6.2), not the floor of the
+            // level table (levels.back() is DT_MIN: ~1e11 steps for a 1000 yr run)
+            double dt_min_particle = 1e300;
+            {
+                auto h_dt = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), work_p.dt_adapt);
+                for (int i = 0; i < work_p.N; i++) dt_min_particle = std::min(dt_min_particle, h_dt(i));
+            }
             double dt_global = levels.back();
+            for (double lv : levels) {
+                if (lv <= dt_min_particle) { dt_global = lv; break; }
+            }
+            if (my_rank == 0) std::printf("FSI global step: %.4e Myr\n", dt_global * TIME_UNIT_MYR);
             while (t < t_final) {
                 auto step_t0 = std::chrono::high_resolution_clock::now();
                 // In replicated mode, work_p contains all particles on all ranks
