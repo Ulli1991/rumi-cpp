@@ -1,5 +1,6 @@
 #include "post_newtonian.h"
 #include "constants.h"
+#include "diagnostics.h"
 #include <Kokkos_Core.hpp>
 #include <cmath>
 #include <cstring>
@@ -429,16 +430,23 @@ void global_pn1_kick(Particles& p, int start, int count,
         }
     }
 
-    // Apply velocity kicks
+    // Apply velocity kicks; the Newtonian E, P, L they change go to the PN sink (diagnostics are Newtonian)
     for (int ii = 0; ii < n_compact; ii++) {
         int i = compact[ii];
+        double r[3] = {h_x(i), h_y(i), h_z(i)}, v0[3] = {h_vx(i), h_vy(i), h_vz(i)};
         h_vx(i) += dvx[ii];
         h_vy(i) += dvy[ii];
         h_vz(i) += dvz[ii];
+        double v1[3] = {h_vx(i), h_vy(i), h_vz(i)};
+        g_energy_books.E_pn += 0.5 * h_m(i) * ((v0[0]*v0[0] + v0[1]*v0[1] + v0[2]*v0[2]) -
+                                               (v1[0]*v1[0] + v1[1]*v1[1] + v1[2]*v1[2]));
+        g_energy_books.sink_PL(h_m(i), r, v0);
+        g_energy_books.sink_PL(h_m(i), r, v1, -1.0);
     }
 
     // Copy velocities back to device
     Kokkos::deep_copy(p.vx, h_vx);
     Kokkos::deep_copy(p.vy, h_vy);
     Kokkos::deep_copy(p.vz, h_vz);
+    p.zero_kick_compensation();   // velocities changed outside the compensated kicks
 }

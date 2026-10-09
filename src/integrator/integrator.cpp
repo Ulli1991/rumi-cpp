@@ -51,6 +51,7 @@ bool use_nonblocking_mpi = false;
 
 // Barnes-Hut tree configuration
 bool use_tree = false;
+bool all_slow_split = false;
 int tree_threshold = 10000;
 double tree_theta = 0.5;
 int tree_n_leaf = 32;
@@ -506,6 +507,7 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
         const int n_sec = (int)secular_idx.size();
         std::vector<double> dE_gw(n_sec, 0.0);
         std::vector<char> evolved(n_sec, 0);
+        std::vector<EnergyBookkeeping> sec_books(n_sec);  // P/L the secular evolution moves (PN, GW)
         Kokkos::parallel_for("secular_binaries",
             Kokkos::RangePolicy<Kokkos::DefaultHostExecutionSpace, Kokkos::Schedule<Kokkos::Dynamic>>(0, n_sec),
             [&](int k) {
@@ -543,6 +545,18 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
                 dE_gw[k] = E_orb_pre - E_orb_post;
             }
 
+            // P and L moved by the evolution (Kepler motion and the CoM drift conserve both)
+            {
+                double r1o[3] = {h_x(idx0 - start), h_y(idx0 - start), h_z(idx0 - start)};
+                double v1o[3] = {h_vx(idx0 - start), h_vy(idx0 - start), h_vz(idx0 - start)};
+                double r2o[3] = {h_x(idx1 - start), h_y(idx1 - start), h_z(idx1 - start)};
+                double v2o[3] = {h_vx(idx1 - start), h_vy(idx1 - start), h_vz(idx1 - start)};
+                sec_books[k].sink_PL(m1_sec, r1o, v1o);
+                sec_books[k].sink_PL(m2_sec, r2o, v2o);
+                sec_books[k].sink_PL(m1_sec, p1, v1, -1.0);
+                sec_books[k].sink_PL(m2_sec, p2, v2, -1.0);
+            }
+
             // Write back to host mirrors
             h_x(idx0 - start) = p1[0]; h_y(idx0 - start) = p1[1]; h_z(idx0 - start) = p1[2];
             h_vx(idx0 - start) = v1[0]; h_vy(idx0 - start) = v1[1]; h_vz(idx0 - start) = v1[2];
@@ -551,6 +565,10 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
         });
         for (int k = 0; k < n_sec; k++) {
             g_energy_books.E_gw += dE_gw[k];
+            for (int c = 0; c < 3; c++) {
+                g_energy_books.P_sink[c] += sec_books[k].P_sink[c];
+                g_energy_books.L_sink[c] += sec_books[k].L_sink[c];
+            }
             g_subsystem_mgr.step_secular_evolved += evolved[k];
         }
 
@@ -911,6 +929,51 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
 
             if (!failed.empty())
                 std::printf("  LogH restart: GAVE UP after %d subdivisions\n", MAX_SUBDIV);
+        }
+
+        // PN-active subsystems: the global diagnostics are Newtonian, so book the change of the members'
+        // Newtonian energy, momentum and angular momentum over this advance (Newtonian LogH conserves
+        // them; what changed is the PN dynamics, plus GBS error at its tolerance)
+        if (g_collisional.pn_order > 0 && g_collisional.c_code > 0.0) {
+            Kokkos::deep_copy(h_x, Kokkos::subview(p.x, rng));
+            Kokkos::deep_copy(h_y, Kokkos::subview(p.y, rng));
+            Kokkos::deep_copy(h_z, Kokkos::subview(p.z, rng));
+            Kokkos::deep_copy(h_vx, Kokkos::subview(p.vx, rng));
+            Kokkos::deep_copy(h_vy, Kokkos::subview(p.vy, rng));
+            Kokkos::deep_copy(h_vz, Kokkos::subview(p.vz, rng));
+            for (int si = 0; si < n_sub; si++) {
+                const auto& sub = saved_subs[si];
+                int nb = sub.n_bodies;
+                int idx[LOGH_MAX_BODIES];
+                bool pn_active = false, ok = true;
+                for (int b = 0; b < nb; b++) {
+                    idx[b] = g_subsystem_mgr.safe_pid_to_idx(sub.particle_ids[b]);
+                    if (idx[b] < 0) { ok = false; break; }
+                    if (h_m(idx[b] - start) >= g_collisional.m_pn) pn_active = true;
+                }
+                if (!ok || !pn_active) continue;
+                double E_pre = 0.0, E_post = 0.0;
+                for (int b = 0; b < nb; b++) {
+                    const auto& s0 = saved_bodies[si][b];
+                    int i = idx[b] - start;
+                    double m = h_m(i);
+                    double r0[3] = {s0.x, s0.y, s0.z}, v0[3] = {s0.vx, s0.vy, s0.vz};
+                    double r1[3] = {h_x(i), h_y(i), h_z(i)}, v1[3] = {h_vx(i), h_vy(i), h_vz(i)};
+                    E_pre  += 0.5 * m * (v0[0]*v0[0] + v0[1]*v0[1] + v0[2]*v0[2]);
+                    E_post += 0.5 * m * (v1[0]*v1[0] + v1[1]*v1[1] + v1[2]*v1[2]);
+                    g_energy_books.sink_PL(m, r0, v0);
+                    g_energy_books.sink_PL(m, r1, v1, -1.0);
+                    for (int c = b + 1; c < nb; c++) {
+                        const auto& s1 = saved_bodies[si][c];
+                        int j = idx[c] - start;
+                        double Gmm = G * m * h_m(j);
+                        E_pre  -= Gmm / std::sqrt((s0.x-s1.x)*(s0.x-s1.x) + (s0.y-s1.y)*(s0.y-s1.y) + (s0.z-s1.z)*(s0.z-s1.z));
+                        E_post -= Gmm / std::sqrt((h_x(i)-h_x(j))*(h_x(i)-h_x(j)) + (h_y(i)-h_y(j))*(h_y(i)-h_y(j)) +
+                                                  (h_z(i)-h_z(j))*(h_z(i)-h_z(j)));
+                    }
+                }
+                g_energy_books.E_pn += E_pre - E_post;
+            }
         }
 
         // Propagate persistent state back from logh_mgr to g_subsystem_mgr
@@ -2673,6 +2736,10 @@ static int hhs_fsi_recursive(
         } else if (use_mpi) {
             fsi_step_distributed(*dp, start, count, G, soft2, pivot_dt,
                                  forces_valid, tree_built_for_subset);
+        } else if (all_slow_split) {
+            // FROST Algorithm 3 with an empty fast set: fsi(S, tau/2) twice
+            fsi_step(p, start, count, G, soft2, pivot_dt * 0.5, forces_valid, true);
+            fsi_step(p, start, count, G, soft2, pivot_dt * 0.5, false, true);
         } else {
             fsi_step(p, start, count, G, soft2, pivot_dt, forces_valid, true);
         }

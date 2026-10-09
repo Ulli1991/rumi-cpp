@@ -18,13 +18,14 @@ struct EnergyBookkeeping {
     double E_gw = 0.0;        // gravitational wave losses (PN2.5)
     double E_merge = 0.0;     // merger dissipation
     double E_sse = 0.0;       // stellar evolution mass loss
+    double E_pn = 0.0;        // Newtonian energy changed by PN forces in subsystems (diagnostics stay Newtonian)
 
     // Momentum and angular momentum (about the origin) carried off by the same events: escapers, merger
     // mass loss and kicks, orbital L of merged pairs (remnant spin is not tracked), SSE winds and kicks
     double P_sink[3] = {0.0, 0.0, 0.0};
     double L_sink[3] = {0.0, 0.0, 0.0};
 
-    double total_sink() const { return E_escape + E_gw + E_merge + E_sse; }
+    double total_sink() const { return E_escape + E_gw + E_merge + E_sse + E_pn; }
     void reset() { *this = EnergyBookkeeping(); }
 
     // Book what a body of mass m at r with velocity v takes along (sign -1: what it brings)

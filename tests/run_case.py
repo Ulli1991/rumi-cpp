@@ -59,7 +59,9 @@ def run(exe, cfg):
 def run_output(exe, cfg):
     """stdout of one run; raises on a nonzero exit or a timeout."""
     with tempfile.TemporaryDirectory() as d:
-        Path(d, "config.txt").write_text("".join(f"{k} = {v}\n" for k, v in cfg.items()))
+        # NBODY_TEST_EXTRA="KEY=value,KEY2=value" overrides keys of every case (A/B comparisons)
+        extra = dict(kv.split("=", 1) for kv in os.environ.get("NBODY_TEST_EXTRA", "").split(",") if "=" in kv)
+        Path(d, "config.txt").write_text("".join(f"{k} = {v}\n" for k, v in {**cfg, **extra}.items()))
         try:
             launcher = os.environ.get("NBODY_TEST_LAUNCHER", "").split()  # e.g. "mpirun -n 2"
             out = subprocess.run(launcher + [exe], cwd=d, capture_output=True, text=True, timeout=TIMEOUT_S)

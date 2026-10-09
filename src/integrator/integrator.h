@@ -22,6 +22,7 @@ extern bool use_nonblocking_mpi;        // MPI_NON_BLOCKING config toggle
 
 // Barnes-Hut tree configuration
 extern bool use_tree;                   // USE_TREE config toggle
+extern bool all_slow_split;             // ALL_SLOW_SPLIT: an all-slow set takes two FSI steps of tau/2 (FROST Alg. 3)
 extern int tree_threshold;              // Particle count above which tree is used (default: 10000)
 extern double tree_theta;               // Opening angle (default: 0.5)
 extern int tree_n_leaf;                 // Max particles per leaf (default: 32)

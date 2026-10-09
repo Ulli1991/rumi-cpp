@@ -560,8 +560,13 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
         } else {
             dE_rel = std::fabs((Ef_norm - E0_norm) / (std::fabs(E0_norm) + 1e-30));
         }
+        // With PN terms there is no energy this check can hold to eta_restart: E_N + E_1PN is conserved
+        // only to O(v^4/c^4), and 2PN/3PN/radiation reaction change it further. PN subsystems restart on
+        // GBS non-convergence instead; their Newtonian energy change is booked as E_pn by the caller.
+        bool converged = n_gbs_steps < GBS_MAX_STEPS;
+        if (any_compact && pn_order > 0 && c_norm > 0.0) dE_rel = converged ? 0.0 : 1e30;
         h_eerr(s) = dE_rel;
-        h_conv(s) = (n_gbs_steps < GBS_MAX_STEPS) ? 1 : 0;
+        h_conv(s) = converged ? 1 : 0;
 
         gbs_sum += n_gbs_steps;
         if (dE_rel > dE_max) dE_max = dE_rel;

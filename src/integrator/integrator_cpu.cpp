@@ -814,7 +814,12 @@ static int cpu_hhs_recursive(CpuSubset& s, Particles& p, int start, int count,
 
 
     if (fast_count == 0) {
-        cpu_fsi_step(s, p, start, count, G, soft2, pivot_dt);
+        if (all_slow_split) {  // FROST Algorithm 3 with an empty fast set: fsi(S, tau/2) twice
+            cpu_fsi_step(s, p, start, count, G, soft2, pivot_dt * 0.5);
+            cpu_fsi_step(s, p, start, count, G, soft2, pivot_dt * 0.5);
+        } else {
+            cpu_fsi_step(s, p, start, count, G, soft2, pivot_dt);
+        }
         return n_removed;
     }
 
