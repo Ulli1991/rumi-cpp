@@ -1097,6 +1097,7 @@ int main(int argc, char** argv) {
         g_subsystem_mgr = SubsystemManager();
 #endif
     }
+    release_integrator_globals();
     Kokkos::finalize();
     MPIComm::finalize();
     return exit_code;

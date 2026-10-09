@@ -78,3 +78,6 @@ void advance_subsystems_in_range(Particles& p, int start, int count, double G, d
 // Each rank computes for its slice, then allgather accelerations and timesteps
 void compute_acceleration_and_timestep_distributed(DistributedParticles& dp,
                                                  double G, double soft2, double eta);
+
+// Release global Kokkos Views held by the integrator (call before Kokkos::finalize)
+void release_integrator_globals();

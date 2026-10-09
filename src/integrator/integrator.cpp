@@ -58,6 +58,8 @@ int tree_n_group = 64;
 // Global tree instance (rebuilt each top-level step)
 static Octree g_octree;
 
+void release_integrator_globals() { g_octree = Octree(); }  // before Kokkos::finalize
+
 // TILE_SIZE defined in constants.h
 
 // =============================================================================

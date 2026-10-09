@@ -45,6 +45,12 @@ non-collisional build compiles again; MPI CPU build (build-host-mpi, gcc/14 + op
 tests. GPU (MI300A) ctest: all accuracy checks equal the host values; 2-body cases are ~20x slower than one
 CPU core (launch latency), so GPU runs need NBODY_TEST_TIMEOUT and apu (apudev caps jobs at 15 min).
 
+Tree check (65k Plummer, softened, 10 steps, 2 MI300A): direct FSI |dE/E| 2.6e-10 / 1.9e-11 / 1.3e-12 at
+eta 0.2 / 0.1 / 0.05 (order 3.8-3.9), 2.8 s/step. Tree (FSI with tree gradient term, not KDK) sits on its
+force-error floor independent of eta: 1.4e-5 at theta 0.5, 2.8e-6 at theta 0.3, and loses L (1e-4 to 6e-4
+in 10 steps; only P is corrected); 3.9-4.2 s/step, slower than direct at this N. Not useful for the
+accuracy targets until higher multipoles / symmetric (FMM-type) interactions; revisit for N >~ 1e6.
+
 Open, found on the way:
 - frost4_e099 (6.9e-11 vs 6.6e-11) and floor_binary_e0 (1.1e-14 vs 2.4e-15) fail on gcc/x86 with
   identical numbers before and after these changes: laptop bounds, re-measure per platform.
