@@ -82,6 +82,27 @@ KOKKOS_INLINE_FUNCTION double pair_dt(double r2s, double ir, double dx, double d
     return Kokkos::fmin(eta_ff * tff, eta_fb * tfb);
 }
 
+// pair_dt, skipped (1e30) when it cannot go below `cur`: with d = c t eta (FROST Eq. 49) the symmetrized step is
+// eta t (1 + d / (1 + sqrt(1 + d^2))) >= eta t / (2 (1 + |d|)) for either criterion. Pairs that pass the test (with a
+// further factor 1.5 margin) get the unchanged pair_dt, so the minimum over pairs is bit-identical; most distant
+// pairs skip two reciprocal roots and both divisions.
+KOKKOS_INLINE_FUNCTION double pair_dt_below(double cur, double r2s, double ir, double dx, double dy, double dz,
+                                            double dvx, double dvy, double dvz, double G, double msum,
+                                            double eta_ff, double eta_fb) {
+    const double Gm = G * msum;
+    const double v_sq = dvx * dvx + dvy * dvy + dvz * dvz;
+    const double r = r2s * ir;
+    const double t_ff = r2s * fast_rsqrt(r * (Gm + EPS));
+    const double inv_v = fast_rsqrt(v_sq + EPS);
+    const double t_fb = r * inv_v;
+    const double rdv_ir2 = (dx * dvx + dy * dvy + dz * dvz) * ir * ir;
+    const double d_ff = 1.5 * rdv_ir2 * t_ff * eta_ff;
+    const double d_fb = rdv_ir2 * (1.0 + Gm * ir * inv_v * inv_v) * t_fb * eta_fb;
+    if (eta_ff * t_ff >= 3.0 * cur * (1.0 + Kokkos::fabs(d_ff)) && eta_fb * t_fb >= 3.0 * cur * (1.0 + Kokkos::fabs(d_fb)))
+        return 1e30;
+    return pair_dt(r2s, ir, dx, dy, dz, dvx, dvy, dvz, G, msum, eta_ff, eta_fb);
+}
+
 // Time steps of the sinks from the sources (HHS subset). Collisional mode also accumulates the
 // partner-free acceleration and jerk: jerk criterion (BIFROST sec. 3.4.5), and ax, ay, az are overwritten
 // with that acceleration for the v/a, gradient and perturbation criteria that follow.
@@ -107,8 +128,8 @@ struct DtK {
         double dvx = s[4] - a.vx, dvy = s[5] - a.vy, dvz = s[6] - a.vz;
         double r2s = w ? dx * dx + dy * dy + dz * dz + soft2 : 1.0;
         double ir = fast_rsqrt(r2s);
-        double t = COLL ? pair_dt(r2s, ir, dx, dy, dz, s[8] - a.cvx, s[9] - a.cvy, s[10] - a.cvz, G, a.m + s[3], eta_ff, eta_fb)
-                        : pair_dt(r2s, ir, dx, dy, dz, dvx, dvy, dvz, G, a.m + s[3], eta_ff, eta_fb);
+        double t = COLL ? pair_dt_below(mn[0], r2s, ir, dx, dy, dz, s[8] - a.cvx, s[9] - a.cvy, s[10] - a.cvz, G, a.m + s[3], eta_ff, eta_fb)
+                        : pair_dt_below(mn[0], r2s, ir, dx, dy, dz, dvx, dvy, dvz, G, a.m + s[3], eta_ff, eta_fb);
         mn[0] = Kokkos::fmin(mn[0], w ? t : 1e30);
         if (COLL) {
             double fac1 = G * (w ? s[3] : 0.0) * ir * ir * ir;
@@ -157,8 +178,8 @@ struct AccDtK {
         double ir = fast_rsqrt(r2s);
         double fac1 = G * (w ? s[3] : 0.0) * ir * ir * ir;
         sum[0] += fac1 * dx; sum[1] += fac1 * dy; sum[2] += fac1 * dz;
-        double t = COLL ? pair_dt(r2s, ir, dx, dy, dz, s[8] - a.cvx, s[9] - a.cvy, s[10] - a.cvz, G, a.m + s[3], eta_ff, eta_fb)
-                        : pair_dt(r2s, ir, dx, dy, dz, dvx, dvy, dvz, G, a.m + s[3], eta_ff, eta_fb);
+        double t = COLL ? pair_dt_below(mn[0], r2s, ir, dx, dy, dz, s[8] - a.cvx, s[9] - a.cvy, s[10] - a.cvz, G, a.m + s[3], eta_ff, eta_fb)
+                        : pair_dt_below(mn[0], r2s, ir, dx, dy, dz, dvx, dvy, dvz, G, a.m + s[3], eta_ff, eta_fb);
         mn[0] = Kokkos::fmin(mn[0], w ? t : 1e30);
         if (COLL) {
             double fac2 = 3.0 * (dx * dvx + dy * dvy + dz * dvz) * ir * ir;
