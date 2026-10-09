@@ -1080,7 +1080,20 @@ static void sync_after_removal(Particles& p, DistributedParticles* dp) {
 void hhs_fsi_step_dynamic(Particles& p, int start, int count, double pivot_dt,
                           double G, double soft2, double dt_min,
                           double eta) {
-    hhs_fsi_recursive(p, nullptr, start, count, pivot_dt, G, soft2, dt_min, eta, false);
+#ifdef ENABLE_COLLISIONAL
+    if (p.collisional) g_subsystem_mgr.reset_step_diagnostics();
+    // Global PN1.0 half-kicks around the FSI step (BIFROST Section 3.7), as in hhs_fsi_step_distributed
+    bool do_global_pn = p.collisional && (g_collisional.pn_order & 1) && g_collisional.c_code > 0.0;
+    if (do_global_pn)
+        global_pn1_kick(p, start, count, G, g_collisional.c_code, g_collisional.m_pn, pivot_dt * 0.5);
+#endif
+    int n_removed = hhs_fsi_recursive(p, nullptr, start, count, pivot_dt, G, soft2, dt_min, eta, false);
+#ifdef ENABLE_COLLISIONAL
+    if (do_global_pn)
+        global_pn1_kick(p, start, count - n_removed, G, g_collisional.c_code, g_collisional.m_pn, pivot_dt * 0.5);
+#else
+    (void)n_removed;
+#endif
 }
 
 // =============================================================================
