@@ -1,4 +1,5 @@
 #include "gbs.h"
+#include <atomic>
 #include <cstring>
 #include <cmath>
 #include <algorithm>
@@ -139,7 +140,7 @@ static double omega_from_packed(const double* y, int nb) {
     return std::atan2(ey, ex);
 }
 
-static int gbs_debug_counter = 0;
+static std::atomic<int> gbs_debug_counter{0};  // host batch integrates subsystems in parallel
 
 bool GBSIntegrator::step(LogHState& state, double ds, double G, double& ds_next,
                           double c_code, int pn_order) {
@@ -152,7 +153,7 @@ bool GBSIntegrator::step(LogHState& state, double ds, double G, double& ds_next,
     if (do_debug) {
         double w0 = omega_from_packed(y0, 2);
         std::printf("      GBS step #%d: ds=%.6e  omega_in=%.6f\n",
-                    gbs_debug_counter, ds, w0);
+                    gbs_debug_counter.load(), ds, w0);
     }
 
     for (int stage = 0; stage < MAX_STAGES; stage++) {

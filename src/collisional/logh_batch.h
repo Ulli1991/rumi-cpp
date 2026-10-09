@@ -35,17 +35,17 @@ struct SubsystemBatch {
     // stored_aux_vel_offsets[s] = starting body index for subsystem s
     std::vector<double> stored_aux_vel;
     std::vector<int> stored_aux_vel_offsets;
-    std::vector<bool> has_stored_aux_vel;
+    std::vector<char> has_stored_aux_vel;
 
     // Persistent spin vectors for BH binaries (2-body only, code units)
     // stored_spins[s] = {chi1[3], chi2[3]} for subsystem s
     std::vector<double> stored_spins;  // flat: [n_sub * 6]
-    std::vector<bool> has_stored_spins;
+    std::vector<char> has_stored_spins;
     std::vector<int> stored_stellar_type;  // flat: [n_sub * 2] for 2-body (spins)
 
     // Persistent normalization scales (computed once per subsystem, fixed thereafter)
     std::vector<double> stored_V_scale, stored_R_scale, stored_T_scale, stored_E_scale;
-    std::vector<bool> stored_scales_set;
+    std::vector<char> stored_scales_set;
 
     // Cached member indices from pack() — reused by unpack() to avoid recomputation
     std::vector<int> cached_member_indices;

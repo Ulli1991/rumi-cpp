@@ -342,7 +342,11 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
     double min_dE = 1e30;
     int cap_hit = 0;
 
-    for (int s = 0; s < n_sub; s++) {
+    // Subsystems are independent: integrate them on all host threads (one GBS integration is long
+    // serial work; dynamic scheduling balances binaries against multiplets)
+    using HostPolicy = Kokkos::RangePolicy<Kokkos::DefaultHostExecutionSpace, Kokkos::Schedule<Kokkos::Dynamic>>;
+    Kokkos::parallel_reduce("logh_batch_host", HostPolicy(0, n_sub),
+        [&](int s, int& gbs_sum, double& dE_max, double& dE_min, int& caps) {
         int nb = h_nbod(s);
         int off = h_off(s);
         double dt = h_dt(s);
@@ -559,11 +563,12 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
         h_eerr(s) = dE_rel;
         h_conv(s) = (n_gbs_steps < GBS_MAX_STEPS) ? 1 : 0;
 
-        total_gbs_steps += n_gbs_steps;
-        if (dE_rel > max_dE) max_dE = dE_rel;
-        if (dE_rel < min_dE) min_dE = dE_rel;
-        if (n_gbs_steps >= GBS_MAX_STEPS) cap_hit++;
-    }
+        gbs_sum += n_gbs_steps;
+        if (dE_rel > dE_max) dE_max = dE_rel;
+        if (dE_rel < dE_min) dE_min = dE_rel;
+        if (n_gbs_steps >= GBS_MAX_STEPS) caps++;
+    }, Kokkos::Sum<int>(total_gbs_steps), Kokkos::Max<double>(max_dE), Kokkos::Min<double>(min_dE),
+       Kokkos::Sum<int>(cap_hit));
 
     // Store stats for caller (printed in step summary, not here)
     batch.stat_total_gbs = total_gbs_steps;
