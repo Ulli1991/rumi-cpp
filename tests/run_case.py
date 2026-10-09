@@ -24,6 +24,11 @@ MERGERS = dict(TEST_CASE="plummer", INTEGRATOR="hhs", TOTAL_TIME_MYR="2e-8", DT_
                SSE_ENABLED="false", PLUMMER_N="400", PLUMMER_M_TOTAL="200", PLUMMER_R_HALF="0.3", PLUMMER_SEED="7",
                PLUMMER_MASS_DIST="kroupa", BINARY_FRAC="0.5", BINARY_A_MIN_AU="0.005", BINARY_A_MAX_AU="0.02",
                PRINT_INTERVAL="1", PROFILING="false")
+# 16 stars inside r_ngb: one 15-body neighbour group, more than LogH's fixed storage (LOGH_MAX_BODIES = 8)
+BIG_GROUP = dict(TEST_CASE="plummer", INTEGRATOR="hhs", TOTAL_TIME_MYR="1e-5", DT_MAX_MYR="1e-6", DT_MIN_MYR="1e-16",
+                 SOFTENING_PC="0", COLLISIONAL="true", R_NGB="1e-3", R_NGB_MAX="0.1", PN_ORDER="0", SSE_ENABLED="false",
+                 PLUMMER_N="16", PLUMMER_M_TOTAL="16", PLUMMER_R_HALF="2e-4", PLUMMER_SEED="3", PLUMMER_MASS_DIST="equal",
+                 PRINT_INTERVAL="1", PROFILING="false")
 
 
 def run(exe, cfg):
@@ -78,6 +83,15 @@ def mergers(exe, label, cfg, bounds):
     ok = check(f"{label} mergers", n_merged, 50, lower=True)
     ok &= check(f"{label} |N_final - (N0 - mergers)|", abs(n_final - (n0 - n_merged)), 0)
     ok &= check(f"{label} max|dE/E| with merger sink", max(r[0] for r in rows), bounds[0])
+    return ok & check(f"{label} max|dP|/M [km/s]", max(r[1] for r in rows), bounds[1])
+
+
+def big_group(exe, label, cfg, bounds):
+    """A group larger than LogH's storage must stay with the FSI: no crash, P conserved, E bounded."""
+    out = run_output(exe, cfg)
+    rows = diagnostics(out)
+    ok = check(f"{label} groups left to the FSI", out.count("exceeds LOGH_MAX_BODIES"), 1, lower=True)
+    ok &= check(f"{label} max|dE/E|", max(r[0] for r in rows), bounds[0])
     return ok & check(f"{label} max|dP|/M [km/s]", max(r[1] for r in rows), bounds[1])
 
 
@@ -143,6 +157,8 @@ CASES = {
     # recursion 2.2e-10 / 4.3e-14 km/s; CPU small-subset path (4 restarts) 1.9e-9 / 3.1e-12 km/s. Bounds:
     # the restart threshold for E, P well above round-off but far below one lost binary member (~3 km/s).
     "mergers_gpu_path": lambda exe: mergers(exe, "mergers gpu path", dict(MERGERS, SERIAL_N2_CPU="0"), (1e-8, 1e-12)),
+    # Before: LogH wrote a 15-body group past its 8-body arrays (bus error). Measured 9.4e-6 / 2.0e-14 km/s.
+    "logh_big_group": lambda exe: big_group(exe, "big group", BIG_GROUP, (1.2e-5, 1e-12)),
     "mergers_cpu_path": lambda exe: mergers(exe, "mergers cpu path", dict(MERGERS, SERIAL_N2_CPU="64"), (1e-8, 1e-11)),
 }
 

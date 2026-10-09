@@ -234,6 +234,18 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
     };
 
     for (auto& [root, members] : components) {
+        // LogH has fixed storage for LOGH_MAX_BODIES; MSTAR, which BIFROST uses for larger groups, is
+        // not wired in. Larger groups stay field particles, integrated by the FSI directly.
+        if ((int)members.size() > LOGH_MAX_BODIES) {
+            static bool warned = false;
+            if (!warned) {
+                std::printf("WARNING: %d-body group exceeds LOGH_MAX_BODIES=%d, left to the FSI "
+                            "(reported once)\n", (int)members.size(), LOGH_MAX_BODIES);
+                warned = true;
+            }
+            continue;
+        }
+
         // Check if this component exactly matches an existing subsystem
         auto key = make_key(members);
         auto it = old_by_pids.find(key);
