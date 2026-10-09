@@ -189,11 +189,22 @@ void compute_errors(const DiagnosticState& cur, const DiagnosticState& ini,
         double M_total = 0;
         for (int i = 0; i < p.N; i++) M_total += h_mass(i);
         double dpx = cur.Px - ini.Px, dpy = cur.Py - ini.Py, dpz = cur.Pz - ini.Pz;
+#ifdef ENABLE_COLLISIONAL
+        if (g_collisional.enabled) {
+            dpx += g_energy_books.P_sink[0]; dpy += g_energy_books.P_sink[1]; dpz += g_energy_books.P_sink[2];
+        }
+#endif
         dP = vec_mag(dpx, dpy, dpz) / M_total;
     }
 
+    double Lx = cur.Lx, Ly = cur.Ly, Lz = cur.Lz;
+#ifdef ENABLE_COLLISIONAL
+    if (g_collisional.enabled) {
+        Lx += g_energy_books.L_sink[0]; Ly += g_energy_books.L_sink[1]; Lz += g_energy_books.L_sink[2];
+    }
+#endif
     double L0_mag = vec_mag(ini.Lx, ini.Ly, ini.Lz);
-    double L_mag  = vec_mag(cur.Lx, cur.Ly, cur.Lz);
+    double L_mag  = vec_mag(Lx, Ly, Lz);
     dL = (L0_mag > 0.0) ? std::fabs((L_mag - L0_mag) / L0_mag) : 0.0;
 }
 

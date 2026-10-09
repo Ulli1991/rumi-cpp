@@ -19,8 +19,21 @@ struct EnergyBookkeeping {
     double E_merge = 0.0;     // merger dissipation
     double E_sse = 0.0;       // stellar evolution mass loss
 
+    // Momentum and angular momentum (about the origin) carried off by the same events: escapers, merger
+    // mass loss and kicks, orbital L of merged pairs (remnant spin is not tracked), SSE winds and kicks
+    double P_sink[3] = {0.0, 0.0, 0.0};
+    double L_sink[3] = {0.0, 0.0, 0.0};
+
     double total_sink() const { return E_escape + E_gw + E_merge + E_sse; }
-    void reset() { E_escape = E_gw = E_merge = E_sse = 0.0; }
+    void reset() { *this = EnergyBookkeeping(); }
+
+    // Book what a body of mass m at r with velocity v takes along (sign -1: what it brings)
+    void sink_PL(double m, const double r[3], const double v[3], double sign = 1.0) {
+        for (int k = 0; k < 3; k++) P_sink[k] += sign * m * v[k];
+        L_sink[0] += sign * m * (r[1] * v[2] - r[2] * v[1]);
+        L_sink[1] += sign * m * (r[2] * v[0] - r[0] * v[2]);
+        L_sink[2] += sign * m * (r[0] * v[1] - r[1] * v[0]);
+    }
 };
 
 // Global energy bookkeeping instance

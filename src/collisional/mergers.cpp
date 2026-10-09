@@ -295,6 +295,14 @@ void execute_merger(const MergerEvent& event, Particles& p,
         E_after -= G * h_m(k) * (m_rem / rc - m1 / r1 - m2 / r2);
     }
     books.E_merge += E_before - E_after;
+    {
+        double r1[3] = {h_x(idx1), h_y(idx1), h_z(idx1)}, v1[3] = {h_vx(idx1), h_vy(idx1), h_vz(idx1)};
+        double r2[3] = {h_x(idx2), h_y(idx2), h_z(idx2)}, v2[3] = {h_vx(idx2), h_vy(idx2), h_vz(idx2)};
+        double rc[3] = {cx, cy, cz}, u[3] = {ux, uy, uz};
+        books.sink_PL(m1, r1, v1);
+        books.sink_PL(m2, r2, v2);
+        books.sink_PL(m_rem, rc, u, -1.0);
+    }
 
     // Place remnant at idx1, mark idx2 for removal
     h_x(idx1) = cx; h_y(idx1) = cy; h_z(idx1) = cz;
@@ -431,6 +439,10 @@ int remove_escapers(Particles& p, double G, double r_escape_rh,
             PE_esc -= G * h_m(i) * h_m(j) / rij;
         }
         books.E_escape += KE_esc + PE_esc;
+        {
+            double ri[3] = {h_x(i), h_y(i), h_z(i)}, vi[3] = {h_vx(i), h_vy(i), h_vz(i)};
+            books.sink_PL(h_m(i), ri, vi);
+        }
 
         // Record escaper event before zeroing mass
         g_escaper_log.record(h_pid(i), g_sim_time, h_m(i),

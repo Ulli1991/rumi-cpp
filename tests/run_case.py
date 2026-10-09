@@ -104,6 +104,7 @@ def mergers(exe, label, cfg, bounds):
     ok = check(f"{label} mergers", n_merged, 50, lower=True)
     ok &= check(f"{label} |N_final - (N0 - mergers)|", abs(n_final - (n0 - n_merged)), 0)
     ok &= check(f"{label} max|dE/E| with merger sink", max(r[0] for r in rows), bounds[0])
+    ok &= check(f"{label} max|dL/L| with merger sink", max(r[2] for r in rows), bounds[1])
     return ok & check(f"{label} max|dP|/M [km/s]", max(r[1] for r in rows), bounds[1])
 
 
@@ -143,6 +144,7 @@ def binaries(exe, label, cfg, bounds):
     rows = run(exe, cfg)
     ok = check(f"{label} steps", len(rows), 2, lower=True)
     ok &= check(f"{label} max|dE/E|", max(r[0] for r in rows), bounds[0])
+    ok &= check(f"{label} max|dL/L|", max(r[2] for r in rows), bounds[1])
     return ok & check(f"{label} max|dP|/M [km/s]", max(r[1] for r in rows), bounds[1])
 
 

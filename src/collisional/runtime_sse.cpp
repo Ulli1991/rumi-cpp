@@ -1,14 +1,18 @@
 #include "runtime_sse.h"
 #include "constants.h"
+#include "diagnostics.h"
 #include <cmath>
 #include <cstdio>
+#include <vector>
 
 void advance_stellar_evolution(Particles& p, SSEContext& sse, double dt_myr,
                                 EnergyBookkeeping& books, double G) {
-    (void)G;
     if (dt_myr <= 0.0) return;
 
     int N = p.N;
+    auto h_x     = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.x);
+    auto h_y     = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.y);
+    auto h_z     = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.z);
 
     // Copy stellar fields to host
     auto h_m     = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.mass);
@@ -25,6 +29,9 @@ void advance_stellar_evolution(Particles& p, SSEContext& sse, double dt_myr,
     bool changed = false;
     double total_dm = 0;
     int n_type_change = 0;
+    // State before the update, for the exact energy, momentum and angular momentum sinks
+    std::vector<int> touched;
+    std::vector<double> m_before, v_before;
 
     for (int i = 0; i < N; i++) {
         int kw = h_stype(i);
@@ -42,11 +49,11 @@ void advance_stellar_evolution(Particles& p, SSEContext& sse, double dt_myr,
 
         // Mass loss
         double dm = m_old - res.mass;
-        if (dm > 0) {
-            // Energy correction: kinetic energy of lost mass
-            double v2 = h_vx(i)*h_vx(i) + h_vy(i)*h_vy(i) + h_vz(i)*h_vz(i);
-            books.E_sse += 0.5 * dm * v2;
-            total_dm += dm;
+        if (dm > 0) total_dm += dm;
+        if (dm != 0.0 || res.kw != kw) {
+            touched.push_back(i);
+            m_before.push_back(m_old);
+            v_before.insert(v_before.end(), {h_vx(i), h_vy(i), h_vz(i)});
         }
 
         // Update particle properties
@@ -83,11 +90,28 @@ void advance_stellar_evolution(Particles& p, SSEContext& sse, double dt_myr,
 
     if (!changed) return;
 
+    // Exact sinks: E_sse = E(before) - E(after) with the potential of every pair, so E_total + sinks is
+    // conserved through winds and natal kicks; P and L carried off by the lost mass (and the kick recoil)
+    double PE_before = 0.0, KE_change = 0.0;
+    if (!touched.empty()) PE_before = compute_potential_energy_tiled(p, G, 0.0, 0, N);
+    for (size_t k = 0; k < touched.size(); k++) {
+        int i = touched[k];
+        const double* vb = &v_before[3 * k];
+        double r[3] = {h_x(i), h_y(i), h_z(i)}, va[3] = {h_vx(i), h_vy(i), h_vz(i)};
+        KE_change += 0.5 * h_m(i) * (va[0]*va[0] + va[1]*va[1] + va[2]*va[2])
+                   - 0.5 * m_before[k] * (vb[0]*vb[0] + vb[1]*vb[1] + vb[2]*vb[2]);
+        books.sink_PL(m_before[k], r, vb);
+        books.sink_PL(h_m(i), r, va, -1.0);
+    }
+
     // Copy back to device
     Kokkos::deep_copy(p.mass, h_m);
     Kokkos::deep_copy(p.vx, h_vx);
     Kokkos::deep_copy(p.vy, h_vy);
     Kokkos::deep_copy(p.vz, h_vz);
+    p.zero_kick_compensation();   // kicked velocities are new
+    if (!touched.empty())
+        books.E_sse += -KE_change + PE_before - compute_potential_energy_tiled(p, G, 0.0, 0, N);
     Kokkos::deep_copy(p.stellar_type, h_stype);
     Kokkos::deep_copy(p.stellar_age, h_sage);
     Kokkos::deep_copy(p.core_mass, h_cmass);
