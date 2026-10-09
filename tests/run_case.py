@@ -185,6 +185,17 @@ def all_binaries(exe, label, cfg, n_bin):
         check(f"{label} max|dE/E|", max(r[0] for r in rows), 1e-8)
 
 
+def ranks_agree(exe, label, cfg, bound):
+    """The same run on 1 and 2 ranks: the energy series must agree to round-off (MPI-only paths)."""
+    launcher = os.environ.get("NBODY_TEST_LAUNCHER", "")
+    os.environ["NBODY_TEST_LAUNCHER"] = launcher.replace("-n 2", "-n 1")
+    one = run(exe, cfg)
+    os.environ["NBODY_TEST_LAUNCHER"] = launcher
+    two = run(exe, cfg)
+    ok = check(f"{label} rows (1 vs 2 ranks)", abs(len(one) - len(two)), 0)
+    return ok & check(f"{label} max |dE/E(1) - dE/E(2)|", max(abs(a[0] - b[0]) for a, b in zip(one, two)), bound)
+
+
 def check(name, value, bound, lower=False):
     ok = value >= bound if lower else value <= bound
     print(f"{'ok  ' if ok else 'FAIL'} {name} = {value:.3e} ({'>=' if lower else '<='} {bound:.3e})")
@@ -298,6 +309,9 @@ CASES = {
     # CPU path with restarts off: a merger in a nested CPU call used to drop the enclosing level's subsystem
     # flags on the host (internal forces counted twice), |dE/E| 2e-5 per step, hidden by restarts. Measured
     # now 1.4e-10 / 6.7e-13 km/s, as the GPU path.
+    # 2000 stars with binaries on 1 and 2 ranks: measured |difference| 4e-15 over 5 steps (summation order)
+    "mpi_1v2": lambda exe: ranks_agree(exe, "1 vs 2 ranks", dict(BINARIES, TOTAL_TIME_MYR="5e-3", REPLICA_CHECK_INTERVAL="1"),
+                                       1e-13),
     "mergers_cpu_path": lambda exe: mergers(exe, "mergers cpu path", dict(MERGERS, SERIAL_N2_CPU="64", ETA_RESTART="0"),
                                             (1e-8, 1e-11)),
 }
