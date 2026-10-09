@@ -23,6 +23,7 @@ add_executable(nbody-kokkos
     ${SRC_DIR}/gravity/forces.cpp
     ${SRC_DIR}/gravity/tree.cpp
     ${SRC_DIR}/gravity/tree_forces.cpp
+    ${SRC_DIR}/gravity/fmm.cpp
     ${SRC_DIR}/integrator/integrator.cpp
     ${SRC_DIR}/integrator/integrator_cpu.cpp
     ${SRC_DIR}/integrator/timestep.cpp
@@ -62,6 +63,12 @@ if(ENABLE_COLLISIONAL)
     message(STATUS "Collisional (unsoftened direct N-body) support enabled")
 endif()
 target_link_libraries(nbody-kokkos Kokkos::kokkos)
+
+# FMM check against direct summation (tests/fmm_test.cpp)
+add_executable(fmm-test ${CMAKE_CURRENT_SOURCE_DIR}/tests/fmm_test.cpp ${SRC_DIR}/gravity/fmm.cpp)
+target_include_directories(fmm-test PRIVATE ${SRC_DIR}/core ${SRC_DIR}/gravity)
+target_link_libraries(fmm-test Kokkos::kokkos)
+target_compile_features(fmm-test PRIVATE cxx_std_17)
 target_compile_features(nbody-kokkos PRIVATE cxx_std_17)
 
 # Build type: Release (default), RelWithDebInfo, Debug
