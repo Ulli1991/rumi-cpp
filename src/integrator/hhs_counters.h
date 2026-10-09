@@ -31,11 +31,14 @@ struct HHSCounters {
 
     // Per-depth: CPU serial path
     int cpu_depth_calls[MAX_DEPTH] = {};
+    long long cc_calls[MAX_DEPTH] = {}, cc_comps[MAX_DEPTH] = {}, cc_largest[MAX_DEPTH] = {};   // HHS_CC splits
     long long cpu_depth_count[MAX_DEPTH] = {};
 
     void reset() {
         distributed = local = cpu = slow0_dist = slow0_local = max_depth = 0;
         std::memset(local_depth_calls, 0, sizeof(local_depth_calls));
+        std::memset(cc_calls, 0, sizeof(cc_calls)); std::memset(cc_comps, 0, sizeof(cc_comps));
+        std::memset(cc_largest, 0, sizeof(cc_largest));
         std::memset(local_depth_count, 0, sizeof(local_depth_count));
         std::memset(local_depth_time, 0, sizeof(local_depth_time));
         std::memset(dist_depth_calls, 0, sizeof(dist_depth_calls));

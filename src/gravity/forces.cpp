@@ -261,3 +261,102 @@ void neighbor_search_subset(Particles& p, int start, int count,
 void neighbor_search_subset(Particles&, int, int, double, double, double, double) {}
 #endif
 
+
+// ==========================================================================
+// HHS with connected components (HHS_CC)
+// ==========================================================================
+namespace {
+Kokkos::View<int*>& cc_buf(int k) {   // 0: edge i, 1: edge j, 2: counter
+    static Kokkos::View<int*> b[3] = {Kokkos::View<int*>("cc_ei", 0), Kokkos::View<int*>("cc_ej", 0), Kokkos::View<int*>("cc_cnt", 1)};
+    static bool hook = (Kokkos::push_finalize_hook([] { for (auto& v : b) v = Kokkos::View<int*>(); }), true);
+    (void)hook;
+    return b[k];
+}
+}  // namespace
+
+std::vector<int> cc_components(Particles& p, int start, int count, double pivot, double G, double soft2, double eta) {
+    std::vector<int> sizes{count};
+    if (count < 2) return sizes;
+    const int max_edges = 16 * count + 1024;
+    if ((int)cc_buf(0).extent(0) < max_edges) { Kokkos::realloc(cc_buf(0), max_edges); Kokkos::realloc(cc_buf(1), max_edges); }
+    if (cc_buf(2).extent(0) < 1) Kokkos::realloc(cc_buf(2), 1);
+    Kokkos::deep_copy(cc_buf(2), 0);
+    Etas e = etas(eta);
+    static Kokkos::View<double*> dmin("cc_dmin", 0);
+    static bool hook = (Kokkos::push_finalize_hook([] { dmin = Kokkos::View<double*>(); }), true);
+    (void)hook;
+    if ((int)dmin.extent(0) < count) Kokkos::realloc(dmin, count);
+    PairMinK pm{{p.x.data()}, {p.y.data()}, {p.z.data()}, {p.mass.data()}, {p.vx.data()}, {p.vy.data()}, {p.vz.data()},
+                {dmin.data()}, start, sid_ptr(p, p.collisional), G, soft2, e.ff, e.fb};
+    run_n2("cc_pair_min", start, count, start, count, pm);
+    auto launch = [&](auto coll_tag) {
+        constexpr bool COLL = decltype(coll_tag)::value;
+        EdgeK<COLL> k{{p.x.data()}, {p.y.data()}, {p.z.data()}, {p.mass.data()}, {p.vx.data()}, {p.vy.data()}, {p.vz.data()},
+                      sid_ptr(p, COLL), cc_buf(0).data(), cc_buf(1).data(), cc_buf(2).data(), max_edges,
+                      G, soft2, e.ff, e.fb, pivot, {dmin.data()}, start};
+        run_n2("cc_edges", start, count, start, count, k);
+    };
+#ifdef ENABLE_COLLISIONAL
+    if (p.collisional) launch(std::true_type{}); else
+#endif
+    launch(std::false_type{});
+    int n_edges = 0;
+    Kokkos::deep_copy(n_edges, Kokkos::subview(cc_buf(2), 0));
+    if (n_edges > max_edges) return sizes;   // dense: one component
+    auto hi = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Kokkos::subview(cc_buf(0), Kokkos::make_pair(0, n_edges)));
+    auto hj = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Kokkos::subview(cc_buf(1), Kokkos::make_pair(0, n_edges)));
+    std::vector<int> parent(count);
+    for (int k = 0; k < count; k++) parent[k] = k;
+    auto find = [&](int a) { while (parent[a] != a) { parent[a] = parent[parent[a]]; a = parent[a]; } return a; };
+    for (int k = 0; k < n_edges; k++) {
+        int a = find(hi(k) - start), b = find(hj(k) - start);
+        if (a != b) parent[std::max(a, b)] = std::min(a, b);
+    }
+    // components ordered by their first slot; slots in their original order inside a component
+    std::vector<int> root(count), comp_of_root(count, -1), order;
+    sizes.clear();
+    for (int k = 0; k < count; k++) {
+        root[k] = find(k);
+        if (comp_of_root[root[k]] < 0) { comp_of_root[root[k]] = (int)sizes.size(); sizes.push_back(0); }
+        sizes[comp_of_root[root[k]]]++;
+    }
+    if (sizes.size() == 1) return sizes;
+    std::vector<int> offs(sizes.size(), 0);
+    for (size_t c = 1; c < sizes.size(); c++) offs[c] = offs[c - 1] + sizes[c - 1];
+    order.resize(count);
+    for (int k = 0; k < count; k++) order[offs[comp_of_root[root[k]]]++] = start + k;
+    auto hs = Kokkos::create_mirror_view(p.scratch_i);
+    Kokkos::deep_copy(hs, p.scratch_i);
+    for (int k = 0; k < count; k++) hs(k) = order[k];
+    Kokkos::deep_copy(p.scratch_i, hs);
+    p.apply_permutation(start, count);
+    return sizes;
+}
+
+void cc_inter_acceleration(Particles& p, int start, int count, const int* cid, double G, double soft2) {
+    auto launch = [&](auto coll_tag) {
+        constexpr bool COLL = decltype(coll_tag)::value;
+        ForceCidK<COLL> k{{p.x.data()}, {p.y.data()}, {p.z.data()}, {p.mass.data()}, {p.ax.data()}, {p.ay.data()},
+                          {p.az.data()}, sid_ptr(p, COLL), cid, G, soft2};
+        run_n2("cc_inter_force", start, count, start, count, k);
+    };
+#ifdef ENABLE_COLLISIONAL
+    if (p.collisional) { launch(std::true_type{}); return; }
+#endif
+    launch(std::false_type{});
+}
+
+void cc_inter_gradient(Particles& p, int start, int count, const int* cid, const GradSnapshot& s, double G, double soft2,
+                       double dt) {
+    auto launch = [&](auto coll_tag) {
+        constexpr bool COLL = decltype(coll_tag)::value;
+        GradCidK<COLL> k{{p.x.data()}, {p.y.data()}, {p.z.data()}, {p.mass.data()}, {p.ax.data()}, {p.ay.data()},
+                         {p.az.data()}, {s.x}, {s.y}, {s.z}, s.offset, sid_ptr(p, COLL), cid,
+                         G * dt * dt * GRAD_COEFF, soft2};
+        run_n2("cc_inter_grad", start, count, start, count, k);
+    };
+#ifdef ENABLE_COLLISIONAL
+    if (p.collisional) { launch(std::true_type{}); return; }
+#endif
+    launch(std::false_type{});
+}

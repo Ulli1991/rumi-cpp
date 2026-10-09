@@ -188,6 +188,14 @@ def all_binaries(exe, label, cfg, n_bin):
         check(f"{label} max|dE/E|", max(r[0] for r in rows), 1e-8)
 
 
+def cc_vs_plain(exe, label, cfg, ratio):
+    """HHS_CC against plain HHS on the same run: max |dE/E| at most `ratio` times the plain one."""
+    plain = max(r[0] for r in run(exe, dict(cfg, HHS_CC="false")))
+    cc = max(r[0] for r in run(exe, dict(cfg, HHS_CC="true")))
+    print(f"   plain {plain:.3e}, HHS_CC {cc:.3e}")
+    return check(f"{label} max|dE/E| HHS_CC / plain", cc / plain, ratio)
+
+
 def ranks_agree(exe, label, cfg, bound):
     """The same run on 1 and 2 ranks: the energy series must agree to round-off (MPI-only paths)."""
     launcher = os.environ.get("NBODY_TEST_LAUNCHER", "")
@@ -324,6 +332,12 @@ CASES = {
     # Before: the neighbour buffer (max(1000, N/10) pairs) truncated silently, 250 binaries stayed field
     # particles at level ~30 and step 1 never finished. Measured: all 1250 detected, 1.1 s, 1.7e-13.
     "binaries50_detected": lambda exe: all_binaries(exe, "50 % binaries", BINARIES50, 1250),
+    # HHS_CC (connected components): a pair made fast only by the v/a criterion must stay one component (before the
+    # dominant-partner edges: precession off by 50 %), and binaries keep their strongest perturber (before: 10x dE)
+    "cc_pn1_wide": lambda exe: precession(exe, "wide PN1 binary, HHS_CC", dict(PN1_WIDE, HHS_CC="true"), 0.1),
+    "cc_binaries50": lambda exe: all_binaries(exe, "50 % binaries, HHS_CC", dict(BINARIES50, HHS_CC="true"), 1250),
+    # measured 5.0e-11 / 3.8e-11 = 1.3 (10 before binaries kept their perturbers)
+    "cc_vs_plain_binaries50": lambda exe: cc_vs_plain(exe, "50 % binaries", BINARIES50, 3.0),
     # Triple branch of detect_from_pairs used a particle id where the union-find wanted a compact id
     # (out of bounds for ids >= the number of pair members; the tests' triples had ids 0-2)
     # Measured 9.8e-9 (dense core, at the restart threshold): bound 3e-8

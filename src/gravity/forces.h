@@ -50,3 +50,13 @@ void neighbor_search_subset(Particles& p, int start, int count,
                             double G, double r_ngb, double r_ngb_max,
                             double pivot_dt);
 
+
+// HHS with connected components (HHS_CC): split [start, start+count) into components (pair time step below
+// pivot, or subsystem partners, connect), reorder it so components are contiguous, return their sizes in order
+// (one entry if connected or too dense)
+#include <vector>
+std::vector<int> cc_components(Particles& p, int start, int count, double pivot, double G, double soft2, double eta);
+// Accelerations and gradient corrections from other components (cid per particle), added to ax, ay, az
+void cc_inter_acceleration(Particles& p, int start, int count, const int* cid, double G, double soft2);
+void cc_inter_gradient(Particles& p, int start, int count, const int* cid, const GradSnapshot& s, double G,
+                       double soft2, double dt);

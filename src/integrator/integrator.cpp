@@ -52,6 +52,8 @@ bool use_nonblocking_mpi = false;
 // Barnes-Hut tree configuration
 bool use_tree = false;
 bool all_slow_split = false;
+bool hhs_cc = false;
+int hhs_cc_max = -1;   // -1: SERIAL_N2_GPU
 bool distribute_subsystems = false;
 int distribute_subsystems_min = 256;
 int tree_threshold = 10000;
@@ -1247,7 +1249,17 @@ void hhs_fsi_step_dynamic(Particles& p, int start, int count, double pivot_dt,
     if (do_global_pn)
         global_pn1_kick(p, start, count, G, g_collisional.c_code, g_collisional.m_pn, pivot_dt * 0.5);
 #endif
+    if (hhs_cc) g_hhs_counters.reset();
     int n_removed = hhs_fsi_recursive(p, nullptr, start, count, pivot_dt, G, soft2, dt_min, eta, false);
+    if (hhs_cc) {   // component statistics per depth
+        std::printf("  HHS_CC components:");
+        for (int d = 0; d < HHSCounters::MAX_DEPTH; d++)
+            if (g_hhs_counters.cc_calls[d] > 0)
+                std::printf(" d%d %lld x %.1f (largest %.0f)", d, g_hhs_counters.cc_calls[d],
+                            (double)g_hhs_counters.cc_comps[d] / g_hhs_counters.cc_calls[d],
+                            (double)g_hhs_counters.cc_largest[d] / g_hhs_counters.cc_calls[d]);
+        std::printf("\n");
+    }
 #ifdef ENABLE_COLLISIONAL
     if (do_global_pn)
         global_pn1_kick(p, start, count - n_removed, G, g_collisional.c_code, g_collisional.m_pn, pivot_dt * 0.5);
@@ -1854,6 +1866,95 @@ static void cross_acceleration_and_gradient_global_tree(Particles& p,
 }
 
 // =============================================================================
+// HHS with connected components (HHS_CC, Janes et al. 2014): the fast set F splits into components (pair time
+// step below the pivot, or subsystem partners, connect). Interactions S<->F and between components are kicked at
+// this level (with the gradient term in the middle kick); each component recurses alone, so the deep levels become
+// independent pieces of work. Same kick-drift structure as Algorithm 4.
+// =============================================================================
+static int hhs_cc_step(Particles& p, DistributedParticles* dp, int slow_start, int slow_count, int fast_start,
+                       std::vector<int> comps, double pivot_dt, double G, double soft2, double dt_min, double eta,
+                       int depth) {
+    static Kokkos::View<int*> cid("cc_cid", 0);
+    static Kokkos::View<double*> snx("cc_snx", 0), sny("cc_sny", 0), snz("cc_snz", 0);
+    static bool hook = (Kokkos::push_finalize_hook([] { cid = Kokkos::View<int*>(); snx = sny = snz = Kokkos::View<double*>(); }), true);
+    (void)hook;
+    int n_removed = 0;
+    auto fast_count = [&]() { int n = 0; for (int c : comps) n += c; return n; };
+    auto set_cid = [&]() {   // component index per particle of F (nested levels reuse the array)
+        if ((int)cid.extent(0) < p.N) Kokkos::realloc(cid, p.N);
+        std::vector<int> h;
+        for (size_t c = 0; c < comps.size(); c++) h.insert(h.end(), comps[c], (int)c);
+        if (h.empty()) return;
+        Kokkos::View<int*, Kokkos::HostSpace, Kokkos::MemoryUnmanaged> hv(h.data(), h.size());
+        Kokkos::deep_copy(Kokkos::subview(cid, Kokkos::make_pair(fast_start, fast_start + (int)h.size())), hv);
+    };
+    auto cross = [&](bool with_grad) {
+        const int nf = fast_count();
+        g_profiler.start();
+        cross_acceleration(p, slow_start, slow_count, fast_start, nf, G, soft2);   // nf = 0 or slow = 0: zero
+        set_cid();
+        cc_inter_acceleration(p, fast_start, nf, cid.data(), G, soft2);
+        if (with_grad) {
+            if ((int)snx.extent(0) < nf) { Kokkos::realloc(snx, nf); Kokkos::realloc(sny, nf); Kokkos::realloc(snz, nf); }
+            RawView ax{p.ax.data()}, ay{p.ay.data()}, az{p.az.data()}, ox{snx.data()}, oy{sny.data()}, oz{snz.data()};
+            const int f0 = fast_start;
+            Kokkos::parallel_for("cc_snap", nf, KOKKOS_LAMBDA(int ii) {
+                ox(ii) = ax(f0 + ii); oy(ii) = ay(f0 + ii); oz(ii) = az(f0 + ii);
+            });
+            if (slow_count > 0)
+                cross_gradient_correction(p, slow_start, slow_count, fast_start, nf, G, soft2, pivot_dt);
+            cc_inter_gradient(p, fast_start, nf, cid.data(), GradSnapshot{snx.data(), sny.data(), snz.data(), fast_start},
+                              G, soft2, pivot_dt);
+        }
+        g_profiler.stop(with_grad ? StepProfiler::CROSS_GRAD : StepProfiler::CROSS_FORCE);
+    };
+    auto kick = [&](double f) {
+        g_profiler.start();
+        kick_velocities(p, slow_start, slow_count, pivot_dt * f);
+        kick_velocities(p, fast_start, fast_count(), pivot_dt * f);
+        g_profiler.stop(StepProfiler::DRIFT_KICK);
+    };
+    auto recurse_all = [&]() {
+        int s0 = fast_start;
+        for (int& c : comps) {
+            if (c == 1) {   // a lone particle has no internal interactions: its own Hamiltonian is a free drift
+                g_profiler.start();
+                drift(p, s0, 1, pivot_dt * 0.5);
+                g_profiler.stop(StepProfiler::DRIFT_KICK);
+                s0 += 1;
+                continue;
+            }
+            int k = hhs_fsi_recursive(p, dp, s0, c, pivot_dt * 0.5, G, soft2, dt_min, eta, false, false, depth + 1);
+            c -= k;
+            n_removed += k;
+            s0 += c;
+        }
+    };
+#ifdef ENABLE_COLLISIONAL
+    auto saved_active = g_subsystem_mgr.active;
+    auto restore = [&]() {
+        g_profiler.start();
+        g_subsystem_mgr.restore_active(saved_active);
+        if (!g_subsystem_mgr.active.empty()) g_subsystem_mgr.rebuild_pid_to_idx(p);
+        g_subsystem_mgr.update_particle_flags(p);
+        g_profiler.stop(StepProfiler::SUBSYSTEM_BOOKKEEP);
+    };
+#else
+    auto restore = []() {};
+#endif
+    cross(false); kick(FSI_KICK);
+    if (slow_count > 0) fsi_step(p, slow_start, slow_count, G, soft2, pivot_dt * 0.5, false, true);
+    recurse_all();
+    restore();
+    cross(true); kick(FSI_MOD_KICK);
+    recurse_all();
+    restore();
+    if (slow_count > 0) fsi_step(p, slow_start, slow_count, G, soft2, pivot_dt * 0.5, false, true);
+    cross(false); kick(FSI_KICK);
+    return n_removed;
+}
+
+// =============================================================================
 // Unified HHS-FSI recursion (Algorithm 4 from FROST paper)
 //
 // Single function handles all GPU paths: MPI-distributed, local GPU, and tree.
@@ -1881,8 +1982,12 @@ static int hhs_fsi_recursive(
         ~DepthScope() { g_profiler.cur_depth = saved; }
     } depth_scope(depth);
 
+    // HHS_CC splits sets of at most cc_max particles; they run locally on every rank (replicated), so that the
+    // integration does not depend on the number of ranks
+    const int cc_max = hhs_cc_max >= 0 ? hhs_cc_max : std::max(serial_n2_gpu, 16384);
+    const bool cc_set = hhs_cc && count <= cc_max;
     // Dispatch flags: MPI for large subsets when distributed
-    bool use_mpi = dp && (serial_n2_gpu == 0 || count > serial_n2_gpu);
+    bool use_mpi = dp && (serial_n2_gpu == 0 || count > serial_n2_gpu) && !cc_set;
     bool tree_eligible = dp && use_tree && count >= tree_threshold;
 
     // Counters
@@ -2096,6 +2201,21 @@ static int hhs_fsi_recursive(
             fsi_step(p, start, count, G, soft2, pivot_dt, forces_valid, true);
         }
         return n_removed;
+    }
+
+    // HHS_CC: split the fast set into components when it falls apart (local path only)
+    if (cc_set && !tree_eligible && fast_count >= 2) {
+        g_profiler.start();
+        std::vector<int> comps = cc_components(p, fast_start, fast_count, pivot_dt, G, soft2, eta);
+        g_profiler.stop(StepProfiler::PARTITION);
+        if (depth < HHSCounters::MAX_DEPTH) {
+            g_hhs_counters.cc_calls[depth]++;
+            g_hhs_counters.cc_comps[depth] += (long long)comps.size();
+            g_hhs_counters.cc_largest[depth] += *std::max_element(comps.begin(), comps.end());
+        }
+        if (comps.size() > 1)
+            return n_removed + hhs_cc_step(p, dp, slow_start, slow_count, fast_start, std::move(comps), pivot_dt,
+                                           G, soft2, dt_min, eta, depth);
     }
 
     // Base case: all particles are fast
@@ -2371,6 +2491,10 @@ void hhs_fsi_step_distributed(DistributedParticles& dp, double pivot_dt,
                 std::printf("  ngb=%d", g_hhs_counters.dist_depth_ngb_pairs[d]);
             if (g_hhs_counters.dist_depth_l0_clamped[d] > 0)
                 std::printf("  l0_clamp=%d", g_hhs_counters.dist_depth_l0_clamped[d]);
+            if (g_hhs_counters.cc_calls[d] > 0)
+                std::printf("  cc: %lld calls, %.1f comps, largest %.0f", g_hhs_counters.cc_calls[d],
+                            (double)g_hhs_counters.cc_comps[d] / g_hhs_counters.cc_calls[d],
+                            (double)g_hhs_counters.cc_largest[d] / g_hhs_counters.cc_calls[d]);
             if (g_hhs_counters.local_depth_time[d] > 0.001)
                 std::printf("  time=%.3fs", g_hhs_counters.local_depth_time[d]);
             std::printf("\n");
