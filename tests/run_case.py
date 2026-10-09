@@ -208,6 +208,14 @@ def triples(exe, label, cfg, bound):
         check(f"{label} max|dE/E|", max(r[0] for r in rows), bound)
 
 
+def no_fsi_groups(exe, label, cfg, bound):
+    """Neighbour chains in a dense core must be split along bound pairs, not left whole to the FSI."""
+    out = run_output(exe, cfg)
+    rows = diagnostics(out)
+    return check(f"{label} groups left to the FSI", out.count("exceeds LOGH_MAX_BODIES"), 0) & \
+        check(f"{label} max|dE/E|", max(r[0] for r in rows), bound)
+
+
 def check(name, value, bound, lower=False):
     ok = value >= bound if lower else value <= bound
     print(f"{'ok  ' if ok else 'FAIL'} {name} = {value:.3e} ({'>=' if lower else '<='} {bound:.3e})")
@@ -315,6 +323,10 @@ CASES = {
     # (out of bounds for ids >= the number of pair members; the tests' triples had ids 0-2)
     # Measured 9.8e-9 (dense core, at the restart threshold): bound 3e-8
     "triples_detected": lambda exe: triples(exe, "dense core", TRIPLES, 3e-8),
+    # r_h = 0.03 pc: before, a 9+ body chain (linked by unbound fly-bys) went to the FSI whole, with its
+    # tight binaries integrated orbit by orbit (r_h = 0.02 pc never finished a step). Measured 3.6e-8.
+    "dense_core_split": lambda exe: no_fsi_groups(exe, "dense core", dict(TRIPLES, PLUMMER_R_HALF="0.03",
+                                                                            TOTAL_TIME_MYR="1e-4"), 1e-7),
     "logh_big_group": lambda exe: big_group(exe, "big group", BIG_GROUP, (1.2e-5, 1e-12)),
     # MPI cases, run under NBODY_TEST_LAUNCHER (CTest sets 2 ranks). Spins were not broadcast: lost on every
     # rank of a GPU run (host backends alias the mirror, so the host build cannot fail this one).

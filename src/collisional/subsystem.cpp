@@ -332,6 +332,34 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
         components[root] = std::vector<int>(members_set.begin(), members_set.end());
     }
 
+    // A group larger than LogH's storage is usually a chain linked partly by unbound fly-bys (dense
+    // cores). Split it along its bound pairs only: its binaries and triples still become subsystems
+    // instead of the whole group being integrated orbit by orbit by the FSI.
+    {
+        std::vector<int> oversize;
+        for (auto& [root, members] : components)
+            if ((int)members.size() > LOGH_MAX_BODIES) oversize.push_back(root);
+        int next_key = -1;
+        for (int root : oversize) {
+            std::unordered_map<int, int> in_group;
+            for (int pid : components[root]) in_group.emplace(pid, (int)in_group.size());
+            components.erase(root);
+            UnionFind bound_uf((int)in_group.size());
+            for (const auto& pr : pairs) {
+                if (!pr.bound) continue;
+                auto a = in_group.find(pr.pid_lo), b = in_group.find(pr.pid_hi);
+                if (a != in_group.end() && b != in_group.end()) bound_uf.unite(a->second, b->second);
+            }
+            std::map<int, std::vector<int>> parts;
+            for (const auto& [pid, k] : in_group) parts[bound_uf.find(k)].push_back(pid);
+            for (auto& [r, part] : parts) {
+                if (part.size() < 2) continue;   // a single star: field particle
+                std::sort(part.begin(), part.end());
+                components[next_key--] = part;   // still > LOGH_MAX_BODIES: left to the FSI below
+            }
+        }
+    }
+
     // Build lookup from sorted pid set → old subsystem for persistent state transfer
     // (aux_vel, normalization scales carried over for identical member sets)
     auto make_key = [](const std::vector<int>& pids) -> std::vector<int> {
