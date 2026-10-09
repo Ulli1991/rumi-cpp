@@ -793,7 +793,7 @@ static int cpu_hhs_recursive(CpuSubset& s, Particles& p, int start, int count,
                                        G, g_collisional.c_code);
                     }
                     // The subset is a suffix of [0, N): compaction shortens it from the end
-                    int k = p.compact_remove_zero_mass();
+                    int k = p.compact_remove_zero_mass(dev_start);
                     g_subsystem_mgr.rebuild_pid_to_idx(p);
                     g_subsystem_mgr.update_particle_flags(p);
                     s.resize(s.count - k);

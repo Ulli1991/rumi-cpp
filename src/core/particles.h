@@ -82,8 +82,9 @@ struct Particles {
     // Every per-particle field moves, so identities and stellar properties stay with their particle.
     void apply_permutation(int start, int count);
 
-    // Remove particles with mass==0, compact remaining, update N
+    // Remove particles with mass==0 at index >= from, compact remaining, update N. Slots below `from` keep
+    // their place (inside the HHS recursion they belong to the callers' ranges).
     // Returns number of particles removed
-    int compact_remove_zero_mass();
+    int compact_remove_zero_mass(int from = 0);
     void zero_kick_compensation(int start = 0, int count = -1);  // after velocities are overwritten
 };

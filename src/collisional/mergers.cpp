@@ -2,6 +2,7 @@
 #include "merger_tree.h"
 #include "kepler.h"
 #include "constants.h"
+#include "integrator.h"
 #include <cmath>
 #include <algorithm>
 #include <cstdio>
@@ -273,6 +274,13 @@ void execute_merger(const MergerEvent& event, Particles& p,
         bh_bh_remnant(m1, m2, chi1, chi2, L_orb, m_rem, chi_rem, v_kick, G, c_code);
     }
 
+    // With integer positions the remnant sits on the grid; use that position in the books too
+    if (use_integer_positions) {
+        cx = (double)llrint(cx * int_pos_inv_scale) * int_pos_scale;
+        cy = (double)llrint(cy * int_pos_inv_scale) * int_pos_scale;
+        cz = (double)llrint(cz * int_pos_inv_scale) * int_pos_scale;
+    }
+
     // Energy sink = E(before) - E(after) of everything the merger changes, so E_total + sinks
     // stays constant (BIFROST §3.16): the pair's kinetic and mutual potential energy, the
     // remnant's kinetic energy (with kick), and the potential with all other particles, where
@@ -320,6 +328,17 @@ void execute_merger(const MergerEvent& event, Particles& p,
     mgr.removed_pids.insert(event.pid2);
 
     Kokkos::deep_copy(p.x, h_x);
+    if (use_integer_positions) {   // integer positions are the source of truth for the drift
+        auto h_ix = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.ix);
+        auto h_iy = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.iy);
+        auto h_iz = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.iz);
+        h_ix(idx1) = llrint(cx * int_pos_inv_scale);
+        h_iy(idx1) = llrint(cy * int_pos_inv_scale);
+        h_iz(idx1) = llrint(cz * int_pos_inv_scale);
+        Kokkos::deep_copy(p.ix, h_ix);
+        Kokkos::deep_copy(p.iy, h_iy);
+        Kokkos::deep_copy(p.iz, h_iz);
+    }
     Kokkos::deep_copy(p.y, h_y);
     Kokkos::deep_copy(p.z, h_z);
     Kokkos::deep_copy(p.vx, h_vx);

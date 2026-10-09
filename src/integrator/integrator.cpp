@@ -2386,31 +2386,12 @@ static void compute_timestep_distributed(DistributedParticles& dp, int start, in
                         double mass_sum = mi + mj;
                         double r3 = r2s * r2s * inv_r;
 
-                        // Symmetrized timestep (always on)
+                        // Symmetrized timestep (FROST Eq. 49 on the step eta*t), as the other kernels
                         {
-                            double inv_Gm = 1.0 / (G * mass_sum + EPS);
-                            double inv_vsq = 1.0 / (v_sq + EPS);
-                            double t_ff_sq = r3 * inv_Gm;
-                            double t_fb_sq = r2s * inv_vsq;
-                            double t_ff = t_ff_sq * fast_rsqrt(t_ff_sq + EPS);
-                            double t_fb = t_fb_sq * fast_rsqrt(t_fb_sq + EPS);
-
-                            double inv_r2 = inv_r * inv_r;
-                            double r_dot_v = dx*dvx + dy*dvy + dz*dvz;
-
-                            double c_ff = 1.5 * r_dot_v * inv_r2;
-                            double c_fb = r_dot_v * inv_r2 * (1.0 + G * mass_sum * inv_r * inv_vsq);
-
-                            double ct_ff = c_ff * t_ff_sq;
-                            double s_ff = 1.0 + c_ff * ct_ff;
-                            double u_ff = s_ff * fast_rsqrt(s_ff);
-                            double t_sym_ff = t_ff + ct_ff / (u_ff + 1.0);
-
-                            double ct_fb = c_fb * t_fb_sq;
-                            double s_fb = 1.0 + c_fb * ct_fb;
-                            double u_fb = s_fb * fast_rsqrt(s_fb);
-                            double t_sym_fb = t_fb + ct_fb / (u_fb + 1.0);
-
+                            (void)v_sq; (void)r3;
+                            double t_sym_ff, t_sym_fb;
+                            symmetrized_timestep(r2s, inv_r, dx, dy, dz, dvx, dvy, dvz, G, mass_sum,
+                                                 eta_ff_v, eta_fb_v, t_sym_ff, t_sym_fb);
                             t_min_i = Kokkos::fmin(t_min_i, Kokkos::fmin(eta_ff_v * t_sym_ff, eta_fb_v * t_sym_fb));
                         }
 
@@ -2704,7 +2685,7 @@ static int hhs_fsi_recursive(
                 g_subsystem_mgr.step_mergers += (int)mergers.size();
                 if (!mergers.empty()) {
                     // Compaction shifts only the tail [idx, N), which callers see as a shorter suffix
-                    int k = p.compact_remove_zero_mass();
+                    int k = p.compact_remove_zero_mass(start);
                     sync_after_removal(p, dp);
                     n_removed += k;
                     count -= k;
@@ -2830,6 +2811,8 @@ static int hhs_fsi_recursive(
 #ifdef ENABLE_COLLISIONAL
     g_profiler.start();
     g_subsystem_mgr.restore_active(saved_active);
+    // The flags go by particle id; partitions below moved particles since the map was last built
+    if (!g_subsystem_mgr.active.empty()) g_subsystem_mgr.rebuild_pid_to_idx(p);
     g_subsystem_mgr.update_particle_flags(p);
     g_profiler.stop(StepProfiler::SUBSYSTEM_BOOKKEEP);
 #endif
@@ -2880,6 +2863,8 @@ static int hhs_fsi_recursive(
 #ifdef ENABLE_COLLISIONAL
     g_profiler.start();
     g_subsystem_mgr.restore_active(saved_active);
+    // The flags go by particle id; partitions below moved particles since the map was last built
+    if (!g_subsystem_mgr.active.empty()) g_subsystem_mgr.rebuild_pid_to_idx(p);
     g_subsystem_mgr.update_particle_flags(p);
     g_profiler.stop(StepProfiler::SUBSYSTEM_BOOKKEEP);
 #endif

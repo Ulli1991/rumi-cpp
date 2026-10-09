@@ -204,18 +204,19 @@ CASES = {
     # circular orbit: the eta^4 term cancels (constant along the orbit), the error sits at round-off
     "kepler_e0": lambda exe: sweep(exe, "e=0", dict(KEPLER, BINARY_E="0.0"), ["0.064"], [1e-12], None),
     # FROST: "minimum relative energy error 1e-12 - 1e-10 at eta ~ 0.008" for e = 0.9, 0.99; measured
-    # 2.37e-12 and 5.09e-11 (bounds 1.3x)
+    # 2.37e-12 and 5.09e-11 (clang/arm64), 1.43e-12 and 6.90e-11 (gcc/x86-64); bounds 1.3x the larger
     "frost4_e09": lambda exe: endpoint(exe, "e=0.9", dict(FROST4, BINARY_E="0.9"), "0.008", 3.1e-12, 1e-10),
-    "frost4_e099": lambda exe: endpoint(exe, "e=0.99", dict(FROST4, BINARY_E="0.99"), "0.008", 6.6e-11, 1e-10),
+    "frost4_e099": lambda exe: endpoint(exe, "e=0.99", dict(FROST4, BINARY_E="0.99"), "0.008", 9.0e-11, 1e-10),
     # Through the CPU small-subset path, which kept the pre-fix FROST Eq. 49 (no eta): 1.5e-6 before, 9.1e-13 now
     "frost4_e09_cpu": lambda exe: endpoint(exe, "e=0.9 cpu path", dict(FROST4, BINARY_E="0.9", SERIAL_N2_CPU="8"),
                                            "0.008", 1.2e-12, 1e-10),
     # Round-off floor with compensated kicks and integer positions (domain 1e-3 pc), eta = 0.004; 1.3x
-    # measured. Binary e = 0: 1.8e-15 end, 6.1e-15 max, L 3e-15 (plain kicks: 2.9e-13 max, L 1e-13).
+    # measured. Binary e = 0: 1.8e-15 end, 6.1e-15 max, L 3e-15 on clang/arm64; 1.07e-14, 1.15e-14, L 5.6e-15
+    # on gcc/x86-64 (bounds from the larger; plain kicks: 2.9e-13 max, L 1e-13).
     # Planets: 3.4e-14 end, 1.1e-13 max, P 7e-18, L 2e-15 (FROST Fig. 5: ~1e-13, ~1e-16, ~1e-14).
     "floor_binary_e0": lambda exe: floor(exe, "floor e=0", dict(FROST4, BINARY_E="0.0", ETA="0.004", ETA_FF="0.004",
                                           ETA_FB="0.004", INTEGER_POSITIONS="true", DOMAIN_HALFSIZE_PC="1e-3"),
-                                         (2.4e-15, 8.0e-15, 1e-14, 4.0e-15)),
+                                         (1.4e-14, 1.5e-14, 1e-14, 7.3e-15)),
     "floor_planets": lambda exe: floor(exe, "floor planets", dict(PLANETS, ETA="0.004", ETA_FF="0.004", ETA_FB="0.004",
                                         INTEGER_POSITIONS="true", DOMAIN_HALFSIZE_PC="1e-3"),
                                        (4.5e-14, 1.5e-13, 1.0e-17, 2.6e-15)),

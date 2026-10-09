@@ -247,7 +247,7 @@ void Particles::apply_permutation(int start, int count) {
     });
 }
 
-int Particles::compact_remove_zero_mass() {
+int Particles::compact_remove_zero_mass(int from) {
     // Copy mass to host to find which particles to keep
     auto h_m = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), mass);
     int N_old = N;
@@ -256,7 +256,7 @@ int Particles::compact_remove_zero_mass() {
     std::vector<int> keep;
     keep.reserve(N);
     for (int i = 0; i < N; i++) {
-        if (h_m(i) > 0.0) keep.push_back(i);
+        if (i < from || h_m(i) > 0.0) keep.push_back(i);
     }
     int N_new = (int)keep.size();
     int n_removed = N_old - N_new;

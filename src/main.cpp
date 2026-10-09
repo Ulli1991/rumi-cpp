@@ -488,6 +488,15 @@ int main(int argc, char** argv) {
 
         // Collisional (unsoftened direct N-body) configuration
         g_collisional.enabled = cfg.get_bool("COLLISIONAL", false);
+        if (g_collisional.enabled && use_tree) {
+            // Merger compaction re-indexes particles under a built tree, and tree forces lose 4th order and
+            // L conservation (force-error floor ~1e-5 at theta 0.5): not supported for collisional runs
+            if (MPIComm::rank() == 0)
+                std::fprintf(stderr, "ERROR: USE_TREE is not supported with COLLISIONAL = true\n");
+            Kokkos::finalize();
+            MPIComm::finalize();
+            return 1;
+        }
         if (g_collisional.enabled) {
             g_collisional.r_ngb           = cfg.get_double("R_NGB", 1e-3);
             g_collisional.r_ngb_max       = cfg.get_double("R_NGB_MAX", 0.1);
@@ -885,6 +894,12 @@ int main(int argc, char** argv) {
                     double dt_sse_myr = dt_max * TIME_UNIT_MYR;
                     advance_stellar_evolution(work_p, *g_sse_ctx, dt_sse_myr,
                                               g_energy_books, G);
+                    // Massless remnants (kw = 15) leave now: inside the step, compaction must only ever
+                    // remove particles from the current HHS range
+                    if (work_p.compact_remove_zero_mass() > 0) {
+                        if (use_distributed) dp.sync_count();
+                        g_subsystem_mgr.rebuild_pid_to_idx(work_p);
+                    }
                 }
 
                 // ============================================================
