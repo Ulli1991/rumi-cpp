@@ -471,6 +471,7 @@ int main(int argc, char** argv) {
         serial_n2_cpu = cfg.get_int("SERIAL_N2_CPU", 0);
         all_slow_split = cfg.get_bool("ALL_SLOW_SPLIT", true);
         distribute_subsystems = cfg.get_bool("DISTRIBUTE_SUBSYSTEMS", false);   // FROST Algorithm 3
+        distribute_subsystems_min = cfg.get_int("DISTRIBUTE_MIN_SUBSYSTEMS", 256);
         use_integer_positions = cfg.get_bool("INTEGER_POSITIONS", false);
         double domain_halfsize = cfg.get_double("DOMAIN_HALFSIZE_PC", 200.0);
         use_nonblocking_mpi = cfg.get_bool("MPI_NON_BLOCKING", false);

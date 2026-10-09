@@ -53,6 +53,7 @@ bool use_nonblocking_mpi = false;
 bool use_tree = false;
 bool all_slow_split = false;
 bool distribute_subsystems = false;
+int distribute_subsystems_min = 256;
 int tree_threshold = 10000;
 double tree_theta = 0.5;
 int tree_n_leaf = 32;
@@ -585,10 +586,12 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
     }
 
     // Partition eligible subsystems into secular binaries, secular triples, and LogH. With
-    // DISTRIBUTE_SUBSYSTEMS each rank takes the ones at positions rank, rank + ranks, ...
+    // DISTRIBUTE_SUBSYSTEMS each rank takes the ones at positions rank, rank + ranks, ... when there are
+    // enough of them to pay for the exchange (replicas agree on `eligible`, so all ranks decide alike)
     bool distributed_subs = false;
 #ifdef USE_MPI
-    distributed_subs = distribute_subsystems && MPIComm::size() > 1;
+    distributed_subs = distribute_subsystems && MPIComm::size() > 1 &&
+                       (int)eligible.size() >= distribute_subsystems_min;
     const EnergyBookkeeping books_before = g_energy_books;
 #endif
     std::vector<int> secular_idx, secular_triple_idx, logh_idx;
@@ -2629,6 +2632,11 @@ static int hhs_fsi_recursive(
 
     if (count == 0) return 0;
     int n_removed = 0;  // merged-away particles; [start, start+count) is always a suffix of [0, N)
+    struct DepthScope {   // profiler charges work to this depth until the call returns
+        int saved;
+        explicit DepthScope(int d) : saved(g_profiler.cur_depth) { g_profiler.cur_depth = d; }
+        ~DepthScope() { g_profiler.cur_depth = saved; }
+    } depth_scope(depth);
 
     // Dispatch flags: MPI for large subsets when distributed
     bool use_mpi = dp && (serial_n2_gpu == 0 || count > serial_n2_gpu);

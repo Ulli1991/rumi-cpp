@@ -113,6 +113,22 @@ Open, found on the way:
    MSTAR not wired in.
 6. MPI speed, measure first with the step profiler: fuse accelerations + time steps into one
    allgather, NCCL/RCCL inside a node, MPI-4 persistent collectives, SERIAL_N2_GPU per machine.
+   Profiler now prints time per HHS depth (forces / subsystems / kicks / MPI); MPI time was never
+   recorded before (no timer named its component). DISTRIBUTE_MIN_SUBSYSTEMS (default 256): smaller
+   calls run on every rank. Batching the exchange per level is impossible (same-depth calls are
+   separated by the deeper calls that need their results). Next: fuse enforce_shared_timestep,
+   apply_perturbation_timestep and detect_mergers into one gather and one parallel loop.
+7. Far field for N >~ 1e6 (tree check above: force-error floor 1e-5..1e-6, L drift, slower at 65k):
+   a. Barnes randomisation (Treecode2, arXiv:2602.06295): random root shift, rotation and size at
+      each tree build, so P and L errors random-walk (~sqrt t) instead of drifting. Cheap on our
+      octree (rebuilt per level). Test: the 65k tree case, L drift and long-run dE/E.
+   b. Dehnen FMM (falcON, astro-ph/0003209): symmetric cell-cell interactions, exact P, lets the
+      HHS slow<->fast kicks be pairwise symmetric (Gadget-4 HHS + FMM, Volker's trick).
+   c. Marcello (arXiv:1706.06989): torque correction on the Dehnen scheme, exact L, ~2x cost.
+   d. High expansion order (p ~ 8-10, estimate) and the FSI gradient term from the local
+      expansions (tidal tensor). First: force error and cost vs p on a 1e6 Plummer sphere.
+   e. FMM only on the large top levels, direct below a size threshold. Check that random frames
+      per force evaluation do not spoil FSI time symmetry measurably.
 
 Full audit and review: `jax-hydro/research_notes/Rantala integrators/` (rantala_spec.md,
 cpp_nbody_code_review.md; local, not in a repo). The README's FROST and BIFROST DOIs are wrong:

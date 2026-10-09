@@ -344,9 +344,11 @@ CASES = {
     # The same with DISTRIBUTE_SUBSYSTEMS (each rank integrates its share, then exchanges): replicas must stay
     # identical (hash every step) and agree with 1 rank. Before mass was exchanged: REPLICA MISMATCH, exit 3.
     "mergers_mpi2_dist": lambda exe: replicas(exe, "mergers, 2 ranks, distributed", dict(MERGERS, SERIAL_N2_CPU="0",
-                                              REPLICA_CHECK_INTERVAL="1", DISTRIBUTE_SUBSYSTEMS="true")),
+                                              REPLICA_CHECK_INTERVAL="1", DISTRIBUTE_SUBSYSTEMS="true",
+                                              DISTRIBUTE_MIN_SUBSYSTEMS="1")),
     "mpi_1v2_dist": lambda exe: ranks_agree(exe, "1 vs 2 ranks, distributed", dict(BINARIES, TOTAL_TIME_MYR="5e-3",
-                                            REPLICA_CHECK_INTERVAL="1", DISTRIBUTE_SUBSYSTEMS="true"), 1e-13),
+                                            REPLICA_CHECK_INTERVAL="1", DISTRIBUTE_SUBSYSTEMS="true",
+                                            DISTRIBUTE_MIN_SUBSYSTEMS="1"), 1e-13),
     "mergers_cpu_path": lambda exe: mergers(exe, "mergers cpu path", dict(MERGERS, SERIAL_N2_CPU="64", ETA_RESTART="0"),
                                             (1e-8, 1e-11)),
 }

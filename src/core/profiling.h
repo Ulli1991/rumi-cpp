@@ -56,6 +56,13 @@ struct StepProfiler {
     int counts_mpi[NUM_TIMERS];
     long long pairs[NUM_TIMERS];
     double step_wall_total;
+
+    // Per HHS depth: time of each component, and the MPI time inside it, charged to the depth that ran it
+    static constexpr int MAX_DEPTH = 40;
+    int cur_depth = 0;
+    double depth_elapsed[MAX_DEPTH][NUM_TIMERS];
+    double depth_mpi[MAX_DEPTH];
+    double pending_mpi = 0;   // MPI time since the last stop(), charged to the component stop() closes
     int step_count;
 
     Timer active_component;  // which component is currently being timed
@@ -70,6 +77,9 @@ struct StepProfiler {
         std::memset(counts, 0, sizeof(counts));
         std::memset(counts_mpi, 0, sizeof(counts_mpi));
         std::memset(pairs, 0, sizeof(pairs));
+        std::memset(depth_elapsed, 0, sizeof(depth_elapsed));
+        std::memset(depth_mpi, 0, sizeof(depth_mpi));
+        pending_mpi = 0;
         step_wall_total = 0.0;
         step_count = 0;
         active_component = NUM_TIMERS;
@@ -88,7 +98,16 @@ struct StepProfiler {
 #ifndef DISABLE_PROFILING_FENCES
         Kokkos::fence();  // ensure GPU work is complete before timing
         auto t_end = std::chrono::high_resolution_clock::now();
-        elapsed[t] += std::chrono::duration<double>(t_end - t_start).count();
+        double dt = std::chrono::duration<double>(t_end - t_start).count();
+        elapsed[t] += dt;
+        int d = cur_depth < MAX_DEPTH ? cur_depth : MAX_DEPTH - 1;
+        depth_elapsed[d][t] += dt;
+        if (pending_mpi > 0) {
+            elapsed_mpi[t] += pending_mpi;
+            counts_mpi[t]++;
+            depth_mpi[d] += pending_mpi;
+            pending_mpi = 0;
+        }
         counts[t]++;
         pairs[t] += n_pairs;
         active_component = NUM_TIMERS;
@@ -105,10 +124,7 @@ struct StepProfiler {
 
     void mpi_stop() {
         auto t_end = std::chrono::high_resolution_clock::now();
-        if (active_component < NUM_TIMERS) {
-            elapsed_mpi[active_component] += std::chrono::duration<double>(t_end - t_mpi).count();
-            counts_mpi[active_component]++;
-        }
+        pending_mpi += std::chrono::duration<double>(t_end - t_mpi).count();
     }
 
     void print_report(int /*N*/, int n_ranks) const {
@@ -194,6 +210,26 @@ struct StepProfiler {
             double pct_mpi = (step_wall_total > 0.0) ? 100.0 * mpi_total / step_wall_total : 0.0;
             std::printf("  %-24s %10.3f %8d %10s %7.1f%%\n",
                         "Total MPI", mpi_total, mpi_total_calls, "-", pct_mpi);
+        }
+
+        // Per-depth breakdown
+        int last = -1;
+        for (int d = 0; d < MAX_DEPTH; d++)
+            for (int i = 0; i < NUM_TIMERS; i++)
+                if (depth_elapsed[d][i] > 0) last = d;
+        if (last >= 0) {
+            std::printf("\n  --- Time per HHS depth [s] ");
+            for (int i = 0; i < 41; i++) std::printf("-");
+            std::printf("\n  %-6s %9s %9s %9s %9s %9s %9s\n", "Depth", "total", "forces", "subsys", "kick/part", "other", "MPI");
+            for (int d = 0; d <= last; d++) {
+                const double* e = depth_elapsed[d];
+                double f = e[ADAPTIVE_DT] + e[SELF_FORCE] + e[SELF_GRAD] + e[CROSS_FORCE] + e[CROSS_GRAD] + e[TREE_MAINT];
+                double sub = e[SUBSYSTEM_DETECT] + e[SUBSYSTEM_INTEG] + e[SUBSYSTEM_DT] + e[SUBSYSTEM_BOOKKEEP];
+                double kp = e[DRIFT_KICK] + e[PARTITION] + e[PACK_DATA];
+                double tot = 0;
+                for (int i = 0; i < NUM_TIMERS; i++) tot += e[i];
+                std::printf("  L%-5d %9.3f %9.3f %9.3f %9.3f %9.3f %9.3f\n", d, tot, f, sub, kp, tot - f - sub - kp, depth_mpi[d]);
+            }
         }
 
         std::fflush(stdout);
