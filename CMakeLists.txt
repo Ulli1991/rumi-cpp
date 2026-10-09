@@ -97,7 +97,7 @@ if(ACCURATE_RSQRT)
     target_compile_definitions(nbody-kokkos PRIVATE ACCURATE_RSQRT)
 endif()
 
-option(RSQRT_NEWTON "Device rsqrt refined by one Newton step (~0.5 ulp)" OFF)
+option(RSQRT_NEWTON "Device rsqrt refined by one Newton step (~0.5 ulp; +4 % per 200k step, GPU accuracy = CPU)" ON)
 if(RSQRT_NEWTON)
     target_compile_definitions(nbody-kokkos PRIVATE RSQRT_NEWTON)
 endif()
