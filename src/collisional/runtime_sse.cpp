@@ -60,6 +60,8 @@ void advance_stellar_evolution(Particles& p, SSEContext& sse, double dt_myr,
         h_m(i) = res.mass;
         h_sage(i) = age_new;
         h_cmass(i) = res.mass_core;
+        h_srad(i) = res.radius;       // collision radii follow the evolution
+        h_lum(i) = res.luminosity;
 
         // Type change detection
         if (res.kw != kw) {
@@ -115,6 +117,8 @@ void advance_stellar_evolution(Particles& p, SSEContext& sse, double dt_myr,
     Kokkos::deep_copy(p.stellar_type, h_stype);
     Kokkos::deep_copy(p.stellar_age, h_sage);
     Kokkos::deep_copy(p.core_mass, h_cmass);
+    Kokkos::deep_copy(p.stellar_radius, h_srad);
+    Kokkos::deep_copy(p.luminosity, h_lum);
 
     if (total_dm > 0 || n_type_change > 0) {
         std::printf("SSE: dm_total=%.4e M_sun, %d type changes, E_sse=%.4e\n",
