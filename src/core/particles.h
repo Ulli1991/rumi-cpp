@@ -78,6 +78,10 @@ struct Particles {
     void pack_pos_range(int start, int count);  // Pack x,y,z,mass into pos_packed for [start, start+count)
     void pack_vel_range(int start, int count);  // Pack vx,vy,vz into vel_packed for [start, start+count)
 
+    // Reorder [start, start+count): slot start+ii receives the particle at global index scratch_i(ii).
+    // Every per-particle field moves, so identities and stellar properties stay with their particle.
+    void apply_permutation(int start, int count);
+
     // Remove particles with mass==0, compact remaining, update N
     // Returns number of particles removed
     int compact_remove_zero_mass();

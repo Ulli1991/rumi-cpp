@@ -310,6 +310,23 @@ void DistributedParticles::distribute_initial(Particles& global_particles) {
 #endif
 }
 
+void DistributedParticles::sync_count() {
+    N_total = local.N;
+    N_local = N_total;
+#ifdef USE_MPI
+    int n_ranks = MPIComm::size();
+    int my_rank = MPIComm::rank();
+    int base_count = N_total / n_ranks;
+    int remainder = N_total % n_ranks;
+    my_start = 0;
+    for (int r = 0; r < my_rank; r++) my_start += base_count + (r < remainder ? 1 : 0);
+    my_count = base_count + (my_rank < remainder ? 1 : 0);
+#else
+    my_start = 0;
+    my_count = N_total;
+#endif
+}
+
 void DistributedParticles::get_force_slice(int start, int count, int& slice_start, int& slice_count) const {
 #ifdef USE_MPI
     int n_ranks = MPIComm::size();

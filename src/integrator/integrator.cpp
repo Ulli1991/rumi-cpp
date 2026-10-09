@@ -1056,121 +1056,26 @@ static int partition_by_pivot(Particles& p, int start, int count, double pivot) 
         perm(dest) = start + ii;
     });
 
-    // Apply permutation: fused gather of all fields
-    RawView px{p.x.data()}, py{p.y.data()}, pz{p.z.data()};
-    RawView pvx{p.vx.data()}, pvy{p.vy.data()}, pvz{p.vz.data()};
-    RawView pax{p.ax.data()}, pay{p.ay.data()}, paz{p.az.data()};
-    RawView pmass{p.mass.data()}, pdt{p.dt_adapt.data()};
-    auto porig = p.orig_index;
-    auto plevel = p.level;
-    auto pix = p.ix; auto piy = p.iy; auto piz = p.iz;
-
-    // Scratch: 11 doubles + 2 ints + 3 int64s
-    auto t1 = p.scratch1;  auto t2 = p.scratch2;  auto t3 = p.scratch3;
-    auto t4 = p.scratch4;  auto t5 = p.scratch5;  auto t6 = p.scratch6;
-    auto t7 = p.scratch7;  auto t8 = p.scratch8;  auto t9 = p.scratch9;
-    auto t10 = p.scratch10; auto t11 = p.scratch11;
-    auto ti1 = p.scratch_i2; auto ti2 = p.scratch_i3;
-    auto tl1 = p.scratch_l1; auto tl2 = p.scratch_l2; auto tl3 = p.scratch_l3;
-
-    // Single fused gather of all fields
-    Kokkos::parallel_for("gather_all", count, KOKKOS_LAMBDA(int ii) {
-        int src = perm(ii);
-        t1(ii) = px(src);   t2(ii) = py(src);   t3(ii) = pz(src);
-        t4(ii) = pvx(src);  t5(ii) = pvy(src);  t6(ii) = pvz(src);
-        t7(ii) = pax(src);  t8(ii) = pay(src);  t9(ii) = paz(src);
-        t10(ii) = pmass(src); t11(ii) = pdt(src);
-        ti1(ii) = porig(src); ti2(ii) = plevel(src);
-        tl1(ii) = pix(src); tl2(ii) = piy(src); tl3(ii) = piz(src);
-    });
-
-    // Single fused copy back of all fields
-    Kokkos::parallel_for("copy_all", count, KOKKOS_LAMBDA(int ii) {
-        int dst = start + ii;
-        px(dst) = t1(ii);   py(dst) = t2(ii);   pz(dst) = t3(ii);
-        pvx(dst) = t4(ii);  pvy(dst) = t5(ii);  pvz(dst) = t6(ii);
-        pax(dst) = t7(ii);  pay(dst) = t8(ii);  paz(dst) = t9(ii);
-        pmass(dst) = t10(ii); pdt(dst) = t11(ii);
-        porig(dst) = ti1(ii); plevel(dst) = ti2(ii);
-        pix(dst) = tl1(ii); piy(dst) = tl2(ii); piz(dst) = tl3(ii);
-    });
-
-    // Kick compensation follows its particle (t1-t3 are free after the copy-back)
-    RawView pcx{p.cvx.data()}, pcy{p.cvy.data()}, pcz{p.cvz.data()};
-    Kokkos::parallel_for("gather_comp", count, KOKKOS_LAMBDA(int ii) {
-        int src = perm(ii);
-        t1(ii) = pcx(src); t2(ii) = pcy(src); t3(ii) = pcz(src);
-    });
-    Kokkos::parallel_for("copy_comp", count, KOKKOS_LAMBDA(int ii) {
-        int dst = start + ii;
-        pcx(dst) = t1(ii); pcy(dst) = t2(ii); pcz(dst) = t3(ii);
-    });
-
-#ifdef ENABLE_COLLISIONAL
-    // Second pass: permute collisional-only fields
-    if (p.collisional) {
-        auto ppid = p.particle_id;   auto psid = p.subsystem_id;
-        auto pstype = p.stellar_type;
-        auto pmzams = p.m_zams;      auto psage = p.stellar_age;
-        auto psrad = p.stellar_radius; auto plum = p.luminosity;
-        auto pcmass = p.core_mass;   auto psmag = p.spin_mag;
-        auto pdtl0 = p.dt_level0;
-        auto pgmag = p.grad_mag;
-        auto pspin = p.spin_vec;
-
-        Kokkos::parallel_for("gather_coll_pivot", count, KOKKOS_LAMBDA(int ii) {
-            int src = perm(ii);
-            ti1(ii) = ppid(src);
-            ti2(ii) = psid(src);
-            tl1(ii) = pstype(src);
-            t1(ii) = pmzams(src);
-            t2(ii) = psage(src);
-            t3(ii) = psrad(src);
-            t4(ii) = plum(src);
-            t5(ii) = pcmass(src);
-            t6(ii) = psmag(src);
-            t7(ii) = pdtl0(src);
-            t8(ii) = pgmag(src);
-        });
-        Kokkos::parallel_for("copy_coll_pivot", count, KOKKOS_LAMBDA(int ii) {
-            int dst = start + ii;
-            ppid(dst) = ti1(ii);
-            psid(dst) = ti2(ii);
-            pstype(dst) = (int)tl1(ii);
-            pmzams(dst) = t1(ii);
-            psage(dst) = t2(ii);
-            psrad(dst) = t3(ii);
-            plum(dst) = t4(ii);
-            pcmass(dst) = t5(ii);
-            psmag(dst) = t6(ii);
-            pdtl0(dst) = t7(ii);
-            pgmag(dst) = t8(ii);
-        });
-
-        // Spin vector (3 components)
-        Kokkos::parallel_for("gather_spin_pivot", count, KOKKOS_LAMBDA(int ii) {
-            int src = perm(ii);
-            t1(ii) = pspin(src, 0);
-            t2(ii) = pspin(src, 1);
-            t3(ii) = pspin(src, 2);
-        });
-        Kokkos::parallel_for("copy_spin_pivot", count, KOKKOS_LAMBDA(int ii) {
-            int dst = start + ii;
-            pspin(dst, 0) = t1(ii);
-            pspin(dst, 1) = t2(ii);
-            pspin(dst, 2) = t3(ii);
-        });
-    }
-#endif
+    p.apply_permutation(start, count);
 
     return slow_count;
 }
 
-// Forward declaration: unified HHS-FSI recursion (defined after all helper functions)
-static void hhs_fsi_recursive(Particles& p, DistributedParticles* dp,
+// Forward declaration: unified HHS-FSI recursion (defined after all helper functions).
+// Returns the number of particles that mergers removed from [start, start+count).
+static int hhs_fsi_recursive(Particles& p, DistributedParticles* dp,
     int start, int count, double pivot_dt,
     double G, double soft2, double dt_min, double eta,
     bool dt_valid, bool global_tree_available = false, int depth = 0);
+
+// After compact_remove_zero_mass: the cached pid map points at old slots, and in MPI mode the
+// per-rank slices still cover the old particle count.
+static void sync_after_removal(Particles& p, DistributedParticles* dp) {
+#ifdef ENABLE_COLLISIONAL
+    if (p.collisional) g_subsystem_mgr.rebuild_pid_to_idx(p);
+#endif
+    if (dp) dp->sync_count();
+}
 
 void hhs_fsi_step_dynamic(Particles& p, int start, int count, double pivot_dt,
                           double G, double soft2, double dt_min,
@@ -2472,7 +2377,7 @@ static void cross_acceleration_and_gradient_global_tree(Particles& p,
 // Tree operations require dp != nullptr (tree_threshold >> serial_n2_gpu).
 // CPU serial path (count <= serial_n2_cpu) delegated to hhs_fsi_recursive_cpu.
 // =============================================================================
-static void hhs_fsi_recursive(
+static int hhs_fsi_recursive(
     Particles& p,
     DistributedParticles* dp,
     int start, int count,
@@ -2483,7 +2388,8 @@ static void hhs_fsi_recursive(
     bool global_tree_available,
     int depth) {
 
-    if (count == 0) return;
+    if (count == 0) return 0;
+    int n_removed = 0;  // merged-away particles; [start, start+count) is always a suffix of [0, N)
 
     // Dispatch flags: MPI for large subsets when distributed
     bool use_mpi = dp && (serial_n2_gpu == 0 || count > serial_n2_gpu);
@@ -2507,9 +2413,10 @@ static void hhs_fsi_recursive(
     // CPU serial for very small subsets
     if (serial_n2_cpu > 0 && count <= serial_n2_cpu) {
         g_hhs_counters.cpu++;
-        hhs_fsi_recursive_cpu(p, start, count, pivot_dt, G, soft2, dt_min, eta, dt_valid, depth);
-        if (dp) p.pack_pos_range(start, count);
-        return;
+        n_removed = hhs_fsi_recursive_cpu(p, start, count, pivot_dt, G, soft2, dt_min, eta, dt_valid, depth);
+        if (n_removed > 0) sync_after_removal(p, dp);
+        if (dp) p.pack_pos_range(start, count - n_removed);
+        return n_removed;
     }
 
     // Base case: at minimum timestep, use FSI on the subset
@@ -2524,7 +2431,7 @@ static void hhs_fsi_recursive(
         } else {
             fsi_step(p, start, count, G, soft2, pivot_dt, false, true);
         }
-        return;
+        return 0;
     }
 
     // BIFROST Section 3.5: fresh neighbor search + detection, then timestep
@@ -2652,9 +2559,12 @@ static void hhs_fsi_recursive(
                 }
                 g_subsystem_mgr.step_mergers += (int)mergers.size();
                 if (!mergers.empty()) {
-                    int n_removed = p.compact_remove_zero_mass();
-                    count -= n_removed;
-                    if (count <= 0) return;
+                    // Compaction shifts only the tail [idx, N), which callers see as a shorter suffix
+                    int k = p.compact_remove_zero_mass();
+                    sync_after_removal(p, dp);
+                    n_removed += k;
+                    count -= k;
+                    if (count <= 0) return n_removed;
                     g_subsystem_mgr.update_particle_flags(p);
                 }
             }
@@ -2685,7 +2595,7 @@ static void hhs_fsi_recursive(
         } else {
             fsi_step(p, start, count, G, soft2, pivot_dt, forces_valid, true);
         }
-        return;
+        return n_removed;
     }
 
     // Base case: all particles are fast
@@ -2693,11 +2603,13 @@ static void hhs_fsi_recursive(
         if (use_mpi) g_hhs_counters.slow0_dist++;
         else g_hhs_counters.slow0_local++;
         double sub_pivot = pivot_dt * 0.5;
-        hhs_fsi_recursive(p, dp, start, count, sub_pivot,
-                          G, soft2, dt_min, eta, true, tree_for_subs, depth + 1);
-        hhs_fsi_recursive(p, dp, start, count, sub_pivot,
-                          G, soft2, dt_min, eta, false, tree_for_subs, depth + 1);
-        return;
+        int k = hhs_fsi_recursive(p, dp, start, count, sub_pivot,
+                                  G, soft2, dt_min, eta, true, tree_for_subs, depth + 1);
+        n_removed += k;
+        count -= k;
+        n_removed += hhs_fsi_recursive(p, dp, start, count, sub_pivot,
+                                       G, soft2, dt_min, eta, false, tree_for_subs, depth + 1);
+        return n_removed;
     }
 
     long long cross_pairs = 2LL * slow_count * fast_count;
@@ -2758,12 +2670,15 @@ static void hhs_fsi_recursive(
     }
 
     // Step 3: Recurse on fast (first half) — always compute fresh timesteps
-    hhs_fsi_recursive(p, dp, fast_start, fast_count, pivot_dt * 0.5,
-                      G, soft2, dt_min, eta, false, tree_for_subs, depth + 1);
+    int k = hhs_fsi_recursive(p, dp, fast_start, fast_count, pivot_dt * 0.5,
+                              G, soft2, dt_min, eta, false, tree_for_subs, depth + 1);
+    n_removed += k;
+    fast_count -= k;
+    count -= k;
 
     // Restore subsystem state after recursion overwrote it
     g_profiler.start();
-    g_subsystem_mgr.active = saved_active;
+    g_subsystem_mgr.restore_active(saved_active);
     g_subsystem_mgr.update_particle_flags(p);
     g_profiler.stop(StepProfiler::SUBSYSTEM_BOOKKEEP);
 
@@ -2803,12 +2718,15 @@ static void hhs_fsi_recursive(
     g_profiler.stop(StepProfiler::DRIFT_KICK);
 
     // Step 5: Recurse on fast (second half)
-    hhs_fsi_recursive(p, dp, fast_start, fast_count, pivot_dt * 0.5,
-                      G, soft2, dt_min, eta, false, tree_for_subs, depth + 1);
+    k = hhs_fsi_recursive(p, dp, fast_start, fast_count, pivot_dt * 0.5,
+                          G, soft2, dt_min, eta, false, tree_for_subs, depth + 1);
+    n_removed += k;
+    fast_count -= k;
+    count -= k;
 
     // Restore again for the second half-step on slow
     g_profiler.start();
-    g_subsystem_mgr.active = saved_active;
+    g_subsystem_mgr.restore_active(saved_active);
     g_subsystem_mgr.update_particle_flags(p);
     g_profiler.stop(StepProfiler::SUBSYSTEM_BOOKKEEP);
 
@@ -2855,6 +2773,7 @@ static void hhs_fsi_recursive(
     kick_velocities(p, slow_start, slow_count, pivot_dt * FSI_KICK);
     kick_velocities(p, fast_start, fast_count, pivot_dt * FSI_KICK);
     g_profiler.stop(StepProfiler::DRIFT_KICK);
+    return n_removed;
 }
 
 // Distributed HHS-FSI - main entry point

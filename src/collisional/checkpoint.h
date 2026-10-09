@@ -3,6 +3,8 @@
 #include "particles.h"
 #include "subsystem.h"
 #include "diagnostics.h"
+#include "merger_tree.h"
+#include <unordered_set>
 #include <vector>
 
 // Adaptive error restarts: save state and rollback on energy error
@@ -21,11 +23,16 @@ struct Checkpoint {
     std::vector<int> particle_id, subsystem_id, stellar_type;
     std::vector<double> m_zams, stellar_age, stellar_radius, luminosity, core_mass;
     std::vector<double> spin_vec_flat;  // 3*N
-    std::vector<double> spin_mag, dt_level0;
+    std::vector<double> spin_mag, dt_level0, grad_mag;
 
     // Subsystem manager state
     std::vector<Subsystem> subsystems;
     int next_subsystem_id;
+    int step_mergers;
+    std::unordered_set<int> removed_pids;
+
+    // Merger history (a rolled-back step must not leave its mergers recorded)
+    MergerTree merger_tree;
 
     // Energy bookkeeping
     EnergyBookkeeping energy_books;

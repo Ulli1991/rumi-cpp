@@ -26,6 +26,8 @@ struct CpuSubset {
 #endif
     int count;
     int device_start = 0;  // offset into device Particles arrays
+    std::vector<int> src;  // src[i]: device slot (relative to device_start) that host slot i came from
+    bool order_dirty = false;
 
     void resize(int n);
 
@@ -34,10 +36,14 @@ struct CpuSubset {
 
     // Copy results back to device (positions, velocities, mass, dt_adapt, ix/iy/iz)
     void copy_to_device(Particles& p, int start);
+
+    // Reorder the device slots to match the host order after partitions, so fields that only
+    // live on the device (particle_id, stellar data, spin, kick compensation) follow their particle
+    void sync_order_to_device(Particles& p);
 };
 
 // Entry point: copy subset to host, run CPU HHS, copy back
-void hhs_fsi_recursive_cpu(Particles& p, int start, int count,
+int hhs_fsi_recursive_cpu(Particles& p, int start, int count,
                            double pivot_dt, double G, double soft2,
                            double dt_min, double eta, bool dt_valid,
                            int depth);

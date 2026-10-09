@@ -1,6 +1,7 @@
 #include "checkpoint.h"
 #include "collisional_config.h"
 #include "diagnostics.h"
+#include "merger_tree.h"
 #include <cstdio>
 #include <cmath>
 
@@ -53,7 +54,7 @@ void Checkpoint::save(const Particles& p, const SubsystemManager& mgr,
         m_zams.resize(N); stellar_age.resize(N); stellar_radius.resize(N);
         luminosity.resize(N); core_mass.resize(N);
         spin_vec_flat.resize(N * 3);
-        spin_mag.resize(N); dt_level0.resize(N);
+        spin_mag.resize(N); dt_level0.resize(N); grad_mag.resize(N);
 
         auto h_pid = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.particle_id);
         auto h_sid = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.subsystem_id);
@@ -66,6 +67,7 @@ void Checkpoint::save(const Particles& p, const SubsystemManager& mgr,
         auto h_spin = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.spin_vec);
         auto h_smag = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.spin_mag);
         auto h_dtl0 = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.dt_level0);
+        auto h_gmag = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.grad_mag);
 
         for (int i = 0; i < N; i++) {
             particle_id[i] = h_pid(i);
@@ -81,13 +83,17 @@ void Checkpoint::save(const Particles& p, const SubsystemManager& mgr,
             spin_vec_flat[i*3+2] = h_spin(i, 2);
             spin_mag[i] = h_smag(i);
             dt_level0[i] = h_dtl0(i);
+            grad_mag[i] = h_gmag(i);
         }
     }
 
     // Subsystem state
     subsystems = mgr.active;
     next_subsystem_id = mgr.next_id;
+    step_mergers = mgr.step_mergers;
+    removed_pids = mgr.removed_pids;
     energy_books = books;
+    merger_tree = g_merger_tree;
 
     valid = true;
 }
@@ -99,6 +105,7 @@ void Checkpoint::save(const Particles& p, const SubsystemManager& mgr,
 void Checkpoint::restore(Particles& p, SubsystemManager& mgr,
                          EnergyBookkeeping& books) const {
     if (!valid) return;
+    p.N = N;  // mergers during the rolled-back step shortened the arrays
 
     // Copy back to device
     auto h_x = Kokkos::create_mirror_view(p.x);
@@ -158,6 +165,7 @@ void Checkpoint::restore(Particles& p, SubsystemManager& mgr,
         auto h_spin = Kokkos::create_mirror_view(p.spin_vec);
         auto h_smag = Kokkos::create_mirror_view(p.spin_mag);
         auto h_dtl0 = Kokkos::create_mirror_view(p.dt_level0);
+        auto h_gmag = Kokkos::create_mirror_view(p.grad_mag);
 
         for (int i = 0; i < N; i++) {
             h_pid(i) = particle_id[i];
@@ -173,6 +181,7 @@ void Checkpoint::restore(Particles& p, SubsystemManager& mgr,
             h_spin(i, 2) = spin_vec_flat[i*3+2];
             h_smag(i) = spin_mag[i];
             h_dtl0(i) = dt_level0[i];
+            h_gmag(i) = grad_mag[i];
         }
 
         Kokkos::deep_copy(p.particle_id, h_pid);
@@ -186,11 +195,16 @@ void Checkpoint::restore(Particles& p, SubsystemManager& mgr,
         Kokkos::deep_copy(p.spin_vec, h_spin);
         Kokkos::deep_copy(p.spin_mag, h_smag);
         Kokkos::deep_copy(p.dt_level0, h_dtl0);
+        Kokkos::deep_copy(p.grad_mag, h_gmag);
     }
 
     mgr.active = subsystems;
     mgr.next_id = next_subsystem_id;
+    mgr.step_mergers = step_mergers;
+    mgr.removed_pids = removed_pids;
+    if (p.collisional) mgr.rebuild_pid_to_idx(p);
     books = energy_books;
+    g_merger_tree = merger_tree;
 }
 
 // ============================================================================

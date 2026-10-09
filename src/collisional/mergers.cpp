@@ -273,13 +273,28 @@ void execute_merger(const MergerEvent& event, Particles& p,
         bh_bh_remnant(m1, m2, chi1, chi2, L_orb, m_rem, chi_rem, v_kick, G, c_code);
     }
 
-    // Energy dissipated (mass difference converted to GW energy)
-    double dm = M - m_rem;
-    // Binding energy of the binary + kinetic energy of lost mass
-    double dx = h_x(idx2) - h_x(idx1), dy = h_y(idx2) - h_y(idx1), dz = h_z(idx2) - h_z(idx1);
-    double r = std::sqrt(dx*dx + dy*dy + dz*dz);
-    double E_bind = -G * m1 * m2 / (r > 0 ? r : 1e-30);
-    books.E_merge += E_bind + 0.5 * dm * (cvx*cvx + cvy*cvy + cvz*cvz);
+    // Energy sink = E(before) - E(after) of everything the merger changes, so E_total + sinks
+    // stays constant (BIFROST §3.16): the pair's kinetic and mutual potential energy, the
+    // remnant's kinetic energy (with kick), and the potential with all other particles, where
+    // m1 at x1 and m2 at x2 become m_rem at the CoM. Collisional runs are unsoftened.
+    auto dist = [&](int k, double px, double py, double pz) {
+        double ex = h_x(k) - px, ey = h_y(k) - py, ez = h_z(k) - pz;
+        return std::sqrt(ex*ex + ey*ey + ez*ez);
+    };
+    double r = dist(idx2, h_x(idx1), h_y(idx1), h_z(idx1));
+    double v1sq = h_vx(idx1)*h_vx(idx1) + h_vy(idx1)*h_vy(idx1) + h_vz(idx1)*h_vz(idx1);
+    double v2sq = h_vx(idx2)*h_vx(idx2) + h_vy(idx2)*h_vy(idx2) + h_vz(idx2)*h_vz(idx2);
+    double ux = cvx + v_kick[0], uy = cvy + v_kick[1], uz = cvz + v_kick[2];
+    double E_before = 0.5 * (m1 * v1sq + m2 * v2sq) - G * m1 * m2 / (r > 0 ? r : 1e-30);
+    double E_after = 0.5 * m_rem * (ux*ux + uy*uy + uz*uz);
+    for (int k = 0; k < p.N; k++) {
+        if (k == idx1 || k == idx2 || h_m(k) == 0.0) continue;
+        double r1 = dist(k, h_x(idx1), h_y(idx1), h_z(idx1));
+        double r2 = dist(k, h_x(idx2), h_y(idx2), h_z(idx2));
+        double rc = dist(k, cx, cy, cz);
+        E_after -= G * h_m(k) * (m_rem / rc - m1 / r1 - m2 / r2);
+    }
+    books.E_merge += E_before - E_after;
 
     // Place remnant at idx1, mark idx2 for removal
     h_x(idx1) = cx; h_y(idx1) = cy; h_z(idx1) = cz;
@@ -294,6 +309,7 @@ void execute_merger(const MergerEvent& event, Particles& p,
 
     // Mark particle 2 with zero mass (will be compacted later)
     h_m(idx2) = 0.0;
+    mgr.removed_pids.insert(event.pid2);
 
     Kokkos::deep_copy(p.x, h_x);
     Kokkos::deep_copy(p.y, h_y);
@@ -319,7 +335,6 @@ void execute_merger(const MergerEvent& event, Particles& p,
         }
     }
 
-    (void)dm;  // energy accounting already handled above
 }
 
 // ============================================================================

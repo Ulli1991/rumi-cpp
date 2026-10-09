@@ -5,6 +5,7 @@
 #include "logh.h"
 #include <Kokkos_Core.hpp>
 #include <vector>
+#include <unordered_set>
 #include <cmath>
 
 // Neighbor pair detected during pairwise force/timestep computation
@@ -71,6 +72,13 @@ struct SubsystemManager {
     int safe_pid_to_idx(int pid) const {
         return (pid >= 0 && pid < (int)pid_to_idx_.size()) ? pid_to_idx_[pid] : -1;
     }
+
+    // Particle IDs removed by mergers. IDs are never reused, so the set only grows.
+    std::unordered_set<int> removed_pids;
+
+    // Reinstate a subsystem list saved before a recursive call, dropping subsystems
+    // with a member that a merger removed in the meantime.
+    void restore_active(const std::vector<Subsystem>& saved);
 
     // GPU output buffer for neighbor pairs (written by pairwise kernels)
     Kokkos::View<int*>    ngb_pair_i;    // particle index i

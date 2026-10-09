@@ -15,10 +15,24 @@ P_MYR = math.sqrt(1000 / 20) * 1e-6
 FROST4 = dict(KEPLER, TOTAL_TIME_MYR=f"{1000 * P_MYR:.10e}", DT_MAX_MYR=f"{P_MYR:.10e}")
 # FROST Fig. 5: Sun and the four giant planets (Tables A1-A2), 1000 yr
 PLANETS = dict(KEPLER, TEST_CASE="outer_planets", TOTAL_TIME_MYR="1.0e-3")
+# 400 Kroupa stars, half in contact binaries (a = 1-4 R_sun): ~75 stellar mergers in 20 steps, at HHS depths
+# 0-10. Each merger compacts the particle arrays mid-recursion and may trigger step restarts.
+MERGERS = dict(TEST_CASE="plummer", INTEGRATOR="hhs", TOTAL_TIME_MYR="2e-8", DT_MAX_MYR="1e-9",
+               DT_MIN_MYR="1e-16", ETA_FF="0.2", ETA_FB="0.2", ETA_GRAD="0.1", ETA_JERK="0.1", SOFTENING_PC="0",
+               COLLISIONAL="true", R_NGB="1e-3", R_NGB_MAX="0.1", ETA_PERT="0.02", ETA_GBS="1e-10",
+               ETA_RESTART="1e-8", N_ORB_SECULAR="3", M_PN="5.0", PN_ORDER="0", R_ESCAPE_RH="100.0",
+               SSE_ENABLED="false", PLUMMER_N="400", PLUMMER_M_TOTAL="200", PLUMMER_R_HALF="0.3", PLUMMER_SEED="7",
+               PLUMMER_MASS_DIST="kroupa", BINARY_FRAC="0.5", BINARY_A_MIN_AU="0.005", BINARY_A_MAX_AU="0.02",
+               PRINT_INTERVAL="1", PROFILING="false")
 
 
 def run(exe, cfg):
     """L0 diagnostic rows (|dE/E|, |dP|/M, |dL/L|) of one run; raises on a nonzero exit."""
+    return diagnostics(run_output(exe, cfg))
+
+
+def run_output(exe, cfg):
+    """stdout of one run; raises on a nonzero exit or a timeout."""
     with tempfile.TemporaryDirectory() as d:
         Path(d, "config.txt").write_text("".join(f"{k} = {v}\n" for k, v in cfg.items()))
         try:
@@ -27,7 +41,11 @@ def run(exe, cfg):
             raise SystemExit(f"FAIL: no result within {TIMEOUT_S} s (hung or stuck in time)")
     if out.returncode != 0:
         raise SystemExit(f"FAIL: exit {out.returncode}\n{out.stdout[-2000:]}{out.stderr[-2000:]}")
-    rows = [line.split() for line in out.stdout.splitlines() if re.match(r"^\s+L0\s", line) and len(line.split()) >= 8]
+    return out.stdout
+
+
+def diagnostics(stdout):
+    rows = [line.split() for line in stdout.splitlines() if re.match(r"^\s+L0\s", line) and len(line.split()) >= 8]
     if not rows:
         raise SystemExit("FAIL: no diagnostics printed")
     return [[float(r[3]), float(r[4]), float(r[5])] for r in rows]
@@ -46,6 +64,21 @@ def floor(exe, label, cfg, bounds):
     vals = (rows[-1][0], max(r[0] for r in rows), max(r[1] for r in rows), max(r[2] for r in rows))
     names = ("|dE/E| at end", "max|dE/E|", "max|dP|/M [km/s]", "max|dL/L|")
     return all([check(f"{label} {n}", v, b) for n, v, b in zip(names, vals, bounds)])
+
+
+def mergers(exe, label, cfg, bounds):
+    """Stellar mergers inside the HHS recursion: the particle count must drop by exactly the recorded mergers
+    (no duplicated or lost particles), momentum and energy including the merger sink must be conserved."""
+    out = run_output(exe, cfg)
+    rows = diagnostics(out)
+    n0 = int(cfg["PLUMMER_N"])
+    n_merged = int(re.findall(r"Merger tree written to \S+ \((\d+) events\)", out)[-1])
+    last_table = out[out.rfind("Level        dt"):]
+    n_final = sum(int(m) for m in re.findall(r"^\s+L\d+\s+\S+\s+(\d+)", last_table, re.M))
+    ok = check(f"{label} mergers", n_merged, 50, lower=True)
+    ok &= check(f"{label} |N_final - (N0 - mergers)|", abs(n_final - (n0 - n_merged)), 0)
+    ok &= check(f"{label} max|dE/E| with merger sink", max(r[0] for r in rows), bounds[0])
+    return ok & check(f"{label} max|dP|/M [km/s]", max(r[1] for r in rows), bounds[1])
 
 
 def check(name, value, bound, lower=False):
@@ -105,6 +138,12 @@ CASES = {
                                      [3.1e-7, 1.1e-8, 5.7e-10], (4.43, 4.83)),
     "planets_fsi": lambda exe: sweep(exe, "planets fsi", dict(PLANETS, INTEGRATOR="fsi"), ["0.128", "0.064", "0.032"],
                                      [9.6e-8, 6.1e-9, 3.8e-10], (3.90, 4.30)),
+    # Before the fix: segfault in step 1 (duplicated particle after compaction, LogH NaN), then mass loss on
+    # step restarts and |dE/E| ~ 1 from an incomplete merger sink. Measured on the host build: GPU-path
+    # recursion 2.2e-10 / 4.3e-14 km/s; CPU small-subset path (4 restarts) 1.9e-9 / 3.1e-12 km/s. Bounds:
+    # the restart threshold for E, P well above round-off but far below one lost binary member (~3 km/s).
+    "mergers_gpu_path": lambda exe: mergers(exe, "mergers gpu path", dict(MERGERS, SERIAL_N2_CPU="0"), (1e-8, 1e-12)),
+    "mergers_cpu_path": lambda exe: mergers(exe, "mergers cpu path", dict(MERGERS, SERIAL_N2_CPU="64"), (1e-8, 1e-11)),
 }
 
 if __name__ == "__main__":

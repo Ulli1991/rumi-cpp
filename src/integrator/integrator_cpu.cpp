@@ -26,6 +26,7 @@ void CpuSubset::resize(int n) {
     ax.resize(n); ay.resize(n); az.resize(n);
     mass.resize(n); dt_adapt.resize(n);
     ix.resize(n); iy.resize(n); iz.resize(n);
+    src.resize(n);
 #ifdef ENABLE_COLLISIONAL
     sid.resize(n, -1);
     grad_mag.resize(n, 0.0);
@@ -63,10 +64,12 @@ void CpuSubset::copy_from_device(Particles& p, int start) {
         vx[i] = h_vx(i); vy[i] = h_vy(i); vz[i] = h_vz(i);
         mass[i] = h_m(i); dt_adapt[i] = h_dt(i);
         ix[i] = h_ix(i); iy[i] = h_iy(i); iz[i] = h_iz(i);
+        src[i] = i;
     }
+    device_start = start;
+    order_dirty = false;
 #ifdef ENABLE_COLLISIONAL
     collisional = p.collisional;
-    device_start = start;
     if (collisional) {
         auto h_sid = Kokkos::create_mirror_view(Kokkos::subview(p.subsystem_id, Kokkos::pair<int,int>(start, start+count)));
         auto h_gm  = Kokkos::create_mirror_view(Kokkos::subview(p.grad_mag, Kokkos::pair<int,int>(start, start+count)));
@@ -87,7 +90,18 @@ void CpuSubset::copy_from_device(Particles& p, int start) {
 #endif
 }
 
+void CpuSubset::sync_order_to_device(Particles& p) {
+    if (!order_dirty) return;
+    auto perm = Kokkos::subview(p.scratch_i, Kokkos::pair<int,int>(0, count));
+    auto h_perm = Kokkos::create_mirror_view(perm);
+    for (int i = 0; i < count; i++) { h_perm(i) = device_start + src[i]; src[i] = i; }
+    Kokkos::deep_copy(perm, h_perm);
+    p.apply_permutation(device_start, count);
+    order_dirty = false;
+}
+
 void CpuSubset::copy_to_device(Particles& p, int start) {
+    sync_order_to_device(p);
     auto h_x = Kokkos::create_mirror_view(Kokkos::subview(p.x, Kokkos::pair<int,int>(start, start+count)));
     auto h_y = Kokkos::create_mirror_view(Kokkos::subview(p.y, Kokkos::pair<int,int>(start, start+count)));
     auto h_z = Kokkos::create_mirror_view(Kokkos::subview(p.z, Kokkos::pair<int,int>(start, start+count)));
@@ -120,12 +134,15 @@ void CpuSubset::copy_to_device(Particles& p, int start) {
     if (collisional) {
         auto h_sid = Kokkos::create_mirror_view(Kokkos::subview(p.subsystem_id, Kokkos::pair<int,int>(start, start+count)));
         auto h_dl0 = Kokkos::create_mirror_view(Kokkos::subview(p.dt_level0, Kokkos::pair<int,int>(start, start+count)));
+        auto h_gm  = Kokkos::create_mirror_view(Kokkos::subview(p.grad_mag, Kokkos::pair<int,int>(start, start+count)));
         for (int i = 0; i < count; i++) {
             h_sid(i) = sid[i];
             h_dl0(i) = dt_level0[i];
+            h_gm(i) = grad_mag[i];
         }
         Kokkos::deep_copy(Kokkos::subview(p.subsystem_id, Kokkos::pair<int,int>(start, start+count)), h_sid);
         Kokkos::deep_copy(Kokkos::subview(p.dt_level0, Kokkos::pair<int,int>(start, start+count)), h_dl0);
+        Kokkos::deep_copy(Kokkos::subview(p.grad_mag, Kokkos::pair<int,int>(start, start+count)), h_gm);
     }
 #endif
     Kokkos::fence();
@@ -474,6 +491,7 @@ static int cpu_partition_by_pivot(CpuSubset& s, int start, int count, double piv
     std::vector<double> tax(count), tay(count), taz(count);
     std::vector<double> tm(count), tdt(count);
     std::vector<int64_t> tix(count), tiy(count), tiz(count);
+    std::vector<int> tsrc(count);
 #ifdef ENABLE_COLLISIONAL
     std::vector<int> tsid(count);
     std::vector<double> tgm(count), tdl0(count);
@@ -488,6 +506,7 @@ static int cpu_partition_by_pivot(CpuSubset& s, int start, int count, double piv
         tax[dst] = s.ax[src]; tay[dst] = s.ay[src]; taz[dst] = s.az[src];
         tm[dst] = s.mass[src]; tdt[dst] = s.dt_adapt[src];
         tix[dst] = s.ix[src]; tiy[dst] = s.iy[src]; tiz[dst] = s.iz[src];
+        tsrc[dst] = s.src[src];
 #ifdef ENABLE_COLLISIONAL
         tsid[dst] = s.sid[src];
         tgm[dst] = s.grad_mag[src]; tdl0[dst] = s.dt_level0[src];
@@ -501,12 +520,14 @@ static int cpu_partition_by_pivot(CpuSubset& s, int start, int count, double piv
         s.ax[dst] = tax[i]; s.ay[dst] = tay[i]; s.az[dst] = taz[i];
         s.mass[dst] = tm[i]; s.dt_adapt[dst] = tdt[i];
         s.ix[dst] = tix[i]; s.iy[dst] = tiy[i]; s.iz[dst] = tiz[i];
+        s.src[dst] = tsrc[i];
 #ifdef ENABLE_COLLISIONAL
         s.sid[dst] = tsid[i];
         s.grad_mag[dst] = tgm[i]; s.dt_level0[dst] = tdl0[i];
         s.particle_id[dst] = tpid[i];
 #endif
     }
+    s.order_dirty = true;
     return slow_count;
 }
 
@@ -517,6 +538,7 @@ static int cpu_partition_by_pivot(CpuSubset& s, int start, int count, double piv
 #ifdef ENABLE_COLLISIONAL
 // Sync CpuSubset state to device Particles for subsystem detection/integration
 static void cpu_sync_to_device(CpuSubset& s, Particles& p, int cpu_start, int dev_start, int count) {
+    s.sync_order_to_device(p);  // device-only fields (ids, stellar data) must sit where s has their particle
     auto h_x = Kokkos::create_mirror_view(Kokkos::subview(p.x, Kokkos::pair<int,int>(dev_start, dev_start+count)));
     auto h_y = Kokkos::create_mirror_view(Kokkos::subview(p.y, Kokkos::pair<int,int>(dev_start, dev_start+count)));
     auto h_z = Kokkos::create_mirror_view(Kokkos::subview(p.z, Kokkos::pair<int,int>(dev_start, dev_start+count)));
@@ -619,10 +641,12 @@ static void cpu_fsi_step(CpuSubset& s, Particles& p, int start, int count,
 }
 
 // CPU HHS-FSI recursion
-static void cpu_hhs_recursive(CpuSubset& s, Particles& p, int start, int count,
-                              double pivot_dt, double G, double soft2,
-                              double dt_min, double eta, bool dt_valid, int depth = 0) {
-    if (count == 0) return;
+// Returns the number of particles that mergers removed from [start, start+count).
+static int cpu_hhs_recursive(CpuSubset& s, Particles& p, int start, int count,
+                             double pivot_dt, double G, double soft2,
+                             double dt_min, double eta, bool dt_valid, int depth = 0) {
+    if (count == 0) return 0;
+    int n_removed = 0;
     if (depth < HHSCounters::MAX_DEPTH) {
         g_hhs_counters.cpu_depth_calls[depth]++;
         g_hhs_counters.cpu_depth_count[depth] += count;
@@ -630,7 +654,7 @@ static void cpu_hhs_recursive(CpuSubset& s, Particles& p, int start, int count,
 
     if (pivot_dt * 0.5 < dt_min) {
         cpu_fsi_step(s, p, start, count, G, soft2, pivot_dt);
-        return;
+        return 0;
     }
 
     // Global device offset for this subset
@@ -697,24 +721,6 @@ static void cpu_hhs_recursive(CpuSubset& s, Particles& p, int start, int count,
             g_subsystem_mgr.enforce_shared_timestep(p);
             g_subsystem_mgr.apply_perturbation_timestep(p, G, g_collisional.eta_pert);
 
-            // Merger detection (BIFROST §3.14)
-            if (g_collisional.c_code > 0.0) {
-                auto mergers = detect_mergers(g_subsystem_mgr, p, G,
-                                               g_collisional.c_code, pivot_dt);
-                for (const auto& ev : mergers) {
-                    auto* sub = find_subsystem_for_merger(g_subsystem_mgr, ev);
-                    if (sub) g_merger_tree.record(ev, *sub, g_sim_time);
-                    execute_merger(ev, p, g_subsystem_mgr, g_energy_books,
-                                   G, g_collisional.c_code);
-                }
-                g_subsystem_mgr.step_mergers += (int)mergers.size();
-                if (!mergers.empty()) {
-                    int n_removed = p.compact_remove_zero_mass();
-                    count -= n_removed;
-                    if (count <= 0) return;
-                }
-            }
-
             // Sync dt_adapt back from device
             {
                 auto h_dt = Kokkos::create_mirror_view(Kokkos::subview(p.dt_adapt, Kokkos::pair<int,int>(dev_start, dev_start+count)));
@@ -728,6 +734,32 @@ static void cpu_hhs_recursive(CpuSubset& s, Particles& p, int start, int count,
                 for (int i = start; i < start + count; i++)
                     s.dt_level0[i] = s.dt_adapt[i];
             }
+
+            // Merger detection (BIFROST §3.14). The merger and the compaction run on the device
+            // copy, so write the whole subset there first and reload the shorter subset after.
+            if (g_collisional.c_code > 0.0) {
+                auto mergers = detect_mergers(g_subsystem_mgr, p, G,
+                                               g_collisional.c_code, pivot_dt);
+                g_subsystem_mgr.step_mergers += (int)mergers.size();
+                if (!mergers.empty()) {
+                    s.copy_to_device(p, s.device_start);
+                    for (const auto& ev : mergers) {
+                        auto* sub = find_subsystem_for_merger(g_subsystem_mgr, ev);
+                        if (sub) g_merger_tree.record(ev, *sub, g_sim_time);
+                        execute_merger(ev, p, g_subsystem_mgr, g_energy_books,
+                                       G, g_collisional.c_code);
+                    }
+                    // The subset is a suffix of [0, N): compaction shortens it from the end
+                    int k = p.compact_remove_zero_mass();
+                    g_subsystem_mgr.rebuild_pid_to_idx(p);
+                    g_subsystem_mgr.update_particle_flags(p);
+                    s.resize(s.count - k);
+                    s.copy_from_device(p, s.device_start);
+                    n_removed += k;
+                    count -= k;
+                    if (count <= 0) return n_removed;
+                }
+            }
         }
 #endif
     }
@@ -740,15 +772,17 @@ static void cpu_hhs_recursive(CpuSubset& s, Particles& p, int start, int count,
 
     if (fast_count == 0) {
         cpu_fsi_step(s, p, start, count, G, soft2, pivot_dt);
-        return;
+        return n_removed;
     }
 
     // Partition was a no-op when slow_count==0, so dt_adapt still valid
     if (slow_count == 0) {
         double sub_pivot = pivot_dt * 0.5;
-        cpu_hhs_recursive(s, p, start, count, sub_pivot, G, soft2, dt_min, eta, true, depth + 1);
-        cpu_hhs_recursive(s, p, start, count, sub_pivot, G, soft2, dt_min, eta, false, depth + 1);
-        return;
+        int k = cpu_hhs_recursive(s, p, start, count, sub_pivot, G, soft2, dt_min, eta, true, depth + 1);
+        n_removed += k;
+        count -= k;
+        n_removed += cpu_hhs_recursive(s, p, start, count, sub_pivot, G, soft2, dt_min, eta, false, depth + 1);
+        return n_removed;
     }
 
     // Save this level's subsystem state before recursive calls can overwrite it.
@@ -763,10 +797,12 @@ static void cpu_hhs_recursive(CpuSubset& s, Particles& p, int start, int count,
     cpu_fsi_step(s, p, slow_start, slow_count, G, soft2, pivot_dt * 0.5);
 
     // Step 3: Recurse on fast (first half)
-    cpu_hhs_recursive(s, p, fast_start, fast_count, pivot_dt * 0.5, G, soft2, dt_min, eta, false, depth + 1);
+    int k = cpu_hhs_recursive(s, p, fast_start, fast_count, pivot_dt * 0.5, G, soft2, dt_min, eta, false, depth + 1);
+    n_removed += k;
+    fast_count -= k;
 
     // Restore this level's subsystem state after recursion overwrote it
-    g_subsystem_mgr.active = saved_active_cpu;
+    g_subsystem_mgr.restore_active(saved_active_cpu);
     g_subsystem_mgr.update_particle_flags(p);
 
     // Step 4: Cross-gradient kick (2dt/3)
@@ -776,10 +812,12 @@ static void cpu_hhs_recursive(CpuSubset& s, Particles& p, int start, int count,
     cpu_kick(s, fast_start, fast_count, pivot_dt * FSI_MOD_KICK);
 
     // Step 5: Recurse on fast (second half)
-    cpu_hhs_recursive(s, p, fast_start, fast_count, pivot_dt * 0.5, G, soft2, dt_min, eta, false, depth + 1);
+    k = cpu_hhs_recursive(s, p, fast_start, fast_count, pivot_dt * 0.5, G, soft2, dt_min, eta, false, depth + 1);
+    n_removed += k;
+    fast_count -= k;
 
     // Restore again for the second half-step on slow
-    g_subsystem_mgr.active = saved_active_cpu;
+    g_subsystem_mgr.restore_active(saved_active_cpu);
     g_subsystem_mgr.update_particle_flags(p);
 
     // Step 6: FSI half-step on slow
@@ -789,10 +827,11 @@ static void cpu_hhs_recursive(CpuSubset& s, Particles& p, int start, int count,
     cpu_cross_acc(s, slow_start, slow_count, fast_start, fast_count, G, soft2);
     cpu_kick(s, slow_start, slow_count, pivot_dt * FSI_KICK);
     cpu_kick(s, fast_start, fast_count, pivot_dt * FSI_KICK);
+    return n_removed;
 }
 
 // Entry point: copy subset to host, run CPU HHS, copy back
-void hhs_fsi_recursive_cpu(Particles& p, int start, int count,
+int hhs_fsi_recursive_cpu(Particles& p, int start, int count,
                            double pivot_dt, double G, double soft2,
                            double dt_min, double eta, bool dt_valid,
                            int depth) {
@@ -800,6 +839,7 @@ void hhs_fsi_recursive_cpu(Particles& p, int start, int count,
     CpuSubset s;
     s.resize(count);
     s.copy_from_device(p, start);
-    cpu_hhs_recursive(s, p, 0, count, pivot_dt, G, soft2, dt_min, eta, dt_valid, depth);
+    int n_removed = cpu_hhs_recursive(s, p, 0, count, pivot_dt, G, soft2, dt_min, eta, dt_valid, depth);
     s.copy_to_device(p, start);
+    return n_removed;
 }

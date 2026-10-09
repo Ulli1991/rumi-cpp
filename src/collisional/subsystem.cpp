@@ -393,6 +393,16 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
 // Update subsystem_id in Particles
 // ============================================================================
 
+void SubsystemManager::restore_active(const std::vector<Subsystem>& saved) {
+    active = saved;
+    if (removed_pids.empty()) return;
+    active.erase(std::remove_if(active.begin(), active.end(), [&](const Subsystem& sub) {
+        for (int pid : sub.particle_ids)
+            if (removed_pids.count(pid)) return true;
+        return false;
+    }), active.end());
+}
+
 void SubsystemManager::update_particle_flags(Particles& p) const {
     // subsystem_id exists only in collisional mode; the HHS recursion calls this unconditionally
     if (!p.collisional) return;

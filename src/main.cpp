@@ -11,6 +11,7 @@
 #ifdef ENABLE_COLLISIONAL
 #include "collisional_config.h"
 #include "subsystem.h"
+#include "logh_batch.h"
 #include "kepler.h"
 #include "checkpoint.h"
 #include "mergers.h"
@@ -909,6 +910,8 @@ int main(int argc, char** argv) {
 
                     constexpr int max_restarts = 10;
                     double prev_dE = 1e30;
+                    Checkpoint best;  // post-step state of the attempt with the smallest error
+                    double best_dE = 1e30;
 
                     for (int restart = 0; restart <= max_restarts; restart++) {
                         // Save checkpoint
@@ -932,24 +935,29 @@ int main(int argc, char** argv) {
                             break;
                         }
 
-                        if (restart == max_restarts) {
-                            // Max retries exhausted — accept and continue (BIFROST escape valve)
-                            std::printf("RESTART: max retries (%d) reached, accepting |dE/E|=%.2e\n",
-                                        max_restarts, dE);
-                            break;
-                        }
-
-                        if (restart > 0 && dE >= prev_dE) {
-                            // Error not decreasing — accept (BIFROST: "if error starts to increase again")
-                            std::printf("RESTART: dE not decreasing (%.2e >= %.2e), accepting\n",
-                                        dE, prev_dE);
+                        bool give_up = restart == max_restarts || (restart > 0 && dE >= prev_dE);
+                        if (give_up) {
+                            // Max retries exhausted, or the error grew again (BIFROST: accept the
+                            // attempt with the smallest error rather than the last one)
+                            if (dE > best_dE) {
+                                best.restore(work_p, g_subsystem_mgr, g_energy_books);
+                                if (use_distributed) dp.sync_count();
+                            }
+                            std::printf("RESTART: %s, accepting |dE/E|=%.2e\n",
+                                        restart == max_restarts ? "max retries reached" : "dE not decreasing",
+                                        std::min(dE, best_dE));
                             break;
                         }
 
                         prev_dE = dE;
+                        if (dE < best_dE) {
+                            best_dE = dE;
+                            best.save(work_p, g_subsystem_mgr, g_energy_books);
+                        }
 
                         // Restore checkpoint
                         checkpoint.restore(work_p, g_subsystem_mgr, g_energy_books);
+                        if (use_distributed) dp.sync_count();
 
                         // Reduce ALL eta parameters by 50% (BIFROST §3.19)
                         g_collisional.eta_ff   *= 0.5;
@@ -1020,6 +1028,7 @@ int main(int argc, char** argv) {
                         if (n_esc > 0) {
                             g_subsystem_mgr.step_escapers += n_esc;
                             work_p.compact_remove_zero_mass();
+                            if (use_distributed) dp.sync_count();
                         }
                     }
                     // Write event logs at snapshot intervals
@@ -1074,6 +1083,9 @@ int main(int argc, char** argv) {
         }
 #ifdef ENABLE_COLLISIONAL
         delete g_sse_ctx;
+        // Global Views must be released before Kokkos::finalize
+        g_logh_batch = SubsystemBatch();
+        g_subsystem_mgr = SubsystemManager();
 #endif
     }
     Kokkos::finalize();

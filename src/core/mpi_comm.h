@@ -134,6 +134,10 @@ struct DistributedParticles {
     // After this, ALL ranks have ALL particles (replicated)
     void distribute_initial(Particles& global_particles);
 
+    // Recompute N_total and this rank's force slice after local.N changed (merger or escaper removal;
+    // every rank removes the same particles from its replica)
+    void sync_count();
+
     // Allgather accelerations after distributed force computation
     // Each rank has computed accelerations for [my_start, my_start + my_count)
     // After this call, all ranks have full acceleration array

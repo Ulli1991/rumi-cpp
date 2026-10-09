@@ -16,6 +16,37 @@
   planets_fsi, floor_binary_e0, floor_planets. Bounds 1.3x measured, orders measured -0.1/+0.3,
   each case fails on the pre-fix code (teeth).
 
+## Done on viper (2026-10-09, host build: Kokkos OpenMP/Serial at ~/kokkos-host, build-host/)
+
+- Mergers inside the HHS recursion (bug 3, part of 9): compaction shifted the arrays under the callers'
+  ranges and left a stale copy in the old last slot (the duplicated pid / one-body LogH NaN / endless
+  restarts of the March binary runs). Ranges are suffixes of [0, N), so the recursion now returns the
+  number of removed particles and callers shorten their counts; restored subsystem lists drop merged pids;
+  the pid map and the MPI slices (`dp.sync_count()`) are refreshed after every compaction (also escapers).
+- Merger energy sink is now exact (pair KE + mutual PE + potential with all others, minus remnant KE):
+  |dE/E| with sinks 2e-10 through 76 mergers; it used to miss 1/2 mu v_rel^2, |dE/E| ~ 1, which triggered
+  restarts.
+- `Checkpoint::restore` restores `p.N` (bug 4), removed pids, merger tree, grad_mag; the restart loop keeps
+  the attempt with the smallest error instead of accepting the worse last one (bug 21).
+- CPU small-subset path (bug 2): its partitions reordered the host copy but never the device-only fields
+  (particle_id, stellar type/radius, spin, kick compensation, orig_index), so with SERIAL_N2_CPU > 0 every
+  CPU-path call scrambled identities. The host copy now records the order and replays it on the device
+  (`Particles::apply_permutation`, shared with the GPU partition) before every write-back; grad_mag is
+  written back too.
+- Global Kokkos Views (LogH batch, subsystem manager) released before `Kokkos::finalize` (every collisional
+  run aborted at exit on host backends).
+- Tests `mergers_gpu_path`, `mergers_cpu_path` (400 stars, 50 % contact binaries, ~75 mergers at depths
+  0-10): the old code segfaults / hangs.
+
+Open, found on the way:
+- frost4_e099 (6.9e-11 vs 6.6e-11) and floor_binary_e0 (1.1e-14 vs 2.4e-15) fail on gcc/x86 with
+  identical numbers before and after these changes: laptop bounds, re-measure per platform.
+- CPU path with binaries needs restarts (first attempt |dE/E| 1e-6) where the GPU path does not; without
+  binaries both agree. Subsystem coupling in the CPU path, not yet understood.
+- SSE_ENABLED defaults to true: its first call removed 37 % of the mass of a ZAMS Kroupa test cluster.
+- With USE_TREE the global tree indices go stale after a merger compaction (tree is off in collisional runs).
+- dL/L is not conserved through mergers (orbital L of the pair is dropped; stellar spin is not tracked).
+
 ## On viper
 
 1. Build against the GPU Kokkos and run `ctest --test-dir <build>`: first check of the fixes on the

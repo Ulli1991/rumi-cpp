@@ -184,6 +184,69 @@ void Particles::pack_vel_range(int start, int count) {
 
 }
 
+void Particles::apply_permutation(int start, int count) {
+    if (count <= 1) return;
+    auto perm = scratch_i;
+    auto px = x, py = y, pz = z, pvx = vx, pvy = vy, pvz = vz;
+    auto pax = ax, pay = ay, paz = az, pmass = mass, pdt = dt_adapt;
+    auto porig = orig_index, plevel = level;
+    auto pix = ix, piy = iy, piz = iz;
+    auto t1 = scratch1, t2 = scratch2, t3 = scratch3, t4 = scratch4, t5 = scratch5, t6 = scratch6;
+    auto t7 = scratch7, t8 = scratch8, t9 = scratch9, t10 = scratch10, t11 = scratch11;
+    auto ti1 = scratch_i2, ti2 = scratch_i3;
+    auto tl1 = scratch_l1, tl2 = scratch_l2, tl3 = scratch_l3;
+
+    Kokkos::parallel_for("gather_all", count, KOKKOS_LAMBDA(int ii) {
+        int src = perm(ii);
+        t1(ii) = px(src);   t2(ii) = py(src);   t3(ii) = pz(src);
+        t4(ii) = pvx(src);  t5(ii) = pvy(src);  t6(ii) = pvz(src);
+        t7(ii) = pax(src);  t8(ii) = pay(src);  t9(ii) = paz(src);
+        t10(ii) = pmass(src); t11(ii) = pdt(src);
+        ti1(ii) = porig(src); ti2(ii) = plevel(src);
+        tl1(ii) = pix(src); tl2(ii) = piy(src); tl3(ii) = piz(src);
+    });
+    Kokkos::parallel_for("copy_all", count, KOKKOS_LAMBDA(int ii) {
+        int dst = start + ii;
+        px(dst) = t1(ii);   py(dst) = t2(ii);   pz(dst) = t3(ii);
+        pvx(dst) = t4(ii);  pvy(dst) = t5(ii);  pvz(dst) = t6(ii);
+        pax(dst) = t7(ii);  pay(dst) = t8(ii);  paz(dst) = t9(ii);
+        pmass(dst) = t10(ii); pdt(dst) = t11(ii);
+        porig(dst) = ti1(ii); plevel(dst) = ti2(ii);
+        pix(dst) = tl1(ii); piy(dst) = tl2(ii); piz(dst) = tl3(ii);
+    });
+
+    // Kick compensation follows its particle (t1-t3 are free after the copy-back)
+    auto pcx = cvx, pcy = cvy, pcz = cvz;
+    Kokkos::parallel_for("gather_comp", count, KOKKOS_LAMBDA(int ii) {
+        int src = perm(ii);
+        t1(ii) = pcx(src); t2(ii) = pcy(src); t3(ii) = pcz(src);
+    });
+    Kokkos::parallel_for("copy_comp", count, KOKKOS_LAMBDA(int ii) {
+        int dst = start + ii;
+        pcx(dst) = t1(ii); pcy(dst) = t2(ii); pcz(dst) = t3(ii);
+    });
+
+    if (!collisional) return;
+    auto ppid = particle_id, psid = subsystem_id, pstype = stellar_type;
+    auto pmzams = m_zams, psage = stellar_age, psrad = stellar_radius, plum = luminosity;
+    auto pcmass = core_mass, psmag = spin_mag, pdtl0 = dt_level0, pgmag = grad_mag;
+    auto pspin = spin_vec;
+    Kokkos::parallel_for("gather_coll", count, KOKKOS_LAMBDA(int ii) {
+        int src = perm(ii);
+        ti1(ii) = ppid(src); ti2(ii) = psid(src); tl1(ii) = pstype(src);
+        t1(ii) = pmzams(src); t2(ii) = psage(src); t3(ii) = psrad(src); t4(ii) = plum(src);
+        t5(ii) = pcmass(src); t6(ii) = psmag(src); t7(ii) = pdtl0(src); t8(ii) = pgmag(src);
+        t9(ii) = pspin(src, 0); t10(ii) = pspin(src, 1); t11(ii) = pspin(src, 2);
+    });
+    Kokkos::parallel_for("copy_coll", count, KOKKOS_LAMBDA(int ii) {
+        int dst = start + ii;
+        ppid(dst) = ti1(ii); psid(dst) = ti2(ii); pstype(dst) = (int)tl1(ii);
+        pmzams(dst) = t1(ii); psage(dst) = t2(ii); psrad(dst) = t3(ii); plum(dst) = t4(ii);
+        pcmass(dst) = t5(ii); psmag(dst) = t6(ii); pdtl0(dst) = t7(ii); pgmag(dst) = t8(ii);
+        pspin(dst, 0) = t9(ii); pspin(dst, 1) = t10(ii); pspin(dst, 2) = t11(ii);
+    });
+}
+
 int Particles::compact_remove_zero_mass() {
     // Copy mass to host to find which particles to keep
     auto h_m = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), mass);
