@@ -469,7 +469,8 @@ int main(int argc, char** argv) {
         bool profiling_enabled = cfg.get_bool("PROFILING", true);
         serial_n2_gpu = cfg.get_int("SERIAL_N2_GPU", 0);
         serial_n2_cpu = cfg.get_int("SERIAL_N2_CPU", 0);
-        all_slow_split = cfg.get_bool("ALL_SLOW_SPLIT", true);   // FROST Algorithm 3
+        all_slow_split = cfg.get_bool("ALL_SLOW_SPLIT", true);
+        distribute_subsystems = cfg.get_bool("DISTRIBUTE_SUBSYSTEMS", false);   // FROST Algorithm 3
         use_integer_positions = cfg.get_bool("INTEGER_POSITIONS", false);
         double domain_halfsize = cfg.get_double("DOMAIN_HALFSIZE_PC", 200.0);
         use_nonblocking_mpi = cfg.get_bool("MPI_NON_BLOCKING", false);
