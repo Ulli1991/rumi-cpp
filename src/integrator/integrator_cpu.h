@@ -14,6 +14,7 @@
 // Host-side data for CPU serial computation
 struct CpuSubset {
     std::vector<double> x, y, z, vx, vy, vz, ax, ay, az, mass, dt_adapt;
+    std::vector<double> cvx, cvy, cvz;  // Kahan compensation of the kicks, as on the device
     std::vector<int64_t> ix, iy, iz;
     std::vector<int> sid;  // subsystem_id (collisional mode)
 #ifdef ENABLE_COLLISIONAL
@@ -40,6 +41,9 @@ struct CpuSubset {
     // Reorder the device slots to match the host order after partitions, so fields that only
     // live on the device (particle_id, stellar data, spin, kick compensation) follow their particle
     void sync_order_to_device(Particles& p);
+
+    // Write host slots [host_start, host_start+n) of the kick compensation to device [dev_start, ...)
+    void copy_compensation_to_device(Particles& p, int host_start, int dev_start, int n) const;
 };
 
 // Entry point: copy subset to host, run CPU HHS, copy back

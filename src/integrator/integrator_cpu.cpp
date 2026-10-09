@@ -23,6 +23,7 @@ void CpuSubset::resize(int n) {
     count = n;
     x.resize(n); y.resize(n); z.resize(n);
     vx.resize(n); vy.resize(n); vz.resize(n);
+    cvx.resize(n); cvy.resize(n); cvz.resize(n);
     ax.resize(n); ay.resize(n); az.resize(n);
     mass.resize(n); dt_adapt.resize(n);
     ix.resize(n); iy.resize(n); iz.resize(n);
@@ -58,8 +59,13 @@ void CpuSubset::copy_from_device(Particles& p, int start) {
     Kokkos::deep_copy(h_ix, Kokkos::subview(p.ix, Kokkos::pair<int,int>(start, start+count)));
     Kokkos::deep_copy(h_iy, Kokkos::subview(p.iy, Kokkos::pair<int,int>(start, start+count)));
     Kokkos::deep_copy(h_iz, Kokkos::subview(p.iz, Kokkos::pair<int,int>(start, start+count)));
+    auto rng = Kokkos::pair<int,int>(start, start+count);
+    auto h_cvx = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Kokkos::subview(p.cvx, rng));
+    auto h_cvy = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Kokkos::subview(p.cvy, rng));
+    auto h_cvz = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Kokkos::subview(p.cvz, rng));
     Kokkos::fence();
     for (int i = 0; i < count; i++) {
+        cvx[i] = h_cvx(i); cvy[i] = h_cvy(i); cvz[i] = h_cvz(i);
         x[i] = h_x(i); y[i] = h_y(i); z[i] = h_z(i);
         vx[i] = h_vx(i); vy[i] = h_vy(i); vz[i] = h_vz(i);
         mass[i] = h_m(i); dt_adapt[i] = h_dt(i);
@@ -88,6 +94,19 @@ void CpuSubset::copy_from_device(Particles& p, int start) {
         }
     }
 #endif
+}
+
+void CpuSubset::copy_compensation_to_device(Particles& p, int host_start, int dev_start, int n) const {
+    auto rng = Kokkos::pair<int,int>(dev_start, dev_start + n);
+    auto h_cvx = Kokkos::create_mirror_view(Kokkos::subview(p.cvx, rng));
+    auto h_cvy = Kokkos::create_mirror_view(Kokkos::subview(p.cvy, rng));
+    auto h_cvz = Kokkos::create_mirror_view(Kokkos::subview(p.cvz, rng));
+    for (int i = 0; i < n; i++) {
+        h_cvx(i) = cvx[host_start + i]; h_cvy(i) = cvy[host_start + i]; h_cvz(i) = cvz[host_start + i];
+    }
+    Kokkos::deep_copy(Kokkos::subview(p.cvx, rng), h_cvx);
+    Kokkos::deep_copy(Kokkos::subview(p.cvy, rng), h_cvy);
+    Kokkos::deep_copy(Kokkos::subview(p.cvz, rng), h_cvz);
 }
 
 void CpuSubset::sync_order_to_device(Particles& p) {
@@ -130,6 +149,7 @@ void CpuSubset::copy_to_device(Particles& p, int start) {
     Kokkos::deep_copy(Kokkos::subview(p.ix, Kokkos::pair<int,int>(start, start+count)), h_ix);
     Kokkos::deep_copy(Kokkos::subview(p.iy, Kokkos::pair<int,int>(start, start+count)), h_iy);
     Kokkos::deep_copy(Kokkos::subview(p.iz, Kokkos::pair<int,int>(start, start+count)), h_iz);
+    copy_compensation_to_device(p, 0, start, count);
 #ifdef ENABLE_COLLISIONAL
     if (collisional) {
         auto h_sid = Kokkos::create_mirror_view(Kokkos::subview(p.subsystem_id, Kokkos::pair<int,int>(start, start+count)));
@@ -361,10 +381,11 @@ static void cpu_drift_field_only(CpuSubset& s, int start, int count, double dt) 
 // CPU kick using pre-computed accelerations
 static void cpu_kick(CpuSubset& s, int start, int count, double kick_dt) {
     const int end = start + count;
+    // Compensated, as kick_velocities on the device
     for (int i = start; i < end; i++) {
-        s.vx[i] += s.ax[i] * kick_dt;
-        s.vy[i] += s.ay[i] * kick_dt;
-        s.vz[i] += s.az[i] * kick_dt;
+        kahan_add(s.vx[i], s.cvx[i], s.ax[i] * kick_dt);
+        kahan_add(s.vy[i], s.cvy[i], s.ay[i] * kick_dt);
+        kahan_add(s.vz[i], s.cvz[i], s.az[i] * kick_dt);
     }
 }
 
@@ -488,6 +509,7 @@ static int cpu_partition_by_pivot(CpuSubset& s, int start, int count, double piv
     // Build reordered copies
     std::vector<double> tx(count), ty(count), tz(count);
     std::vector<double> tvx(count), tvy(count), tvz(count);
+    std::vector<double> tcx(count), tcy(count), tcz(count);
     std::vector<double> tax(count), tay(count), taz(count);
     std::vector<double> tm(count), tdt(count);
     std::vector<int64_t> tix(count), tiy(count), tiz(count);
@@ -503,6 +525,7 @@ static int cpu_partition_by_pivot(CpuSubset& s, int start, int count, double piv
         int dst = (s.dt_adapt[src] >= pivot) ? si++ : fi++;
         tx[dst] = s.x[src]; ty[dst] = s.y[src]; tz[dst] = s.z[src];
         tvx[dst] = s.vx[src]; tvy[dst] = s.vy[src]; tvz[dst] = s.vz[src];
+        tcx[dst] = s.cvx[src]; tcy[dst] = s.cvy[src]; tcz[dst] = s.cvz[src];
         tax[dst] = s.ax[src]; tay[dst] = s.ay[src]; taz[dst] = s.az[src];
         tm[dst] = s.mass[src]; tdt[dst] = s.dt_adapt[src];
         tix[dst] = s.ix[src]; tiy[dst] = s.iy[src]; tiz[dst] = s.iz[src];
@@ -517,6 +540,7 @@ static int cpu_partition_by_pivot(CpuSubset& s, int start, int count, double piv
         int dst = start + i;
         s.x[dst] = tx[i]; s.y[dst] = ty[i]; s.z[dst] = tz[i];
         s.vx[dst] = tvx[i]; s.vy[dst] = tvy[i]; s.vz[dst] = tvz[i];
+        s.cvx[dst] = tcx[i]; s.cvy[dst] = tcy[i]; s.cvz[dst] = tcz[i];
         s.ax[dst] = tax[i]; s.ay[dst] = tay[i]; s.az[dst] = taz[i];
         s.mass[dst] = tm[i]; s.dt_adapt[dst] = tdt[i];
         s.ix[dst] = tix[i]; s.iy[dst] = tiy[i]; s.iz[dst] = tiz[i];
@@ -563,7 +587,7 @@ static void cpu_sync_to_device(CpuSubset& s, Particles& p, int cpu_start, int de
     Kokkos::deep_copy(Kokkos::subview(p.mass, Kokkos::pair<int,int>(dev_start, dev_start+count)), h_m);
     Kokkos::deep_copy(Kokkos::subview(p.dt_adapt, Kokkos::pair<int,int>(dev_start, dev_start+count)), h_dt);
     Kokkos::deep_copy(Kokkos::subview(p.subsystem_id, Kokkos::pair<int,int>(dev_start, dev_start+count)), h_sid);
-    p.zero_kick_compensation(dev_start, count);  // velocities replaced by the CPU path's own
+    s.copy_compensation_to_device(p, cpu_start, dev_start, count);
     Kokkos::fence();
 }
 
@@ -589,10 +613,16 @@ static void cpu_sync_pos_vel_from_device(CpuSubset& s, Particles& p, int cpu_sta
     Kokkos::deep_copy(h_vx, Kokkos::subview(p.vx, Kokkos::pair<int,int>(dev_start, dev_start+count)));
     Kokkos::deep_copy(h_vy, Kokkos::subview(p.vy, Kokkos::pair<int,int>(dev_start, dev_start+count)));
     Kokkos::deep_copy(h_vz, Kokkos::subview(p.vz, Kokkos::pair<int,int>(dev_start, dev_start+count)));
+    // The subsystem integrator zeroed the compensation of the members whose velocities it replaced
+    auto rng = Kokkos::pair<int,int>(dev_start, dev_start+count);
+    auto h_cvx = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Kokkos::subview(p.cvx, rng));
+    auto h_cvy = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Kokkos::subview(p.cvy, rng));
+    auto h_cvz = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Kokkos::subview(p.cvz, rng));
     Kokkos::fence();
     for (int i = 0; i < count; i++) {
         s.x[cpu_start + i] = h_x(i); s.y[cpu_start + i] = h_y(i); s.z[cpu_start + i] = h_z(i);
         s.vx[cpu_start + i] = h_vx(i); s.vy[cpu_start + i] = h_vy(i); s.vz[cpu_start + i] = h_vz(i);
+        s.cvx[cpu_start + i] = h_cvx(i); s.cvy[cpu_start + i] = h_cvy(i); s.cvz[cpu_start + i] = h_cvz(i);
     }
 }
 #endif

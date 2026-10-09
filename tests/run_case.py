@@ -180,6 +180,16 @@ CASES = {
     "floor_planets": lambda exe: floor(exe, "floor planets", dict(PLANETS, ETA="0.004", ETA_FF="0.004", ETA_FB="0.004",
                                         INTEGER_POSITIONS="true", DOMAIN_HALFSIZE_PC="1e-3"),
                                        (4.5e-14, 1.5e-13, 1.0e-17, 2.6e-15)),
+    # Same floors through the CPU small-subset path (SERIAL_N2_CPU covers every set), 1.3x measured. Plain
+    # kicks there before: binary 1.9e-13 end, 3.5e-13 max, L 1.8e-13; planets 2.6e-13, P 2.1e-15, L 2.9e-14.
+    "floor_binary_e0_cpu": lambda exe: floor(exe, "floor e=0 cpu path", dict(FROST4, BINARY_E="0.0", ETA="0.004",
+                                              ETA_FF="0.004", ETA_FB="0.004", INTEGER_POSITIONS="true",
+                                              DOMAIN_HALFSIZE_PC="1e-3", SERIAL_N2_CPU="8"),
+                                             (1.8e-14, 1.9e-14, 1e-14, 9.3e-15)),
+    "floor_planets_cpu": lambda exe: floor(exe, "floor planets cpu path", dict(PLANETS, ETA="0.004", ETA_FF="0.004",
+                                            ETA_FB="0.004", INTEGER_POSITIONS="true", DOMAIN_HALFSIZE_PC="1e-3",
+                                            SERIAL_N2_CPU="8"),
+                                           (1.9e-13, 1.9e-13, 1.0e-17, 1.9e-15)),
     # 1000 yr is ~6 Neptune orbits: no drift check. HHS measured 2.35e-7, 8.27e-9, 4.39e-10, order 4.53
     # (FROST: ~1e-13 at eta = 0.004, which order 4 from here reaches); FSI (all at the fastest occupied
     # level) measured 7.41e-8, 4.64e-9, 2.90e-10, order 4.00 (hung before the fsi-step fix)
