@@ -70,7 +70,14 @@ Later the same night:
 - 2 nodes (4 MI300A) give no speedup at 200k: small-set path and subsystems are replicated per rank.
 - Dense cores: oversize neighbour chains split along bound pairs (r_h = 0.02 pc now 2 steps in 246 s);
   accuracy there does not converge below ~7e-8 per step with eta halving (strong perturbers on
-  subsystems): open.
+  subsystems): open. Diagnosis (r_h = 0.03 pc, 2000 stars, 50 % binaries of 1-20 AU, 10 steps of
+  1e-5 Myr, restarts off): per-step |dE/E| oscillates 3e-9 - 7e-8 for eta x1 and x0.5, unchanged by
+  ETA_GBS 1e-13 or disabling secular evolution; without binaries 1.7e-9 -> 1.3e-11 when eta is halved.
+  The floor is the perturbers' tidal coupling to binaries whose periods are far below the FSI step:
+  their internal motion is exact (LogH / secular) but the perturbation arrives as kicks that sample the
+  orbital phase, and the phase-dependent tidal energy oscillates. Fix candidates: tidal tensor applied
+  inside LogH (PeTar, AR-CHAIN perturbers), a resolution criterion for strongly perturbed binaries, or
+  perturbers inside larger subsystems (MSTAR).
 - RSQRT_NEWTON default (GPU accuracy = CPU at +4 %); SERIAL_N2_CPU = 0 fastest on MI300A (13-14 s vs 15.3 s).
 - DISTRIBUTE_SUBSYSTEMS (off): correct (replicas identical, tests), but on 2 nodes slower (subsystem part
   7.3 s vs 5.2 s): ~4300 calls per step each with inter-node allgathers. Next: one exchange per HHS level
