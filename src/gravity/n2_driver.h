@@ -41,15 +41,15 @@ inline Kokkos::View<double*>& partial_buffer() {
     return buf;
 }
 // Number of source chunks: about 8 teams per compute unit, chunks of at least 4 tiles
-inline int chunk_count(int ni, int nj) {
+inline int chunk_count(int ni, int nj, int TS) {
 #if defined(KOKKOS_ENABLE_CUDA) || defined(KOKKOS_ENABLE_HIP) || defined(KOKKOS_ENABLE_SYCL)
-    static const int target_teams = std::max(1, Kokkos::DefaultExecutionSpace().concurrency() / (2 * TILE_SIZE));
-    int iblocks = (ni + TILE_SIZE - 1) / TILE_SIZE;
+    const int target_teams = std::max(1, Kokkos::DefaultExecutionSpace().concurrency() / (2 * TS));
+    int iblocks = (ni + TS - 1) / TS;
     int n = (target_teams + iblocks - 1) / iblocks;
-    n = std::min(n, std::max(1, nj / (4 * TILE_SIZE)));
+    n = std::min(n, std::max(1, nj / (4 * TS)));
     return std::max(1, std::min(n, 64));
 #else
-    (void)ni; (void)nj;
+    (void)ni; (void)nj; (void)TS;
     return 1;
 #endif
 }
@@ -61,45 +61,18 @@ inline long long n2_host_max() {
     return v;
 }
 
-template <class K>
-void run_n2(const char* name, int i0, int ni, int j0, int nj, const K& k) {
-    if (ni <= 0) return;
-    if constexpr (kHostAccessibleDevice) {
-        if ((long long)ni * nj <= n2_host_max()) {   // tiny set: host loops, same accumulation as the kernel
-            constexpr int NSa = K::NS > 0 ? K::NS : 1, NMa = K::NM > 0 ? K::NM : 1;
-            Kokkos::fence();
-            double src[K::NSRC > 0 ? K::NSRC : 1];
-            for (int ii = 0; ii < ni; ii++) {
-                const int i = i0 + ii;
-                typename K::Sink s = k.sink(i);
-                double sum[NSa], comp[NSa], blk[NSa], mn[NMa];
-                for (int a = 0; a < NSa; a++) sum[a] = comp[a] = blk[a] = 0.0;
-                for (int a = 0; a < NMa; a++) mn[a] = 1e30;
-                int in_block = 0;
-                for (int jj = 0; jj < nj; jj++) {
-                    k.source(j0 + jj, src);
-                    k.pair(s, i, src, j0 + jj, blk, mn);
-                    if (++in_block >= N2_KAHAN_BLOCK || jj == nj - 1) {
-                        for (int a = 0; a < K::NS; a++) { kahan_add(sum[a], comp[a], blk[a]); blk[a] = 0.0; }
-                        in_block = 0;
-                    }
-                }
-                double out[NSa];
-                for (int a = 0; a < K::NS; a++) out[a] = sum[a] - comp[a];
-                k.finish(i, s, out, mn);
-            }
-            return;
-        }
-    }
+namespace n2_detail {
+template <int TS, class K>
+void run_tiled(const char* name, int i0, int ni, int j0, int nj, const K& k) {
     using team_policy = Kokkos::TeamPolicy<>;
     using member_type = team_policy::member_type;
     using scratch_space = Kokkos::DefaultExecutionSpace::scratch_memory_space;
     constexpr int NS = K::NS, NM = K::NM, NSRC = K::NSRC;
     constexpr int NSa = NS > 0 ? NS : 1, NMa = NM > 0 ? NM : 1;
-    const size_t scratch = TILE_SIZE * NSRC * sizeof(double);
-    const int iblocks = (ni + TILE_SIZE - 1) / TILE_SIZE;
-    const int nchunk = nj > 0 ? n2_detail::chunk_count(ni, nj) : 1;
-    const int chunk = nchunk > 1 ? ((nj + nchunk - 1) / nchunk + TILE_SIZE - 1) / TILE_SIZE * TILE_SIZE : nj;
+    const size_t scratch = TS * NSRC * sizeof(double);
+    const int iblocks = (ni + TS - 1) / TS;
+    const int nchunk = nj > 0 ? n2_detail::chunk_count(ni, nj, TS) : 1;
+    const int chunk = nchunk > 1 ? ((nj + nchunk - 1) / nchunk + TS - 1) / TS * TS : nj;
     const int nc = nchunk > 1 ? (nj + chunk - 1) / chunk : 1;
     constexpr int STRIDE = 2 * NS + NM;   // per sink and chunk: sums, compensations, minima
 
@@ -112,15 +85,15 @@ void run_n2(const char* name, int i0, int ni, int j0, int nj, const K& k) {
     }
 
     Kokkos::parallel_for(name,
-        team_policy(iblocks * nc, TILE_SIZE).set_scratch_size(0, Kokkos::PerTeam(scratch)),
+        team_policy(iblocks * nc, TS).set_scratch_size(0, Kokkos::PerTeam(scratch)),
         KOKKOS_LAMBDA(const member_type& team) {
             const int q = team.league_rank() / iblocks;          // source chunk
             const int ib = team.league_rank() - q * iblocks;
-            const int ii = ib * TILE_SIZE + team.team_rank();
+            const int ii = ib * TS + team.team_rank();
             const int i = i0 + ii;
             const bool active = ii < ni;
             const int c0 = j0 + q * chunk, c1 = Kokkos::min(j0 + nj, c0 + chunk);
-            Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged> tile(team.team_scratch(0), TILE_SIZE * NSRC);
+            Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged> tile(team.team_scratch(0), TS * NSRC);
 
             typename K::Sink s{};
             if (active) s = k.sink(i);
@@ -129,8 +102,8 @@ void run_n2(const char* name, int i0, int ni, int j0, int nj, const K& k) {
             for (int a = 0; a < NMa; a++) mn[a] = 1e30;
             int in_block = 0;
 
-            for (int t0 = c0; t0 < c1; t0 += TILE_SIZE) {
-                const int n = Kokkos::min(TILE_SIZE, c1 - t0);
+            for (int t0 = c0; t0 < c1; t0 += TS) {
+                const int n = Kokkos::min(TS, c1 - t0);
                 const int t = team.team_rank();
                 if (t < n) k.source(t0 + t, &tile(t * NSRC));
                 team.team_barrier();
@@ -175,4 +148,44 @@ void run_n2(const char* name, int i0, int ni, int j0, int nj, const K& k) {
             k.finish(i, k.sink(i), out, mn);
         });
     }
+}
+}  // namespace n2_detail
+
+template <class K>
+void run_n2(const char* name, int i0, int ni, int j0, int nj, const K& k) {
+    if (ni <= 0) return;
+    if constexpr (kHostAccessibleDevice) {
+        if ((long long)ni * nj <= n2_host_max()) {   // tiny set: host loops, same accumulation as the kernel
+            constexpr int NSa = K::NS > 0 ? K::NS : 1, NMa = K::NM > 0 ? K::NM : 1;
+            Kokkos::fence();
+            double src[K::NSRC > 0 ? K::NSRC : 1];
+            for (int ii = 0; ii < ni; ii++) {
+                const int i = i0 + ii;
+                typename K::Sink s = k.sink(i);
+                double sum[NSa], comp[NSa], blk[NSa], mn[NMa];
+                for (int a = 0; a < NSa; a++) sum[a] = comp[a] = blk[a] = 0.0;
+                for (int a = 0; a < NMa; a++) mn[a] = 1e30;
+                int in_block = 0;
+                for (int jj = 0; jj < nj; jj++) {
+                    k.source(j0 + jj, src);
+                    k.pair(s, i, src, j0 + jj, blk, mn);
+                    if (++in_block >= N2_KAHAN_BLOCK || jj == nj - 1) {
+                        for (int a = 0; a < K::NS; a++) { kahan_add(sum[a], comp[a], blk[a]); blk[a] = 0.0; }
+                        in_block = 0;
+                    }
+                }
+                double out[NSa];
+                for (int a = 0; a < K::NS; a++) out[a] = sum[a] - comp[a];
+                k.finish(i, s, out, mn);
+            }
+            return;
+        }
+    }
+    // 256-thread tiles once the sinks alone fill the GPU (+5-10 % at 0.25-0.5M in tools/hip_bench), 128 otherwise,
+    // where the source split matters more
+#if defined(KOKKOS_ENABLE_CUDA) || defined(KOKKOS_ENABLE_HIP) || defined(KOKKOS_ENABLE_SYCL)
+    static const int big_tile_min = std::getenv("NBODY_TILE256_MIN") ? std::atoi(std::getenv("NBODY_TILE256_MIN")) : 131072;
+    if (ni >= big_tile_min) { n2_detail::run_tiled<256>(name, i0, ni, j0, nj, k); return; }
+#endif
+    n2_detail::run_tiled<TILE_SIZE>(name, i0, ni, j0, nj, k);
 }
