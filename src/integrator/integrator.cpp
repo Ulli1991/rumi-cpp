@@ -2171,6 +2171,32 @@ static int hhs_fsi_recursive(
 #endif
     }
 
+#ifdef ENABLE_COLLISIONAL
+    // A set that is one subsystem (or one particle) has no interaction left for the recursion to resolve: the
+    // members' mutual force is the subsystem's (LogH), and external perturbations reach it only from the parent
+    // levels. Recursing would only cut its LogH integration into 2^d pieces; one FSI step over the pivot (drift and
+    // one subsystem advance) is the same Hamiltonian, exact to the GBS tolerance.
+    if (p.collisional && count <= LOGH_MAX_BODIES && pivot_dt * 0.5 >= dt_min) {
+        bool one_subsystem = (count == 1);
+        if (!one_subsystem) {
+            int s0 = -2, same = 1;
+            auto h_sid = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
+                             Kokkos::subview(p.subsystem_id, Kokkos::make_pair(start, start + count)));
+            for (int k = 0; k < count; k++) {
+                int sk = h_sid(k);
+                if (sk < 0 || (s0 != -2 && sk != s0)) { same = 0; break; }
+                s0 = sk;
+            }
+            one_subsystem = same;
+        }
+        if (one_subsystem) {
+            if (depth < HHSCounters::MAX_DEPTH) g_hhs_counters.isolated_sets[depth]++;
+            fsi_step(p, start, count, G, soft2, pivot_dt, false, true);
+            return n_removed;
+        }
+    }
+#endif
+
     // Partition into slow (dt >= pivot) and fast (dt < pivot)
     g_profiler.start();
     int slow_count = partition_by_pivot(p, start, count, pivot_dt);
@@ -2492,6 +2518,7 @@ void hhs_fsi_step_distributed(DistributedParticles& dp, double pivot_dt,
                 std::printf("  ngb=%d", g_hhs_counters.dist_depth_ngb_pairs[d]);
             if (g_hhs_counters.dist_depth_l0_clamped[d] > 0)
                 std::printf("  l0_clamp=%d", g_hhs_counters.dist_depth_l0_clamped[d]);
+            if (g_hhs_counters.isolated_sets[d] > 0) std::printf("  isolated=%lld", g_hhs_counters.isolated_sets[d]);
             if (g_hhs_counters.cc_calls[d] > 0)
                 std::printf("  cc: %lld calls, %.1f comps, largest %.0f", g_hhs_counters.cc_calls[d],
                             (double)g_hhs_counters.cc_comps[d] / g_hhs_counters.cc_calls[d],

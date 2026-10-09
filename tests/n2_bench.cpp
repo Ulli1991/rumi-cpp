@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <random>
 #include <vector>
+#include <cmath>
 
 int main(int argc, char** argv) {
     Kokkos::initialize(argc, argv);
@@ -36,12 +37,38 @@ int main(int argc, char** argv) {
             run_n2("bench_force", 0, ni, 0, nj, k);
             Kokkos::fence();
             const double pairs = (double)ni * nj;
-            int reps = std::min(200, std::max(3, (int)(2e11 / pairs)));
+            int reps = std::getenv("N2_REPS") ? std::atoi(std::getenv("N2_REPS")) : std::min(200, std::max(3, (int)(2e11 / pairs)));
             auto t0 = std::chrono::steady_clock::now();
             for (int r = 0; r < reps; r++) run_n2("bench_force", 0, ni, 0, nj, k);
             Kokkos::fence();
             double t = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() / reps;
-            std::printf("kokkos n_sink=%d n_source=%d  %9.3f ms %8.1f Gpairs/s\n", ni, nj, t * 1e3, pairs / t / 1e9);
+            std::printf("kokkos n_sink=%d n_source=%d  %9.3f ms %8.1f Gpairs/s", ni, nj, t * 1e3, pairs / t / 1e9);
+            if (std::getenv("N2_ACC")) {   // force error against a long-double reference on sample sinks
+                auto hax = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), ax);
+                auto hay = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), ay);
+                auto haz = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), az);
+                std::vector<double> err;
+                std::uniform_int_distribution<int> pick(0, ni - 1);
+                for (int s = 0; s < 200; s++) {
+                    int i = pick(rng);
+                    long double a[3] = {0, 0, 0};
+                    for (int j = 0; j < nj; j++) {
+                        if (j == i || (hs(i) >= 0 && hs(j) == hs(i))) continue;
+                        long double dx = (long double)hx(j) - hx(i), dy = (long double)hy(j) - hy(i), dz = (long double)hz(j) - hz(i);
+                        long double r2 = dx * dx + dy * dy + dz * dz + 1e-6L;
+                        long double f = (long double)hm(j) / (r2 * sqrtl(r2));
+                        a[0] += f * dx; a[1] += f * dy; a[2] += f * dz;
+                    }
+                    long double d = sqrtl(powl(hax(i) - a[0], 2) + powl(hay(i) - a[1], 2) + powl(haz(i) - a[2], 2));
+                    err.push_back((double)(d / sqrtl(a[0] * a[0] + a[1] * a[1] + a[2] * a[2])));
+                }
+                std::sort(err.begin(), err.end());
+                double rms = 0;
+                for (double e : err) rms += e * e;
+                std::printf("  | rel force error vs long double: rms %.2e median %.2e max %.2e", std::sqrt(rms / err.size()),
+                            err[err.size() / 2], err.back());
+            }
+            std::printf("\n");
         }
     }
     Kokkos::finalize();

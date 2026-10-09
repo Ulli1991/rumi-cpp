@@ -115,6 +115,35 @@ void symmetrized_timestep(double r2, double inv_r,
     t_sym_fb = t_fb + ct_fb / (u_fb + 1.0);
 }
 
+// Gravitational softening. Plummer: phi = -G m / sqrt(r^2 + eps^2). Spline (SOFTENING_KERNEL = spline): the cubic
+// spline kernel of Monaghan & Lattanzio (1985) as in Gadget-2, exactly Newtonian beyond h = 2.8 eps, so that a far
+// field computed with plain 1/r expansions (FMM) is exact. For a pair at separation r (raw r2 = r^2):
+//   acceleration G m g(r) r_vec,  Jacobian G m (g I + k r_vec r_vec^T) with k = g'(r)/r,  potential -G m w(r)
+struct Softening {
+    int spline = 0;       // 0: Plummer (eps^2 = soft2; 0 = unsoftened), 1: cubic spline with support h
+    double soft2 = 0.0;   // Plummer eps^2 (0 for the spline: r enters raw)
+    double h = 0.0;
+    // g and k for the raw r2; Plummer and unsoftened from the softened r2s = r2 + soft2 and its inverse root
+    KOKKOS_INLINE_FUNCTION void spline_gk(double r2, double& g, double& k) const {
+        const double r = Kokkos::sqrt(r2), hi = 1.0 / h, u = r * hi, hi3 = hi * hi * hi;
+        if (u >= 1.0) { const double ir = 1.0 / r, ir3 = ir * ir * ir; g = ir3; k = -3.0 * ir3 * ir * ir; return; }
+        double dgdu;
+        if (u < 0.5) { g = hi3 * (10.666666666667 + u * u * (32.0 * u - 38.4)); dgdu = hi3 * (96.0 * u * u - 76.8 * u); }
+        else {
+            const double iu3 = 1.0 / (u * u * u);
+            g = hi3 * (21.333333333333 - 48.0 * u + 38.4 * u * u - 10.666666666667 * u * u * u - 0.066666666667 * iu3);
+            dgdu = hi3 * (-48.0 + 76.8 * u - 32.0 * u * u + 0.2 * iu3 / u);
+        }
+        k = u > 0.0 ? dgdu * hi * hi / u : 0.0;
+    }
+    KOKKOS_INLINE_FUNCTION double spline_w(double r2) const {
+        const double r = Kokkos::sqrt(r2), hi = 1.0 / h, u = r * hi;
+        if (u >= 1.0) return 1.0 / r;
+        if (u < 0.5) return -hi * (-2.8 + u * u * (5.333333333333 + u * u * (6.4 * u - 9.6)));
+        return -hi * (-3.2 + 0.066666666667 / u + u * u * (10.666666666667 + u * (-16.0 + u * (9.6 - 2.133333333333 * u))));
+    }
+};
+
 // Kahan (compensated) summation: reduces accumulation error from O(N*eps) to O(eps).
 KOKKOS_INLINE_FUNCTION
 void kahan_add(double& sum, double& comp, double val) {

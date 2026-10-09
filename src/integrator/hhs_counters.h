@@ -32,6 +32,7 @@ struct HHSCounters {
     // Per-depth: CPU serial path
     int cpu_depth_calls[MAX_DEPTH] = {};
     long long cc_calls[MAX_DEPTH] = {}, cc_comps[MAX_DEPTH] = {}, cc_largest[MAX_DEPTH] = {};   // HHS_CC splits
+    long long isolated_sets[MAX_DEPTH] = {};   // sets that were one subsystem: one FSI step, no deeper recursion
     long long cpu_depth_count[MAX_DEPTH] = {};
 
     void reset() {
@@ -39,6 +40,7 @@ struct HHSCounters {
         std::memset(local_depth_calls, 0, sizeof(local_depth_calls));
         std::memset(cc_calls, 0, sizeof(cc_calls)); std::memset(cc_comps, 0, sizeof(cc_comps));
         std::memset(cc_largest, 0, sizeof(cc_largest));
+        std::memset(isolated_sets, 0, sizeof(isolated_sets));
         std::memset(local_depth_count, 0, sizeof(local_depth_count));
         std::memset(local_depth_time, 0, sizeof(local_depth_time));
         std::memset(dist_depth_calls, 0, sizeof(dist_depth_calls));
