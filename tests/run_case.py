@@ -49,6 +49,8 @@ PN_LOGH = dict(TEST_CASE="binary_test", INTEGRATOR="hhs", BINARY_A_PC="1e-7", BI
                BINARY_M2="500", TOTAL_TIME_MYR="2e-9", DT_MAX_MYR="2e-10", DT_MIN_MYR="1e-18", SOFTENING_PC="0",
                COLLISIONAL="true", PN_ORDER="31", M_PN="5.0", ETA_RESTART="1e-8", SSE_ENABLED="false",
                PRINT_INTERVAL="1", PROFILING="false")
+# 5000 Kroupa stars, 50 % primordial binaries (1250 pairs, more than the initial neighbour buffer of 1000)
+BINARIES50 = dict(BINARIES, PLUMMER_N="5000", PLUMMER_M_TOTAL="2000", BINARY_FRAC="0.5", TOTAL_TIME_MYR="1e-3")
 # 16 stars inside r_ngb: one 15-body neighbour group, more than LogH's fixed storage (LOGH_MAX_BODIES = 8)
 BIG_GROUP = dict(TEST_CASE="plummer", INTEGRATOR="hhs", TOTAL_TIME_MYR="1e-5", DT_MAX_MYR="1e-6", DT_MIN_MYR="1e-16",
                  SOFTENING_PC="0", COLLISIONAL="true", R_NGB="1e-3", R_NGB_MAX="0.1", PN_ORDER="0", SSE_ENABLED="false",
@@ -174,6 +176,15 @@ def sse_mass(exe, label, cfg, bound):
     return ok & check(f"{label} mass removed by SSE [M_sun]", dm, bound)
 
 
+def all_binaries(exe, label, cfg, n_bin):
+    """Every primordial binary must become a subsystem (none dropped by a full neighbour buffer)."""
+    out = run_output(exe, cfg)
+    found = int(re.findall(r"Types:\s+bin=(\d+)", out)[0])
+    rows = diagnostics(out)
+    return check(f"{label} binaries detected", found, n_bin, lower=True) & \
+        check(f"{label} max|dE/E|", max(r[0] for r in rows), 1e-8)
+
+
 def check(name, value, bound, lower=False):
     ok = value >= bound if lower else value <= bound
     print(f"{'ok  ' if ok else 'FAIL'} {name} = {value:.3e} ({'>=' if lower else '<='} {bound:.3e})")
@@ -267,6 +278,9 @@ CASES = {
     # mergers). Measured 1.3e-9 M_sun (winds over 5 steps).
     "mergers_sse": lambda exe: sse_mass(exe, "mergers + SSE", dict(MERGERS, SERIAL_N2_CPU="0", SSE_ENABLED="true",
                                                                    TOTAL_TIME_MYR="5e-9"), 1e-6),
+    # Before: the neighbour buffer (max(1000, N/10) pairs) truncated silently, 250 binaries stayed field
+    # particles at level ~30 and step 1 never finished. Measured: all 1250 detected, 1.1 s, 1.7e-13.
+    "binaries50_detected": lambda exe: all_binaries(exe, "50 % binaries", BINARIES50, 1250),
     "logh_big_group": lambda exe: big_group(exe, "big group", BIG_GROUP, (1.2e-5, 1e-12)),
     # MPI cases, run under NBODY_TEST_LAUNCHER (CTest sets 2 ranks). Spins were not broadcast: lost on every
     # rank of a GPU run (host backends alias the mirror, so the host build cannot fail this one).

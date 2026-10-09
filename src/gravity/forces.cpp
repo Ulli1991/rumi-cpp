@@ -906,10 +906,9 @@ void self_acceleration_and_timestep(Particles& p, int start, int count,
 // No subsystem exclusion — every pair is checked fresh.
 // ==========================================================================
 #ifdef ENABLE_COLLISIONAL
-void neighbor_search_subset(Particles& p, int start, int count,
-                            double G, double r_ngb, double r_ngb_max,
-                            double pivot_dt) {
-    if (count <= 1) return;
+static void neighbor_search_kernel(Particles& p, int start, int count,
+                                   double G, double r_ngb, double r_ngb_max,
+                                   double pivot_dt) {
 
     RawView px{p.x.data()}, py{p.y.data()}, pz{p.z.data()};
     RawView pvx{p.vx.data()}, pvy{p.vy.data()}, pvz{p.vz.data()};
@@ -1038,6 +1037,22 @@ void neighbor_search_subset(Particles& p, int start, int count,
             }
         });
     Kokkos::fence();
+}
+
+void neighbor_search_subset(Particles& p, int start, int count,
+                            double G, double r_ngb, double r_ngb_max,
+                            double pivot_dt) {
+    if (count <= 1) return;
+    neighbor_search_kernel(p, start, count, G, r_ngb, r_ngb_max, pivot_dt);
+    // The kernel counts every pair but stores only max_ngb_pairs: an overflow would silently drop pairs
+    // (binaries left undetected are then integrated orbit by orbit by the FSI). Grow and search again.
+    int n_found = 0;
+    Kokkos::deep_copy(n_found, Kokkos::subview(g_subsystem_mgr.ngb_count, 0));
+    if (n_found > g_subsystem_mgr.max_ngb_pairs) {
+        g_subsystem_mgr.allocate_ngb_buffers(2 * n_found);
+        g_subsystem_mgr.reset_ngb_count();
+        neighbor_search_kernel(p, start, count, G, r_ngb, r_ngb_max, pivot_dt);
+    }
 }
 #else
 void neighbor_search_subset(Particles&, int, int, double, double, double, double) {}
