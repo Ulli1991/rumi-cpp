@@ -68,7 +68,15 @@ Later the same night:
   triples_detected); bounds checks abort instead of UB; SSE/escaper removals registered.
 - RSQRT_NEWTON / ACCURATE_RSQRT options (GPU e=0.99 endpoint 1.7e-10 with plain rsqrt vs 6.9e-11).
 - 2 nodes (4 MI300A) give no speedup at 200k: small-set path and subsystems are replicated per rank.
-- Open: dense core (r_h = 0.02 pc, 2000 stars, 50 % binaries) does not finish a step in 120 s.
+- Dense cores: oversize neighbour chains split along bound pairs (r_h = 0.02 pc now 2 steps in 246 s);
+  accuracy there does not converge below ~7e-8 per step with eta halving (strong perturbers on
+  subsystems): open.
+- RSQRT_NEWTON default (GPU accuracy = CPU at +4 %); SERIAL_N2_CPU = 0 fastest on MI300A (13-14 s vs 15.3 s).
+- DISTRIBUTE_SUBSYSTEMS (off): correct (replicas identical, tests), but on 2 nodes slower (subsystem part
+  7.3 s vs 5.2 s): ~4300 calls per step each with inter-node allgathers. Next: one exchange per HHS level
+  or node-local distribution.
+- Long runs on 1 node: 200k no binaries 1.2 Myr, |dE/E| ~1e-9 flat, dP 2e-16, dL 4e-15 (2.2 s/step);
+  10 % binaries 0.15 Myr, 1.1e-9 (BIFROST Fig. 9 with BHs: 3e-7 at 5 Myr).
 
 Tree check (65k Plummer, softened, 10 steps, 2 MI300A): direct FSI |dE/E| 2.6e-10 / 1.9e-11 / 1.3e-12 at
 eta 0.2 / 0.1 / 0.05 (order 3.8-3.9), 2.8 s/step. Tree (FSI with tree gradient term, not KDK) sits on its
