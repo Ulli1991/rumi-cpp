@@ -56,6 +56,20 @@ Night of 2026-10-09 (speed + accuracy):
   SSE/escaper/merger E, P, L sinks; ALL_SLOW_SPLIT option (FROST Alg. 3: e=0.9 endpoint 1.8e-13,
   below FROST's 1e-12, at 1.65x cost); ACCURATE_RSQRT option (GPU frost4_e099 1.7e-10 vs 6.9e-11 CPU).
 
+Later the same night:
+- ALL_SLOW_SPLIT is the default (FROST Alg. 3): free on clusters (20k, 10 % binaries: 84 s vs 83 s, same
+  error), 5-16x lower error on eccentric few-body orbits, round-off floors ~2x higher; bounds re-measured.
+- Per-HHS-level O(N) host work removed (it made the CPU small-set path 44 % of the 200k binary step):
+  incremental pid map (dirty-range tracking, NBODY_CHECK_PIDMAP self-check on in all tests), member-only
+  flag scatter, member gathers in shared/perturbation time-steps and in detection (compact union-find).
+  Results bit-identical on the CPU build.
+- Neighbour pair buffer grows on overflow (50 % binaries: 250 binaries were silently not detected).
+- Second review: triple branch of detection used a raw id in the compact union-find (fixed, test
+  triples_detected); bounds checks abort instead of UB; SSE/escaper removals registered.
+- RSQRT_NEWTON / ACCURATE_RSQRT options (GPU e=0.99 endpoint 1.7e-10 with plain rsqrt vs 6.9e-11).
+- 2 nodes (4 MI300A) give no speedup at 200k: small-set path and subsystems are replicated per rank.
+- Open: dense core (r_h = 0.02 pc, 2000 stars, 50 % binaries) does not finish a step in 120 s.
+
 Tree check (65k Plummer, softened, 10 steps, 2 MI300A): direct FSI |dE/E| 2.6e-10 / 1.9e-11 / 1.3e-12 at
 eta 0.2 / 0.1 / 0.05 (order 3.8-3.9), 2.8 s/step. Tree (FSI with tree gradient term, not KDK) sits on its
 force-error floor independent of eta: 1.4e-5 at theta 0.5, 2.8e-6 at theta 0.3, and loses L (1e-4 to 6e-4
