@@ -25,6 +25,7 @@ struct StepProfiler {
         SUBSYSTEM_BOOKKEEP,
         ENERGY_CHECK,
         PACK_DATA,
+        CPU_PATH,
         NUM_TIMERS
     };
 
@@ -43,7 +44,8 @@ struct StepProfiler {
             "Subsystem timestep",
             "Subsystem bookkeep",
             "Energy check",
-            "Pack data"
+            "Pack data",
+            "CPU small-set path"
         };
         return names[i];
     }

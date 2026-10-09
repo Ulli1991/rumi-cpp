@@ -97,6 +97,11 @@ if(ACCURATE_RSQRT)
     target_compile_definitions(nbody-kokkos PRIVATE ACCURATE_RSQRT)
 endif()
 
+option(RSQRT_NEWTON "Device rsqrt refined by one Newton step (~0.5 ulp)" OFF)
+if(RSQRT_NEWTON)
+    target_compile_definitions(nbody-kokkos PRIVATE RSQRT_NEWTON)
+endif()
+
 option(DISABLE_PROFILING_FENCES "Remove Kokkos::fence() around profiler regions" OFF)
 if(DISABLE_PROFILING_FENCES)
     target_compile_definitions(nbody-kokkos PRIVATE DISABLE_PROFILING_FENCES)

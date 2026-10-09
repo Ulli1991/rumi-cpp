@@ -2538,7 +2538,9 @@ static int hhs_fsi_recursive(
     // CPU serial for very small subsets
     if (serial_n2_cpu > 0 && count <= serial_n2_cpu) {
         g_hhs_counters.cpu++;
+        g_profiler.start();
         n_removed = hhs_fsi_recursive_cpu(p, start, count, pivot_dt, G, soft2, dt_min, eta, dt_valid, depth);
+        g_profiler.stop(StepProfiler::CPU_PATH);
         if (n_removed > 0) sync_after_removal(p, dp);
         if (dp) p.pack_pos_range(start, count - n_removed);
         return n_removed;
