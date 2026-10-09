@@ -129,6 +129,9 @@ struct SubsystemManager {
     // Call after enforce_shared_timestep, before partition_by_pivot.
     void apply_perturbation_timestep(Particles& p, double G, double eta_pert) const;
 
+    // enforce_shared_timestep then apply_perturbation_timestep with one member gather and scatter
+    void subsystem_timesteps(Particles& p, double G, double eta_pert) const;
+
     // Per-level diagnostics: set by detect_from_pairs/accumulate_diagnostics
     int last_level_pairs = 0;       // neighbor pairs found at most recent detect_from_pairs
     int last_level_bound = 0;       // bound pairs at most recent detect_from_pairs

@@ -2132,8 +2132,7 @@ static int hhs_fsi_recursive(
         // Step 3: Subsystem timestep adjustments
         if (p.collisional) {
             g_profiler.start();
-            g_subsystem_mgr.enforce_shared_timestep(p);
-            g_subsystem_mgr.apply_perturbation_timestep(p, G, g_collisional.eta_pert);
+            g_subsystem_mgr.subsystem_timesteps(p, G, g_collisional.eta_pert);
 
             // Level-0 store: capture dt AFTER subsystem adjustments
             if (depth == 0) {

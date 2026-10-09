@@ -761,8 +761,7 @@ static int cpu_hhs_recursive(CpuSubset& s, Particles& p, int start, int count,
                 Kokkos::deep_copy(Kokkos::subview(p.ay, rng), h_ay);
                 Kokkos::deep_copy(Kokkos::subview(p.az, rng), h_az);
             }
-            g_subsystem_mgr.enforce_shared_timestep(p);
-            g_subsystem_mgr.apply_perturbation_timestep(p, G, g_collisional.eta_pert);
+            g_subsystem_mgr.subsystem_timesteps(p, G, g_collisional.eta_pert);
 
             // Sync dt_adapt back from device
             {

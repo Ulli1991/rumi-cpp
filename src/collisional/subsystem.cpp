@@ -321,17 +321,37 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
         uf.unite(compact[pr.pid_lo], compact[pr.pid_hi]);
     }
 
-    // Build components from ALL pairs in single pass via reverse map (O(P))
-    std::map<int, std::set<int>> comp_members;
-    for (auto& pr : pairs) {
+    // Components: (root, pid) sorted and unique (members ascending, as before); each component's pairs in their
+    // sorted order, for the triple search below
+    std::vector<std::pair<int, int>> root_pid;
+    root_pid.reserve(2 * pairs.size());
+    std::unordered_map<int, std::vector<int>> pairs_of_root;
+    for (int k = 0; k < (int)pairs.size(); k++) {
+        const auto& pr = pairs[k];
         int root = uf.find(compact[pr.pid_lo]);
-        comp_members[root].insert(pr.pid_lo);
-        comp_members[root].insert(pr.pid_hi);
+        root_pid.push_back({root, pr.pid_lo});
+        root_pid.push_back({root, pr.pid_hi});
+        pairs_of_root[root].push_back(k);
     }
+    std::sort(root_pid.begin(), root_pid.end());
+    root_pid.erase(std::unique(root_pid.begin(), root_pid.end()), root_pid.end());
     std::map<int, std::vector<int>> components;
-    for (auto& [root, members_set] : comp_members) {
-        components[root] = std::vector<int>(members_set.begin(), members_set.end());
+    for (size_t k = 0; k < root_pid.size();) {
+        size_t e = k;
+        std::vector<int> members;
+        while (e < root_pid.size() && root_pid[e].first == root_pid[k].first) members.push_back(root_pid[e++].second);
+        components.emplace_hint(components.end(), root_pid[k].first, std::move(members));
+        k = e;
     }
+    // Pair of two particle ids in the sorted, unique pair list (binary search), or null
+    auto find_pair = [&](int a, int b) -> const PairInfo* {
+        int lo = std::min(a, b), hi = std::max(a, b);
+        auto it = std::lower_bound(pairs.begin(), pairs.end(), std::make_pair(lo, hi),
+                                   [](const PairInfo& p, const std::pair<int, int>& k) {
+                                       return p.pid_lo != k.first ? p.pid_lo < k.first : p.pid_hi < k.second;
+                                   });
+        return (it != pairs.end() && it->pid_lo == lo && it->pid_hi == hi) ? &*it : nullptr;
+    };
 
     // A group larger than LogH's storage is usually a chain linked partly by unbound fly-bys (dense
     // cores). Split it along its bound pairs only: its binaries and triples still become subsystems
@@ -436,15 +456,11 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
 
             // Find the pair info
             bool pair_bound = false;
-            for (auto& pr : pairs) {
-                if ((pr.pid_lo == members[0] && pr.pid_hi == members[1]) ||
-                    (pr.pid_lo == members[1] && pr.pid_hi == members[0])) {
-                    sub.orb.a = pr.a;
-                    sub.orb.e = pr.e;
-                    sub.orb.E_orb = pr.E_orb;
-                    pair_bound = pr.bound;
-                    break;
-                }
+            if (const PairInfo* pr = find_pair(members[0], members[1])) {
+                sub.orb.a = pr->a;
+                sub.orb.e = pr->e;
+                sub.orb.E_orb = pr->E_orb;
+                pair_bound = pr->bound;
             }
 
             // Compute period (only meaningful for bound orbits with a > 0)
@@ -462,14 +478,12 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
             // Find the tightest pair (inner binary)
             double a_min = 1e30;
             int inner_i = -1, inner_j = -1;
-            for (auto& pr : pairs) {
+            for (int k : pairs_of_root[root]) {   // this component's pairs, in the order of the full list
+                const auto& pr = pairs[k];
                 if (pr.bound && pr.a > 0 && pr.a < a_min) {
-                    int root_lo = uf.find(compact[pr.pid_lo]);
-                    if (root_lo == root) {
-                        a_min = pr.a;
-                        inner_i = pr.pid_lo;
-                        inner_j = pr.pid_hi;
-                    }
+                    a_min = pr.a;
+                    inner_i = pr.pid_lo;
+                    inner_j = pr.pid_hi;
                 }
             }
 
@@ -492,13 +506,7 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
 
                     // Find inner and outer orbital elements
                     double a_in = a_min, e_in = 0.0;
-                    for (auto& pr : pairs) {
-                        if ((pr.pid_lo == inner_i && pr.pid_hi == inner_j) ||
-                            (pr.pid_lo == inner_j && pr.pid_hi == inner_i)) {
-                            e_in = pr.e;
-                            break;
-                        }
-                    }
+                    if (const PairInfo* pr = find_pair(inner_i, inner_j)) e_in = pr->e;
 
                     // Compute outer orbit relative to inner binary COM
                     // (pairwise elements use wrong mu and wrong relative vector)
@@ -653,27 +661,26 @@ void SubsystemManager::fill_cm_velocity(const Particles& p, Kokkos::View<double*
     });
 }
 
-void SubsystemManager::enforce_shared_timestep(Particles& p) const {
-    if (active.empty()) return;
-
-    MemberData md(active, pid_to_idx_, p);
+// Shared time step of each subsystem on gathered member data (min over its members)
+static void shared_timestep_md(const std::vector<Subsystem>& active, const std::vector<int>& pid_to_idx, MemberData& md) {
     auto h_dt = md.col(MemberData::DT);
-    const auto& pid_to_idx = pid_to_idx_;
-
-    // For each subsystem, find min dt and set all members to it
     for (const auto& sub : active) {
         double dt_min = 1e30;
         for (int pid : sub.particle_ids) {
             int idx = pid_to_idx[pid];
             if (idx >= 0) dt_min = std::min(dt_min, h_dt(idx));
         }
-
         for (int pid : sub.particle_ids) {
             int idx = pid_to_idx[pid];
             if (idx >= 0) h_dt(idx) = dt_min;
         }
     }
+}
 
+void SubsystemManager::enforce_shared_timestep(Particles& p) const {
+    if (active.empty()) return;
+    MemberData md(active, pid_to_idx_, p);
+    shared_timestep_md(active, pid_to_idx_, md);
     md.scatter_dt(p);
 }
 
@@ -686,10 +693,9 @@ void SubsystemManager::enforce_shared_timestep(Particles& p) const {
 //   ε_pert = η_pert * min{ |E/Ė|, |L/L̇| }
 // ============================================================================
 
-void SubsystemManager::apply_perturbation_timestep(Particles& p, double G, double eta_pert) const {
-    if (active.empty() || eta_pert <= 0.0) return;
-
-    MemberData md(active, pid_to_idx_, p);
+// Perturbation time step (BIFROST Eq. 30) on gathered member data; returns whether any member was clamped
+static bool perturbation_timestep_md(const std::vector<Subsystem>& active, const std::vector<int>& pid_to_idx,
+                                     MemberData& md, double G, double eta_pert) {
     auto h_x  = md.col(MemberData::X);
     auto h_y  = md.col(MemberData::Y);
     auto h_z  = md.col(MemberData::Z);
@@ -701,7 +707,6 @@ void SubsystemManager::apply_perturbation_timestep(Particles& p, double G, doubl
     auto h_az = md.col(MemberData::AZ);
     auto h_m  = md.col(MemberData::M);
     auto h_dt = md.col(MemberData::DT);
-    const auto& pid_to_idx = pid_to_idx_;
 
     bool modified = false;
 
@@ -904,7 +909,21 @@ void SubsystemManager::apply_perturbation_timestep(Particles& p, double G, doubl
         }
     }
 
-    if (modified) md.scatter_dt(p);
+    return modified;
+}
+
+void SubsystemManager::apply_perturbation_timestep(Particles& p, double G, double eta_pert) const {
+    if (active.empty() || eta_pert <= 0.0) return;
+    MemberData md(active, pid_to_idx_, p);
+    if (perturbation_timestep_md(active, pid_to_idx_, md, G, eta_pert)) md.scatter_dt(p);
+}
+
+void SubsystemManager::subsystem_timesteps(Particles& p, double G, double eta_pert) const {
+    if (active.empty()) return;
+    MemberData md(active, pid_to_idx_, p);   // one gather and one scatter for both passes
+    shared_timestep_md(active, pid_to_idx_, md);
+    if (eta_pert > 0.0) perturbation_timestep_md(active, pid_to_idx_, md, G, eta_pert);
+    md.scatter_dt(p);
 }
 
 void SubsystemManager::reset_step_diagnostics() {
