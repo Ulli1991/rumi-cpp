@@ -26,6 +26,9 @@
 #include <cstdlib>
 #include <random>
 #include <vector>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 // Pair kernel: g(r) with acceleration G m g(r) (x_j - x_i), potential -G m w(r)
 struct Kernel {
@@ -303,6 +306,101 @@ struct FMM {
             }
     }
 
+    // Directed M2L (target t <- source s) in real form. The pair is oriented by cell index (lo = min, hi = max,
+    // R = z_lo - z_hi) for both directions, so t <- s and s <- t use the same rotation: the two local updates
+    // are those of the mutual m2l_real and momentum stays conserved to round-off.
+    void m2l_dir(int t, int s) {
+        Cell& T = cells[t];
+        const Cell& S = cells[s];
+        const int lo = std::min(t, s);
+        const Cell& Lc = cells[lo];
+        const Cell& Hc = cells[std::max(t, s)];
+        double R[3] = {Lc.z[0] - Hc.z[0], Lc.z[1] - Hc.z[1], Lc.z[2] - Hc.z[2]};
+        double r = std::sqrt(R[0] * R[0] + R[1] * R[1] + R[2] * R[2]);
+        double th = std::acos(std::max(-1.0, std::min(1.0, R[2] / r))), ph = std::atan2(R[1], R[0]);
+        double Ms[(RMAX + 1) * (RMAX + 1)], Lt[(RMAX + 1) * (RMAX + 1)];
+        pack(S.M, Ms);
+        rz(ph, Ms); rx(fx90, Ms); rz(th, Ms); rx(fxm90, Ms);
+        double ir = 1.0 / r, Tz[2 * RMAX + 2], pw = ir;
+        for (int j = 0; j <= p; j++) { Tz[j] = fact[j] * pw; pw *= ir; }
+        const bool t_is_lo = (t == lo);   // lo plays A in the mutual formulas: L_A uses (-1)^k, L_B uses (-1)^n
+        for (int k = 0; k <= p; k++)
+            for (int l = 0; l <= k; l++) {
+                double sre = 0, sim = 0;
+                for (int n = l; n + k <= p; n++) {
+                    double tt = Tz[n + k];
+                    const double* ms = Ms + n * n;
+                    double re = l ? ms[2 * l - 1] : ms[0], im = l ? ms[2 * l] : 0.0;
+                    double sg = (!t_is_lo && (n & 1)) ? -1.0 : 1.0;
+                    sre += sg * re * tt; sim += sg * im * tt;
+                }
+                double f = t_is_lo ? (((k + l) & 1) ? -1.0 : 1.0) : ((l & 1) ? -1.0 : 1.0);
+                double* lt = Lt + k * k;
+                if (l == 0) lt[0] = f * sre;
+                else { lt[2 * l - 1] = f * sre; lt[2 * l] = -f * sim; }
+            }
+        rx(bxm90, Lt); rz(th, Lt); rx(bx90, Lt); rz(ph, Lt);
+        unpack_add(Lt, T.L);
+    }
+    // Directed P2P: accelerations of target leaf particles from source leaf particles
+    void p2p_dir(const Cell& T, const Cell& S) {
+        for (int i = T.beg; i < T.end; i++) {
+            double sx = 0, sy = 0, sz = 0, sp = 0;
+            for (int j = S.beg; j < S.end; j++) {
+                if (j == i) continue;
+                double dx = x[j] - x[i], dy = y[j] - y[i], dz = z[j] - z[i], g, w;
+                ker.eval(dx * dx + dy * dy + dz * dz, g, w);
+                sx += m[j] * g * dx; sy += m[j] * g * dy; sz += m[j] * g * dz; sp += m[j] * w;
+            }
+            ax[i] += G * sx; ay[i] += G * sy; az[i] += G * sz; pot[i] -= G * sp;
+        }
+    }
+
+    // Interaction lists from the dual walk, executed in parallel over target cells
+    std::vector<std::vector<int>> far_src, near_src;
+    void collect(int a, int b) {
+        Cell& A = cells[a];
+        Cell& B = cells[b];
+        if (a == b) {
+            if (A.n_child == 0) { near_src[a].push_back(a); return; }
+            for (int i = 0; i < A.n_child; i++)
+                for (int j = i; j < A.n_child; j++) collect(A.child[i], A.child[j]);
+            return;
+        }
+        double dx = A.z[0] - B.z[0], dy = A.z[1] - B.z[1], dz = A.z[2] - B.z[2];
+        double dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+        bool far = A.rmax + B.rmax < theta * dist && (ker.type != 2 || dist - A.rmax - B.rmax > ker.h);
+        if (far) { far_src[a].push_back(b); far_src[b].push_back(a); n_m2l++; return; }
+        bool a_leaf = A.n_child == 0, b_leaf = B.n_child == 0;
+        if (a_leaf && b_leaf) {
+            near_src[a].push_back(b); near_src[b].push_back(a);
+            n_p2p += (long long)(A.end - A.beg) * (B.end - B.beg);
+            return;
+        }
+        bool split_a = !a_leaf && (b_leaf || A.rmax >= B.rmax);
+        if (split_a) { for (int i = 0; i < A.n_child; i++) collect(A.child[i], b); }
+        else { for (int j = 0; j < B.n_child; j++) collect(a, B.child[j]); }
+    }
+    void run_lists() {
+        const int nc = (int)cells.size();
+        far_src.assign(nc, {}); near_src.assign(nc, {});
+        auto t0 = std::chrono::steady_clock::now();
+        collect(0, 0);
+        auto t1 = std::chrono::steady_clock::now();
+        #pragma omp parallel for schedule(dynamic, 4)
+        for (int c = 0; c < nc; c++)
+            for (int s : far_src[c]) m2l_dir(c, s);
+        auto t2 = std::chrono::steady_clock::now();
+        #pragma omp parallel for schedule(dynamic, 4)
+        for (int c = 0; c < nc; c++)
+            for (int s : near_src[c]) p2p_dir(cells[c], cells[s]);
+        auto t3 = std::chrono::steady_clock::now();
+        t_collect = std::chrono::duration<double>(t1 - t0).count();
+        t_m2l = std::chrono::duration<double>(t2 - t1).count();
+        t_p2p = std::chrono::duration<double>(t3 - t2).count();
+    }
+    double t_collect = 0;
+
     void pair(int i, int j) {   // mutual direct
         double dx = x[j] - x[i], dy = y[j] - y[i], dz = z[j] - z[i];
         double g, w;
@@ -360,7 +458,7 @@ struct FMM {
         cells.clear();
         build(0, N, lo, size);
         ax.assign(N, 0); ay.assign(N, 0); az.assign(N, 0); pot.assign(N, 0);
-        interact(0, 0);
+        if (getenv("FMM_RECURSIVE")) interact(0, 0); else run_lists();
         downward(0);
         oax.resize(N); oay.resize(N); oaz.resize(N);
         for (int k = 0; k < N; k++) { oax[id[k]] = ax[k]; oay[id[k]] = ay[k]; oaz[id[k]] = az[k]; }
@@ -511,6 +609,8 @@ int main(int argc, char** argv) {
     std::uniform_real_distribution<double> U(0.0, 1.0);
     FMM f(p, 1.0, theta, ker, n_leaf);
     f.x.resize(N); f.y.resize(N); f.z.resize(N); f.m.assign(N, 1.0 / N);
+    f.id.resize(N);
+    for (int i = 0; i < N; i++) f.id[i] = i;
     for (int i = 0; i < N; i++) {
         double r;
         do { r = 1.0 / std::sqrt(std::pow(U(rng), -2.0 / 3.0) - 1.0); } while (r > 50.0);
@@ -529,7 +629,7 @@ int main(int argc, char** argv) {
     f.build(0, N, lo, size);
     auto t1 = std::chrono::steady_clock::now();
     f.ax.assign(N, 0); f.ay.assign(N, 0); f.az.assign(N, 0); f.pot.assign(N, 0);
-    f.interact(0, 0);
+    if (getenv("FMM_RECURSIVE")) f.interact(0, 0); else f.run_lists();
     auto t2 = std::chrono::steady_clock::now();
     f.downward(0);
     auto t3 = std::chrono::steady_clock::now();
@@ -566,8 +666,8 @@ int main(int argc, char** argv) {
     for (double e : err) rms += e * e;
     rms = std::sqrt(rms / err.size());
     std::printf("SPH N=%d p=%d theta=%.2f n_leaf=%d eps=%.1e kernel=%d | err rms=%.2e median=%.2e max=%.2e | dP=%.1e | "
-                "build %.3f s walk %.3f s [M2L %.3f s P2P %.3f s] down %.3f s (M2L %lld, P2P %.2e) | direct est %.1f s\n",
-                N, p, theta, n_leaf, eps, ktype, rms, err[err.size() / 2], err.back(), dP, tb, tw, f.t_m2l, f.t_p2p, td, f.n_m2l,
+                "build %.3f s walk %.3f s [lists %.3f s M2L %.3f s P2P %.3f s] down %.3f s (M2L %lld, P2P %.2e) | direct est %.1f s\n",
+                N, p, theta, n_leaf, eps, ktype, rms, err[err.size() / 2], err.back(), dP, tb, tw, f.t_collect, f.t_m2l, f.t_p2p, td, f.n_m2l,
                 (double)f.n_p2p, t_dir);
     return 0;
 }
