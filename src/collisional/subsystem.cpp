@@ -22,8 +22,7 @@ void SubsystemManager::rebuild_pid_to_idx(const Particles& p) {
     // Local managers (LogH batches) borrow the global map
     if (this != &g_subsystem_mgr) {
         g_subsystem_mgr.rebuild_pid_to_idx(p);
-        pid_to_idx_ = g_subsystem_mgr.pid_to_idx_;
-        pid_to_idx_max_ = g_subsystem_mgr.pid_to_idx_max_;
+        shared_map_ = &g_subsystem_mgr;   // no copy of the O(max_pid) vector
         return;
     }
     // Incremental: only the slots touched since the last build (O(count) instead of O(N) per call)
@@ -83,7 +82,14 @@ struct MemberData {
 
     struct Col {
         std::vector<double>* v; const std::unordered_map<int, int>* loc;
-        double& operator()(int i) const { return (*v)[loc->find(i)->second]; }
+        double& operator()(int i) const {
+            auto it = loc->find(i);
+            if (it == loc->end()) {   // a slot outside the gathered members: map and gather disagree
+                std::fprintf(stderr, "MemberData: slot %d was not gathered\n", i);
+                std::abort();
+            }
+            return (*v)[it->second];
+        }
     };
     Col col(int k) { return Col{&f[k], &loc}; }
 
@@ -176,6 +182,10 @@ struct UnionFind {
     }
 
     int find(int x) {
+        if (x < 0 || x >= (int)parent.size()) {
+            std::fprintf(stderr, "UnionFind: index %d outside [0, %zu)\n", x, parent.size());
+            std::abort();
+        }
         while (parent[x] != x) {
             parent[x] = parent[parent[x]];
             x = parent[x];
@@ -425,7 +435,7 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
             int inner_i = -1, inner_j = -1;
             for (auto& pr : pairs) {
                 if (pr.bound && pr.a > 0 && pr.a < a_min) {
-                    int root_lo = uf.find(pr.pid_lo);
+                    int root_lo = uf.find(compact[pr.pid_lo]);
                     if (root_lo == root) {
                         a_min = pr.a;
                         inner_i = pr.pid_lo;

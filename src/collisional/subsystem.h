@@ -68,12 +68,14 @@ struct SubsystemManager {
     void check_pid_to_idx(const Particles& p) const;   // full comparison (NBODY_CHECK_PIDMAP)
     const Particles* map_source_ = nullptr;          // particle set the map was built for
     Kokkos::View<int*> flag_buf_;                     // (index, sid) pairs uploaded by update_particle_flags
-    const std::vector<int>& pid_to_idx() const { return pid_to_idx_; }
-    int pid_to_idx_max() const { return pid_to_idx_max_; }
+    const SubsystemManager* shared_map_ = nullptr;   // local managers read the global map
+    const std::vector<int>& pid_to_idx() const { return shared_map_ ? shared_map_->pid_to_idx_ : pid_to_idx_; }
+    int pid_to_idx_max() const { return shared_map_ ? shared_map_->pid_to_idx_max_ : pid_to_idx_max_; }
 
     // Bounds-checked lookup: returns array index for particle ID, or -1 if invalid
     int safe_pid_to_idx(int pid) const {
-        return (pid >= 0 && pid < (int)pid_to_idx_.size()) ? pid_to_idx_[pid] : -1;
+        const auto& m = pid_to_idx();
+        return (pid >= 0 && pid < (int)m.size()) ? m[pid] : -1;
     }
 
     // Particle IDs removed by mergers. IDs are never reused, so the set only grows.

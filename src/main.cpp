@@ -898,6 +898,7 @@ int main(int argc, char** argv) {
                     // remove particles from the current HHS range
                     if (work_p.compact_remove_zero_mass() > 0) {
                         if (use_distributed) dp.sync_count();
+                        for (int pid : work_p.removed_pid_log) g_subsystem_mgr.removed_pids.insert(pid);
                         g_subsystem_mgr.rebuild_pid_to_idx(work_p);
                     }
                 }
@@ -1054,6 +1055,7 @@ int main(int argc, char** argv) {
                             g_subsystem_mgr.step_escapers += n_esc;
                             work_p.compact_remove_zero_mass();
                             if (use_distributed) dp.sync_count();
+                            for (int pid : work_p.removed_pid_log) g_subsystem_mgr.removed_pids.insert(pid);
                         }
                     }
                     // Write event logs at snapshot intervals

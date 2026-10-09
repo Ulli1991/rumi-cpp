@@ -51,6 +51,9 @@ PN_LOGH = dict(TEST_CASE="binary_test", INTEGRATOR="hhs", BINARY_A_PC="1e-7", BI
                PRINT_INTERVAL="1", PROFILING="false")
 # 5000 Kroupa stars, 50 % primordial binaries (1250 pairs, more than the initial neighbour buffer of 1000)
 BINARIES50 = dict(BINARIES, PLUMMER_N="5000", PLUMMER_M_TOTAL="2000", BINARY_FRAC="0.5", TOTAL_TIME_MYR="1e-3")
+# Dense core (r_h = 0.05 pc), 50 % binaries of 1-20 AU: binary-single encounters form triples and multiplets
+TRIPLES = dict(BINARIES, PLUMMER_N="2000", PLUMMER_M_TOTAL="800", PLUMMER_R_HALF="0.05", BINARY_FRAC="0.5",
+               BINARY_A_MIN_AU="1", BINARY_A_MAX_AU="20", TOTAL_TIME_MYR="2e-4", DT_MAX_MYR="1e-4")
 # 16 stars inside r_ngb: one 15-body neighbour group, more than LogH's fixed storage (LOGH_MAX_BODIES = 8)
 BIG_GROUP = dict(TEST_CASE="plummer", INTEGRATOR="hhs", TOTAL_TIME_MYR="1e-5", DT_MAX_MYR="1e-6", DT_MIN_MYR="1e-16",
                  SOFTENING_PC="0", COLLISIONAL="true", R_NGB="1e-3", R_NGB_MAX="0.1", PN_ORDER="0", SSE_ENABLED="false",
@@ -196,6 +199,15 @@ def ranks_agree(exe, label, cfg, bound):
     return ok & check(f"{label} max |dE/E(1) - dE/E(2)|", max(abs(a[0] - b[0]) for a, b in zip(one, two)), bound)
 
 
+def triples(exe, label, cfg, bound):
+    """Triples among particles with large ids must be classified (inner binary, outer companion)."""
+    out = run_output(exe, cfg)
+    n3 = max((int(a) + int(b) for a, b in re.findall(r"tri_s=(\d+)\s+tri_u=(\d+)", out)), default=0)
+    rows = diagnostics(out)
+    return check(f"{label} triples formed", n3, 1, lower=True) & \
+        check(f"{label} max|dE/E|", max(r[0] for r in rows), bound)
+
+
 def check(name, value, bound, lower=False):
     ok = value >= bound if lower else value <= bound
     print(f"{'ok  ' if ok else 'FAIL'} {name} = {value:.3e} ({'>=' if lower else '<='} {bound:.3e})")
@@ -299,6 +311,10 @@ CASES = {
     # Before: the neighbour buffer (max(1000, N/10) pairs) truncated silently, 250 binaries stayed field
     # particles at level ~30 and step 1 never finished. Measured: all 1250 detected, 1.1 s, 1.7e-13.
     "binaries50_detected": lambda exe: all_binaries(exe, "50 % binaries", BINARIES50, 1250),
+    # Triple branch of detect_from_pairs used a particle id where the union-find wanted a compact id
+    # (out of bounds for ids >= the number of pair members; the tests' triples had ids 0-2)
+    # Measured 9.8e-9 (dense core, at the restart threshold): bound 3e-8
+    "triples_detected": lambda exe: triples(exe, "dense core", TRIPLES, 3e-8),
     "logh_big_group": lambda exe: big_group(exe, "big group", BIG_GROUP, (1.2e-5, 1e-12)),
     # MPI cases, run under NBODY_TEST_LAUNCHER (CTest sets 2 ranks). Spins were not broadcast: lost on every
     # rank of a GPU run (host backends alias the mirror, so the host build cannot fail this one).
