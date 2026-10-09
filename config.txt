@@ -20,7 +20,7 @@ ETA_GRAD = 0.1					# Gradient timestep eta
 ETA_JERK = 0.1					# Jerk timestep eta
 SOFTENING_PC = 1e-3                        	# Softening length in pc (= 206 AU)
 SERIAL_N2_GPU = 16384                      	# Full N² on GPU without MPI or tree below this count
-SERIAL_N2_CPU = 256                        	# Full N² on CPU below this count (avoids kernel launch overhead)
+SERIAL_N2_CPU = 0                          	# Full N² on CPU below this count; 0 on MI300A (200k, 10 % binaries: 13-14 s/step vs 15.3 s at 256)
 INTEGER_POSITIONS = false                  	# Use int64 positions (exact drift, MPI-safe)
 DOMAIN_HALFSIZE_PC = 200                   	# Integer position domain half-size in pc
 MPI_NON_BLOCKING = false                    	# Use MPI_Iallgatherv for overlapped transfers
