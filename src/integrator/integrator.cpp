@@ -304,8 +304,36 @@ void drift_field_only(Particles& p, int start, int count, double dt) {
 
 // =============================================================================
 
+// Wall time per phase of advance_subsystems_in_range, summed over a step (printed with the step summary)
+struct SubsystemPhaseTimes {
+    enum { MAP, SECULAR, SEC_TRIPLE, LOGH_PREP, LOGH_RUN, LOGH_UNPACK, LOGH_RETRY, N };
+    double t[N] = {};
+    bool any() const { for (double v : t) if (v > 0.0) return true; return false; }
+    void report_and_reset() {
+        static const char* name[N] = {"map+select", "secular", "sec_triple", "logh_prep+pack", "logh_run",
+                                      "logh_unpack", "logh_retry"};
+        std::printf("  Subsystem phases [s]:");
+        for (int i = 0; i < N; i++) std::printf(" %s=%.3f", name[i], t[i]);
+        std::printf("\n");
+        *this = SubsystemPhaseTimes();
+    }
+};
+static SubsystemPhaseTimes g_subsys_phase;
+namespace {
+struct PhaseClock {
+    std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
+    double lap() {
+        auto t1 = std::chrono::steady_clock::now();
+        double d = std::chrono::duration<double>(t1 - t0).count();
+        t0 = t1;
+        return d;
+    }
+};
+}  // namespace
+
 void advance_subsystems_in_range(Particles& p, int start, int count,
                                   double G, double dt) {
+    PhaseClock phase_clock;
     if (!p.collisional || g_subsystem_mgr.active.empty()) return;
 
     // Rebuild pid→idx mapping: partition_by_pivot() reorders particles,
@@ -467,20 +495,29 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
         }
     }
 
+    g_subsys_phase.t[SubsystemPhaseTimes::MAP] += phase_clock.lap();
+
     // --- Secular binaries: evolve on host ---
     if (!secular_idx.empty()) {
-        for (int s : secular_idx) {
-            const auto& sub = g_subsystem_mgr.active[s];
+        // Binaries are independent (disjoint members): evolve them on all host threads. The GW energy is
+        // summed afterwards in a fixed order, so every MPI rank books the same value.
+        const int n_sec = (int)secular_idx.size();
+        std::vector<double> dE_gw(n_sec, 0.0);
+        std::vector<char> evolved(n_sec, 0);
+        Kokkos::parallel_for("secular_binaries",
+            Kokkos::RangePolicy<Kokkos::DefaultHostExecutionSpace, Kokkos::Schedule<Kokkos::Dynamic>>(0, n_sec),
+            [&](int k) {
+            const auto& sub = g_subsystem_mgr.active[secular_idx[k]];
             int idx0 = g_subsystem_mgr.safe_pid_to_idx(sub.particle_ids[0]);
             int idx1 = g_subsystem_mgr.safe_pid_to_idx(sub.particle_ids[1]);
-            if (idx0 < 0 || idx1 < 0) continue;
+            if (idx0 < 0 || idx1 < 0) return;
 
             double p1[3] = {h_x(idx0 - start), h_y(idx0 - start), h_z(idx0 - start)};
             double v1[3] = {h_vx(idx0 - start), h_vy(idx0 - start), h_vz(idx0 - start)};
             double p2[3] = {h_x(idx1 - start), h_y(idx1 - start), h_z(idx1 - start)};
             double v2[3] = {h_vx(idx1 - start), h_vy(idx1 - start), h_vz(idx1 - start)};
 
-            g_subsystem_mgr.step_secular_evolved++;
+            evolved[k] = 1;
 
             // Compute orbital energy before secular evolution for GW bookkeeping
             double m1_sec = h_m(idx0 - start), m2_sec = h_m(idx1 - start);
@@ -501,7 +538,7 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
             auto oe_post = cartesian_to_elements(r_rel_post, v_rel_post, mu_sec);
             if (oe_post.a > 0.0 && oe_pre.a > 0.0) {
                 double E_orb_post = -G * m1_sec * m2_sec / (2.0 * oe_post.a);
-                g_energy_books.E_gw += E_orb_pre - E_orb_post;
+                dE_gw[k] = E_orb_pre - E_orb_post;
             }
 
             // Write back to host mirrors
@@ -509,6 +546,10 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
             h_vx(idx0 - start) = v1[0]; h_vy(idx0 - start) = v1[1]; h_vz(idx0 - start) = v1[2];
             h_x(idx1 - start) = p2[0]; h_y(idx1 - start) = p2[1]; h_z(idx1 - start) = p2[2];
             h_vx(idx1 - start) = v2[0]; h_vy(idx1 - start) = v2[1]; h_vz(idx1 - start) = v2[2];
+        });
+        for (int k = 0; k < n_sec; k++) {
+            g_energy_books.E_gw += dE_gw[k];
+            g_subsystem_mgr.step_secular_evolved += evolved[k];
         }
 
         // Copy modified host subviews back to device
@@ -526,6 +567,8 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
             dst.has_aux_vel = false;
         }
     }
+
+    g_subsys_phase.t[SubsystemPhaseTimes::SECULAR] += phase_clock.lap();
 
     // --- Secular triples: Kozai-Lidov + GW dissipation ---
     if (!secular_triple_idx.empty()) {
@@ -718,6 +761,8 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
         }
     }
 
+    g_subsys_phase.t[SubsystemPhaseTimes::SEC_TRIPLE] += phase_clock.lap();
+
     // --- LogH subsystems: batch integrate with per-subsystem restart (BIFROST §3.19) ---
     if (!logh_idx.empty()) {
         SubsystemManager logh_mgr;
@@ -748,7 +793,9 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
 
         // Initial batch integration
         g_logh_batch.pack(logh_mgr, p, G, dt);
+        g_subsys_phase.t[SubsystemPhaseTimes::LOGH_PREP] += phase_clock.lap();
         logh_integrate_batch_gpu(g_logh_batch, G, g_collisional.eta_gbs);
+        g_subsys_phase.t[SubsystemPhaseTimes::LOGH_RUN] += phase_clock.lap();
 
         // Check per-subsystem energy errors
         auto h_eerr = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
@@ -763,6 +810,7 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
 
         // Unpack all results (passed get final state; failed get best-effort temporarily)
         g_logh_batch.unpack(logh_mgr, p);
+        g_subsys_phase.t[SubsystemPhaseTimes::LOGH_UNPACK] += phase_clock.lap();
 
         // Accumulate LogH stats into step-level counters
         g_subsystem_mgr.step_logh_calls += n_sub;
@@ -879,6 +927,7 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
             dst.E_scale = src.E_scale;
             dst.scales_set = src.scales_set;
         }
+        g_subsys_phase.t[SubsystemPhaseTimes::LOGH_RETRY] += phase_clock.lap();
     }
 }
 #endif
@@ -1091,6 +1140,7 @@ void hhs_fsi_step_dynamic(Particles& p, int start, int count, double pivot_dt,
 #ifdef ENABLE_COLLISIONAL
     if (do_global_pn)
         global_pn1_kick(p, start, count - n_removed, G, g_collisional.c_code, g_collisional.m_pn, pivot_dt * 0.5);
+    if (p.collisional && g_subsys_phase.any()) g_subsys_phase.report_and_reset();
 #else
     (void)n_removed;
 #endif
@@ -2902,7 +2952,10 @@ void hhs_fsi_step_distributed(DistributedParticles& dp, double pivot_dt,
         }
 
 #ifdef ENABLE_COLLISIONAL
-        if (dp.local.collisional) g_subsystem_mgr.print_step_summary();
+        if (dp.local.collisional) {
+            g_subsystem_mgr.print_step_summary();
+            g_subsys_phase.report_and_reset();
+        }
 #endif
     }
 }
