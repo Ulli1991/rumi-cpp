@@ -457,28 +457,35 @@ void SubsystemManager::restore_active(const std::vector<Subsystem>& saved) {
     }), active.end());
 }
 
-void SubsystemManager::update_particle_flags(Particles& p) const {
+void SubsystemManager::update_particle_flags(Particles& p) {
     // subsystem_id exists only in collisional mode; the HHS recursion calls this unconditionally
     if (!p.collisional) return;
-    // Reset all to -1
+    // Reset all to -1 on the device, then scatter only the members (no O(N) host loop or upload)
     auto sid = p.subsystem_id;
     int N = p.N;
     Kokkos::parallel_for("reset_sid", N, KOKKOS_LAMBDA(int i) { sid(i) = -1; });
 
     if (active.empty()) return;
+    rebuild_pid_to_idx(p);   // incremental: partitions may have moved particles since the last build
 
-    // Use cached pid → index mapping (O(S*M) instead of O(N*S*M))
     const auto& p2i = pid_to_idx_;
-    auto h_sid = Kokkos::create_mirror_view(p.subsystem_id);
-    for (int i = 0; i < N; i++) h_sid(i) = -1;
-
+    std::vector<int> idx_sid;
+    idx_sid.reserve(4 * active.size());
     for (const auto& sub : active) {
         for (int pid : sub.particle_ids) {
-            int idx = (pid < (int)p2i.size()) ? p2i[pid] : -1;
-            if (idx >= 0) h_sid(idx) = sub.id;
+            int idx = (pid >= 0 && pid < (int)p2i.size()) ? p2i[pid] : -1;
+            if (idx >= 0 && idx < N) { idx_sid.push_back(idx); idx_sid.push_back(sub.id); }
         }
     }
-    Kokkos::deep_copy(p.subsystem_id, h_sid);
+    const int n = (int)idx_sid.size() / 2;
+    if (n == 0) return;
+    if ((int)flag_buf_.extent(0) < 2 * n) flag_buf_ = Kokkos::View<int*>("sid_scatter", 4 * n);
+    auto h_buf = Kokkos::create_mirror_view(flag_buf_);
+    std::copy(idx_sid.begin(), idx_sid.end(), h_buf.data());
+    Kokkos::deep_copy(Kokkos::subview(flag_buf_, Kokkos::pair<int,int>(0, 2 * n)),
+                      Kokkos::subview(h_buf, Kokkos::pair<int,int>(0, 2 * n)));
+    auto buf = flag_buf_;
+    Kokkos::parallel_for("scatter_sid", n, KOKKOS_LAMBDA(int k) { sid(buf(2 * k)) = buf(2 * k + 1); });
 }
 
 // ============================================================================

@@ -67,6 +67,7 @@ struct SubsystemManager {
     void rebuild_pid_to_idx(const Particles& p);
     void check_pid_to_idx(const Particles& p) const;   // full comparison (NBODY_CHECK_PIDMAP)
     const Particles* map_source_ = nullptr;          // particle set the map was built for
+    Kokkos::View<int*> flag_buf_;                     // (index, sid) pairs uploaded by update_particle_flags
     const std::vector<int>& pid_to_idx() const { return pid_to_idx_; }
     int pid_to_idx_max() const { return pid_to_idx_max_; }
 
@@ -107,7 +108,7 @@ struct SubsystemManager {
     void remap_indices(const Particles& p);
 
     // Update subsystem_id field in Particles based on active subsystems
-    void update_particle_flags(Particles& p) const;
+    void update_particle_flags(Particles& p);
 
     // Enforce shared timestep: all members of each subsystem get min dt_adapt
     // Call after detection and before partition_by_pivot
