@@ -45,6 +45,17 @@ non-collisional build compiles again; MPI CPU build (build-host-mpi, gcc/14 + op
 tests. GPU (MI300A) ctest: all accuracy checks equal the host values; 2-body cases are ~20x slower than one
 CPU core (launch latency), so GPU runs need NBODY_TEST_TIMEOUT and apu (apudev caps jobs at 15 min).
 
+Night of 2026-10-09 (speed + accuracy):
+- Binary members got orbital time-steps (stale p.ax with the partner in v/a, gradient, perturbation
+  criteria): fixed; PN subsystems ran into an energy restart they cannot pass (E_N + E_1PN under PN):
+  now restart on GBS non-convergence, Newtonian E/P/L change booked as E_pn / P_sink / L_sink.
+- 200k, 10 % binaries, 2 MI300A: never finished a step -> 113-262 s -> 16-25 s/step; |dE/E| 3.4e-11,
+  dP 1.5e-15, dL 4e-16 after 5 steps. No binaries: 2.3-2.4 s/step, 6.5e-11.
+- LogH batch and secular binaries run on all host threads; SSE remnants of mergers restart as ZAMS
+  stars of the merged mass (SSE shrank them back); runtime SSE updates radius/luminosity; exact
+  SSE/escaper/merger E, P, L sinks; ALL_SLOW_SPLIT option (FROST Alg. 3: e=0.9 endpoint 1.8e-13,
+  below FROST's 1e-12, at 1.65x cost); ACCURATE_RSQRT option (GPU frost4_e099 1.7e-10 vs 6.9e-11 CPU).
+
 Tree check (65k Plummer, softened, 10 steps, 2 MI300A): direct FSI |dE/E| 2.6e-10 / 1.9e-11 / 1.3e-12 at
 eta 0.2 / 0.1 / 0.05 (order 3.8-3.9), 2.8 s/step. Tree (FSI with tree gradient term, not KDK) sits on its
 force-error floor independent of eta: 1.4e-5 at theta 0.5, 2.8e-6 at theta 0.3, and loses L (1e-4 to 6e-4
