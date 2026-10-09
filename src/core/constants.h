@@ -86,15 +86,15 @@ void symmetrized_timestep(double r2, double inv_r,
                            double dvx, double dvy, double dvz,
                            double G, double mass_sum, double eta_ff, double eta_fb,
                            double& t_sym_ff, double& t_sym_fb) {
+    // t_ff = sqrt(r^3 / Gm) = r^2 / sqrt(r Gm), t_fb = r / |v|: reciprocal square roots, no divisions
     double v_sq = dvx*dvx + dvy*dvy + dvz*dvz;
-    double inv_Gm  = 1.0 / (G * mass_sum + EPS);
-    double inv_vsq = 1.0 / (v_sq + EPS);
-
-    double r3 = r2 * r2 * inv_r;
-    double t_ff_sq = r3 * inv_Gm;
-    double t_fb_sq = r2 * inv_vsq;
-    double t_ff = t_ff_sq * fast_rsqrt(t_ff_sq + EPS);
-    double t_fb = t_fb_sq * fast_rsqrt(t_fb_sq + EPS);
+    double r = r2 * inv_r;
+    double t_ff = r2 * fast_rsqrt(r * (G * mass_sum + EPS));
+    double inv_v = fast_rsqrt(v_sq + EPS);
+    double t_fb = r * inv_v;
+    double inv_vsq = inv_v * inv_v;
+    double t_ff_sq = t_ff * t_ff;
+    double t_fb_sq = t_fb * t_fb;
 
     double inv_r2 = inv_r * inv_r;
     double r_dot_v = dx*dvx + dy*dvy + dz*dvz;

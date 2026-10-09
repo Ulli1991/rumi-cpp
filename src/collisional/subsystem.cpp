@@ -612,6 +612,46 @@ void SubsystemManager::remap_indices(const Particles& p) {
 // ============================================================================
 
 
+void SubsystemManager::fill_cm_velocity(const Particles& p, Kokkos::View<double*> cvx, Kokkos::View<double*> cvy,
+                                         Kokkos::View<double*> cvz) const {
+    const int N = p.N;
+    auto vx = p.vx, vy = p.vy, vz = p.vz;
+    Kokkos::parallel_for("cm_vel_copy", N, KOKKOS_LAMBDA(int i) { cvx(i) = vx(i); cvy(i) = vy(i); cvz(i) = vz(i); });
+    if (active.empty()) return;
+    const auto& p2i = pid_to_idx();
+    MemberData md(active, p2i, p);
+    auto mvx = md.col(MemberData::VX), mvy = md.col(MemberData::VY), mvz = md.col(MemberData::VZ);
+    auto mm = md.col(MemberData::M);
+    std::vector<int> slot;
+    std::vector<double> val;   // cm velocity per listed slot
+    for (const auto& sub : active) {
+        double M = 0, px = 0, py = 0, pz = 0;
+        std::vector<int> members;
+        for (int pid : sub.particle_ids) {
+            int i = (pid >= 0 && pid < (int)p2i.size()) ? p2i[pid] : -1;
+            if (i < 0 || i >= N) continue;
+            members.push_back(i);
+            M += mm(i); px += mm(i) * mvx(i); py += mm(i) * mvy(i); pz += mm(i) * mvz(i);
+        }
+        if (M <= 0) continue;
+        for (int i : members) { slot.push_back(i); val.push_back(px / M); val.push_back(py / M); val.push_back(pz / M); }
+    }
+    const int n = (int)slot.size();
+    if (n == 0) return;
+    Kokkos::View<int*> d_slot("cm_slot", n);
+    Kokkos::View<double*> d_val("cm_val", 3 * (size_t)n);
+    auto h_slot = Kokkos::create_mirror_view(d_slot);
+    auto h_val = Kokkos::create_mirror_view(d_val);
+    std::copy(slot.begin(), slot.end(), h_slot.data());
+    std::copy(val.begin(), val.end(), h_val.data());
+    Kokkos::deep_copy(d_slot, h_slot);
+    Kokkos::deep_copy(d_val, h_val);
+    Kokkos::parallel_for("cm_vel_scatter", n, KOKKOS_LAMBDA(int k) {
+        int i = d_slot(k);
+        cvx(i) = d_val(3 * k); cvy(i) = d_val(3 * k + 1); cvz(i) = d_val(3 * k + 2);
+    });
+}
+
 void SubsystemManager::enforce_shared_timestep(Particles& p) const {
     if (active.empty()) return;
 

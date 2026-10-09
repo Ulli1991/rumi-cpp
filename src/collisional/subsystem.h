@@ -112,6 +112,11 @@ struct SubsystemManager {
     // Update subsystem_id field in Particles based on active subsystems
     void update_particle_flags(Particles& p);
 
+    // cvx, cvy, cvz <- velocities, except that subsystem members get their subsystem's centre-of-mass
+    // velocity (fly-by time-step criterion with FLYBY_CM_VELOCITY, FROST-CLUSTERS II sec. 2.1)
+    void fill_cm_velocity(const Particles& p, Kokkos::View<double*> cvx, Kokkos::View<double*> cvy,
+                          Kokkos::View<double*> cvz) const;
+
     // Enforce shared timestep: all members of each subsystem get min dt_adapt
     // Call after detection and before partition_by_pivot
     void enforce_shared_timestep(Particles& p) const;

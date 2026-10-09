@@ -63,6 +63,13 @@ struct StepProfiler {
     double depth_elapsed[MAX_DEPTH][NUM_TIMERS];
     double depth_mpi[MAX_DEPTH];
     double pending_mpi = 0;   // MPI time since the last stop(), charged to the component stop() closes
+    // Per depth, LogH batches: calls, subsystems, GBS steps, and the sum over calls of the largest single
+    // subsystem's GBS steps (sum / max_sum = parallelism available to the host threads)
+    long long logh_calls[MAX_DEPTH], logh_nsub[MAX_DEPTH], logh_gbs[MAX_DEPTH], logh_gbs_max[MAX_DEPTH];
+    void record_logh(int n_sub, int gbs, int gbs_max) {
+        int d = cur_depth < MAX_DEPTH ? cur_depth : MAX_DEPTH - 1;
+        logh_calls[d]++; logh_nsub[d] += n_sub; logh_gbs[d] += gbs; logh_gbs_max[d] += gbs_max;
+    }
     int step_count;
 
     Timer active_component;  // which component is currently being timed
@@ -79,6 +86,10 @@ struct StepProfiler {
         std::memset(pairs, 0, sizeof(pairs));
         std::memset(depth_elapsed, 0, sizeof(depth_elapsed));
         std::memset(depth_mpi, 0, sizeof(depth_mpi));
+        std::memset(logh_calls, 0, sizeof(logh_calls));
+        std::memset(logh_nsub, 0, sizeof(logh_nsub));
+        std::memset(logh_gbs, 0, sizeof(logh_gbs));
+        std::memset(logh_gbs_max, 0, sizeof(logh_gbs_max));
         pending_mpi = 0;
         step_wall_total = 0.0;
         step_count = 0;
@@ -229,8 +240,15 @@ struct StepProfiler {
                 double kp = e[DRIFT_KICK] + e[PARTITION] + e[PACK_DATA];
                 double tot = 0;
                 for (int i = 0; i < NUM_TIMERS; i++) tot += e[i];
-                std::printf("  L%-5d %9.3f %9.3f %9.3f %9.3f %9.3f %9.3f %9.3f %9.3f %9.3f\n", d, tot, f, e[SUBSYSTEM_DETECT],
+                std::printf("  d%-5d %9.3f %9.3f %9.3f %9.3f %9.3f %9.3f %9.3f %9.3f %9.3f\n", d, tot, f, e[SUBSYSTEM_DETECT],
                             e[SUBSYSTEM_INTEG], e[SUBSYSTEM_DT], e[SUBSYSTEM_BOOKKEEP], kp, tot - f - sub - kp, depth_mpi[d]);
+            }
+            std::printf("\n  %-6s %9s %11s %12s %12s %10s\n", "LogH", "batches", "subsys/call", "GBS steps", "max/call sum", "parallel");
+            for (int d = 0; d <= last; d++) {
+                if (logh_calls[d] == 0) continue;
+                std::printf("  d%-5d %9lld %11.1f %12lld %12lld %10.1f\n", d, logh_calls[d],
+                            (double)logh_nsub[d] / logh_calls[d], logh_gbs[d], logh_gbs_max[d],
+                            logh_gbs_max[d] > 0 ? (double)logh_gbs[d] / logh_gbs_max[d] : 0.0);
             }
         }
 

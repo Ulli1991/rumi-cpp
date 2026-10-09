@@ -3,8 +3,11 @@
 #include "gbs.h"
 #include "collisional_config.h"
 #include "post_newtonian.h"
+#include "profiling.h"
 #include <Kokkos_Core.hpp>
+#include <algorithm>
 #include <cstring>
+#include <limits>
 
 SubsystemBatch g_logh_batch;
 
@@ -338,6 +341,7 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
     auto h_conv = Kokkos::create_mirror_view(batch.converged);
 
     int total_gbs_steps = 0;
+    std::vector<int> gbs_per_sub(n_sub, 0);   // per-depth load-balance statistics
     double max_dE = 0.0;
     double min_dE = 1e30;
     int cap_hit = 0;
@@ -345,8 +349,7 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
     // Subsystems are independent: integrate them on all host threads (one GBS integration is long
     // serial work; dynamic scheduling balances binaries against multiplets)
     using HostPolicy = Kokkos::RangePolicy<Kokkos::DefaultHostExecutionSpace, Kokkos::Schedule<Kokkos::Dynamic>>;
-    Kokkos::parallel_reduce("logh_batch_host", HostPolicy(0, n_sub),
-        [&](int s, int& gbs_sum, double& dE_max, double& dE_min, int& caps) {
+    auto integrate_one = [&](int s, int& gbs_sum, double& dE_max, double& dE_min, int& caps) {
         int nb = h_nbod(s);
         int off = h_off(s);
         double dt = h_dt(s);
@@ -569,14 +572,28 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
         h_conv(s) = converged ? 1 : 0;
 
         gbs_sum += n_gbs_steps;
+        gbs_per_sub[s] = n_gbs_steps;
         if (dE_rel > dE_max) dE_max = dE_rel;
         if (dE_rel < dE_min) dE_min = dE_rel;
         if (n_gbs_steps >= GBS_MAX_STEPS) caps++;
-    }, Kokkos::Sum<int>(total_gbs_steps), Kokkos::Max<double>(max_dE), Kokkos::Min<double>(min_dE),
-       Kokkos::Sum<int>(cap_hit));
+    };
+    if (n_sub == 1) {   // most deep-level batches: no host threads to start
+        max_dE = std::numeric_limits<double>::lowest();
+        min_dE = std::numeric_limits<double>::max();
+        integrate_one(0, total_gbs_steps, max_dE, min_dE, cap_hit);
+    } else {
+        Kokkos::parallel_reduce("logh_batch_host", HostPolicy(0, n_sub).set_chunk_size(1), integrate_one,
+                                Kokkos::Sum<int>(total_gbs_steps), Kokkos::Max<double>(max_dE),
+                                Kokkos::Min<double>(min_dE), Kokkos::Sum<int>(cap_hit));
+    }
 
     // Store stats for caller (printed in step summary, not here)
     batch.stat_total_gbs = total_gbs_steps;
+    {
+        int mx = 0;
+        for (int g : gbs_per_sub) mx = std::max(mx, g);
+        g_profiler.record_logh(n_sub, total_gbs_steps, mx);
+    }
     batch.stat_worst_dE  = max_dE;
     batch.stat_best_dE   = min_dE;
     batch.stat_cap_hit   = cap_hit;

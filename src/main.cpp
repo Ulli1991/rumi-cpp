@@ -470,6 +470,7 @@ int main(int argc, char** argv) {
         serial_n2_gpu = cfg.get_int("SERIAL_N2_GPU", 0);
         serial_n2_cpu = cfg.get_int("SERIAL_N2_CPU", 0);
         all_slow_split = cfg.get_bool("ALL_SLOW_SPLIT", true);
+        flyby_cm_velocity = cfg.get_bool("FLYBY_CM_VELOCITY", false);   // FROST-CLUSTERS II sec. 2.1
         distribute_subsystems = cfg.get_bool("DISTRIBUTE_SUBSYSTEMS", false);   // FROST Algorithm 3
         distribute_subsystems_min = cfg.get_int("DISTRIBUTE_MIN_SUBSYSTEMS", 256);
         use_integer_positions = cfg.get_bool("INTEGER_POSITIONS", false);

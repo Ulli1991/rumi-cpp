@@ -92,145 +92,8 @@ void compute_acceleration_and_timestep_distributed(DistributedParticles& dp,
 
 
 
-    // Pack data for vectorized memory access
-    dp.local.pack();
-
-    auto pos = dp.local.pos_packed;
-    auto vel = dp.local.vel_packed;
-    RawView pax{dp.local.ax.data()}, pay{dp.local.ay.data()}, paz{dp.local.az.data()};
-    RawView dt_f{dp.local.dt_adapt.data()};
-
-    // Capture eta parameters for timestep criteria
-#ifdef ENABLE_COLLISIONAL
-    double eta_ff_v = g_collisional.eta_ff;
-    double eta_fb_v = g_collisional.eta_fb;
-    double eta_jerk_val = g_collisional.eta_jerk;
-    double eta_va = g_collisional.eta_ff;  // v/a criterion uses general eta
-    bool coll = dp.local.collisional;
-#else
-    double eta_ff_v = eta;
-    double eta_fb_v = eta;
-    (void)eta;
-#endif
-
-    // Tiled GPU kernel: each team handles TILE_SIZE i-particles from my slice
-    using team_policy = Kokkos::TeamPolicy<>;
-    using member_type = team_policy::member_type;
-    using scratch_space = Kokkos::DefaultExecutionSpace::scratch_memory_space;
-
-    size_t scratch_size = TILE_SIZE * 7 * sizeof(double);
-    int num_teams = (my_count + TILE_SIZE - 1) / TILE_SIZE;
-
-    Kokkos::parallel_for("dist_acc_dt_tiled",
-        team_policy(num_teams, TILE_SIZE).set_scratch_size(0, Kokkos::PerTeam(scratch_size)),
-        KOKKOS_LAMBDA(const member_type& team) {
-            int ii = team.league_rank() * TILE_SIZE + team.team_rank();
-            int i = my_start + ii;
-
-            // AoS interleaved tile: [x,y,z,m,vx,vy,vz] per j-particle
-            Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                tile(team.team_scratch(0), TILE_SIZE * 7);
-
-            double xi = 0, yi = 0, zi = 0, mi = 0;
-            double vxi = 0, vyi = 0, vzi = 0;
-            if (ii < my_count) {
-                double vpad;
-                load4(&pos(i, 0), xi, yi, zi, mi);
-                load4(&vel(i, 0), vxi, vyi, vzi, vpad);
-            }
-
-            double axi = 0, ayi = 0, azi = 0;
-            double kx = 0, ky = 0, kz = 0;
-            double t_min_i = 1e30;
-#ifdef ENABLE_COLLISIONAL
-            double jerk_x = 0, jerk_y = 0, jerk_z = 0;
-#endif
-
-            for (int tile_start = 0; tile_start < N; tile_start += TILE_SIZE) {
-                int tile_end = (tile_start + TILE_SIZE < N) ? tile_start + TILE_SIZE : N;
-                int tile_count = tile_end - tile_start;
-
-                int t = team.team_rank();
-                if (t < tile_count) {
-                    int idx = tile_start + t;
-                    int base = t * 7;
-                    double vpad;
-                    load4(&pos(idx, 0), tile(base), tile(base+1), tile(base+2), tile(base+3));
-                    load4(&vel(idx, 0), tile(base+4), tile(base+5), tile(base+6), vpad);
-                }
-                team.team_barrier();
-
-                if (ii < my_count) {
-                    for (int jt = 0; jt < tile_count; jt++) {
-                        int j = tile_start + jt;
-                        if (j == i) continue;
-
-                        int jb = jt * 7;
-                        double dx = tile(jb    ) - xi;
-                        double dy = tile(jb + 1) - yi;
-                        double dz = tile(jb + 2) - zi;
-                        double mj = tile(jb + 3);
-                        double r2 = dx*dx + dy*dy + dz*dz;
-                        double r2s = r2 + soft2;
-                        double inv_r = fast_rsqrt(r2s);
-                        double inv_r3 = inv_r * inv_r * inv_r;
-
-                        kahan_add(axi, kx, G * mj * inv_r3 * dx);
-                        kahan_add(ayi, ky, G * mj * inv_r3 * dy);
-                        kahan_add(azi, kz, G * mj * inv_r3 * dz);
-
-                        // Symmetrized pairwise timestep
-                        double dvx = tile(jb + 4) - vxi;
-                        double dvy = tile(jb + 5) - vyi;
-                        double dvz = tile(jb + 6) - vzi;
-                        double mass_sum = mi + mj;
-                        double t_sym_ff, t_sym_fb;
-                        symmetrized_timestep(r2s, inv_r, dx, dy, dz, dvx, dvy, dvz,
-                                             G, mass_sum, eta_ff_v, eta_fb_v, t_sym_ff, t_sym_fb);
-                        t_min_i = Kokkos::fmin(t_min_i,
-                                    Kokkos::fmin(eta_ff_v * t_sym_ff, eta_fb_v * t_sym_fb));
-
-#ifdef ENABLE_COLLISIONAL
-                        // Jerk accumulation for jerk criterion (Eq. 29)
-                        if (coll) {
-                            double rdotv = dx*dvx + dy*dvy + dz*dvz;
-                            double fac1 = G * mj * inv_r3;
-                            double fac2 = 3.0 * rdotv * inv_r * inv_r;
-                            jerk_x += fac1 * (dvx - fac2 * dx);
-                            jerk_y += fac1 * (dvy - fac2 * dy);
-                            jerk_z += fac1 * (dvz - fac2 * dz);
-                        }
-#endif
-                    }
-                }
-                team.team_barrier();
-            }
-
-            if (ii < my_count) {
-                pax(i) = axi;
-                pay(i) = ayi;
-                paz(i) = azi;
-
-#ifdef ENABLE_COLLISIONAL
-                if (coll) {
-                    // Jerk criterion: dt_jerk = eta_j * |a| / |j| (Eq. 29)
-                    double a_mag = Kokkos::sqrt(axi*axi + ayi*ayi + azi*azi);
-                    double j_mag = Kokkos::sqrt(jerk_x*jerk_x + jerk_y*jerk_y + jerk_z*jerk_z);
-                    if (j_mag > EPS && a_mag > EPS) {
-                        double dt_jerk = eta_jerk_val * a_mag / j_mag;
-                        t_min_i = Kokkos::fmin(t_min_i, dt_jerk);
-                    }
-                    // v/a criterion: dt_va = eta * |v| / |a| (Eq. 24)
-                    double v_mag = Kokkos::sqrt(vxi*vxi + vyi*vyi + vzi*vzi);
-                    if (a_mag > EPS && v_mag > EPS) {
-                        double dt_va = eta_va * v_mag / a_mag;
-                        t_min_i = Kokkos::fmin(t_min_i, dt_va);
-                    }
-                }
-#endif
-                dt_f(i) = t_min_i;
-            }
-        });
+    (void)N;
+    acceleration_and_timestep_range(dp.local, my_start, my_count, 0, N, G, soft2, eta);
     Kokkos::fence();
 
     // Allgather accelerations and timesteps
@@ -410,14 +273,30 @@ static void exchange_subsystem_results(Particles& p, const std::vector<int>& eli
 // Wall time per phase of advance_subsystems_in_range, summed over a step (printed with the step summary)
 struct SubsystemPhaseTimes {
     enum { MAP, SECULAR, SEC_TRIPLE, LOGH_PREP, LOGH_RUN, LOGH_UNPACK, LOGH_RETRY, N };
+    static constexpr int MAXD = 40;
     double t[N] = {};
+    double td[MAXD][N] = {};   // the same per HHS depth
+    long long calls[MAXD] = {};
+    void add(int phase, double dt) {
+        t[phase] += dt;
+        int d = std::min(g_profiler.cur_depth, MAXD - 1);
+        td[d][phase] += dt;
+    }
     bool any() const { for (double v : t) if (v > 0.0) return true; return false; }
     void report_and_reset() {
         static const char* name[N] = {"map+select", "secular", "sec_triple", "logh_prep+pack", "logh_run",
                                       "logh_unpack", "logh_retry"};
         std::printf("  Subsystem phases [s]:");
         for (int i = 0; i < N; i++) std::printf(" %s=%.3f", name[i], t[i]);
+        std::printf("\n  %-6s %8s", "Depth", "calls");
+        for (int i = 0; i < N; i++) std::printf(" %14s", name[i]);
         std::printf("\n");
+        for (int d = 0; d < MAXD; d++) {
+            if (calls[d] == 0) continue;
+            std::printf("  d%-5d %8lld", d, calls[d]);
+            for (int i = 0; i < N; i++) std::printf(" %14.3f", td[d][i]);
+            std::printf("\n");
+        }
         *this = SubsystemPhaseTimes();
     }
 };
@@ -434,10 +313,69 @@ struct PhaseClock {
 };
 }  // namespace
 
+// Host copy of x, y, z, vx, vy, vz, mass of [start, start + count) for the subsystem advance: one packed device
+// buffer and one transfer per direction instead of a transfer (and a host allocation) per array. Buffers persist.
+namespace {
+struct RangeMirror {
+    enum { X, Y, Z, VX, VY, VZ, M, NF };
+    using HostCol = Kokkos::View<double*, Kokkos::HostSpace, Kokkos::MemoryUnmanaged>;
+    int start = 0, count = 0;
+    HostCol col[NF];
+    static Kokkos::View<double*>& dbuf() {
+        static Kokkos::View<double*> b("range_mirror_dev", 0);
+        static bool hook = (Kokkos::push_finalize_hook([] { b = Kokkos::View<double*>(); }), true);
+        (void)hook;
+        return b;
+    }
+    static Kokkos::View<double*, Kokkos::HostSpace>& hbuf() {
+        static Kokkos::View<double*, Kokkos::HostSpace> b("range_mirror_host", 0);
+        static bool hook = (Kokkos::push_finalize_hook([] { b = Kokkos::View<double*, Kokkos::HostSpace>(); }), true);
+        (void)hook;
+        return b;
+    }
+    // nf = 6: positions and velocities, 7: also masses
+    void pull(Particles& p, int nf) {
+        auto d = dbuf();
+        RawView x{p.x.data()}, y{p.y.data()}, z{p.z.data()}, vx{p.vx.data()}, vy{p.vy.data()}, vz{p.vz.data()},
+            m{p.mass.data()};
+        RawView o{d.data()};
+        const int s0 = start, n = count;
+        Kokkos::parallel_for("range_mirror_pack", n, KOKKOS_LAMBDA(int ii) {
+            int i = s0 + ii;
+            o(ii) = x(i); o(n + ii) = y(i); o(2 * n + ii) = z(i);
+            o(3 * n + ii) = vx(i); o(4 * n + ii) = vy(i); o(5 * n + ii) = vz(i);
+            if (nf > 6) o(6 * n + ii) = m(i);
+        });
+        auto rng = Kokkos::make_pair(0, nf * n);
+        Kokkos::deep_copy(Kokkos::subview(hbuf(), rng), Kokkos::subview(d, rng));
+    }
+    void push(Particles& p) {   // positions and velocities
+        auto d = dbuf();
+        auto rng = Kokkos::make_pair(0, 6 * count);
+        Kokkos::deep_copy(Kokkos::subview(d, rng), Kokkos::subview(hbuf(), rng));
+        RawView x{p.x.data()}, y{p.y.data()}, z{p.z.data()}, vx{p.vx.data()}, vy{p.vy.data()}, vz{p.vz.data()};
+        RawView o{d.data()};
+        const int s0 = start, n = count;
+        Kokkos::parallel_for("range_mirror_unpack", n, KOKKOS_LAMBDA(int ii) {
+            int i = s0 + ii;
+            x(i) = o(ii); y(i) = o(n + ii); z(i) = o(2 * n + ii);
+            vx(i) = o(3 * n + ii); vy(i) = o(4 * n + ii); vz(i) = o(5 * n + ii);
+        });
+    }
+    RangeMirror(Particles& p, int s, int n) : start(s), count(n) {
+        if ((int)dbuf().extent(0) < NF * n) Kokkos::realloc(dbuf(), NF * n);
+        if ((int)hbuf().extent(0) < NF * n) Kokkos::realloc(hbuf(), NF * n);
+        for (int f = 0; f < NF; f++) col[f] = HostCol(hbuf().data() + (size_t)f * n, n);
+        pull(p, NF);
+    }
+};
+}  // namespace
+
 void advance_subsystems_in_range(Particles& p, int start, int count,
                                   double G, double dt) {
     PhaseClock phase_clock;
     if (!p.collisional || g_subsystem_mgr.active.empty()) return;
+    g_subsys_phase.calls[std::min(g_profiler.cur_depth, SubsystemPhaseTimes::MAXD - 1)]++;
 
     // Rebuild pid→idx mapping: partition_by_pivot() reorders particles,
     // making the mapping from detect_from_pairs() stale.
@@ -462,15 +400,12 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
 
     if (eligible.empty()) return;
 
-    // Subview D2H copy of particle data — only [start, start+count) range
-    // All accessed indices are guaranteed in this range; access as h_x(idx - start)
-    auto h_x  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Kokkos::subview(p.x, rng));
-    auto h_y  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Kokkos::subview(p.y, rng));
-    auto h_z  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Kokkos::subview(p.z, rng));
-    auto h_vx = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Kokkos::subview(p.vx, rng));
-    auto h_vy = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Kokkos::subview(p.vy, rng));
-    auto h_vz = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Kokkos::subview(p.vz, rng));
-    auto h_m  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Kokkos::subview(p.mass, rng));
+    // Host copy of the particle data of [start, start+count); all accessed indices are in this range,
+    // access as h_x(idx - start). Changes go back with mirror.push(p).
+    RangeMirror mirror(p, start, count);
+    auto h_x = mirror.col[RangeMirror::X], h_y = mirror.col[RangeMirror::Y], h_z = mirror.col[RangeMirror::Z];
+    auto h_vx = mirror.col[RangeMirror::VX], h_vy = mirror.col[RangeMirror::VY], h_vz = mirror.col[RangeMirror::VZ];
+    auto h_m = mirror.col[RangeMirror::M];
 
     // Re-evaluate secular/LogH classification from current orbital state.
     // Subsystems persist across steps, so the detection-time is_secular may be stale.
@@ -610,7 +545,7 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
         }
     }
 
-    g_subsys_phase.t[SubsystemPhaseTimes::MAP] += phase_clock.lap();
+    g_subsys_phase.add(SubsystemPhaseTimes::MAP, phase_clock.lap());
 
     // --- Secular binaries: evolve on host ---
     if (!secular_idx.empty()) {
@@ -620,9 +555,7 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
         std::vector<double> dE_gw(n_sec, 0.0);
         std::vector<char> evolved(n_sec, 0);
         std::vector<EnergyBookkeeping> sec_books(n_sec);  // P/L the secular evolution moves (PN, GW)
-        Kokkos::parallel_for("secular_binaries",
-            Kokkos::RangePolicy<Kokkos::DefaultHostExecutionSpace, Kokkos::Schedule<Kokkos::Dynamic>>(0, n_sec),
-            [&](int k) {
+        auto evolve = [&](int k) {
             const auto& sub = g_subsystem_mgr.active[secular_idx[k]];
             int idx0 = g_subsystem_mgr.safe_pid_to_idx(sub.particle_ids[0]);
             int idx1 = g_subsystem_mgr.safe_pid_to_idx(sub.particle_ids[1]);
@@ -674,7 +607,15 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
             h_vx(idx0 - start) = v1[0]; h_vy(idx0 - start) = v1[1]; h_vz(idx0 - start) = v1[2];
             h_x(idx1 - start) = p2[0]; h_y(idx1 - start) = p2[1]; h_z(idx1 - start) = p2[2];
             h_vx(idx1 - start) = v2[0]; h_vy(idx1 - start) = v2[1]; h_vz(idx1 - start) = v2[2];
-        });
+        };
+        // A few binaries (deep levels, thousands of calls per step) cost less than starting the host threads
+        if (n_sec < 32) {
+            for (int k = 0; k < n_sec; k++) evolve(k);
+        } else {
+            Kokkos::parallel_for("secular_binaries",
+                Kokkos::RangePolicy<Kokkos::DefaultHostExecutionSpace, Kokkos::Schedule<Kokkos::Dynamic>>(0, n_sec),
+                evolve);
+        }
         for (int k = 0; k < n_sec; k++) {
             g_energy_books.E_gw += dE_gw[k];
             for (int c = 0; c < 3; c++) {
@@ -685,12 +626,7 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
         }
 
         // Copy modified host subviews back to device
-        Kokkos::deep_copy(Kokkos::subview(p.x, rng), h_x);
-        Kokkos::deep_copy(Kokkos::subview(p.y, rng), h_y);
-        Kokkos::deep_copy(Kokkos::subview(p.z, rng), h_z);
-        Kokkos::deep_copy(Kokkos::subview(p.vx, rng), h_vx);
-        Kokkos::deep_copy(Kokkos::subview(p.vy, rng), h_vy);
-        Kokkos::deep_copy(Kokkos::subview(p.vz, rng), h_vz);
+        mirror.push(p);
 
         // Clear aux_vel for secular subsystems (not used by secular path;
         // if subsystem transitions back to LogH, false triggers fresh init)
@@ -700,7 +636,7 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
         }
     }
 
-    g_subsys_phase.t[SubsystemPhaseTimes::SECULAR] += phase_clock.lap();
+    g_subsys_phase.add(SubsystemPhaseTimes::SECULAR, phase_clock.lap());
 
     // --- Secular triples: Kozai-Lidov + GW dissipation ---
     if (!secular_triple_idx.empty()) {
@@ -880,12 +816,7 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
             h_vz(idx2 - start) = cm_tot_v[2] + (M12/M_tot)*v_out_new[2];
         }
 
-        Kokkos::deep_copy(Kokkos::subview(p.x, rng), h_x);
-        Kokkos::deep_copy(Kokkos::subview(p.y, rng), h_y);
-        Kokkos::deep_copy(Kokkos::subview(p.z, rng), h_z);
-        Kokkos::deep_copy(Kokkos::subview(p.vx, rng), h_vx);
-        Kokkos::deep_copy(Kokkos::subview(p.vy, rng), h_vy);
-        Kokkos::deep_copy(Kokkos::subview(p.vz, rng), h_vz);
+        mirror.push(p);
 
         for (int s : secular_triple_idx) {
             auto& dst = g_subsystem_mgr.active[s];
@@ -893,10 +824,18 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
         }
     }
 
-    g_subsys_phase.t[SubsystemPhaseTimes::SEC_TRIPLE] += phase_clock.lap();
+    g_subsys_phase.add(SubsystemPhaseTimes::SEC_TRIPLE, phase_clock.lap());
 
     // --- LogH subsystems: batch integrate with per-subsystem restart (BIFROST §3.19) ---
     if (!logh_idx.empty()) {
+        // Most expensive first (longest-processing-time order), so a long integration does not start last
+        // while the other host threads idle: cost ~ N^2 x orbits per step
+        auto cost = [&](int s) {
+            const auto& sub = g_subsystem_mgr.active[s];
+            double n_orb = sub.orb.period > 0.0 ? dt / sub.orb.period : 1.0;
+            return (double)sub.n_bodies * sub.n_bodies * (1.0 + n_orb);
+        };
+        std::stable_sort(logh_idx.begin(), logh_idx.end(), [&](int a, int b) { return cost(a) > cost(b); });
         SubsystemManager logh_mgr;
         for (int s : logh_idx) {
             logh_mgr.active.push_back(g_subsystem_mgr.active[s]);
@@ -925,9 +864,9 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
 
         // Initial batch integration
         g_logh_batch.pack(logh_mgr, p, G, dt);
-        g_subsys_phase.t[SubsystemPhaseTimes::LOGH_PREP] += phase_clock.lap();
+        g_subsys_phase.add(SubsystemPhaseTimes::LOGH_PREP, phase_clock.lap());
         logh_integrate_batch_gpu(g_logh_batch, G, g_collisional.eta_gbs);
-        g_subsys_phase.t[SubsystemPhaseTimes::LOGH_RUN] += phase_clock.lap();
+        g_subsys_phase.add(SubsystemPhaseTimes::LOGH_RUN, phase_clock.lap());
 
         // Check per-subsystem energy errors
         auto h_eerr = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
@@ -942,7 +881,7 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
 
         // Unpack all results (passed get final state; failed get best-effort temporarily)
         g_logh_batch.unpack(logh_mgr, p);
-        g_subsys_phase.t[SubsystemPhaseTimes::LOGH_UNPACK] += phase_clock.lap();
+        g_subsys_phase.add(SubsystemPhaseTimes::LOGH_UNPACK, phase_clock.lap());
 
         // Accumulate LogH stats into step-level counters
         g_subsystem_mgr.step_logh_calls += n_sub;
@@ -962,12 +901,7 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
             // Helper: restore failed subsystems' particle state from saved copy
             // Refresh host mirrors from device (LogH modified positions), then overwrite failed members
             auto restore_failed = [&]() {
-                Kokkos::deep_copy(h_x, Kokkos::subview(p.x, rng));
-                Kokkos::deep_copy(h_y, Kokkos::subview(p.y, rng));
-                Kokkos::deep_copy(h_z, Kokkos::subview(p.z, rng));
-                Kokkos::deep_copy(h_vx, Kokkos::subview(p.vx, rng));
-                Kokkos::deep_copy(h_vy, Kokkos::subview(p.vy, rng));
-                Kokkos::deep_copy(h_vz, Kokkos::subview(p.vz, rng));
+                mirror.pull(p, 6);
                 for (int si : failed) {
                     const auto& sub = saved_subs[si];
                     for (int b = 0; b < sub.n_bodies; b++) {
@@ -982,12 +916,7 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
                     }
                     logh_mgr.active[si] = saved_subs[si];
                 }
-                Kokkos::deep_copy(Kokkos::subview(p.x, rng), h_x);
-                Kokkos::deep_copy(Kokkos::subview(p.y, rng), h_y);
-                Kokkos::deep_copy(Kokkos::subview(p.z, rng), h_z);
-                Kokkos::deep_copy(Kokkos::subview(p.vx, rng), h_vx);
-                Kokkos::deep_copy(Kokkos::subview(p.vy, rng), h_vy);
-                Kokkos::deep_copy(Kokkos::subview(p.vz, rng), h_vz);
+                mirror.push(p);
             };
 
             restore_failed();
@@ -1047,12 +976,7 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
         // Newtonian energy, momentum and angular momentum over this advance (Newtonian LogH conserves
         // them; what changed is the PN dynamics, plus GBS error at its tolerance)
         if (g_collisional.pn_order > 0 && g_collisional.c_code > 0.0) {
-            Kokkos::deep_copy(h_x, Kokkos::subview(p.x, rng));
-            Kokkos::deep_copy(h_y, Kokkos::subview(p.y, rng));
-            Kokkos::deep_copy(h_z, Kokkos::subview(p.z, rng));
-            Kokkos::deep_copy(h_vx, Kokkos::subview(p.vx, rng));
-            Kokkos::deep_copy(h_vy, Kokkos::subview(p.vy, rng));
-            Kokkos::deep_copy(h_vz, Kokkos::subview(p.vz, rng));
+            mirror.pull(p, 6);
             for (int si = 0; si < n_sub; si++) {
                 const auto& sub = saved_subs[si];
                 int nb = sub.n_bodies;
@@ -1104,7 +1028,7 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
             dst.E_scale = src.E_scale;
             dst.scales_set = src.scales_set;
         }
-        g_subsys_phase.t[SubsystemPhaseTimes::LOGH_RETRY] += phase_clock.lap();
+        g_subsys_phase.add(SubsystemPhaseTimes::LOGH_RETRY, phase_clock.lap());
     }
 #ifdef USE_MPI
     if (distributed_subs) exchange_subsystem_results(p, eligible, books_before);
@@ -1380,94 +1304,7 @@ static void self_acceleration_distributed(DistributedParticles& dp, int start, i
         return;
     }
 
-    auto pos = dp.local.pos_packed;
-    RawView pax{dp.local.ax.data()}, pay{dp.local.ay.data()}, paz{dp.local.az.data()};
-#ifdef ENABLE_COLLISIONAL
-    const int* sid_raw = dp.local.subsystem_id.data();
-    bool coll = dp.local.collisional;
-#endif
-
-    const int j_start = start;
-    const int j_end = start + count;
-
-    using team_policy = Kokkos::TeamPolicy<>;
-    using member_type = team_policy::member_type;
-    using scratch_space = Kokkos::DefaultExecutionSpace::scratch_memory_space;
-
-    size_t scratch_size = TILE_SIZE * 4 * sizeof(double); // x,y,z,m
-    int num_teams = (slice_count + TILE_SIZE - 1) / TILE_SIZE;
-
-    Kokkos::parallel_for("dist_self_acc_tiled",
-        team_policy(num_teams, TILE_SIZE).set_scratch_size(0, Kokkos::PerTeam(scratch_size)),
-        KOKKOS_LAMBDA(const member_type& team) {
-            int ii = team.league_rank() * TILE_SIZE + team.team_rank();
-            int i = slice_start + ii;
-
-            // AoS interleaved tile: [x,y,z,m] per j-particle
-            Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                tile(team.team_scratch(0), TILE_SIZE * 4);
-
-            double xi = 0, yi = 0, zi = 0;
-#ifdef ENABLE_COLLISIONAL
-            int sid_i = -1;
-#endif
-
-            if (ii < slice_count) {
-                double mi_pad;
-                load4(&pos(i, 0), xi, yi, zi, mi_pad);
-#ifdef ENABLE_COLLISIONAL
-                if (coll) sid_i = sid_raw[i];
-#endif
-            }
-
-            double axi = 0, ayi = 0, azi = 0;
-            double kx = 0, ky = 0, kz = 0;
-
-            for (int tile_start = j_start; tile_start < j_end; tile_start += TILE_SIZE) {
-                int tile_end = (tile_start + TILE_SIZE < j_end) ? tile_start + TILE_SIZE : j_end;
-                int tile_count = tile_end - tile_start;
-
-                int t = team.team_rank();
-                if (t < tile_count) {
-                    int idx = tile_start + t;
-                    int base = t * 4;
-                    load4(&pos(idx, 0), tile(base), tile(base+1), tile(base+2), tile(base+3));
-                }
-                team.team_barrier();
-
-                if (ii < slice_count) {
-                    for (int jt = 0; jt < tile_count; jt++) {
-                        int j = tile_start + jt;
-                        if (j == i) continue;
-#ifdef ENABLE_COLLISIONAL
-                        if (coll && sid_i >= 0 && sid_raw[j] == sid_i) continue;
-#endif
-
-
-                        int jb = jt * 4;
-                        double dx = tile(jb    ) - xi;
-                        double dy = tile(jb + 1) - yi;
-                        double dz = tile(jb + 2) - zi;
-
-                        double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                        double inv_r = fast_rsqrt(r2);
-                        double inv_r3 = inv_r * inv_r * inv_r;
-                        double mj_inv_r3 = G * tile(jb + 3) * inv_r3;
-
-                        kahan_add(axi, kx, mj_inv_r3 * dx);
-                        kahan_add(ayi, ky, mj_inv_r3 * dy);
-                        kahan_add(azi, kz, mj_inv_r3 * dz);
-                    }
-                }
-                team.team_barrier();
-            }
-
-            if (ii < slice_count) {
-                pax(i) = axi;
-                pay(i) = ayi;
-                paz(i) = azi;
-            }
-        });
+    acceleration_range(dp.local, slice_start, slice_count, start, count, G, soft2);
     Kokkos::fence();
 
     if (use_nonblocking_mpi) {
@@ -1514,109 +1351,9 @@ static void self_gradient_correction_distributed(DistributedParticles& dp, int s
     dp.get_force_slice(start, count, slice_start, slice_count);
 
     if (slice_count > 0) {
-        auto pos = dp.local.pos_packed;
-        RawView pax{dp.local.ax.data()}, pay{dp.local.ay.data()}, paz{dp.local.az.data()};
-        // Snapshot views for race-free j-particle acceleration reads
-        RawView sax{ax_save.data()}, say{ay_save.data()}, saz{az_save.data()};
-#ifdef ENABLE_COLLISIONAL
-        const int* sid_raw = dp.local.subsystem_id.data();
-        bool coll = dp.local.collisional;
-#endif
-
-        const double coeff = G * grad_dt * grad_dt * GRAD_COEFF;
-        const int j_start = start;
-        const int j_end = start + count;
-
-        using team_policy = Kokkos::TeamPolicy<>;
-        using member_type = team_policy::member_type;
-        using scratch_space = Kokkos::DefaultExecutionSpace::scratch_memory_space;
-
-        size_t scratch_size = TILE_SIZE * 7 * sizeof(double);
-        int num_teams = (slice_count + TILE_SIZE - 1) / TILE_SIZE;
-
-        Kokkos::parallel_for("dist_grad_tiled",
-            team_policy(num_teams, TILE_SIZE).set_scratch_size(0, Kokkos::PerTeam(scratch_size)),
-            KOKKOS_LAMBDA(const member_type& team) {
-                int ii = team.league_rank() * TILE_SIZE + team.team_rank();
-                int i = slice_start + ii;
-
-                Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                    tile(team.team_scratch(0), TILE_SIZE * 7);
-
-                double xi = 0, yi = 0, zi = 0;
-                double axi = 0, ayi = 0, azi = 0;
-#ifdef ENABLE_COLLISIONAL
-                int sid_i = -1;
-#endif
-
-                if (ii < slice_count) {
-                    double mi_pad;
-                    load4(&pos(i, 0), xi, yi, zi, mi_pad);
-                    // Read from snapshot (i is in [start, start+count))
-                    axi = sax(i - j_start); ayi = say(i - j_start); azi = saz(i - j_start);
-#ifdef ENABLE_COLLISIONAL
-                    if (coll) sid_i = sid_raw[i];
-#endif
-                }
-
-                double cx = 0, cy = 0, cz = 0;
-                double kcx = 0, kcy = 0, kcz = 0;
-
-                for (int tile_start = j_start; tile_start < j_end; tile_start += TILE_SIZE) {
-                    int tile_end = (tile_start + TILE_SIZE < j_end) ? tile_start + TILE_SIZE : j_end;
-                    int tile_count = tile_end - tile_start;
-
-                    int t = team.team_rank();
-                    if (t < tile_count) {
-                        int idx = tile_start + t;
-                        int base = t * 7;
-                        load4(&pos(idx, 0), tile(base), tile(base+1), tile(base+2), tile(base+3));
-                        // Load from snapshot to avoid data race with corrected accelerations
-                        tile(base + 4) = sax(idx - j_start);
-                        tile(base + 5) = say(idx - j_start);
-                        tile(base + 6) = saz(idx - j_start);
-                    }
-                    team.team_barrier();
-
-                    if (ii < slice_count) {
-                        for (int jt = 0; jt < tile_count; jt++) {
-                            int j = tile_start + jt;
-                            if (j == i) continue;
-#ifdef ENABLE_COLLISIONAL
-                            if (coll && sid_i >= 0 && sid_raw[j] == sid_i) continue;
-#endif
-
-                            int jb = jt * 7;
-                            double dx = tile(jb    ) - xi;
-                            double dy = tile(jb + 1) - yi;
-                            double dz = tile(jb + 2) - zi;
-
-                            double dax = tile(jb + 4) - axi;
-                            double day = tile(jb + 5) - ayi;
-                            double daz = tile(jb + 6) - azi;
-
-                            double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                            double inv_r = fast_rsqrt(r2);
-                            double inv_r2 = inv_r * inv_r;
-                            double inv_r5 = inv_r2 * inv_r2 * inv_r;
-
-                            double r_dot_a = dx*dax + dy*day + dz*daz;
-                            double f = coeff * tile(jb + 3) * inv_r5;
-
-                            kahan_add(cx, kcx, f * (r2 * dax - 3.0 * r_dot_a * dx));
-                            kahan_add(cy, kcy, f * (r2 * day - 3.0 * r_dot_a * dy));
-                            kahan_add(cz, kcz, f * (r2 * daz - 3.0 * r_dot_a * dz));
-                        }
-                    }
-                    team.team_barrier();
-                }
-
-                if (ii < slice_count) {
-                    pax(i) = axi + cx;
-                    pay(i) = ayi + cy;
-                    paz(i) = azi + cz;
-                }
-            });
+        GradSnapshot snap{ax_save.data(), ay_save.data(), az_save.data(), start};
+        gradient_correction_range(dp.local, slice_start, slice_count, start, count, snap, snap, G, soft2, grad_dt,
+                                  false);   // grad_mag below, from the gathered accelerations
         Kokkos::fence();
     }
 
@@ -1944,178 +1681,13 @@ static void cross_acceleration_distributed(DistributedParticles& dp,
     if (slow_count <= 0 || fast_count <= 0) return;
 
 
-    auto pos = dp.local.pos_packed;
-    RawView pax{dp.local.ax.data()}, pay{dp.local.ay.data()}, paz{dp.local.az.data()};
-#ifdef ENABLE_COLLISIONAL
-    const int* sid_raw = dp.local.subsystem_id.data();
-    bool coll = dp.local.collisional;
-#endif
-
-    using team_policy = Kokkos::TeamPolicy<>;
-    using member_type = team_policy::member_type;
-    using scratch_space = Kokkos::DefaultExecutionSpace::scratch_memory_space;
-
-    size_t scratch_size = TILE_SIZE * 4 * sizeof(double);
-
-    // Slow particles: compute force from fast particles
+    // Slow particles from fast, fast from slow: each rank its slice of the sinks
     int slice_start, slice_count;
     dp.get_force_slice(slow_start, slow_count, slice_start, slice_count);
-
-    if (slice_count > 0) {
-        int num_teams = (slice_count + TILE_SIZE - 1) / TILE_SIZE;
-        const int f_start = fast_start;
-        const int f_end = fast_start + fast_count;
-
-        Kokkos::parallel_for("cross_slow_from_fast_tiled",
-            team_policy(num_teams, TILE_SIZE).set_scratch_size(0, Kokkos::PerTeam(scratch_size)),
-            KOKKOS_LAMBDA(const member_type& team) {
-                int ii = team.league_rank() * TILE_SIZE + team.team_rank();
-                int i = slice_start + ii;
-
-                Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                    tile(team.team_scratch(0), TILE_SIZE * 4);
-
-                double xi = 0, yi = 0, zi = 0;
-#ifdef ENABLE_COLLISIONAL
-                int sid_i = -1;
-#endif
-
-                if (ii < slice_count) {
-                    double mi_pad;
-                    load4(&pos(i, 0), xi, yi, zi, mi_pad);
-#ifdef ENABLE_COLLISIONAL
-                    if (coll) sid_i = sid_raw[i];
-#endif
-                }
-
-                double axi = 0, ayi = 0, azi = 0;
-                double kx = 0, ky = 0, kz = 0;
-
-                for (int tile_st = f_start; tile_st < f_end; tile_st += TILE_SIZE) {
-                    int tile_end = (tile_st + TILE_SIZE < f_end) ? tile_st + TILE_SIZE : f_end;
-                    int tile_cnt = tile_end - tile_st;
-
-                    int t = team.team_rank();
-                    if (t < tile_cnt) {
-                        int idx = tile_st + t;
-                        int base = t * 4;
-                        load4(&pos(idx, 0), tile(base), tile(base+1), tile(base+2), tile(base+3));
-                    }
-                    team.team_barrier();
-
-                    if (ii < slice_count) {
-                        for (int jt = 0; jt < tile_cnt; jt++) {
-                            int j_cross = f_start + (tile_st - f_start) + jt;
-#ifdef ENABLE_COLLISIONAL
-                            if (coll && sid_i >= 0 && sid_raw[j_cross] == sid_i) continue;
-#endif
-
-
-                            int jb = jt * 4;
-                            double dx = tile(jb    ) - xi;
-                            double dy = tile(jb + 1) - yi;
-                            double dz = tile(jb + 2) - zi;
-
-                            double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                            double inv_r = fast_rsqrt(r2);
-                            double inv_r3 = inv_r * inv_r * inv_r;
-                            double mj_inv_r3 = G * tile(jb + 3) * inv_r3;
-
-                            kahan_add(axi, kx, mj_inv_r3 * dx);
-                            kahan_add(ayi, ky, mj_inv_r3 * dy);
-                            kahan_add(azi, kz, mj_inv_r3 * dz);
-                        }
-                    }
-                    team.team_barrier();
-                }
-
-                if (ii < slice_count) {
-                    pax(i) = axi;
-                    pay(i) = ayi;
-                    paz(i) = azi;
-                }
-            });
-    }
-
-    // Fast particles: compute force from slow particles
+    acceleration_range(dp.local, slice_start, slice_count, fast_start, fast_count, G, soft2);
     int slice_start_f, slice_count_f;
     dp.get_force_slice(fast_start, fast_count, slice_start_f, slice_count_f);
-
-    if (slice_count_f > 0) {
-        int num_teams_f = (slice_count_f + TILE_SIZE - 1) / TILE_SIZE;
-        const int s_start = slow_start;
-        const int s_end = slow_start + slow_count;
-
-        Kokkos::parallel_for("cross_fast_from_slow_tiled",
-            team_policy(num_teams_f, TILE_SIZE).set_scratch_size(0, Kokkos::PerTeam(scratch_size)),
-            KOKKOS_LAMBDA(const member_type& team) {
-                int ii = team.league_rank() * TILE_SIZE + team.team_rank();
-                int i = slice_start_f + ii;
-
-                const int N = TILE_SIZE;
-                Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                    tile(team.team_scratch(0), N * 4);
-
-                double xi = 0, yi = 0, zi = 0;
-#ifdef ENABLE_COLLISIONAL
-                int sid_i = -1;
-#endif
-
-                if (ii < slice_count_f) {
-                    double mi_pad;
-                    load4(&pos(i, 0), xi, yi, zi, mi_pad);
-#ifdef ENABLE_COLLISIONAL
-                    if (coll) sid_i = sid_raw[i];
-#endif
-                }
-
-                double axi = 0, ayi = 0, azi = 0;
-                double kx = 0, ky = 0, kz = 0;
-
-                for (int tile_st = s_start; tile_st < s_end; tile_st += TILE_SIZE) {
-                    int tile_end = (tile_st + TILE_SIZE < s_end) ? tile_st + TILE_SIZE : s_end;
-                    int tile_cnt = tile_end - tile_st;
-
-                    int t = team.team_rank();
-                    if (t < tile_cnt) {
-                        int idx = tile_st + t;
-                        int tb = t * 4;
-                        load4(&pos(idx, 0), tile(tb), tile(tb+1), tile(tb+2), tile(tb+3));
-                    }
-                    team.team_barrier();
-
-                    if (ii < slice_count_f) {
-                        for (int jt = 0; jt < tile_cnt; jt++) {
-                            int j_cross = s_start + (tile_st - s_start) + jt;
-#ifdef ENABLE_COLLISIONAL
-                            if (coll && sid_i >= 0 && sid_raw[j_cross] == sid_i) continue;
-#endif
-
-                            int jb = jt * 4;
-                            double dx = tile(jb)   - xi;
-                            double dy = tile(jb+1) - yi;
-                            double dz = tile(jb+2) - zi;
-
-                            double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                            double inv_r = fast_rsqrt(r2);
-                            double inv_r3 = inv_r * inv_r * inv_r;
-                            double mj_inv_r3 = G * tile(jb+3) * inv_r3;
-
-                            kahan_add(axi, kx, mj_inv_r3 * dx);
-                            kahan_add(ayi, ky, mj_inv_r3 * dy);
-                            kahan_add(azi, kz, mj_inv_r3 * dz);
-                        }
-                    }
-                    team.team_barrier();
-                }
-
-                if (ii < slice_count_f) {
-                    pax(i) = axi;
-                    pay(i) = ayi;
-                    paz(i) = azi;
-                }
-            });
-    }
+    acceleration_range(dp.local, slice_start_f, slice_count_f, slow_start, slow_count, G, soft2);
     Kokkos::fence();
 
     // Must use separate allgathers: each rank computed its slice of slow and
@@ -2141,14 +1713,7 @@ static void cross_acceleration_and_gradient_distributed(DistributedParticles& dp
                                    fast_start, fast_count, G, soft2);
 
 
-    auto pos = dp.local.pos_packed;
     RawView pax{dp.local.ax.data()}, pay{dp.local.ay.data()}, paz{dp.local.az.data()};
-#ifdef ENABLE_COLLISIONAL
-    const int* sid_raw = dp.local.subsystem_id.data();
-    bool coll = dp.local.collisional;
-#endif
-
-    const double coeff = G * dt * dt * GRAD_COEFF;
 
     // Snapshot accelerations for both slow and fast ranges BEFORE gradient kernels.
     // The slow-from-fast kernel modifies slow accelerations; without a snapshot the
@@ -2187,196 +1752,16 @@ static void cross_acceleration_and_gradient_distributed(DistributedParticles& dp
         saz_f(ii) = paz(fast_start + ii);
     });
 
-    using team_policy = Kokkos::TeamPolicy<>;
-    using member_type = team_policy::member_type;
-    using scratch_space = Kokkos::DefaultExecutionSpace::scratch_memory_space;
-
-    size_t scratch_size = TILE_SIZE * 7 * sizeof(double);
-
-    // Gradient correction for slow particles from fast
+    GradSnapshot snap_s{ax_snap_s.data(), ay_snap_s.data(), az_snap_s.data(), slow_start};
+    GradSnapshot snap_f{ax_snap_f.data(), ay_snap_f.data(), az_snap_f.data(), fast_start};
     int slice_start, slice_count;
     dp.get_force_slice(slow_start, slow_count, slice_start, slice_count);
-
-    if (slice_count > 0) {
-        int num_teams = (slice_count + TILE_SIZE - 1) / TILE_SIZE;
-        const int f_start = fast_start;
-        const int f_end = fast_start + fast_count;
-
-        Kokkos::parallel_for("cross_grad_slow_tiled",
-            team_policy(num_teams, TILE_SIZE).set_scratch_size(0, Kokkos::PerTeam(scratch_size)),
-            KOKKOS_LAMBDA(const member_type& team) {
-                int ii = team.league_rank() * TILE_SIZE + team.team_rank();
-                int i = slice_start + ii;
-
-                const int N = TILE_SIZE;
-                Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                    tile(team.team_scratch(0), N * 7);
-
-                double xi = 0, yi = 0, zi = 0;
-                double axi = 0, ayi = 0, azi = 0;
-#ifdef ENABLE_COLLISIONAL
-                int sid_i = -1;
-#endif
-
-                if (ii < slice_count) {
-                    double mi_pad;
-                    load4(&pos(i, 0), xi, yi, zi, mi_pad);
-                    axi = sax_s(i - slow_start); ayi = say_s(i - slow_start); azi = saz_s(i - slow_start);
-#ifdef ENABLE_COLLISIONAL
-                    if (coll) sid_i = sid_raw[i];
-#endif
-                }
-
-                double cx = 0, cy = 0, cz = 0;
-                double kcx = 0, kcy = 0, kcz = 0;
-
-                for (int tile_st = f_start; tile_st < f_end; tile_st += TILE_SIZE) {
-                    int tile_end = (tile_st + TILE_SIZE < f_end) ? tile_st + TILE_SIZE : f_end;
-                    int tile_cnt = tile_end - tile_st;
-
-                    int t = team.team_rank();
-                    if (t < tile_cnt) {
-                        int idx = tile_st + t;
-                        int tb = t * 7;
-                        load4(&pos(idx, 0), tile(tb), tile(tb+1), tile(tb+2), tile(tb+3));
-                        tile(tb+4) = sax_f(idx - fast_start);
-                        tile(tb+5) = say_f(idx - fast_start);
-                        tile(tb+6) = saz_f(idx - fast_start);
-                    }
-                    team.team_barrier();
-
-                    if (ii < slice_count) {
-                        for (int jt = 0; jt < tile_cnt; jt++) {
-                            int j_cross = tile_st + jt;
-#ifdef ENABLE_COLLISIONAL
-                            if (coll && sid_i >= 0 && sid_raw[j_cross] == sid_i) continue;
-#endif
-
-                            int jb = jt * 7;
-                            double dx = tile(jb)   - xi;
-                            double dy = tile(jb+1) - yi;
-                            double dz = tile(jb+2) - zi;
-
-                            double dax = tile(jb+4) - axi;
-                            double day = tile(jb+5) - ayi;
-                            double daz = tile(jb+6) - azi;
-
-                            double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                            double inv_r = fast_rsqrt(r2);
-                            double inv_r2 = inv_r * inv_r;
-                            double inv_r5 = inv_r2 * inv_r2 * inv_r;
-
-                            double r_dot_a = dx*dax + dy*day + dz*daz;
-                            double f = coeff * tile(jb+3) * inv_r5;
-
-                            kahan_add(cx, kcx, f * (r2 * dax - 3.0 * r_dot_a * dx));
-                            kahan_add(cy, kcy, f * (r2 * day - 3.0 * r_dot_a * dy));
-                            kahan_add(cz, kcz, f * (r2 * daz - 3.0 * r_dot_a * dz));
-                        }
-                    }
-                    team.team_barrier();
-                }
-
-                if (ii < slice_count) {
-                    pax(i) += cx;
-                    pay(i) += cy;
-                    paz(i) += cz;
-                }
-            });
-    }
-
-    // Gradient correction for fast particles from slow
+    gradient_correction_range(dp.local, slice_start, slice_count, fast_start, fast_count, snap_s, snap_f,
+                              G, soft2, dt, false);
     int slice_start_f, slice_count_f;
     dp.get_force_slice(fast_start, fast_count, slice_start_f, slice_count_f);
-
-    if (slice_count_f > 0) {
-        int num_teams_f = (slice_count_f + TILE_SIZE - 1) / TILE_SIZE;
-        const int s_start = slow_start;
-        const int s_end = slow_start + slow_count;
-
-        Kokkos::parallel_for("cross_grad_fast_tiled",
-            team_policy(num_teams_f, TILE_SIZE).set_scratch_size(0, Kokkos::PerTeam(scratch_size)),
-            KOKKOS_LAMBDA(const member_type& team) {
-                int ii = team.league_rank() * TILE_SIZE + team.team_rank();
-                int i = slice_start_f + ii;
-
-                const int N = TILE_SIZE;
-                Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                    tile(team.team_scratch(0), N * 7);
-
-                double xi = 0, yi = 0, zi = 0;
-                double axi = 0, ayi = 0, azi = 0;
-#ifdef ENABLE_COLLISIONAL
-                int sid_i = -1;
-#endif
-
-                if (ii < slice_count_f) {
-                    double mi_pad;
-                    load4(&pos(i, 0), xi, yi, zi, mi_pad);
-                    axi = sax_f(i - fast_start); ayi = say_f(i - fast_start); azi = saz_f(i - fast_start);
-#ifdef ENABLE_COLLISIONAL
-                    if (coll) sid_i = sid_raw[i];
-#endif
-                }
-
-                double cx = 0, cy = 0, cz = 0;
-                double kcx = 0, kcy = 0, kcz = 0;
-
-                for (int tile_st = s_start; tile_st < s_end; tile_st += TILE_SIZE) {
-                    int tile_end = (tile_st + TILE_SIZE < s_end) ? tile_st + TILE_SIZE : s_end;
-                    int tile_cnt = tile_end - tile_st;
-
-                    int t = team.team_rank();
-                    if (t < tile_cnt) {
-                        int idx = tile_st + t;
-                        int tb = t * 7;
-                        load4(&pos(idx, 0), tile(tb), tile(tb+1), tile(tb+2), tile(tb+3));
-                        tile(tb+4) = sax_s(idx - slow_start);
-                        tile(tb+5) = say_s(idx - slow_start);
-                        tile(tb+6) = saz_s(idx - slow_start);
-                    }
-                    team.team_barrier();
-
-                    if (ii < slice_count_f) {
-                        for (int jt = 0; jt < tile_cnt; jt++) {
-                            int j_cross = tile_st + jt;
-#ifdef ENABLE_COLLISIONAL
-                            if (coll && sid_i >= 0 && sid_raw[j_cross] == sid_i) continue;
-#endif
-
-
-                            int jb = jt * 7;
-                            double dx = tile(jb)   - xi;
-                            double dy = tile(jb+1) - yi;
-                            double dz = tile(jb+2) - zi;
-
-                            double dax = tile(jb+4) - axi;
-                            double day = tile(jb+5) - ayi;
-                            double daz = tile(jb+6) - azi;
-
-                            double r2 = dx*dx + dy*dy + dz*dz + soft2;
-                            double inv_r = fast_rsqrt(r2);
-                            double inv_r2 = inv_r * inv_r;
-                            double inv_r5 = inv_r2 * inv_r2 * inv_r;
-
-                            double r_dot_a = dx*dax + dy*day + dz*daz;
-                            double f = coeff * tile(jb+3) * inv_r5;
-
-                            kahan_add(cx, kcx, f * (r2 * dax - 3.0 * r_dot_a * dx));
-                            kahan_add(cy, kcy, f * (r2 * day - 3.0 * r_dot_a * dy));
-                            kahan_add(cz, kcz, f * (r2 * daz - 3.0 * r_dot_a * dz));
-                        }
-                    }
-                    team.team_barrier();
-                }
-
-                if (ii < slice_count_f) {
-                    pax(i) += cx;
-                    pay(i) += cy;
-                    paz(i) += cz;
-                }
-            });
-    }
+    gradient_correction_range(dp.local, slice_start_f, slice_count_f, slow_start, slow_count, snap_f, snap_s,
+                              G, soft2, dt, false);
     Kokkos::fence();
 
     // Must use separate allgathers: force slices were computed independently
@@ -2406,157 +1791,10 @@ static void compute_timestep_distributed(DistributedParticles& dp, int start, in
         return;
     }
 
-    auto pos = dp.local.pos_packed;
-    auto vel = dp.local.vel_packed;
-    RawView dt_f{dp.local.dt_adapt.data()};
-    RawView pax_dt{dp.local.ax.data()}, pay_dt{dp.local.ay.data()}, paz_dt{dp.local.az.data()};
+    timestep_range(dp.local, slice_start, slice_count, start, count, G, soft2, eta);
 #ifdef ENABLE_COLLISIONAL
-    const int* sid_raw = dp.local.subsystem_id.data();
     bool coll = dp.local.collisional;
-    double eta_jerk_val = coll ? g_collisional.eta_jerk : 0.0;
 #endif
-
-    // Capture eta_ff/eta_fb for per-criterion timestep scaling
-#ifdef ENABLE_COLLISIONAL
-    double eta_ff_v = g_collisional.eta_ff;
-    double eta_fb_v = g_collisional.eta_fb;
-#else
-    double eta_ff_v = eta;
-    double eta_fb_v = eta;
-#endif
-
-    const int j_start = start;
-    const int j_end = start + count;
-#ifdef ENABLE_COLLISIONAL
-    RawView pax_w{dp.local.ax.data()}, pay_w{dp.local.ay.data()}, paz_w{dp.local.az.data()};
-#endif
-
-    using team_policy = Kokkos::TeamPolicy<>;
-    using member_type = team_policy::member_type;
-    using scratch_space = Kokkos::DefaultExecutionSpace::scratch_memory_space;
-
-    // Need x,y,z,m,vx,vy,vz for adaptive timestep
-    size_t scratch_size = TILE_SIZE * 7 * sizeof(double);
-    int num_teams = (slice_count + TILE_SIZE - 1) / TILE_SIZE;
-
-    Kokkos::parallel_for("dist_dt_tiled",
-        team_policy(num_teams, TILE_SIZE).set_scratch_size(0, Kokkos::PerTeam(scratch_size)),
-        KOKKOS_LAMBDA(const member_type& team) {
-            int ii = team.league_rank() * TILE_SIZE + team.team_rank();
-            int i = slice_start + ii;
-
-            const int N = TILE_SIZE;
-            Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged>
-                tile(team.team_scratch(0), N * 7);
-
-            double xi = 0, yi = 0, zi = 0, mi = 0;
-            double vxi = 0, vyi = 0, vzi = 0;
-#ifdef ENABLE_COLLISIONAL
-            int sid_i = -1;
-#endif
-            if (ii < slice_count) {
-                double vpad;
-                load4(&pos(i, 0), xi, yi, zi, mi);
-                load4(&vel(i, 0), vxi, vyi, vzi, vpad);
-#ifdef ENABLE_COLLISIONAL
-                if (coll) sid_i = sid_raw[i];
-#endif
-            }
-
-            double t_min_i = 1e30;
-#ifdef ENABLE_COLLISIONAL
-            double jerk_x = 0, jerk_y = 0, jerk_z = 0;
-            double acc_xi = 0, acc_yi = 0, acc_zi = 0;  // fresh subset acceleration for jerk criterion
-#endif
-
-            for (int tile_st = j_start; tile_st < j_end; tile_st += TILE_SIZE) {
-                int tile_end = (tile_st + TILE_SIZE < j_end) ? tile_st + TILE_SIZE : j_end;
-                int tile_cnt = tile_end - tile_st;
-
-                int t = team.team_rank();
-                if (t < tile_cnt) {
-                    int idx = tile_st + t;
-                    int tb = t * 7;
-                    double vpad;
-                    load4(&pos(idx, 0), tile(tb), tile(tb+1), tile(tb+2), tile(tb+3));
-                    load4(&vel(idx, 0), tile(tb+4), tile(tb+5), tile(tb+6), vpad);
-                }
-                team.team_barrier();
-
-                if (ii < slice_count) {
-                    for (int jt = 0; jt < tile_cnt; jt++) {
-                        int j = tile_st + jt;
-                        if (j == i) continue;
-#ifdef ENABLE_COLLISIONAL
-                        if (coll && sid_i >= 0 && sid_raw[j] == sid_i) continue;
-#endif
-
-                        int jb = jt * 7;
-                        double dx = tile(jb)   - xi;
-                        double dy = tile(jb+1) - yi;
-                        double dz = tile(jb+2) - zi;
-                        double r2 = dx*dx + dy*dy + dz*dz;
-
-                        double dvx = tile(jb+4) - vxi;
-                        double dvy = tile(jb+5) - vyi;
-                        double dvz = tile(jb+6) - vzi;
-                        double v_sq = dvx*dvx + dvy*dvy + dvz*dvz;
-
-                        double r2s = r2 + soft2;
-                        double inv_r = fast_rsqrt(r2s);
-                        double mj = tile(jb+3);
-                        double mass_sum = mi + mj;
-                        double r3 = r2s * r2s * inv_r;
-
-                        // Symmetrized timestep (FROST Eq. 49 on the step eta*t), as the other kernels
-                        {
-                            (void)v_sq; (void)r3;
-                            double t_sym_ff, t_sym_fb;
-                            symmetrized_timestep(r2s, inv_r, dx, dy, dz, dvx, dvy, dvz, G, mass_sum,
-                                                 eta_ff_v, eta_fb_v, t_sym_ff, t_sym_fb);
-                            t_min_i = Kokkos::fmin(t_min_i, Kokkos::fmin(eta_ff_v * t_sym_ff, eta_fb_v * t_sym_fb));
-                        }
-
-#ifdef ENABLE_COLLISIONAL
-                        // Jerk + acceleration accumulation (collisional only)
-                        if (coll) {
-                            double inv_r3 = inv_r * inv_r * inv_r;
-                            double rdotv = dx*dvx + dy*dvy + dz*dvz;
-                            double fac1 = G * mj * inv_r3;
-                            double fac2 = 3.0 * rdotv * inv_r * inv_r;
-                            jerk_x += fac1 * (dvx - fac2 * dx);
-                            jerk_y += fac1 * (dvy - fac2 * dy);
-                            jerk_z += fac1 * (dvz - fac2 * dz);
-                            // Fresh subset acceleration for jerk criterion (BIFROST §3.4.5)
-                            acc_xi += fac1 * dx;
-                            acc_yi += fac1 * dy;
-                            acc_zi += fac1 * dz;
-                        }
-#endif
-
-                    }
-                }
-                team.team_barrier();
-            }
-
-            if (ii < slice_count) {
-                dt_f(i) = t_min_i;
-#ifdef ENABLE_COLLISIONAL
-                // Jerk timestep: dt_jerk = eta_j * |a| / |j| (BIFROST §3.4.5)
-                // Uses freshly accumulated subset acceleration, not stale p.ax/ay/az
-                if (coll && eta_jerk_val > 0.0) {
-                    double a_mag = Kokkos::sqrt(acc_xi*acc_xi + acc_yi*acc_yi + acc_zi*acc_zi);
-                    double j_mag = Kokkos::sqrt(jerk_x*jerk_x + jerk_y*jerk_y + jerk_z*jerk_z);
-                    if (j_mag > EPS && a_mag > EPS) {
-                        double dt_jerk = eta_jerk_val * a_mag / j_mag;
-                        dt_f(i) = Kokkos::fmin(dt_f(i), dt_jerk);
-                    }
-                }
-                // Partner-free acceleration for the v/a, gradient and perturbation criteria
-                if (coll) { pax_w(i) = acc_xi; pay_w(i) = acc_yi; paz_w(i) = acc_zi; }
-#endif
-            }
-        });
     Kokkos::fence();
 
     // Allgather dt_adapt values (uses GPU-aware MPI when available)

@@ -2,6 +2,9 @@
 
 #include "particles.h"
 
+// FLYBY_CM_VELOCITY: pair time steps use the subsystem centre-of-mass velocity of members (FROST-CLUSTERS II)
+extern bool flyby_cm_velocity;
+
 // Full N-body
 void compute_acceleration_and_timestep(Particles& p, double G, double soft2, double eta);
 
@@ -28,9 +31,16 @@ void cross_gradient_correction(Particles& p,
 void compute_timestep_subset(Particles& p, int start, int count,
                           double G, double soft2, double eta);
 
-// Fused self-force + symmetrized timestep (no kick, stores forces for reuse)
-void self_acceleration_and_timestep(Particles& p, int start, int count,
-                                     double G, double soft2, double eta);
+// Range versions: sinks [i0, i0+ni) from sources [j0, j0+nj). The MPI paths pass their slice of the sinks.
+void acceleration_and_timestep_range(Particles& p, int i0, int ni, int j0, int nj, double G, double soft2,
+                                     double eta);
+void acceleration_range(Particles& p, int i0, int ni, int j0, int nj, double G, double soft2);
+void timestep_range(Particles& p, int i0, int ni, int j0, int nj, double G, double soft2, double eta);
+
+// Snapshot of uncorrected accelerations for the gradient correction: element i - offset belongs to particle i
+struct GradSnapshot { double* x; double* y; double* z; int offset; };
+void gradient_correction_range(Particles& p, int i0, int ni, int j0, int nj, const GradSnapshot& si,
+                               const GradSnapshot& sj, double G, double soft2, double dt, bool write_gmag);
 
 // Standalone neighbor search (BIFROST Section 3.5)
 // Lightweight N² tiled kernel: detects neighbor pairs without computing forces

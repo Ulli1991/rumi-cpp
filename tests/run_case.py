@@ -270,9 +270,13 @@ CASES = {
     # Planets: 3.4e-14 end, 1.1e-13 max, P 7e-18, L 2e-15 (FROST Fig. 5: ~1e-13, ~1e-16, ~1e-14).
     # With the split (twice the steps at the slowest level, so about twice the round-off): 4.5e-15 end,
     # 2.3e-14 max, L 1.2e-14; planets 9.4e-14, 1.1e-13, P 3.9e-18, L 2.5e-15.
+    # The binary floor is a random walk: over BINARY_E = 0, 1e-12 ... 4e-12 (same physics, other round-off)
+    # the end value spreads over 2.5e-15 - 2.2e-14 and the max over 1.0e-14 - 2.4e-14 with the per-pair Kahan
+    # kernels, 2.7e-15 - 3.5e-14 and 1.0e-14 - 4.0e-14 with the tile-blocked ones (L 2.0e-14 at e = 0); the
+    # bounds are 1.3x the largest of these, not of the single e = 0 draw.
     "floor_binary_e0": lambda exe: floor(exe, "floor e=0", dict(FROST4, BINARY_E="0.0", ETA="0.004", ETA_FF="0.004",
                                           ETA_FB="0.004", INTEGER_POSITIONS="true", DOMAIN_HALFSIZE_PC="1e-3"),
-                                         (1.4e-14, 3.0e-14, 1e-14, 1.5e-14)),
+                                         (4.5e-14, 5.2e-14, 1e-14, 2.6e-14)),
     "floor_planets": lambda exe: floor(exe, "floor planets", dict(PLANETS, ETA="0.004", ETA_FF="0.004", ETA_FB="0.004",
                                         INTEGER_POSITIONS="true", DOMAIN_HALFSIZE_PC="1e-3"),
                                        (1.25e-13, 1.5e-13, 1.0e-17, 3.3e-15)),
