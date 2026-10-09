@@ -318,7 +318,12 @@ void execute_merger(const MergerEvent& event, Particles& p,
     h_vy(idx1) = cvy + v_kick[1];
     h_vz(idx1) = cvz + v_kick[2];
     h_m(idx1) = m_rem;
-    h_stype(idx1) = (is_bh1 || is_bh2) ? 14 : h_stype(idx1);
+    // Remnant type independent of which progenitor sits in idx1: a compact progenitor (kw >= 10)
+    // dominates, the more compact one first (BH 14 > NS 13 > WDs); two stars stay a star
+    {
+        int k1 = h_stype(idx1), k2 = h_stype(idx2);
+        h_stype(idx1) = (k1 >= 10 || k2 >= 10) ? std::max(k1, k2) : k1;
+    }
     h_spin(idx1, 0) = chi_rem[0];
     h_spin(idx1, 1) = chi_rem[1];
     h_spin(idx1, 2) = chi_rem[2];
