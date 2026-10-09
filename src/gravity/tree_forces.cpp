@@ -133,6 +133,119 @@ static void tree_walk(const TreeWalkData& d, const char* name) {
     int match_flag = d.match_flag, src_flag_val = d.src_flag;
     int g_off = d.g_offset;
 
+#if !defined(KOKKOS_ENABLE_CUDA) && !defined(KOKKOS_ENABLE_HIP) && !defined(KOKKOS_ENABLE_SYCL)
+    // Host backends cap the team size at the thread count, so one thread walks the tree for a whole
+    // group and loops over the group's particles at each node (same MAC, same interactions, same order
+    // of accumulation per particle as the GPU walk).
+    (void)stack_bytes;
+    Kokkos::parallel_for(name, Kokkos::RangePolicy<>(0, d.n_groups), [=](const int g) {
+        int gid = g_off + g;
+        int g_start_val = gs(gid);
+        int g_count_val = gc(gid);
+        if (g_count_val > TREE_GROUP_SIZE) Kokkos::abort("tree_walk: group larger than TREE_GROUP_SIZE");
+        double gcx = gcen(gid, 0), gcy = gcen(gid, 1), gcz = gcen(gid, 2);
+        double gsx = grp_sz(gid, 0), gsy = grp_sz(gid, 1), gsz = grp_sz(gid, 2);
+
+        double xi[TREE_GROUP_SIZE], yi[TREE_GROUP_SIZE], zi[TREE_GROUP_SIZE], mi[TREE_GROUP_SIZE];
+        double vxi[TREE_GROUP_SIZE], vyi[TREE_GROUP_SIZE], vzi[TREE_GROUP_SIZE];
+        double axi[TREE_GROUP_SIZE], ayi[TREE_GROUP_SIZE], azi[TREE_GROUP_SIZE];
+        double cx[TREE_GROUP_SIZE], cy[TREE_GROUP_SIZE], cz[TREE_GROUP_SIZE], t_min_sq[TREE_GROUP_SIZE];
+        int orig[TREE_GROUP_SIZE];
+        bool act[TREE_GROUP_SIZE];
+        for (int k = 0; k < g_count_val; k++) {
+            int si = g_start_val + k;
+            load4(&spos(si, 0), xi[k], yi[k], zi[k], mi[k]);
+            orig[k] = sidx(si);
+            if (Filt == FILT_ALL || Filt == FILT_DISJOINT) act[k] = true;
+            else if (Filt == FILT_SELF || Filt == FILT_CROSS) act[k] = (sflag(si) == match_flag);
+            else act[k] = (sflag(si) != 2);
+            vxi[k] = vyi[k] = vzi[k] = 0;
+            if (Op == OP_FORCE_DT && act[k]) { vxi[k] = pvx(orig[k]); vyi[k] = pvy(orig[k]); vzi[k] = pvz(orig[k]); }
+            axi[k] = ayi[k] = azi[k] = 0;
+            if (Op == OP_GRADIENT && act[k]) { axi[k] = pax(orig[k]); ayi[k] = pay(orig[k]); azi[k] = paz(orig[k]); }
+            cx[k] = cy[k] = cz[k] = 0;
+            t_min_sq[k] = 1e60;
+        }
+
+        int stack[TREE_STACK_SIZE];
+        int stack_top = 0;
+        stack[stack_top++] = 0;
+        while (stack_top > 0) {
+            int node = stack[--stack_top];
+            double ccx, ccy, ccz, cmass;
+            load4(&cell_com(node, 0), ccx, ccy, ccz, cmass);
+            if ((Filt == FILT_SELF || Filt == FILT_CROSS || Filt == FILT_ACTIVE) && cmass <= 0.0) continue;
+            bool accept = mac_accept(gcx, gcy, gcz, gsx, gsy, gsz, ccx, ccy, ccz, cell_sst(node));
+            if (accept) {
+                for (int k = 0; k < g_count_val; k++) {
+                    if (!act[k]) continue;
+                    double dx = ccx - xi[k], dy = ccy - yi[k], dz = ccz - zi[k];
+                    double r2 = dx*dx + dy*dy + dz*dz + soft2;
+                    if (Op == OP_FORCE || Op == OP_FORCE_DT) {
+                        double inv_r = gravity_interaction(dx, dy, dz, r2, G * cmass, axi[k], ayi[k], azi[k]);
+                        if (Op == OP_FORCE_DT) {
+                            double t_ff, t_fb;
+                            symmetrized_timestep(r2, inv_r, dx, dy, dz, cvel(node, 0) - vxi[k], cvel(node, 1) - vyi[k],
+                                                 cvel(node, 2) - vzi[k], G, mi[k] + cmass, Kokkos::sqrt(eta_ff_sq),
+                                                 Kokkos::sqrt(eta_fb_sq), t_ff, t_fb);
+                            t_min_sq[k] = Kokkos::fmin(t_min_sq[k], Kokkos::fmin(eta_ff_sq * t_ff * t_ff, eta_fb_sq * t_fb * t_fb));
+                        }
+                    }
+                    if (Op == OP_GRADIENT)
+                        gradient_correction_interaction(dx, dy, dz, caccel(node, 0) - axi[k], caccel(node, 1) - ayi[k],
+                                                        caccel(node, 2) - azi[k], r2, coeff * cmass, cx[k], cy[k], cz[k]);
+                }
+            } else if (cell_lf(node)) {
+                int lpbeg = cell_pb(node), lpend = cell_pe(node);
+                for (int k = 0; k < g_count_val; k++) {
+                    if (!act[k]) continue;
+                    int my_sorted_idx = g_start_val + k;
+                    for (int j = lpbeg; j < lpend; j++) {
+                        if (Filt == FILT_ALL && j_sidx(j) == orig[k]) continue;
+                        if (Filt == FILT_SELF && (sflag(j) != match_flag || j == my_sorted_idx)) continue;
+                        if (Filt == FILT_CROSS && sflag(j) != src_flag_val) continue;
+                        if (Filt == FILT_ACTIVE && j == my_sorted_idx) continue;
+                        double pjx, pjy, pjz, mj;
+                        load4(&j_spos(j, 0), pjx, pjy, pjz, mj);
+                        double dx = pjx - xi[k], dy = pjy - yi[k], dz = pjz - zi[k];
+                        double r2 = dx*dx + dy*dy + dz*dz + soft2;
+                        if (Op == OP_FORCE || Op == OP_FORCE_DT) {
+                            double inv_r = gravity_interaction(dx, dy, dz, r2, G * mj, axi[k], ayi[k], azi[k]);
+                            if (Op == OP_FORCE_DT) {
+                                int jo = j_sidx(j);
+                                double t_ff, t_fb;
+                                symmetrized_timestep(r2, inv_r, dx, dy, dz, pvx(jo) - vxi[k], pvy(jo) - vyi[k],
+                                                     pvz(jo) - vzi[k], G, mi[k] + mj, Kokkos::sqrt(eta_ff_sq),
+                                                     Kokkos::sqrt(eta_fb_sq), t_ff, t_fb);
+                                t_min_sq[k] = Kokkos::fmin(t_min_sq[k], Kokkos::fmin(eta_ff_sq * t_ff * t_ff, eta_fb_sq * t_fb * t_fb));
+                            }
+                        }
+                        if (Op == OP_GRADIENT) {
+                            int jo = j_sidx(j);
+                            gradient_correction_interaction(dx, dy, dz, pax(jo) - axi[k], pay(jo) - ayi[k], paz(jo) - azi[k],
+                                                            r2, coeff * mj, cx[k], cy[k], cz[k]);
+                        }
+                    }
+                }
+            } else {
+                for (int c = 0; c < 8; c++) {
+                    int child = cell_ch(node, c);
+                    if (child >= 0 && stack_top < TREE_STACK_SIZE - 1) stack[stack_top++] = child;
+                }
+            }
+        }
+
+        for (int k = 0; k < g_count_val; k++) {
+            if (!act[k]) continue;
+            int o = orig[k];
+            if (Op == OP_FORCE || Op == OP_FORCE_DT) { pax(o) = axi[k]; pay(o) = ayi[k]; paz(o) = azi[k]; }
+            if (Op == OP_FORCE_DT) dtf(o) = Kokkos::sqrt(t_min_sq[k]);
+            if (Op == OP_GRADIENT) { pax(o) = axi[k] + cx[k]; pay(o) = ayi[k] + cy[k]; paz(o) = azi[k] + cz[k]; }
+        }
+    });
+    return;
+#endif
+
     Kokkos::parallel_for(name,
         team_policy(d.n_groups, TREE_GROUP_SIZE)
             .set_scratch_size(0, Kokkos::PerTeam(stack_bytes)),

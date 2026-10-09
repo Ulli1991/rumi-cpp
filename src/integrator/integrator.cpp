@@ -1178,6 +1178,11 @@ void fsi_step(Particles& p, int start, int count,
         tree_momentum_correction(p, start, count);
         g_profiler.stop(StepProfiler::SELF_FORCE);
         g_profiler.start();
+        g_octree.compute_cell_accelerations(p);   // FSI gradient term, as in fsi_step_distributed
+        tree_self_gradient_correction(p, g_octree, G, soft2, dt);
+        tree_momentum_correction(p, start, count);
+        g_profiler.stop(StepProfiler::SELF_GRAD);
+        g_profiler.start();
         kick_velocities(p, start, count, dt * FSI_MOD_KICK);
         g_profiler.stop(StepProfiler::DRIFT_KICK);
     } else {

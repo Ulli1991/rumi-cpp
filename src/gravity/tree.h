@@ -9,6 +9,13 @@
 // Tree traversal group size (threads per team in traversal kernel)
 constexpr int TREE_GROUP_SIZE = 64;
 
+// Team size of the per-cell reduction kernels; host backends cap teams at the thread count
+#if defined(KOKKOS_ENABLE_CUDA) || defined(KOKKOS_ENABLE_HIP) || defined(KOKKOS_ENABLE_SYCL)
+constexpr int TREE_CELL_TEAM = 32;
+#else
+constexpr int TREE_CELL_TEAM = 1;
+#endif
+
 // Max tree depth (log8(10^6) ~ 7, with margin)
 constexpr int TREE_MAX_DEPTH = 25;
 

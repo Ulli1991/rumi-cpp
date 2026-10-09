@@ -405,7 +405,7 @@ void Octree::compute_cell_accelerations(Particles& p) {
     auto ca = cell_accel;
     int nc = n_cells;
 
-    constexpr int TEAM_SZ = 32;
+    constexpr int TEAM_SZ = TREE_CELL_TEAM;
     // Scratch: 3 doubles per thread for partial sums (sax, say, saz)
     size_t scratch_bytes = 3 * TEAM_SZ * sizeof(double);
 
@@ -483,7 +483,7 @@ void Octree::compute_active_cell_accelerations(Particles& p) {
     auto ca = cell_accel;
     int nc = n_cells;
 
-    constexpr int TEAM_SZ = 32;
+    constexpr int TEAM_SZ = TREE_CELL_TEAM;
     size_t scratch_bytes = 4 * TEAM_SZ * sizeof(double);  // m_active, max, may, maz
 
     using team_policy = Kokkos::TeamPolicy<>;
@@ -647,7 +647,7 @@ void Octree::recompute_total_monopoles() {
     auto vel_v = cell_vel;
     int nc = n_cells;
 
-    constexpr int TEAM_SZ = 32;
+    constexpr int TEAM_SZ = TREE_CELL_TEAM;
 
     using team_policy = Kokkos::TeamPolicy<>;
     using team_member = team_policy::member_type;
@@ -738,7 +738,7 @@ void Octree::recompute_dual_monopoles(Particles& p) {
     auto vel_f = cell_vel_fast;
     int nc = n_cells;
 
-    constexpr int TEAM_SZ = 32;
+    constexpr int TEAM_SZ = TREE_CELL_TEAM;
     // Scratch: 14 doubles per thread (7 slow + 7 fast: m,x,y,z,vx,vy,vz each)
     size_t scratch_bytes = 14 * TEAM_SZ * sizeof(double);
 
@@ -867,7 +867,7 @@ void Octree::compute_dual_cell_accelerations(Particles& p) {
     auto ca_f = cell_accel_fast;
     int nc = n_cells;
 
-    constexpr int TEAM_SZ = 32;
+    constexpr int TEAM_SZ = TREE_CELL_TEAM;
     // Scratch: 6 doubles per thread (3 slow + 3 fast: ax,ay,az each)
     size_t scratch_bytes = 6 * TEAM_SZ * sizeof(double);
 

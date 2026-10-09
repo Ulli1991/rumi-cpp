@@ -219,8 +219,9 @@ struct StepProfiler {
                 if (depth_elapsed[d][i] > 0) last = d;
         if (last >= 0) {
             std::printf("\n  --- Time per HHS depth [s] ");
-            for (int i = 0; i < 41; i++) std::printf("-");
-            std::printf("\n  %-6s %9s %9s %9s %9s %9s %9s\n", "Depth", "total", "forces", "subsys", "kick/part", "other", "MPI");
+            for (int i = 0; i < 71; i++) std::printf("-");
+            std::printf("\n  %-6s %9s %9s %9s %9s %9s %9s %9s %9s %9s\n", "Depth", "total", "forces", "sub_det",
+                        "sub_int", "sub_dt", "sub_book", "kick/part", "other", "MPI");
             for (int d = 0; d <= last; d++) {
                 const double* e = depth_elapsed[d];
                 double f = e[ADAPTIVE_DT] + e[SELF_FORCE] + e[SELF_GRAD] + e[CROSS_FORCE] + e[CROSS_GRAD] + e[TREE_MAINT];
@@ -228,7 +229,8 @@ struct StepProfiler {
                 double kp = e[DRIFT_KICK] + e[PARTITION] + e[PACK_DATA];
                 double tot = 0;
                 for (int i = 0; i < NUM_TIMERS; i++) tot += e[i];
-                std::printf("  L%-5d %9.3f %9.3f %9.3f %9.3f %9.3f %9.3f\n", d, tot, f, sub, kp, tot - f - sub - kp, depth_mpi[d]);
+                std::printf("  L%-5d %9.3f %9.3f %9.3f %9.3f %9.3f %9.3f %9.3f %9.3f %9.3f\n", d, tot, f, e[SUBSYSTEM_DETECT],
+                            e[SUBSYSTEM_INTEG], e[SUBSYSTEM_DT], e[SUBSYSTEM_BOOKKEEP], kp, tot - f - sub - kp, depth_mpi[d]);
             }
         }
 
