@@ -2190,6 +2190,9 @@ static void compute_timestep_distributed(DistributedParticles& dp, int start, in
 
     const int j_start = start;
     const int j_end = start + count;
+#ifdef ENABLE_COLLISIONAL
+    RawView pax_w{dp.local.ax.data()}, pay_w{dp.local.ay.data()}, paz_w{dp.local.az.data()};
+#endif
 
     using team_policy = Kokkos::TeamPolicy<>;
     using member_type = team_policy::member_type;
@@ -2331,6 +2334,8 @@ static void compute_timestep_distributed(DistributedParticles& dp, int start, in
                         dt_f(i) = Kokkos::fmin(dt_f(i), dt_jerk);
                     }
                 }
+                // Partner-free acceleration for the v/a, gradient and perturbation criteria
+                if (coll) { pax_w(i) = acc_xi; pay_w(i) = acc_yi; paz_w(i) = acc_zi; }
 #endif
             }
         });
@@ -2338,6 +2343,9 @@ static void compute_timestep_distributed(DistributedParticles& dp, int start, in
 
     // Allgather dt_adapt values (uses GPU-aware MPI when available)
     dp.allgather_timestep_subset(start, count);
+#ifdef ENABLE_COLLISIONAL
+    if (coll) dp.allgather_accelerations_subset(start, count);
+#endif
 }
 
 // CPU serial path: CpuSubset + all cpu_* functions in integrator_cpu.cpp

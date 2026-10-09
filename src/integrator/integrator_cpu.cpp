@@ -424,31 +424,12 @@ static void cpu_compute_timestep(CpuSubset& s, int start, int count,
             double r2s = r2 + EPS;
             double inv_r = 1.0 / std::sqrt(r2s);
             double mass_sum = s.mass[i] + s.mass[j];
-            double r3 = r2s * r2s * inv_r;
+            (void)v_sq;
 
-            // Symmetric timestep (always on): compute actual timescales per pair
-            double inv_Gm = 1.0 / (G * mass_sum + EPS);
-            double inv_vsq = 1.0 / (v_sq + EPS);
-            double t_ff_sq = r3 * inv_Gm;
-            double t_fb_sq = r2s * inv_vsq;
-            double t_ff = t_ff_sq * (1.0 / std::sqrt(t_ff_sq + EPS));
-            double t_fb = t_fb_sq * (1.0 / std::sqrt(t_fb_sq + EPS));
-
-            double inv_r2 = inv_r * inv_r;
-            double r_dot_v = dx*dvx + dy*dvy + dz*dvz;
-
-            double c_ff = 1.5 * r_dot_v * inv_r2;
-            double c_fb = r_dot_v * inv_r2 * (1.0 + G * mass_sum * inv_r * inv_vsq);
-
-            double ct_ff = c_ff * t_ff_sq;
-            double s_ff = 1.0 + c_ff * ct_ff;
-            double u_ff = s_ff * (1.0 / std::sqrt(s_ff));
-            double t_sym_ff = t_ff + ct_ff / (u_ff + 1.0);
-
-            double ct_fb = c_fb * t_fb_sq;
-            double s_fb = 1.0 + c_fb * ct_fb;
-            double u_fb = s_fb * (1.0 / std::sqrt(s_fb));
-            double t_sym_fb = t_fb + ct_fb / (u_fb + 1.0);
+            // Symmetrized timestep (FROST Eq. 49 on the step eta*t), the same function as the device kernels
+            double t_sym_ff, t_sym_fb;
+            symmetrized_timestep(r2s, inv_r, dx, dy, dz, dvx, dvy, dvz, G, mass_sum, eta_ff_v, eta_fb_v,
+                                 t_sym_ff, t_sym_fb);
 
             double t_pair = std::min(eta_ff_v * t_sym_ff, eta_fb_v * t_sym_fb);
             s.dt_adapt[i] = std::min(s.dt_adapt[i], t_pair);
@@ -492,6 +473,12 @@ static void cpu_compute_timestep(CpuSubset& s, int start, int count,
                 double dt_jerk = eta_jerk_val * a_mag / j_mag;
                 s.dt_adapt[i] = std::min(s.dt_adapt[i], dt_jerk);
             }
+        }
+    }
+    // Keep the partner-free acceleration for the v/a, gradient and perturbation criteria
+    if (s.collisional) {
+        for (int i = start; i < end; i++) {
+            s.ax[i] = acc_x[i - start]; s.ay[i] = acc_y[i - start]; s.az[i] = acc_z[i - start];
         }
     }
 #endif
@@ -757,12 +744,22 @@ static int cpu_hhs_recursive(CpuSubset& s, Particles& p, int start, int count,
                 if (s.dt_adapt[i] > s.dt_level0[i]) s.dt_adapt[i] = s.dt_level0[i];
         }
 
-        // Step 3: Subsystem timestep adjustments (sync dt to device, run, sync back)
+        // Step 3: Subsystem timestep adjustments (sync dt and accelerations to device, run, sync back)
         if (s.collisional) {
             {
-                auto h_dt = Kokkos::create_mirror_view(Kokkos::subview(p.dt_adapt, Kokkos::pair<int,int>(dev_start, dev_start+count)));
-                for (int i = 0; i < count; i++) h_dt(i) = s.dt_adapt[start + i];
-                Kokkos::deep_copy(Kokkos::subview(p.dt_adapt, Kokkos::pair<int,int>(dev_start, dev_start+count)), h_dt);
+                auto rng = Kokkos::pair<int,int>(dev_start, dev_start+count);
+                auto h_dt = Kokkos::create_mirror_view(Kokkos::subview(p.dt_adapt, rng));
+                auto h_ax = Kokkos::create_mirror_view(Kokkos::subview(p.ax, rng));
+                auto h_ay = Kokkos::create_mirror_view(Kokkos::subview(p.ay, rng));
+                auto h_az = Kokkos::create_mirror_view(Kokkos::subview(p.az, rng));
+                for (int i = 0; i < count; i++) {
+                    h_dt(i) = s.dt_adapt[start + i];
+                    h_ax(i) = s.ax[start + i]; h_ay(i) = s.ay[start + i]; h_az(i) = s.az[start + i];
+                }
+                Kokkos::deep_copy(Kokkos::subview(p.dt_adapt, rng), h_dt);
+                Kokkos::deep_copy(Kokkos::subview(p.ax, rng), h_ax);
+                Kokkos::deep_copy(Kokkos::subview(p.ay, rng), h_ay);
+                Kokkos::deep_copy(Kokkos::subview(p.az, rng), h_az);
             }
             g_subsystem_mgr.enforce_shared_timestep(p);
             g_subsystem_mgr.apply_perturbation_timestep(p, G, g_collisional.eta_pert);

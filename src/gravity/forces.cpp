@@ -770,6 +770,9 @@ static void compute_timestep_subset_impl(Particles& p, int start, int count,
                         dt_val = Kokkos::fmin(dt_val, dt_jerk);
                     }
                 }
+                // Keep it: the v/a, gradient and perturbation criteria read p.ax next, which otherwise
+                // holds the last force evaluation, made before the current subsystems excluded partners
+                if (COLL) { pax(i) = acc_xi; pay(i) = acc_yi; paz(i) = acc_zi; }
 
                 dt_f(i) = dt_val;
             }

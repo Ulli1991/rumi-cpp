@@ -37,6 +37,13 @@ SPIN_IMBH = dict(TEST_CASE="plummer", INTEGRATOR="hhs", TOTAL_TIME_MYR="2e-3", D
                  PLUMMER_M_TOTAL="200", PLUMMER_R_HALF="0.5", PLUMMER_SEED="11", PLUMMER_MASS_DIST="equal",
                  ADD_IMBH="true", IMBH_M1="500", IMBH_M2="500", IMBH_A_PC="2e-5", IMBH_E="0.5", IMBH_SPIN="0.9",
                  PRINT_INTERVAL="5", PROFILING="false")
+# 2000 Kroupa stars, 10 % primordial binaries (a = 0.1-100 AU, thermal e), two 1e-3 Myr steps
+BINARIES = dict(TEST_CASE="plummer", INTEGRATOR="hhs", TOTAL_TIME_MYR="2e-3", DT_MAX_MYR="1e-3", DT_MIN_MYR="1e-14",
+                ETA_FF="0.2", ETA_FB="0.2", ETA_GRAD="0.1", ETA_JERK="0.1", SOFTENING_PC="0", COLLISIONAL="true",
+                R_NGB="1e-3", R_NGB_MAX="0.1", ETA_PERT="0.02", ETA_GBS="1e-10", ETA_RESTART="1e-8",
+                N_ORB_SECULAR="3", PN_ORDER="0", SSE_ENABLED="false", PLUMMER_N="2000", PLUMMER_M_TOTAL="800",
+                PLUMMER_R_HALF="1.0", PLUMMER_SEED="5", PLUMMER_MASS_DIST="kroupa", BINARY_FRAC="0.1",
+                BINARY_A_MIN_AU="0.1", BINARY_A_MAX_AU="100", PRINT_INTERVAL="1", PROFILING="false")
 # 16 stars inside r_ngb: one 15-body neighbour group, more than LogH's fixed storage (LOGH_MAX_BODIES = 8)
 BIG_GROUP = dict(TEST_CASE="plummer", INTEGRATOR="hhs", TOTAL_TIME_MYR="1e-5", DT_MAX_MYR="1e-6", DT_MIN_MYR="1e-16",
                  SOFTENING_PC="0", COLLISIONAL="true", R_NGB="1e-3", R_NGB_MAX="0.1", PN_ORDER="0", SSE_ENABLED="false",
@@ -130,6 +137,15 @@ def replicas(exe, label, cfg):
         check(f"{label} steps run", len(diagnostics(out)), 20, lower=True)
 
 
+def binaries(exe, label, cfg, bounds):
+    """A cluster with primordial binaries must step at cluster time-steps (the binaries' internal motion is
+    LogH's or the secular integrator's), finish in time and conserve P and E."""
+    rows = run(exe, cfg)
+    ok = check(f"{label} steps", len(rows), 2, lower=True)
+    ok &= check(f"{label} max|dE/E|", max(r[0] for r in rows), bounds[0])
+    return ok & check(f"{label} max|dP|/M [km/s]", max(r[1] for r in rows), bounds[1])
+
+
 def check(name, value, bound, lower=False):
     ok = value >= bound if lower else value <= bound
     print(f"{'ok  ' if ok else 'FAIL'} {name} = {value:.3e} ({'>=' if lower else '<='} {bound:.3e})")
@@ -171,6 +187,9 @@ CASES = {
     # 2.37e-12 and 5.09e-11 (bounds 1.3x)
     "frost4_e09": lambda exe: endpoint(exe, "e=0.9", dict(FROST4, BINARY_E="0.9"), "0.008", 3.1e-12, 1e-10),
     "frost4_e099": lambda exe: endpoint(exe, "e=0.99", dict(FROST4, BINARY_E="0.99"), "0.008", 6.6e-11, 1e-10),
+    # Through the CPU small-subset path, which kept the pre-fix FROST Eq. 49 (no eta): 1.5e-6 before, 9.1e-13 now
+    "frost4_e09_cpu": lambda exe: endpoint(exe, "e=0.9 cpu path", dict(FROST4, BINARY_E="0.9", SERIAL_N2_CPU="8"),
+                                           "0.008", 1.2e-12, 1e-10),
     # Round-off floor with compensated kicks and integer positions (domain 1e-3 pc), eta = 0.004; 1.3x
     # measured. Binary e = 0: 1.8e-15 end, 6.1e-15 max, L 3e-15 (plain kicks: 2.9e-13 max, L 1e-13).
     # Planets: 3.4e-14 end, 1.1e-13 max, P 7e-18, L 2e-15 (FROST Fig. 5: ~1e-13, ~1e-16, ~1e-14).
@@ -182,6 +201,7 @@ CASES = {
                                        (4.5e-14, 1.5e-13, 1.0e-17, 2.6e-15)),
     # Same floors through the CPU small-subset path (SERIAL_N2_CPU covers every set), 1.3x measured. Plain
     # kicks there before: binary 1.9e-13 end, 3.5e-13 max, L 1.8e-13; planets 2.6e-13, P 2.1e-15, L 2.9e-14.
+    # Planets measured 2.3e-14 end, 9.5e-14 max, P 5.3e-18, L 2.7e-15 (CPU path on FROST Eq. 49 with eta).
     "floor_binary_e0_cpu": lambda exe: floor(exe, "floor e=0 cpu path", dict(FROST4, BINARY_E="0.0", ETA="0.004",
                                               ETA_FF="0.004", ETA_FB="0.004", INTEGER_POSITIONS="true",
                                               DOMAIN_HALFSIZE_PC="1e-3", SERIAL_N2_CPU="8"),
@@ -189,7 +209,7 @@ CASES = {
     "floor_planets_cpu": lambda exe: floor(exe, "floor planets cpu path", dict(PLANETS, ETA="0.004", ETA_FF="0.004",
                                             ETA_FB="0.004", INTEGER_POSITIONS="true", DOMAIN_HALFSIZE_PC="1e-3",
                                             SERIAL_N2_CPU="8"),
-                                           (1.9e-13, 1.9e-13, 1.0e-17, 1.9e-15)),
+                                           (3.0e-14, 1.3e-13, 1.0e-17, 3.5e-15)),
     # 1000 yr is ~6 Neptune orbits: no drift check. HHS measured 2.35e-7, 8.27e-9, 4.39e-10, order 4.53
     # (FROST: ~1e-13 at eta = 0.004, which order 4 from here reaches); FSI (all at the fastest occupied
     # level) measured 7.41e-8, 4.64e-9, 2.90e-10, order 4.00 (hung before the fsi-step fix)
@@ -198,14 +218,19 @@ CASES = {
     "planets_fsi": lambda exe: sweep(exe, "planets fsi", dict(PLANETS, INTEGRATOR="fsi"), ["0.128", "0.064", "0.032"],
                                      [9.6e-8, 6.1e-9, 3.8e-10], (3.90, 4.30)),
     # Before the fix: segfault in step 1 (duplicated particle after compaction, LogH NaN), then mass loss on
-    # step restarts and |dE/E| ~ 1 from an incomplete merger sink. Measured on the host build: 2.2e-10 /
-    # 4.3e-14 km/s. Bounds: the restart threshold for E, P well above round-off but far below one lost
-    # binary member (~3 km/s).
-    "mergers_gpu_path": lambda exe: mergers(exe, "mergers gpu path", dict(MERGERS, SERIAL_N2_CPU="0"), (1e-8, 1e-12)),
+    # step restarts and |dE/E| ~ 1 from an incomplete merger sink. Measured on the host build: 1.4e-10 /
+    # 6.7e-13 km/s (P grows smoothly: round-off of the LogH reconstruction of ~600 km/s orbits). Bounds: the
+    # restart threshold for E, P far below one lost binary member (~3 km/s).
+    "mergers_gpu_path": lambda exe: mergers(exe, "mergers gpu path", dict(MERGERS, SERIAL_N2_CPU="0"), (1e-8, 1e-11)),
     # Before: LogH wrote a 15-body group past its 8-body arrays (bus error). Measured 9.4e-6 / 2.0e-14 km/s.
     # Before: the single-rank step skipped the global PN1 kicks (ratio 0.03). Measured 1.045 (sampled once
     # per print, so the osculating periapsis carries the intra-orbit PN oscillation).
     "pn1_global_single_rank": lambda exe: precession(exe, "wide PN1 binary", PN1_WIDE, 0.1),
+    # Before: v/a, gradient and perturbation criteria read accelerations that still held the binary
+    # partner (stale from the last force evaluation), so members got orbital time-steps down to level 29
+    # and step 1 never finished (> 120 s; the 10 % binary production runs hung the same way). Measured
+    # 2 s, 3.2e-10 / 6.0e-15 km/s (2 stellar collisions; their orbital L is not carried, so no L check).
+    "binaries_timestep": lambda exe: binaries(exe, "binaries", BINARIES, (1e-8, 1e-12)),
     "logh_big_group": lambda exe: big_group(exe, "big group", BIG_GROUP, (1.2e-5, 1e-12)),
     # MPI cases, run under NBODY_TEST_LAUNCHER (CTest sets 2 ranks). Spins were not broadcast: lost on every
     # rank of a GPU run (host backends alias the mirror, so the host build cannot fail this one).
@@ -215,9 +240,9 @@ CASES = {
                                                                          REPLICA_CHECK_INTERVAL="1")),
     # CPU path with restarts off: a merger in a nested CPU call used to drop the enclosing level's subsystem
     # flags on the host (internal forces counted twice), |dE/E| 2e-5 per step, hidden by restarts. Measured
-    # now 2.2e-10 / 4.4e-14 km/s, as the GPU path.
+    # now 1.4e-10 / 6.7e-13 km/s, as the GPU path.
     "mergers_cpu_path": lambda exe: mergers(exe, "mergers cpu path", dict(MERGERS, SERIAL_N2_CPU="64", ETA_RESTART="0"),
-                                            (1e-8, 1e-12)),
+                                            (1e-8, 1e-11)),
 }
 
 if __name__ == "__main__":
