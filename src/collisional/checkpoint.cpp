@@ -106,6 +106,8 @@ void Checkpoint::restore(Particles& p, SubsystemManager& mgr,
                          EnergyBookkeeping& books) const {
     if (!valid) return;
     p.N = N;  // mergers during the rolled-back step shortened the arrays
+    p.mark_layout_dirty(0, INT_MAX);
+    p.removed_pid_log.clear();
 
     // Copy back to device
     auto h_x = Kokkos::create_mirror_view(p.x);

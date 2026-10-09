@@ -4,6 +4,7 @@
 
 void Particles::allocate(int n, bool collisional_mode) {
     N = n;
+    layout_dirty_lo = 0; layout_dirty_hi = INT_MAX; removed_pid_log.clear();
     collisional = collisional_mode;
     x  = Kokkos::View<double*>("x",  n);
     y  = Kokkos::View<double*>("y",  n);
@@ -186,6 +187,7 @@ void Particles::pack_vel_range(int start, int count) {
 
 void Particles::apply_permutation(int start, int count) {
     if (count <= 1) return;
+    mark_layout_dirty(start, start + count);
     auto perm = scratch_i;
     auto px = x, py = y, pz = z, pvx = vx, pvy = vy, pvz = vz;
     auto pax = ax, pay = ay, paz = az, pmass = mass, pdt = dt_adapt;
@@ -261,6 +263,12 @@ int Particles::compact_remove_zero_mass(int from) {
     int N_new = (int)keep.size();
     int n_removed = N_old - N_new;
     if (n_removed == 0) return 0;
+    mark_layout_dirty(from, N_old);
+    if (collisional) {
+        auto h_pid_old = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), particle_id);
+        for (int i = from; i < N_old; i++)
+            if (h_m(i) <= 0.0) removed_pid_log.push_back(h_pid_old(i));
+    }
 
     // Mirror all fields to host
     auto h_x  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), x);
@@ -354,6 +362,7 @@ int Particles::compact_remove_zero_mass(int from) {
 
 void Particles::partition_by_level() {
     if (N == 0 || n_levels == 0) return;
+    mark_layout_dirty(0, N);  // reorders every slot
 
     // Resize level_count / level_start on host
     level_count.assign(n_levels, 0);

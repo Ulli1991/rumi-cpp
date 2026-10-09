@@ -65,6 +65,8 @@ struct SubsystemManager {
     std::vector<int> pid_to_idx_;
     int pid_to_idx_max_ = 0;
     void rebuild_pid_to_idx(const Particles& p);
+    void check_pid_to_idx(const Particles& p) const;   // full comparison (NBODY_CHECK_PIDMAP)
+    const Particles* map_source_ = nullptr;          // particle set the map was built for
     const std::vector<int>& pid_to_idx() const { return pid_to_idx_; }
     int pid_to_idx_max() const { return pid_to_idx_max_; }
 

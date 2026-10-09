@@ -1,6 +1,8 @@
 #pragma once
 
 #include <Kokkos_Core.hpp>
+#include <algorithm>
+#include <climits>
 #include <vector>
 
 struct Particles {
@@ -69,6 +71,15 @@ struct Particles {
 
     // Gradient timestep criterion
     Kokkos::View<double*> grad_mag;        // |gradient correction| from previous step (stale)
+
+    // Slots whose particle may have changed since the pid -> index map was last built (permutations,
+    // compactions, restores); lets SubsystemManager::rebuild_pid_to_idx update only that range
+    mutable int layout_dirty_lo = 0, layout_dirty_hi = INT_MAX;
+    mutable std::vector<int> removed_pid_log;   // ids removed since the last map build
+    void mark_layout_dirty(int lo, int hi) const {
+        layout_dirty_lo = std::min(layout_dirty_lo, lo);
+        layout_dirty_hi = std::max(layout_dirty_hi, hi);
+    }
 
     void allocate(int n, bool collisional_mode = false);
     void deallocate();

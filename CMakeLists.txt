@@ -118,14 +118,15 @@ foreach(case kepler_e09 kepler_e0 frost4_e09 frost4_e099 planets_hhs planets_fsi
              mergers_sse binaries50_detected)
     add_test(NAME ${case} COMMAND Python3::Interpreter ${CMAKE_SOURCE_DIR}/tests/run_case.py
              $<TARGET_FILE:nbody-kokkos> ${case})
-    # Few-body cases: host threads only add overhead (and timeouts)
-    set_tests_properties(${case} PROPERTIES ENVIRONMENT "OMP_NUM_THREADS=1")
+    # Few-body cases: host threads only add overhead (and timeouts); every incremental pid-map update is
+    # checked against a full rebuild
+    set_tests_properties(${case} PROPERTIES ENVIRONMENT "OMP_NUM_THREADS=1;NBODY_CHECK_PIDMAP=1")
 endforeach()
 if(USE_MPI)
     foreach(case spin_mpi2 mergers_mpi2)
         add_test(NAME ${case} COMMAND Python3::Interpreter ${CMAKE_SOURCE_DIR}/tests/run_case.py
                  $<TARGET_FILE:nbody-kokkos> ${case})
         set_tests_properties(${case} PROPERTIES
-                             ENVIRONMENT "NBODY_TEST_LAUNCHER=${MPIEXEC_EXECUTABLE} -n 2 --oversubscribe;OMP_NUM_THREADS=1")
+                             ENVIRONMENT "NBODY_TEST_LAUNCHER=${MPIEXEC_EXECUTABLE} -n 2 --oversubscribe;OMP_NUM_THREADS=1;NBODY_CHECK_PIDMAP=1")
     endforeach()
 endif()

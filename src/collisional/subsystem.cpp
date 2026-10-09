@@ -5,6 +5,7 @@
 #include <numeric>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <set>
@@ -17,6 +18,34 @@ SubsystemManager g_subsystem_mgr;
 // ============================================================================
 
 void SubsystemManager::rebuild_pid_to_idx(const Particles& p) {
+    // Local managers (LogH batches) borrow the global map
+    if (this != &g_subsystem_mgr) {
+        g_subsystem_mgr.rebuild_pid_to_idx(p);
+        pid_to_idx_ = g_subsystem_mgr.pid_to_idx_;
+        pid_to_idx_max_ = g_subsystem_mgr.pid_to_idx_max_;
+        return;
+    }
+    // Incremental: only the slots touched since the last build (O(count) instead of O(N) per call)
+    const int lo = p.layout_dirty_lo, hi = std::min(p.layout_dirty_hi, p.N);
+    if (map_source_ == &p && !pid_to_idx_.empty() && p.layout_dirty_hi != INT_MAX) {
+        for (int pid : p.removed_pid_log)
+            if (pid >= 0 && pid < (int)pid_to_idx_.size()) pid_to_idx_[pid] = -1;
+        bool ok = true;
+        if (lo < hi) {
+            auto h_rng = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
+                             Kokkos::subview(p.particle_id, Kokkos::pair<int,int>(lo, hi)));
+            for (int i = lo; i < hi && ok; i++) {
+                int pid = h_rng(i - lo);
+                if (pid < 0 || pid >= (int)pid_to_idx_.size()) ok = false;
+                else pid_to_idx_[pid] = i;
+            }
+        }
+        if (ok) {
+            p.layout_dirty_lo = INT_MAX; p.layout_dirty_hi = 0; p.removed_pid_log.clear();
+            if (std::getenv("NBODY_CHECK_PIDMAP")) check_pid_to_idx(p);
+            return;
+        }
+    }
     auto h_pid = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.particle_id);
     int max_pid = 0;
     for (int i = 0; i < p.N; i++) max_pid = std::max(max_pid, h_pid(i));
@@ -27,6 +56,19 @@ void SubsystemManager::rebuild_pid_to_idx(const Particles& p) {
     }
     for (int i = 0; i < p.N; i++) pid_to_idx_[h_pid(i)] = i;
     pid_to_idx_max_ = max_pid;
+    map_source_ = &p;
+    p.layout_dirty_lo = INT_MAX; p.layout_dirty_hi = 0; p.removed_pid_log.clear();
+}
+
+void SubsystemManager::check_pid_to_idx(const Particles& p) const {
+    auto h_pid = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.particle_id);
+    std::vector<int> full(pid_to_idx_.size(), -1);
+    for (int i = 0; i < p.N; i++) if (h_pid(i) >= 0 && h_pid(i) < (int)full.size()) full[h_pid(i)] = i;
+    for (size_t k = 0; k < full.size(); k++)
+        if (full[k] != pid_to_idx_[k]) {
+            std::fprintf(stderr, "PIDMAP MISMATCH pid=%zu map=%d actual=%d\n", k, pid_to_idx_[k], full[k]);
+            std::abort();
+        }
 }
 
 // ============================================================================
