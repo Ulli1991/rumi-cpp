@@ -1,3 +1,4 @@
+#include "small_for.h"
 #include "subsystem.h"
 #include "collisional_config.h"
 #include "constants.h"
@@ -119,7 +120,7 @@ struct MemberData {
         auto px = p.x, py = p.y, pz = p.z, pvx = p.vx, pvy = p.vy, pvz = p.vz;
         auto pax = p.ax, pay = p.ay, paz = p.az, pm = p.mass, pdt = p.dt_adapt;
         auto ppid = p.particle_id;
-        Kokkos::parallel_for("member_gather", n, KOKKOS_LAMBDA(int k) {
+        small_for("member_gather", n, KOKKOS_LAMBDA(int k) {
             int i = d_idx(k);
             double* b = &d_buf(k * NF);
             b[X] = px(i); b[Y] = py(i); b[Z] = pz(i); b[VX] = pvx(i); b[VY] = pvy(i); b[VZ] = pvz(i);
@@ -143,7 +144,7 @@ struct MemberData {
         Kokkos::deep_copy(d_idx, h_idx);
         Kokkos::deep_copy(d_dt, h_dt);
         auto pdt = p.dt_adapt;
-        Kokkos::parallel_for("member_scatter_dt", n, KOKKOS_LAMBDA(int k) { pdt(d_idx(k)) = d_dt(k); });
+        small_for("member_scatter_dt", n, KOKKOS_LAMBDA(int k) { pdt(d_idx(k)) = d_dt(k); });
     }
 };
 }  // namespace
@@ -594,7 +595,7 @@ void SubsystemManager::update_particle_flags(Particles& p) {
     Kokkos::deep_copy(Kokkos::subview(flag_buf_, Kokkos::pair<int,int>(0, 2 * n)),
                       Kokkos::subview(h_buf, Kokkos::pair<int,int>(0, 2 * n)));
     auto buf = flag_buf_;
-    Kokkos::parallel_for("scatter_sid", n, KOKKOS_LAMBDA(int k) { sid(buf(2 * k)) = buf(2 * k + 1); });
+    small_for("scatter_sid", n, KOKKOS_LAMBDA(int k) { sid(buf(2 * k)) = buf(2 * k + 1); });
 }
 
 // ============================================================================
@@ -646,7 +647,7 @@ void SubsystemManager::fill_cm_velocity(const Particles& p, Kokkos::View<double*
     std::copy(val.begin(), val.end(), h_val.data());
     Kokkos::deep_copy(d_slot, h_slot);
     Kokkos::deep_copy(d_val, h_val);
-    Kokkos::parallel_for("cm_vel_scatter", n, KOKKOS_LAMBDA(int k) {
+    small_for("cm_vel_scatter", n, KOKKOS_LAMBDA(int k) {
         int i = d_slot(k);
         cvx(i) = d_val(3 * k); cvy(i) = d_val(3 * k + 1); cvz(i) = d_val(3 * k + 2);
     });

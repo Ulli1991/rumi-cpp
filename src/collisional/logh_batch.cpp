@@ -1,3 +1,4 @@
+#include "small_for.h"
 #include "logh_batch.h"
 #include "logh.h"
 #include "gbs.h"
@@ -86,7 +87,7 @@ void SubsystemBatch::pack(const SubsystemManager& mgr, const Particles& p,
     auto px = p.x; auto py = p.y; auto pz = p.z;
     auto pvx = p.vx; auto pvy = p.vy; auto pvz = p.vz;
     auto pm = p.mass; auto pspin = p.spin_vec; auto pstype = p.stellar_type;
-    Kokkos::parallel_for("pack_gather", n_mem, KOKKOS_LAMBDA(int i) {
+    small_for("pack_gather", n_mem, KOKKOS_LAMBDA(int i) {
         int k = d_idx(i);
         int base = i * PACK_STRIDE;
         d_buf(base + 0) = px(k);  d_buf(base + 1) = py(k);  d_buf(base + 2) = pz(k);
@@ -249,7 +250,7 @@ void SubsystemBatch::unpack(SubsystemManager& mgr, Particles& p) {
     auto pvx = p.vx; auto pvy = p.vy; auto pvz = p.vz;
     auto pcx = p.cvx; auto pcy = p.cvy; auto pcz = p.cvz;
     auto pm = p.mass;
-    Kokkos::parallel_for("unpack_scatter", n_mem, KOKKOS_LAMBDA(int i) {
+    small_for("unpack_scatter", n_mem, KOKKOS_LAMBDA(int i) {
         int k = d_idx(i);
         int base = i * UNPACK_STRIDE;
         px(k) = d_buf(base + 0); py(k) = d_buf(base + 1); pz(k) = d_buf(base + 2);
@@ -297,7 +298,7 @@ void SubsystemBatch::unpack(SubsystemManager& mgr, Particles& p) {
         Kokkos::deep_copy(d_si, h_si);
         Kokkos::deep_copy(d_sv, h_sv);
         auto pspin = p.spin_vec;
-        Kokkos::parallel_for("spin_scatter", n_spin, KOKKOS_LAMBDA(int i) {
+        small_for("spin_scatter", n_spin, KOKKOS_LAMBDA(int i) {
             int k = d_si(i);
             pspin(k, 0) = d_sv(i * 3 + 0);
             pspin(k, 1) = d_sv(i * 3 + 1);

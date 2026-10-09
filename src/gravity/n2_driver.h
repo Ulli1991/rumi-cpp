@@ -22,6 +22,7 @@
 // in chunk order in a second kernel, so results do not depend on scheduling. Host backends never split.
 
 #include "constants.h"
+#include "small_for.h"
 #include <Kokkos_Core.hpp>
 #include <algorithm>
 
@@ -54,9 +55,42 @@ inline int chunk_count(int ni, int nj) {
 }
 }  // namespace n2_detail
 
+// Pair counts up to this run on the host where it can access device memory (NBODY_SMALL_N2, default 4096)
+inline long long n2_host_max() {
+    static const long long v = std::getenv("NBODY_SMALL_N2") ? std::atoll(std::getenv("NBODY_SMALL_N2")) : 4096;
+    return v;
+}
+
 template <class K>
 void run_n2(const char* name, int i0, int ni, int j0, int nj, const K& k) {
     if (ni <= 0) return;
+    if constexpr (kHostAccessibleDevice) {
+        if ((long long)ni * nj <= n2_host_max()) {   // tiny set: host loops, same accumulation as the kernel
+            constexpr int NSa = K::NS > 0 ? K::NS : 1, NMa = K::NM > 0 ? K::NM : 1;
+            Kokkos::fence();
+            double src[K::NSRC > 0 ? K::NSRC : 1];
+            for (int ii = 0; ii < ni; ii++) {
+                const int i = i0 + ii;
+                typename K::Sink s = k.sink(i);
+                double sum[NSa], comp[NSa], blk[NSa], mn[NMa];
+                for (int a = 0; a < NSa; a++) sum[a] = comp[a] = blk[a] = 0.0;
+                for (int a = 0; a < NMa; a++) mn[a] = 1e30;
+                int in_block = 0;
+                for (int jj = 0; jj < nj; jj++) {
+                    k.source(j0 + jj, src);
+                    k.pair(s, i, src, j0 + jj, blk, mn);
+                    if (++in_block >= N2_KAHAN_BLOCK || jj == nj - 1) {
+                        for (int a = 0; a < K::NS; a++) { kahan_add(sum[a], comp[a], blk[a]); blk[a] = 0.0; }
+                        in_block = 0;
+                    }
+                }
+                double out[NSa];
+                for (int a = 0; a < K::NS; a++) out[a] = sum[a] - comp[a];
+                k.finish(i, s, out, mn);
+            }
+            return;
+        }
+    }
     using team_policy = Kokkos::TeamPolicy<>;
     using member_type = team_policy::member_type;
     using scratch_space = Kokkos::DefaultExecutionSpace::scratch_memory_space;

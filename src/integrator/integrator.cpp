@@ -1,3 +1,4 @@
+#include "small_for.h"
 #include "integrator.h"
 #include "integrator_cpu.h"
 #include "hhs_counters.h"
@@ -118,7 +119,7 @@ void drift(Particles& p, int start, int count, double dt) {
         auto pix = p.ix; auto piy = p.iy; auto piz = p.iz;
         double scale = int_pos_scale;
         double inv_scale = int_pos_inv_scale;
-        Kokkos::parallel_for("drift_int", count, KOKKOS_LAMBDA(int ii) {
+        small_for("drift_int", count, KOKKOS_LAMBDA(int ii) {
             int i = start + ii;
             pix(i) += llrint(pvx(i) * dt * inv_scale);
             piy(i) += llrint(pvy(i) * dt * inv_scale);
@@ -128,7 +129,7 @@ void drift(Particles& p, int start, int count, double dt) {
             pz(i) = (double)piz(i) * scale;
         });
     } else {
-        Kokkos::parallel_for("drift", count, KOKKOS_LAMBDA(int ii) {
+        small_for("drift", count, KOKKOS_LAMBDA(int ii) {
             int i = start + ii;
             px(i) += pvx(i) * dt;
             py(i) += pvy(i) * dt;
@@ -151,7 +152,7 @@ void drift_field_only(Particles& p, int start, int count, double dt) {
         auto pix = p.ix; auto piy = p.iy; auto piz = p.iz;
         double scale = int_pos_scale;
         double inv_scale = int_pos_inv_scale;
-        Kokkos::parallel_for("drift_field_int", count, KOKKOS_LAMBDA(int ii) {
+        small_for("drift_field_int", count, KOKKOS_LAMBDA(int ii) {
             int i = start + ii;
             if (p_sid(i) >= 0) return;  // skip subsystem members
             pix(i) += llrint(pvx(i) * dt * inv_scale);
@@ -162,7 +163,7 @@ void drift_field_only(Particles& p, int start, int count, double dt) {
             pz(i) = (double)piz(i) * scale;
         });
     } else {
-        Kokkos::parallel_for("drift_field", count, KOKKOS_LAMBDA(int ii) {
+        small_for("drift_field", count, KOKKOS_LAMBDA(int ii) {
             int i = start + ii;
             if (p_sid(i) >= 0) return;  // skip subsystem members
             px(i) += pvx(i) * dt;
@@ -342,7 +343,7 @@ struct RangeMirror {
             m{p.mass.data()};
         RawView o{d.data()};
         const int s0 = start, n = count;
-        Kokkos::parallel_for("range_mirror_pack", n, KOKKOS_LAMBDA(int ii) {
+        small_for("range_mirror_pack", n, KOKKOS_LAMBDA(int ii) {
             int i = s0 + ii;
             o(ii) = x(i); o(n + ii) = y(i); o(2 * n + ii) = z(i);
             o(3 * n + ii) = vx(i); o(4 * n + ii) = vy(i); o(5 * n + ii) = vz(i);
@@ -358,7 +359,7 @@ struct RangeMirror {
         RawView x{p.x.data()}, y{p.y.data()}, z{p.z.data()}, vx{p.vx.data()}, vy{p.vy.data()}, vz{p.vz.data()};
         RawView o{d.data()};
         const int s0 = start, n = count;
-        Kokkos::parallel_for("range_mirror_unpack", n, KOKKOS_LAMBDA(int ii) {
+        small_for("range_mirror_unpack", n, KOKKOS_LAMBDA(int ii) {
             int i = s0 + ii;
             x(i) = o(ii); y(i) = o(n + ii); z(i) = o(2 * n + ii);
             vx(i) = o(3 * n + ii); vy(i) = o(4 * n + ii); vz(i) = o(5 * n + ii);
@@ -1290,7 +1291,7 @@ void kick_velocities(Particles& p, int start, int count, double dt) {
     RawView cvx{p.cvx.data()}, cvy{p.cvy.data()}, cvz{p.cvz.data()};
 
     // Compensated: a plain v += a dt rounds at ~eps|v| per kick and sets the energy floor
-    Kokkos::parallel_for("kick", count, KOKKOS_LAMBDA(int ii) {
+    small_for("kick", count, KOKKOS_LAMBDA(int ii) {
         int i = start + ii;
         kahan_add(pvx(i), cvx(i), pax(i) * dt);
         kahan_add(pvy(i), cvy(i), pay(i) * dt);
@@ -1416,7 +1417,7 @@ static void get_tree_group_range(const Octree& tree, int& g_offset, int& g_count
 
 static void zero_accelerations(Particles& p, int start, int count) {
     auto ax = p.ax; auto ay = p.ay; auto az = p.az;
-    Kokkos::parallel_for("zero_acc", count, KOKKOS_LAMBDA(int ii) {
+    small_for("zero_acc", count, KOKKOS_LAMBDA(int ii) {
         int i = start + ii;
         ax(i) = 0.0; ay(i) = 0.0; az(i) = 0.0;
     });
@@ -1424,7 +1425,7 @@ static void zero_accelerations(Particles& p, int start, int count) {
 
 static void init_timesteps_max(Particles& p, int start, int count) {
     auto dt_f = p.dt_adapt;
-    Kokkos::parallel_for("init_dt_max", count, KOKKOS_LAMBDA(int ii) {
+    small_for("init_dt_max", count, KOKKOS_LAMBDA(int ii) {
         dt_f(start + ii) = 1e30;
     });
 }
@@ -1753,12 +1754,12 @@ static void cross_acceleration_and_gradient_distributed(DistributedParticles& dp
     }
     RawView sax_s{ax_snap_s.data()}, say_s{ay_snap_s.data()}, saz_s{az_snap_s.data()};
     RawView sax_f{ax_snap_f.data()}, say_f{ay_snap_f.data()}, saz_f{az_snap_f.data()};
-    Kokkos::parallel_for("snap_cross_slow", slow_count, KOKKOS_LAMBDA(int ii) {
+    small_for("snap_cross_slow", slow_count, KOKKOS_LAMBDA(int ii) {
         sax_s(ii) = pax(slow_start + ii);
         say_s(ii) = pay(slow_start + ii);
         saz_s(ii) = paz(slow_start + ii);
     });
-    Kokkos::parallel_for("snap_cross_fast", fast_count, KOKKOS_LAMBDA(int ii) {
+    small_for("snap_cross_fast", fast_count, KOKKOS_LAMBDA(int ii) {
         sax_f(ii) = pax(fast_start + ii);
         say_f(ii) = pay(fast_start + ii);
         saz_f(ii) = paz(fast_start + ii);
@@ -1898,7 +1899,7 @@ static int hhs_cc_step(Particles& p, DistributedParticles* dp, int slow_start, i
             if ((int)snx.extent(0) < nf) { Kokkos::realloc(snx, nf); Kokkos::realloc(sny, nf); Kokkos::realloc(snz, nf); }
             RawView ax{p.ax.data()}, ay{p.ay.data()}, az{p.az.data()}, ox{snx.data()}, oy{sny.data()}, oz{snz.data()};
             const int f0 = fast_start;
-            Kokkos::parallel_for("cc_snap", nf, KOKKOS_LAMBDA(int ii) {
+            small_for("cc_snap", nf, KOKKOS_LAMBDA(int ii) {
                 ox(ii) = ax(f0 + ii); oy(ii) = ay(f0 + ii); oz(ii) = az(f0 + ii);
             });
             if (slow_count > 0)
@@ -2089,7 +2090,7 @@ static int hhs_fsi_recursive(
             RawView vvx{p.vx.data()}, vvy{p.vy.data()}, vvz{p.vz.data()};
             double eta_g = g_collisional.eta_grad;
             double eta_va = eta;
-            Kokkos::parallel_for("dt_grad", count, KOKKOS_LAMBDA(int ii) {
+            small_for("dt_grad", count, KOKKOS_LAMBDA(int ii) {
                 int i = start + ii;
                 double a_mag = Kokkos::sqrt(agx(i)*agx(i) + agy(i)*agy(i) + agz(i)*agz(i));
                 double v_mag = Kokkos::sqrt(vvx(i)*vvx(i) + vvy(i)*vvy(i) + vvz(i)*vvz(i));
@@ -2138,7 +2139,7 @@ static int hhs_fsi_recursive(
             if (depth == 0) {
                 auto dt_f = p.dt_adapt;
                 auto dt_l0 = p.dt_level0;
-                Kokkos::parallel_for("copy_dt_level0", count, KOKKOS_LAMBDA(int ii) {
+                small_for("copy_dt_level0", count, KOKKOS_LAMBDA(int ii) {
                     int i = start + ii;
                     dt_l0(i) = dt_f(i);
                 });
