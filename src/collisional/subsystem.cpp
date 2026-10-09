@@ -72,6 +72,76 @@ void SubsystemManager::check_pid_to_idx(const Particles& p) const {
         }
 }
 
+namespace {
+// Host copy of the subsystem members' state only (instead of full O(N) arrays per HHS level). The
+// columns keep the h_x(idx) call syntax of the code that used full-array mirrors.
+struct MemberData {
+    enum { X, Y, Z, VX, VY, VZ, AX, AY, AZ, M, DT, PID, NF };
+    std::unordered_map<int, int> loc;   // particle slot -> member row
+    std::vector<int> idx;
+    std::vector<double> f[NF];
+
+    struct Col {
+        std::vector<double>* v; const std::unordered_map<int, int>* loc;
+        double& operator()(int i) const { return (*v)[loc->find(i)->second]; }
+    };
+    Col col(int k) { return Col{&f[k], &loc}; }
+
+    MemberData(const std::vector<Subsystem>& subs, const std::vector<int>& p2i, const Particles& p) {
+        for (const auto& sub : subs)
+            for (int pid : sub.particle_ids) {
+                int i = (pid >= 0 && pid < (int)p2i.size()) ? p2i[pid] : -1;
+                if (i >= 0 && i < p.N && loc.emplace(i, (int)idx.size()).second) idx.push_back(i);
+            }
+        gather(p);
+    }
+    MemberData(const std::vector<int>& slots, const Particles& p) {
+        for (int i : slots)
+            if (i >= 0 && i < p.N && loc.emplace(i, (int)idx.size()).second) idx.push_back(i);
+        gather(p);
+    }
+
+    void gather(const Particles& p) {
+        const int n = (int)idx.size();
+        for (auto& v : f) v.resize(n);
+        if (n == 0) return;
+        Kokkos::View<int*> d_idx("member_idx", n);
+        Kokkos::View<double*> d_buf("member_gather", (size_t)n * NF);
+        auto h_idx = Kokkos::create_mirror_view(d_idx);
+        std::copy(idx.begin(), idx.end(), h_idx.data());
+        Kokkos::deep_copy(d_idx, h_idx);
+        auto px = p.x, py = p.y, pz = p.z, pvx = p.vx, pvy = p.vy, pvz = p.vz;
+        auto pax = p.ax, pay = p.ay, paz = p.az, pm = p.mass, pdt = p.dt_adapt;
+        auto ppid = p.particle_id;
+        Kokkos::parallel_for("member_gather", n, KOKKOS_LAMBDA(int k) {
+            int i = d_idx(k);
+            double* b = &d_buf(k * NF);
+            b[X] = px(i); b[Y] = py(i); b[Z] = pz(i); b[VX] = pvx(i); b[VY] = pvy(i); b[VZ] = pvz(i);
+            b[AX] = pax(i); b[AY] = pay(i); b[AZ] = paz(i); b[M] = pm(i); b[DT] = pdt(i);
+            b[PID] = (double)ppid(i);   // ids are exactly representable
+        });
+        auto h_buf = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), d_buf);
+        for (int k = 0; k < n; k++)
+            for (int c = 0; c < NF; c++) f[c][k] = h_buf(k * NF + c);
+    }
+
+    // Write the members' dt back to the device
+    void scatter_dt(Particles& p) const {
+        const int n = (int)idx.size();
+        if (n == 0) return;
+        Kokkos::View<int*> d_idx("member_idx", n);
+        Kokkos::View<double*> d_dt("member_dt", n);
+        auto h_idx = Kokkos::create_mirror_view(d_idx);
+        auto h_dt = Kokkos::create_mirror_view(d_dt);
+        for (int k = 0; k < n; k++) { h_idx(k) = idx[k]; h_dt(k) = f[DT][k]; }
+        Kokkos::deep_copy(d_idx, h_idx);
+        Kokkos::deep_copy(d_dt, h_dt);
+        auto pdt = p.dt_adapt;
+        Kokkos::parallel_for("member_scatter_dt", n, KOKKOS_LAMBDA(int k) { pdt(d_idx(k)) = d_dt(k); });
+    }
+};
+}  // namespace
+
 // ============================================================================
 // GPU buffer allocation
 // ============================================================================
@@ -186,9 +256,13 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
         last_level_bound = nb;
     }
 
-    // Get particle IDs and adaptive timesteps on host
-    auto h_pid = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.particle_id);
-    auto h_dt  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.dt_adapt);
+    // Ids, time-steps, masses (and positions for triples) of the pair members only, not all N
+    std::vector<int> pair_slots(2 * (size_t)n_pairs);
+    for (int k = 0; k < n_pairs; k++) { pair_slots[2 * k] = h_pi(k); pair_slots[2 * k + 1] = h_pj(k); }
+    MemberData md(pair_slots, p);
+    auto h_pid_d = md.col(MemberData::PID);
+    auto h_pid = [&](int i) { return (int)h_pid_d(i); };
+    auto h_dt  = md.col(MemberData::DT);
 
     // Rebuild cached pid → index mapping
     rebuild_pid_to_idx(p);
@@ -227,15 +301,19 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
 
     // Union-find to identify connected components
     // Merge ALL pairs (bound and unbound fly-bys both form subsystems)
-    UnionFind uf(max_pid + 1);
+    // Union-find on compact ids (O(pairs), not sized by the largest particle id)
+    (void)max_pid;
+    std::unordered_map<int, int> compact;
+    for (auto& pr : pairs) { compact.emplace(pr.pid_lo, (int)compact.size()); compact.emplace(pr.pid_hi, (int)compact.size()); }
+    UnionFind uf((int)compact.size());
     for (auto& pr : pairs) {
-        uf.unite(pr.pid_lo, pr.pid_hi);
+        uf.unite(compact[pr.pid_lo], compact[pr.pid_hi]);
     }
 
     // Build components from ALL pairs in single pass via reverse map (O(P))
     std::map<int, std::set<int>> comp_members;
     for (auto& pr : pairs) {
-        int root = uf.find(pr.pid_lo);
+        int root = uf.find(compact[pr.pid_lo]);
         comp_members[root].insert(pr.pid_lo);
         comp_members[root].insert(pr.pid_hi);
     }
@@ -256,15 +334,13 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
         old_by_pids[make_key(old_sub.particle_ids)] = &old_sub;
     }
 
-    auto h_mass = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.mass);
-    // Position/velocity mirrors created lazily (only for triples, avoids N-sized D2H for binaries)
-    bool have_pos = false;
-    auto h_x  = Kokkos::create_mirror_view(Kokkos::HostSpace(), p.x);
-    auto h_y  = Kokkos::create_mirror_view(Kokkos::HostSpace(), p.y);
-    auto h_z  = Kokkos::create_mirror_view(Kokkos::HostSpace(), p.z);
-    auto h_vx = Kokkos::create_mirror_view(Kokkos::HostSpace(), p.vx);
-    auto h_vy = Kokkos::create_mirror_view(Kokkos::HostSpace(), p.vy);
-    auto h_vz = Kokkos::create_mirror_view(Kokkos::HostSpace(), p.vz);
+    auto h_mass = md.col(MemberData::M);
+    auto h_x  = md.col(MemberData::X);
+    auto h_y  = md.col(MemberData::Y);
+    auto h_z  = md.col(MemberData::Z);
+    auto h_vx = md.col(MemberData::VX);
+    auto h_vy = md.col(MemberData::VY);
+    auto h_vz = md.col(MemberData::VZ);
 
     // Helper: min dt_adapt over subsystem members (used for binary, triple, multiplet)
     auto min_dt_members = [&](const Subsystem& s) {
@@ -387,12 +463,6 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
 
                     // Compute outer orbit relative to inner binary COM
                     // (pairwise elements use wrong mu and wrong relative vector)
-                    if (!have_pos) {
-                        Kokkos::deep_copy(h_x, p.x);   Kokkos::deep_copy(h_y, p.y);
-                        Kokkos::deep_copy(h_z, p.z);   Kokkos::deep_copy(h_vx, p.vx);
-                        Kokkos::deep_copy(h_vy, p.vy);  Kokkos::deep_copy(h_vz, p.vz);
-                        have_pos = true;
-                    }
                     double M_in = m1 + m2;
                     double mu_out = G * (M_in + m3);
                     double cx  = (m1*h_x(idx_i)  + m2*h_x(idx_j))  / M_in;
@@ -503,64 +573,6 @@ void SubsystemManager::remap_indices(const Particles& p) {
 // Enforce shared timestep for subsystem members (BIFROST Section 3.4.2)
 // ============================================================================
 
-namespace {
-// Host copy of the subsystem members' state only (instead of full O(N) arrays per HHS level). The
-// columns keep the h_x(idx) call syntax of the code that used full-array mirrors.
-struct MemberData {
-    enum { X, Y, Z, VX, VY, VZ, AX, AY, AZ, M, DT, NF };
-    std::unordered_map<int, int> loc;   // particle slot -> member row
-    std::vector<int> idx;
-    std::vector<double> f[NF];
-
-    struct Col {
-        std::vector<double>* v; const std::unordered_map<int, int>* loc;
-        double& operator()(int i) const { return (*v)[loc->find(i)->second]; }
-    };
-    Col col(int k) { return Col{&f[k], &loc}; }
-
-    MemberData(const std::vector<Subsystem>& subs, const std::vector<int>& p2i, const Particles& p) {
-        for (const auto& sub : subs)
-            for (int pid : sub.particle_ids) {
-                int i = (pid >= 0 && pid < (int)p2i.size()) ? p2i[pid] : -1;
-                if (i >= 0 && i < p.N && loc.emplace(i, (int)idx.size()).second) idx.push_back(i);
-            }
-        const int n = (int)idx.size();
-        for (auto& v : f) v.resize(n);
-        if (n == 0) return;
-        Kokkos::View<int*> d_idx("member_idx", n);
-        Kokkos::View<double*> d_buf("member_gather", (size_t)n * NF);
-        auto h_idx = Kokkos::create_mirror_view(d_idx);
-        std::copy(idx.begin(), idx.end(), h_idx.data());
-        Kokkos::deep_copy(d_idx, h_idx);
-        auto px = p.x, py = p.y, pz = p.z, pvx = p.vx, pvy = p.vy, pvz = p.vz;
-        auto pax = p.ax, pay = p.ay, paz = p.az, pm = p.mass, pdt = p.dt_adapt;
-        Kokkos::parallel_for("member_gather", n, KOKKOS_LAMBDA(int k) {
-            int i = d_idx(k);
-            double* b = &d_buf(k * NF);
-            b[X] = px(i); b[Y] = py(i); b[Z] = pz(i); b[VX] = pvx(i); b[VY] = pvy(i); b[VZ] = pvz(i);
-            b[AX] = pax(i); b[AY] = pay(i); b[AZ] = paz(i); b[M] = pm(i); b[DT] = pdt(i);
-        });
-        auto h_buf = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), d_buf);
-        for (int k = 0; k < n; k++)
-            for (int c = 0; c < NF; c++) f[c][k] = h_buf(k * NF + c);
-    }
-
-    // Write the members' dt back to the device
-    void scatter_dt(Particles& p) const {
-        const int n = (int)idx.size();
-        if (n == 0) return;
-        Kokkos::View<int*> d_idx("member_idx", n);
-        Kokkos::View<double*> d_dt("member_dt", n);
-        auto h_idx = Kokkos::create_mirror_view(d_idx);
-        auto h_dt = Kokkos::create_mirror_view(d_dt);
-        for (int k = 0; k < n; k++) { h_idx(k) = idx[k]; h_dt(k) = f[DT][k]; }
-        Kokkos::deep_copy(d_idx, h_idx);
-        Kokkos::deep_copy(d_dt, h_dt);
-        auto pdt = p.dt_adapt;
-        Kokkos::parallel_for("member_scatter_dt", n, KOKKOS_LAMBDA(int k) { pdt(d_idx(k)) = d_dt(k); });
-    }
-};
-}  // namespace
 
 void SubsystemManager::enforce_shared_timestep(Particles& p) const {
     if (active.empty()) return;
