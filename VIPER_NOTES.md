@@ -38,11 +38,16 @@
 - Tests `mergers_gpu_path`, `mergers_cpu_path` (400 stars, 50 % contact binaries, ~75 mergers at depths
   0-10): the old code segfaults / hangs.
 
+Also done (same day): LogH groups > 8 bodies stay with the FSI (bug 1); single-rank global PN1 (bug 5);
+spins broadcast in MPI; replica hash every REPLICA_CHECK_INTERVAL steps (exit 3); compensated kicks in the
+CPU path; CPU path kept dropping the enclosing level's subsystem flags after a nested merger (2e-5/step);
+non-collisional build compiles again; MPI CPU build (build-host-mpi, gcc/14 + openmpi/5.0) runs the 2-rank
+tests. GPU (MI300A) ctest: all accuracy checks equal the host values; 2-body cases are ~20x slower than one
+CPU core (launch latency), so GPU runs need NBODY_TEST_TIMEOUT and apu (apudev caps jobs at 15 min).
+
 Open, found on the way:
 - frost4_e099 (6.9e-11 vs 6.6e-11) and floor_binary_e0 (1.1e-14 vs 2.4e-15) fail on gcc/x86 with
   identical numbers before and after these changes: laptop bounds, re-measure per platform.
-- CPU path with binaries needs restarts (first attempt |dE/E| 1e-6) where the GPU path does not; without
-  binaries both agree. Subsystem coupling in the CPU path, not yet understood.
 - SSE_ENABLED defaults to true: its first call removed 37 % of the mass of a ZAMS Kroupa test cluster.
 - With USE_TREE the global tree indices go stale after a merger compaction (tree is off in collisional runs).
 - dL/L is not conserved through mergers (orbital L of the pair is dropped; stellar spin is not tracked).
