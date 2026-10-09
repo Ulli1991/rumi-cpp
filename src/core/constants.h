@@ -28,8 +28,8 @@ constexpr double GRAD_COEFF = 1.0 / 24.0;
 
 // Portable reciprocal square root: hardware rsqrt on GPU, std::sqrt on CPU.
 KOKKOS_INLINE_FUNCTION double fast_rsqrt(double x) {
-#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
-    return rsqrt(x);
+#if (defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)) && !defined(ACCURATE_RSQRT)
+    return rsqrt(x);  // ~1 ulp on the device; ACCURATE_RSQRT uses the correctly rounded 1/sqrt
 #else
     return 1.0 / std::sqrt(x);
 #endif

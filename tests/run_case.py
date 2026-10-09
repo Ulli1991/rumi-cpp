@@ -166,6 +166,14 @@ def pn_books(exe, label, cfg, bounds):
     return ok & check(f"{label} max|dP|/M [km/s]", max(r[1] for r in rows), bounds[1])
 
 
+def sse_mass(exe, label, cfg, bound):
+    """Runtime SSE after mergers: a remnant star must evolve as itself, so SSE removes only wind mass."""
+    out = run_output(exe, cfg)
+    dm = sum(float(v) for v in re.findall(r"SSE: dm_total=(\S+) M_sun", out))
+    ok = check(f"{label} mergers", out.count("[MERGER #"), 20, lower=True)
+    return ok & check(f"{label} mass removed by SSE [M_sun]", dm, bound)
+
+
 def check(name, value, bound, lower=False):
     ok = value >= bound if lower else value <= bound
     print(f"{'ok  ' if ok else 'FAIL'} {name} = {value:.3e} ({'>=' if lower else '<='} {bound:.3e})")
@@ -255,6 +263,10 @@ CASES = {
     # Before: 40 LogH give-ups (E_N + E_1PN cannot hold eta_restart under PN), |dE/E| 4.8e-5, |dL/L| 2.3e-5
     # unbooked. Measured 0 / 0 / 2.6e-13 km/s (the whole system is the PN subsystem, so all of it is booked).
     "pn_logh_books": lambda exe: pn_books(exe, "PN LogH binary", PN_LOGH, (1e-12, 1e-11)),
+    # Before: merger remnants kept a progenitor's m_zams, so SSE shrank them back (56.7 M_sun lost in 46
+    # mergers). Measured 1.3e-9 M_sun (winds over 5 steps).
+    "mergers_sse": lambda exe: sse_mass(exe, "mergers + SSE", dict(MERGERS, SERIAL_N2_CPU="0", SSE_ENABLED="true",
+                                                                   TOTAL_TIME_MYR="5e-9"), 1e-6),
     "logh_big_group": lambda exe: big_group(exe, "big group", BIG_GROUP, (1.2e-5, 1e-12)),
     # MPI cases, run under NBODY_TEST_LAUNCHER (CTest sets 2 ranks). Spins were not broadcast: lost on every
     # rank of a GPU run (host backends alias the mirror, so the host build cannot fail this one).

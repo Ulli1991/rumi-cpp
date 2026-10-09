@@ -349,6 +349,19 @@ void execute_merger(const MergerEvent& event, Particles& p,
     Kokkos::deep_copy(p.stellar_type, h_stype);
     Kokkos::deep_copy(p.spin_vec, h_spin);
 
+    // A star made by a merger must evolve as that star: runtime SSE recomputes the mass from m_zams and the
+    // age, so keeping a progenitor's would shrink the remnant back to it. Simplification of BSE (Hurley et
+    // al. 2002): the remnant restarts as a zero-age star of the merged mass. Compact remnants (kw >= 10)
+    // are not evolved by SSE.
+    if (h_stype(idx1) < 10) {
+        auto h_mzams = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.m_zams);
+        auto h_sage  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.stellar_age);
+        h_mzams(idx1) = m_rem;
+        h_sage(idx1) = 0.0;
+        Kokkos::deep_copy(p.m_zams, h_mzams);
+        Kokkos::deep_copy(p.stellar_age, h_sage);
+    }
+
     // Remove the merged subsystem
     for (auto it = mgr.active.begin(); it != mgr.active.end(); ) {
         bool contains_pid2 = false;

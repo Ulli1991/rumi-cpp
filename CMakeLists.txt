@@ -92,6 +92,11 @@ if(USE_MPI)
 endif()
 
 # Disable profiling fences (removes Kokkos::fence() around profiler regions for production runs)
+option(ACCURATE_RSQRT "Device kernels use 1/sqrt (correctly rounded) instead of rsqrt (~1 ulp)" OFF)
+if(ACCURATE_RSQRT)
+    target_compile_definitions(nbody-kokkos PRIVATE ACCURATE_RSQRT)
+endif()
+
 option(DISABLE_PROFILING_FENCES "Remove Kokkos::fence() around profiler regions" OFF)
 if(DISABLE_PROFILING_FENCES)
     target_compile_definitions(nbody-kokkos PRIVATE DISABLE_PROFILING_FENCES)
@@ -104,7 +109,8 @@ find_package(Python3 COMPONENTS Interpreter REQUIRED)
 foreach(case kepler_e09 kepler_e0 frost4_e09 frost4_e099 planets_hhs planets_fsi floor_binary_e0 floor_planets
              mergers_gpu_path mergers_cpu_path logh_big_group
              pn1_global_single_rank floor_binary_e0_cpu floor_planets_cpu
-             binaries_timestep frost4_e09_cpu pn_logh_books)
+             binaries_timestep frost4_e09_cpu pn_logh_books
+             mergers_sse)
     add_test(NAME ${case} COMMAND Python3::Interpreter ${CMAKE_SOURCE_DIR}/tests/run_case.py
              $<TARGET_FILE:nbody-kokkos> ${case})
     # Few-body cases: host threads only add overhead (and timeouts)
