@@ -129,6 +129,11 @@ Open, found on the way:
       expansions (tidal tensor). First: force error and cost vs p on a 1e6 Plummer sphere.
    e. FMM only on the large top levels, direct below a size threshold. Check that random frames
       per force evaluation do not spoil FSI time symmetry measurably.
+   Phase 1 done (tools/fmm/fmm_ref.cpp: Cartesian, softened kernel, mutual dual walk, serial):
+   momentum to 1e-17 at every order; error ~theta^p. N = 2e4 Plummer: rms 3.0e-10 at theta 0.2,
+   p 10 (8.4e-12 at p 12); 1.6e-7 at theta 0.3, p 10. Plain Cartesian M2L is O(p^6), 27 us at p 10:
+   far too slow. Next: O(p^3) rotation-based spherical-harmonic M2L (Dehnen 2014), which needs an
+   exactly Newtonian far field: compact (spline/Wendland) softening or none, decided by the user.
 
 Full audit and review: `jax-hydro/research_notes/Rantala integrators/` (rantala_spec.md,
 cpp_nbody_code_review.md; local, not in a repo). The README's FROST and BIFROST DOIs are wrong:
