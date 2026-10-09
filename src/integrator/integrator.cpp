@@ -2713,12 +2713,16 @@ static int hhs_fsi_recursive(
 
     // Base case: all particles are slow — reuse fused forces for first FSI kick
     if (fast_count == 0) {
+        // ALL_SLOW_SPLIT (FROST Algorithm 3, F empty): fsi(S, tau/2) twice, on every path
+        const int n_sub = all_slow_split ? 2 : 1;
+        const double h = pivot_dt / n_sub;
         if (dp && global_tree_available && tree_eligible) {
-            fsi_step_distributed(*dp, start, count, G, soft2, pivot_dt,
-                                 forces_valid, false, 0);
+            for (int k = 0; k < n_sub; k++)
+                fsi_step_distributed(*dp, start, count, G, soft2, h, k == 0 && forces_valid, false, 0);
         } else if (use_mpi) {
-            fsi_step_distributed(*dp, start, count, G, soft2, pivot_dt,
-                                 forces_valid, tree_built_for_subset);
+            for (int k = 0; k < n_sub; k++)
+                fsi_step_distributed(*dp, start, count, G, soft2, h, k == 0 && forces_valid,
+                                     k == 0 && tree_built_for_subset);
         } else if (all_slow_split) {
             // FROST Algorithm 3 with an empty fast set: fsi(S, tau/2) twice
             fsi_step(p, start, count, G, soft2, pivot_dt * 0.5, forces_valid, true);

@@ -216,32 +216,38 @@ def sweep(exe, label, base, etas, bounds, order, drift_max=None):
 
 
 CASES = {
-    # bounds ~1.3x measured (5.81e-6, 1.22e-7, 8.34e-9), order measured 4.72 -0.1/+0.3; drift 1.0-1.2
-    # (5.0 before the symmetrised-step fix, which also gave 4.6e-3 at eta = 0.064)
+    # bounds ~1.3x measured with ALL_SLOW_SPLIT (FROST Alg. 3; default): 3.24e-7, 8.98e-9, 5.24e-10, order
+    # 4.64 -0.1/+0.3 (without the split 5.6e-6, 1.2e-7, 8.3e-9, order 4.70); drift 1.1-1.2 (5.0 before the
+    # symmetrised-step fix, which also gave 4.6e-3 at eta = 0.064)
     "kepler_e09": lambda exe: sweep(exe, "e=0.9", dict(KEPLER, BINARY_E="0.9"), ["0.064", "0.032", "0.016"],
-                                    [7.6e-6, 1.6e-7, 1.1e-8], (4.62, 5.02), 1.5),
+                                    [4.2e-7, 1.2e-8, 6.8e-10], (4.54, 4.94), 1.5),
     # circular orbit: the eta^4 term cancels (constant along the orbit), the error sits at round-off
     "kepler_e0": lambda exe: sweep(exe, "e=0", dict(KEPLER, BINARY_E="0.0"), ["0.064"], [1e-12], None),
-    # FROST: "minimum relative energy error 1e-12 - 1e-10 at eta ~ 0.008" for e = 0.9, 0.99; measured
-    # 2.37e-12 and 5.09e-11 (clang/arm64), 1.43e-12 and 6.90e-11 (gcc/x86-64); bounds 1.3x the larger
-    "frost4_e09": lambda exe: endpoint(exe, "e=0.9", dict(FROST4, BINARY_E="0.9"), "0.008", 3.1e-12, 1e-10),
-    "frost4_e099": lambda exe: endpoint(exe, "e=0.99", dict(FROST4, BINARY_E="0.99"), "0.008", 9.0e-11, 1e-10),
-    # Through the CPU small-subset path, which kept the pre-fix FROST Eq. 49 (no eta): 1.5e-6 before, 9.1e-13 now
+    # FROST: "minimum relative energy error 1e-12 - 1e-10 at eta ~ 0.008" for e = 0.9, 0.99. Measured with the
+    # split 1.76e-13 and 1.44e-11 (gcc/x86-64; e = 0.9 now below FROST's range); without it 1.43e-12 / 6.90e-11
+    # (2.37e-12 / 5.09e-11 clang/arm64). GPU builds need 1/sqrt or RSQRT_NEWTON for e = 0.99 (rsqrt: 1.7e-10).
+    "frost4_e09": lambda exe: endpoint(exe, "e=0.9", dict(FROST4, BINARY_E="0.9"), "0.008", 2.3e-13, 1e-10),
+    "frost4_e099": lambda exe: endpoint(exe, "e=0.99", dict(FROST4, BINARY_E="0.99"), "0.008", 1.9e-11, 1e-10),
+    # Through the CPU small-subset path, which kept the pre-fix FROST Eq. 49 (no eta): 1.5e-6 before, 9.1e-13
+    # after (1.33e-12 with the split)
     "frost4_e09_cpu": lambda exe: endpoint(exe, "e=0.9 cpu path", dict(FROST4, BINARY_E="0.9", SERIAL_N2_CPU="8"),
-                                           "0.008", 1.2e-12, 1e-10),
+                                           "0.008", 1.8e-12, 1e-10),
     # Round-off floor with compensated kicks and integer positions (domain 1e-3 pc), eta = 0.004; 1.3x
     # measured. Binary e = 0: 1.8e-15 end, 6.1e-15 max, L 3e-15 on clang/arm64; 1.07e-14, 1.15e-14, L 5.6e-15
     # on gcc/x86-64 (bounds from the larger; plain kicks: 2.9e-13 max, L 1e-13).
     # Planets: 3.4e-14 end, 1.1e-13 max, P 7e-18, L 2e-15 (FROST Fig. 5: ~1e-13, ~1e-16, ~1e-14).
+    # With the split (twice the steps at the slowest level, so about twice the round-off): 4.5e-15 end,
+    # 2.3e-14 max, L 1.2e-14; planets 9.4e-14, 1.1e-13, P 3.9e-18, L 2.5e-15.
     "floor_binary_e0": lambda exe: floor(exe, "floor e=0", dict(FROST4, BINARY_E="0.0", ETA="0.004", ETA_FF="0.004",
                                           ETA_FB="0.004", INTEGER_POSITIONS="true", DOMAIN_HALFSIZE_PC="1e-3"),
-                                         (1.4e-14, 1.5e-14, 1e-14, 7.3e-15)),
+                                         (1.4e-14, 3.0e-14, 1e-14, 1.5e-14)),
     "floor_planets": lambda exe: floor(exe, "floor planets", dict(PLANETS, ETA="0.004", ETA_FF="0.004", ETA_FB="0.004",
                                         INTEGER_POSITIONS="true", DOMAIN_HALFSIZE_PC="1e-3"),
-                                       (4.5e-14, 1.5e-13, 1.0e-17, 2.6e-15)),
+                                       (1.25e-13, 1.5e-13, 1.0e-17, 3.3e-15)),
     # Same floors through the CPU small-subset path (SERIAL_N2_CPU covers every set), 1.3x measured. Plain
     # kicks there before: binary 1.9e-13 end, 3.5e-13 max, L 1.8e-13; planets 2.6e-13, P 2.1e-15, L 2.9e-14.
-    # Planets measured 2.3e-14 end, 9.5e-14 max, P 5.3e-18, L 2.7e-15 (CPU path on FROST Eq. 49 with eta).
+    # Planets measured 2.3e-14 end, 9.5e-14 max, P 5.3e-18, L 2.7e-15 (CPU path on FROST Eq. 49 with eta);
+    # with the split 9.4e-14 end, 1.1e-13 max, L 1.9e-15.
     "floor_binary_e0_cpu": lambda exe: floor(exe, "floor e=0 cpu path", dict(FROST4, BINARY_E="0.0", ETA="0.004",
                                               ETA_FF="0.004", ETA_FB="0.004", INTEGER_POSITIONS="true",
                                               DOMAIN_HALFSIZE_PC="1e-3", SERIAL_N2_CPU="8"),
@@ -249,12 +255,13 @@ CASES = {
     "floor_planets_cpu": lambda exe: floor(exe, "floor planets cpu path", dict(PLANETS, ETA="0.004", ETA_FF="0.004",
                                             ETA_FB="0.004", INTEGER_POSITIONS="true", DOMAIN_HALFSIZE_PC="1e-3",
                                             SERIAL_N2_CPU="8"),
-                                           (3.0e-14, 1.3e-13, 1.0e-17, 3.5e-15)),
-    # 1000 yr is ~6 Neptune orbits: no drift check. HHS measured 2.35e-7, 8.27e-9, 4.39e-10, order 4.53
+                                           (1.25e-13, 1.4e-13, 1.0e-17, 3.5e-15)),
+    # 1000 yr is ~6 Neptune orbits: no drift check. HHS measured 1.69e-7, 4.27e-9, 2.50e-10, order 4.70 with the
+    # split (2.35e-7, 8.27e-9, 4.39e-10, order 4.53 without)
     # (FROST: ~1e-13 at eta = 0.004, which order 4 from here reaches); FSI (all at the fastest occupied
     # level) measured 7.41e-8, 4.64e-9, 2.90e-10, order 4.00 (hung before the fsi-step fix)
     "planets_hhs": lambda exe: sweep(exe, "planets hhs", PLANETS, ["0.128", "0.064", "0.032"],
-                                     [3.1e-7, 1.1e-8, 5.7e-10], (4.43, 4.83)),
+                                     [2.2e-7, 5.5e-9, 3.3e-10], (4.60, 5.00)),
     "planets_fsi": lambda exe: sweep(exe, "planets fsi", dict(PLANETS, INTEGRATOR="fsi"), ["0.128", "0.064", "0.032"],
                                      [9.6e-8, 6.1e-9, 3.8e-10], (3.90, 4.30)),
     # Before the fix: segfault in step 1 (duplicated particle after compaction, LogH NaN), then mass loss on
