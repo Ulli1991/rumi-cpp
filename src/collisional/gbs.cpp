@@ -4,6 +4,7 @@
 #include <cmath>
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 
 constexpr int GBSIntegrator::STEP_SEQ[];
 
@@ -142,6 +143,21 @@ static double omega_from_packed(const double* y, int nb) {
 
 static std::atomic<int> gbs_debug_counter{0};  // host batch integrates subsystems in parallel
 
+// NBODY_GBS_STATS=1: totals over the run, printed at exit (calls, GBS steps, failed and overshooting steps, the
+// stage at which converged steps stopped)
+namespace {
+struct GbsStats {
+    std::atomic<long long> calls{0}, steps{0}, failed{0}, overshoot{0}, stage[GBSIntegrator::MAX_STAGES] = {};
+    ~GbsStats() {
+        if (!std::getenv("NBODY_GBS_STATS") || calls == 0) return;
+        std::printf("GBS stats: %lld calls, %lld steps (%.1f / call), failed %lld, overshoot %lld; converged at stage:",
+                    calls.load(), steps.load(), (double)steps / calls, failed.load(), overshoot.load());
+        for (int k = 0; k < GBSIntegrator::MAX_STAGES; k++) std::printf(" %lld", stage[k].load());
+        std::printf("\n");
+    }
+} g_gbs_stats;
+}  // namespace
+
 bool GBSIntegrator::step(LogHState& state, double ds, double G, double& ds_next,
                           double c_code, int pn_order) {
     int dim = 0;
@@ -182,6 +198,7 @@ bool GBSIntegrator::step(LogHState& state, double ds, double G, double& ds_next,
             }
 
             if (err < eta_gbs) {
+                g_gbs_stats.stage[stage]++;
                 // Converged: unpack best estimate from work[stage]
                 unpack_state(work[stage], dim, state);
 
@@ -245,13 +262,19 @@ int GBSIntegrator::integrate_to_time(LogHState& state, double t_target, double G
     double Omega0 = T0 + state.B;
     if (Omega0 < 1e-30) Omega0 = 1e-30;
 
-    // Scale ds so each GBS step covers at most ~1/10 dynamical time.
+    // Scale ds so each GBS step covers at most ~1/dyn_cap dynamical times (default 3; was 10, which cost 4x the
+    // GBS steps at unchanged accuracy on the binary, PN, merger and dense-core tests; NBODY_GBS_DYNCAP overrides).
     // BIFROST convention: dt = ds / Omega, so ds = dt * Omega.
     // This ensures stage 0 (2 substeps) produces a qualitatively correct
     // solution, which is required for GBS polynomial extrapolation.
-    double ds_dyn = t_dyn * Omega0 / 10.0;
+    static const double dyn_cap = std::getenv("NBODY_GBS_DYNCAP") ? std::atof(std::getenv("NBODY_GBS_DYNCAP")) : 3.0;
+    double ds_dyn = t_dyn * Omega0 / dyn_cap;
     double ds = std::min(ds_initial, ds_dyn);
 
+    // Relative tolerance on the end time. 1e-12 lands subsystems exactly on the step time, but on the dense-core
+    // case it samples the oscillating tidal-coupling floor at another binary phase: |dE/E| ~1 % higher on 4 of 4
+    // seeds. Kept at 1e-4 (energy first); NBODY_GBS_TTOL overrides.
+    static const double time_tol = std::getenv("NBODY_GBS_TTOL") ? std::atof(std::getenv("NBODY_GBS_TTOL")) : 1e-4;
     int n_steps = 0;
     int n_failed = 0;
     int n_overshoot = 0;
@@ -261,7 +284,7 @@ int GBSIntegrator::integrate_to_time(LogHState& state, double t_target, double G
     for (int iter = 0; iter < max_iter; iter++) {
         // Check if we've reached the target time
         double dt_remain = t_target - state.t;
-        if (std::fabs(dt_remain) < 1e-4 * std::fabs(t_target)) break;
+        if (std::fabs(dt_remain) < time_tol * std::fabs(t_target)) break;
 
         // Recompute dynamical time constraint at current state
         // Prevents ds from growing too large when orbit approaches periapsis
@@ -285,7 +308,7 @@ int GBSIntegrator::integrate_to_time(LogHState& state, double t_target, double G
         double ds_est = dt_remain * Omega;
 
         // Also cap ds by dynamical time (BIFROST: ds = dt * Omega)
-        double ds_dyn_now = t_dyn_now * Omega / 10.0;
+        double ds_dyn_now = t_dyn_now * Omega / dyn_cap;
 
         // Use the smallest of current ds, time-based estimate, and dynamical limit
         double ds_try = ds;
@@ -307,16 +330,20 @@ int GBSIntegrator::integrate_to_time(LogHState& state, double t_target, double G
             state = saved;
             ds = ds_try * 0.5;
             n_failed++;
+            g_gbs_stats.failed++;
             continue;
         }
 
         // Check if we overshot the target time
         if ((dt_remain > 0 && state.t > t_target + 1e-10 * std::fabs(t_target)) ||
             (dt_remain < 0 && state.t < t_target - 1e-10 * std::fabs(t_target))) {
-            // Overshoot — bisect
+            // Overshoot: aim at the target with the secant through this attempt (t(s) is smooth over a step),
+            // slightly short so that the next step lands inside the tolerance from below
+            const double dt_attempt = state.t - saved.t;
             state = saved;
-            ds = ds_try * 0.5;
+            ds = (dt_attempt != 0.0) ? ds_try * (dt_remain / dt_attempt) * (1.0 - 1e-6) : ds_try * 0.5;
             n_overshoot++;
+            g_gbs_stats.overshoot++;
             continue;
         }
 
@@ -324,8 +351,10 @@ int GBSIntegrator::integrate_to_time(LogHState& state, double t_target, double G
         ds = ds_next;
     }
 
+    g_gbs_stats.calls++;
+    g_gbs_stats.steps += n_steps;
     double dt_remain = t_target - state.t;
-    bool reached = std::fabs(dt_remain) < 1e-4 * std::fabs(t_target);
+    bool reached = std::fabs(dt_remain) < time_tol * std::fabs(t_target);
     if (!reached) {
         double Omega_final = logh_kinetic_energy(state) + state.B;
         std::printf("      GBS: %d steps, t_final=%.6f/%.6f  Omega=%.3e  ds_range=[%.2e,%.2e]  fail=%d overshoot=%d"
