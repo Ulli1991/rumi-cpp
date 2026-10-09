@@ -1257,6 +1257,10 @@ static void self_gradient_correction_distributed(DistributedParticles& dp, int s
     static Kokkos::View<double*> ax_save("ax_save_grad", 0);
     static Kokkos::View<double*> ay_save("ay_save_grad", 0);
     static Kokkos::View<double*> az_save("az_save_grad", 0);
+    static bool released_at_finalize = (Kokkos::push_finalize_hook([] {
+        ax_save = {}; ay_save = {}; az_save = {};
+    }), true);
+    (void)released_at_finalize;
     if ((int)ax_save.extent(0) < count) {
         Kokkos::realloc(ax_save, count);
         Kokkos::realloc(ay_save, count);
@@ -1919,6 +1923,10 @@ static void cross_acceleration_and_gradient_distributed(DistributedParticles& dp
     static Kokkos::View<double*> ax_snap_f("ax_snap_cross_f", 0);
     static Kokkos::View<double*> ay_snap_f("ay_snap_cross_f", 0);
     static Kokkos::View<double*> az_snap_f("az_snap_cross_f", 0);
+    static bool released_at_finalize = (Kokkos::push_finalize_hook([] {
+        ax_snap_s = {}; ay_snap_s = {}; az_snap_s = {}; ax_snap_f = {}; ay_snap_f = {}; az_snap_f = {};
+    }), true);
+    (void)released_at_finalize;
     if ((int)ax_snap_s.extent(0) < slow_count) {
         Kokkos::realloc(ax_snap_s, slow_count);
         Kokkos::realloc(ay_snap_s, slow_count);

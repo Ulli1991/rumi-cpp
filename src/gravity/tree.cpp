@@ -549,6 +549,8 @@ void Octree::rebuild_sorted_indices(Particles& p) {
     // Build reverse map: permanent_id -> current_particle_index
     int N = p.N;
     static Kokkos::View<int*> reverse_map("reverse_map", 0);
+    static bool released_at_finalize = (Kokkos::push_finalize_hook([] { reverse_map = {}; }), true);
+    (void)released_at_finalize;
     if ((int)reverse_map.extent(0) < N)
         reverse_map = Kokkos::View<int*>("reverse_map", N);
 

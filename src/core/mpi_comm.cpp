@@ -1,5 +1,6 @@
 #include "mpi_comm.h"
 #include "profiling.h"
+#include <cstdint>
 #include <cstdio>
 #include <algorithm>
 #include <numeric>
@@ -203,9 +204,9 @@ void DistributedParticles::distribute_initial(Particles& global_particles) {
         Kokkos::deep_copy(local.iz, h_iz);
     }
 
-    // Broadcast collisional fields if enabled (packed: 6 doubles + 3 ints → 2 broadcasts)
+    // Broadcast collisional fields if enabled (packed: 9 doubles + 3 ints → 2 broadcasts)
     if (local.collisional) {
-        constexpr int N_COLL_DBL = 6;  // mzams, sage, srad, lum, cmass, smag
+        constexpr int N_COLL_DBL = 9;  // mzams, sage, srad, lum, cmass, smag, spin_vec[3]
         constexpr int N_COLL_INT = 3;  // pid, sid, stype
 
         std::vector<double> coll_dbl(N_COLL_DBL * (size_t)N_total);
@@ -222,10 +223,12 @@ void DistributedParticles::distribute_initial(Particles& global_particles) {
             auto h_lum = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), src.luminosity);
             auto h_cmass = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), src.core_mass);
             auto h_smag = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), src.spin_mag);
+            auto h_spin = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), src.spin_vec);
             for (int i = 0; i < N_total; i++) {
                 double* dp = &coll_dbl[i * N_COLL_DBL];
                 dp[0]=h_mzams(i); dp[1]=h_sage(i); dp[2]=h_srad(i);
                 dp[3]=h_lum(i); dp[4]=h_cmass(i); dp[5]=h_smag(i);
+                dp[6]=h_spin(i, 0); dp[7]=h_spin(i, 1); dp[8]=h_spin(i, 2);
                 int* ip = &coll_int[i * N_COLL_INT];
                 ip[0]=h_pid(i); ip[1]=h_sid(i); ip[2]=h_stype(i);
             }
@@ -243,10 +246,12 @@ void DistributedParticles::distribute_initial(Particles& global_particles) {
         auto h_lum = Kokkos::create_mirror_view(local.luminosity);
         auto h_cmass = Kokkos::create_mirror_view(local.core_mass);
         auto h_smag = Kokkos::create_mirror_view(local.spin_mag);
+        auto h_spin = Kokkos::create_mirror_view(local.spin_vec);
         for (int i = 0; i < N_total; i++) {
             const double* dp = &coll_dbl[i * N_COLL_DBL];
             h_mzams(i)=dp[0]; h_sage(i)=dp[1]; h_srad(i)=dp[2];
             h_lum(i)=dp[3]; h_cmass(i)=dp[4]; h_smag(i)=dp[5];
+            h_spin(i, 0)=dp[6]; h_spin(i, 1)=dp[7]; h_spin(i, 2)=dp[8];
             const int* ip = &coll_int[i * N_COLL_INT];
             h_pid(i)=ip[0]; h_sid(i)=ip[1]; h_stype(i)=ip[2];
         }
@@ -259,6 +264,7 @@ void DistributedParticles::distribute_initial(Particles& global_particles) {
         Kokkos::deep_copy(local.luminosity, h_lum);
         Kokkos::deep_copy(local.core_mass, h_cmass);
         Kokkos::deep_copy(local.spin_mag, h_smag);
+        Kokkos::deep_copy(local.spin_vec, h_spin);
     }
 
     // Pre-allocate MPI communication buffers to avoid cudaMalloc per allgather
@@ -324,6 +330,43 @@ void DistributedParticles::sync_count() {
 #else
     my_start = 0;
     my_count = N_total;
+#endif
+}
+
+namespace {
+// FNV-1a over raw bytes: bitwise-identical replicas give identical hashes
+struct Fnv1a {
+    uint64_t h = 1469598103934665603ULL;
+    void add(const void* data, size_t n) {
+        auto* b = static_cast<const unsigned char*>(data);
+        for (size_t i = 0; i < n; i++) { h ^= b[i]; h *= 1099511628211ULL; }
+    }
+    template <class View> void add_view(const View& v, int n) {
+        auto h_v = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), v);
+        add(h_v.data(), sizeof(typename View::value_type) * (size_t)n * (v.rank() > 1 ? v.extent(1) : 1));
+    }
+};
+}  // namespace
+
+bool DistributedParticles::replicas_agree(int step) const {
+#ifdef USE_MPI
+    if (MPIComm::size() == 1) return true;
+    Fnv1a f;
+    f.add(&local.N, sizeof(local.N));
+    f.add_view(local.x, local.N); f.add_view(local.y, local.N); f.add_view(local.z, local.N);
+    f.add_view(local.vx, local.N); f.add_view(local.vy, local.N); f.add_view(local.vz, local.N);
+    f.add_view(local.mass, local.N);
+    if (local.collisional) { f.add_view(local.particle_id, local.N); f.add_view(local.spin_vec, local.N); }
+    unsigned long long mine = f.h, lo = 0, hi = 0;
+    MPI_CHECK(MPI_Allreduce(&mine, &lo, 1, MPI_UNSIGNED_LONG_LONG, MPI_MIN, MPI_COMM_WORLD));
+    MPI_CHECK(MPI_Allreduce(&mine, &hi, 1, MPI_UNSIGNED_LONG_LONG, MPI_MAX, MPI_COMM_WORLD));
+    if (lo == hi) return true;
+    if (MPIComm::rank() == 0)
+        std::printf("REPLICA MISMATCH at step %d: ranks hold different particle states\n", step);
+    return false;
+#else
+    (void)step;
+    return true;
 #endif
 }
 

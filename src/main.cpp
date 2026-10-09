@@ -382,6 +382,7 @@ int main(int argc, char** argv) {
     MPIComm::init(&argc, &argv);
 
     Kokkos::initialize(argc, argv);
+    int exit_code = 0;
     {
         int my_rank = MPIComm::rank();
         int n_ranks = MPIComm::size();
@@ -434,6 +435,7 @@ int main(int argc, char** argv) {
         double eta          = cfg.get_double("ETA", 0.2);
         double soft_pc      = cfg.get_double("SOFTENING_PC", 1e-3);
         int print_interval  = cfg.get_int("PRINT_INTERVAL", 1000);
+        int replica_check_interval = cfg.get_int("REPLICA_CHECK_INTERVAL", 10);  // steps; 0 = off
         int N_plummer       = cfg.get_int("PLUMMER_N", 1000);
         double M_total_msun = cfg.get_double("PLUMMER_M_TOTAL", 3.79e2);
         double r_half_pc    = cfg.get_double("PLUMMER_R_HALF", 3.5);
@@ -999,6 +1001,13 @@ int main(int argc, char** argv) {
                 t += dt_max;
                 step++;
 
+                // Replicated MPI state must stay bitwise identical; stop instead of diverging silently
+                if (use_distributed && replica_check_interval > 0 && step % replica_check_interval == 0 &&
+                    !dp.replicas_agree(step)) {
+                    exit_code = 3;
+                    break;
+                }
+
                 auto step_t1 = std::chrono::high_resolution_clock::now();
                 double step_wall = std::chrono::duration<double>(step_t1 - step_t0).count();
                 g_profiler.step_wall_total += step_wall;
@@ -1090,5 +1099,5 @@ int main(int argc, char** argv) {
     }
     Kokkos::finalize();
     MPIComm::finalize();
-    return 0;
+    return exit_code;
 }

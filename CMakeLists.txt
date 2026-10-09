@@ -107,3 +107,11 @@ foreach(case kepler_e09 kepler_e0 frost4_e09 frost4_e099 planets_hhs planets_fsi
     add_test(NAME ${case} COMMAND Python3::Interpreter ${CMAKE_SOURCE_DIR}/tests/run_case.py
              $<TARGET_FILE:nbody-kokkos> ${case})
 endforeach()
+if(USE_MPI)
+    foreach(case spin_mpi2 mergers_mpi2)
+        add_test(NAME ${case} COMMAND Python3::Interpreter ${CMAKE_SOURCE_DIR}/tests/run_case.py
+                 $<TARGET_FILE:nbody-kokkos> ${case})
+        set_tests_properties(${case} PROPERTIES
+                             ENVIRONMENT "NBODY_TEST_LAUNCHER=${MPIEXEC_EXECUTABLE} -n 2 --oversubscribe")
+    endforeach()
+endif()

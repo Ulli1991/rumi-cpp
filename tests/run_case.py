@@ -1,12 +1,13 @@
 """Run one cpp-nbody test case from a small config and check the printed diagnostics against bounds."""
 import math
+import os
 import re
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
-TIMEOUT_S = 120     # every case runs in seconds on one CPU core
+TIMEOUT_S = int(os.environ.get("NBODY_TEST_TIMEOUT", 120))  # seconds per run on one CPU core; GPUs need more (launch latency)
 # FROST Fig. 4 binary: m1 = m2 = 10 Msun, a = 10 AU, ~1000 orbits; diagnostics every 1e-5 Myr
 KEPLER = dict(TEST_CASE="binary_test", INTEGRATOR="hhs", TOTAL_TIME_MYR="7.0711e-3", DT_MAX_MYR="1.0e-5",
               DT_MIN_MYR="1.0e-14", SOFTENING_PC="0", COLLISIONAL="false", PRINT_INTERVAL="1")
@@ -30,6 +31,12 @@ PN1_WIDE = dict(TEST_CASE="binary_test", INTEGRATOR="hhs", BINARY_A_PC="2e-3", B
                 BINARY_M2="5e4", TOTAL_TIME_MYR="2.7e-4", DT_MAX_MYR="1.35e-6", DT_MIN_MYR="1e-16", SOFTENING_PC="0",
                 COLLISIONAL="true", R_NGB="1e-3", R_NGB_MAX="1e-3", PN_ORDER="1", M_PN="5.0", SSE_ENABLED="false",
                 PRINT_INTERVAL="20", PROFILING="false")
+# 200 stars plus a 500+500 Msun BH binary (a = 2e-5 pc) with spins 0.9 along L, all PN orders
+SPIN_IMBH = dict(TEST_CASE="plummer", INTEGRATOR="hhs", TOTAL_TIME_MYR="2e-3", DT_MAX_MYR="1e-4", DT_MIN_MYR="1e-16",
+                 SOFTENING_PC="0", COLLISIONAL="true", PN_ORDER="31", SSE_ENABLED="false", PLUMMER_N="200",
+                 PLUMMER_M_TOTAL="200", PLUMMER_R_HALF="0.5", PLUMMER_SEED="11", PLUMMER_MASS_DIST="equal",
+                 ADD_IMBH="true", IMBH_M1="500", IMBH_M2="500", IMBH_A_PC="2e-5", IMBH_E="0.5", IMBH_SPIN="0.9",
+                 PRINT_INTERVAL="5", PROFILING="false")
 # 16 stars inside r_ngb: one 15-body neighbour group, more than LogH's fixed storage (LOGH_MAX_BODIES = 8)
 BIG_GROUP = dict(TEST_CASE="plummer", INTEGRATOR="hhs", TOTAL_TIME_MYR="1e-5", DT_MAX_MYR="1e-6", DT_MIN_MYR="1e-16",
                  SOFTENING_PC="0", COLLISIONAL="true", R_NGB="1e-3", R_NGB_MAX="0.1", PN_ORDER="0", SSE_ENABLED="false",
@@ -47,7 +54,8 @@ def run_output(exe, cfg):
     with tempfile.TemporaryDirectory() as d:
         Path(d, "config.txt").write_text("".join(f"{k} = {v}\n" for k, v in cfg.items()))
         try:
-            out = subprocess.run([exe], cwd=d, capture_output=True, text=True, timeout=TIMEOUT_S)
+            launcher = os.environ.get("NBODY_TEST_LAUNCHER", "").split()  # e.g. "mpirun -n 2"
+            out = subprocess.run(launcher + [exe], cwd=d, capture_output=True, text=True, timeout=TIMEOUT_S)
         except subprocess.TimeoutExpired:
             raise SystemExit(f"FAIL: no result within {TIMEOUT_S} s (hung or stuck in time)")
     if out.returncode != 0:
@@ -105,6 +113,21 @@ def precession(exe, label, cfg, tol):
     """Periapsis precession measured by the binary tracker against the 1PN rate 6 pi G M / (c^2 a (1 - e^2))."""
     ratio = float(re.findall(r"ratio_raw=(\S+)", run_output(exe, cfg))[-1])
     return check(f"{label} |precession / 1PN - 1|", abs(ratio - 1.0), tol)
+
+
+def spins(exe, label, cfg, chi):
+    """Every subsystem member's |chi| printed by the subsystem diagnostics must equal the IC spin."""
+    out = run_output(exe, cfg)
+    rows = re.findall(r"^\s+\d+\s+BIN\s+2\s+(?:\S+\s+){5}(\S+)\s+(\S+)", out, re.M)
+    worst = max((abs(float(c) - chi) for row in rows for c in row), default=float("inf"))
+    return check(f"{label} max | |chi| - {chi} |", worst, 1e-3)
+
+
+def replicas(exe, label, cfg):
+    """Replicated MPI state must agree bitwise every step (the run stops with exit 3 otherwise)."""
+    out = run_output(exe, cfg)
+    return check(f"{label} replica mismatches", out.count("REPLICA MISMATCH"), 0) & \
+        check(f"{label} steps run", len(diagnostics(out)), 20, lower=True)
 
 
 def check(name, value, bound, lower=False):
@@ -174,6 +197,12 @@ CASES = {
     # per print, so the osculating periapsis carries the intra-orbit PN oscillation).
     "pn1_global_single_rank": lambda exe: precession(exe, "wide PN1 binary", PN1_WIDE, 0.1),
     "logh_big_group": lambda exe: big_group(exe, "big group", BIG_GROUP, (1.2e-5, 1e-12)),
+    # MPI cases, run under NBODY_TEST_LAUNCHER (CTest sets 2 ranks). Spins were not broadcast: lost on every
+    # rank of a GPU run (host backends alias the mirror, so the host build cannot fail this one).
+    "spin_mpi2": lambda exe: spins(exe, "IMBH spin, 2 ranks", SPIN_IMBH, 0.9),
+    # Mergers mid-recursion on 2 ranks: compaction must leave the replicas identical (MPI slices resynced)
+    "mergers_mpi2": lambda exe: replicas(exe, "mergers, 2 ranks", dict(MERGERS, SERIAL_N2_CPU="0",
+                                                                         REPLICA_CHECK_INTERVAL="1")),
     "mergers_cpu_path": lambda exe: mergers(exe, "mergers cpu path", dict(MERGERS, SERIAL_N2_CPU="64"), (1e-8, 1e-11)),
 }
 

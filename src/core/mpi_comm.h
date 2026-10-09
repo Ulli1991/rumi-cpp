@@ -138,6 +138,10 @@ struct DistributedParticles {
     // every rank removes the same particles from its replica)
     void sync_count();
 
+    // Hash the replicated state (N, positions, velocities, masses; ids and spins in collisional
+    // mode) and compare across ranks. Returns false, after printing the step, if any rank differs.
+    bool replicas_agree(int step) const;
+
     // Allgather accelerations after distributed force computation
     // Each rank has computed accelerations for [my_start, my_start + my_count)
     // After this call, all ranks have full acceleration array
