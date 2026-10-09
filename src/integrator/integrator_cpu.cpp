@@ -670,6 +670,22 @@ static void cpu_fsi_step(CpuSubset& s, Particles& p, int start, int count,
     cpu_kick(s, start, count, dt * FSI_KICK);
 }
 
+// Reinstate this level's subsystems after a recursive call. The device flags are rewritten from
+// them; the host copy keeps its own sid, except after a merger below, whose reload took every sid
+// from the device (where only the inner level's subsystems were flagged).
+#ifdef ENABLE_COLLISIONAL
+static void restore_subsystems_cpu(CpuSubset& s, Particles& p,
+                                   const std::vector<Subsystem>& saved, bool reloaded) {
+    if (reloaded) {
+        s.sync_order_to_device(p);
+        g_subsystem_mgr.rebuild_pid_to_idx(p);
+    }
+    g_subsystem_mgr.restore_active(saved);
+    g_subsystem_mgr.update_particle_flags(p);
+    if (reloaded) cpu_sync_sid_from_device(s, p, 0, s.device_start, s.count);
+}
+#endif
+
 // CPU HHS-FSI recursion
 // Returns the number of particles that mergers removed from [start, start+count).
 static int cpu_hhs_recursive(CpuSubset& s, Particles& p, int start, int count,
@@ -815,8 +831,10 @@ static int cpu_hhs_recursive(CpuSubset& s, Particles& p, int start, int count,
         return n_removed;
     }
 
+#ifdef ENABLE_COLLISIONAL
     // Save this level's subsystem state before recursive calls can overwrite it.
     auto saved_active_cpu = g_subsystem_mgr.active;
+#endif
 
     // Step 1: Cross-kick (dt/6)
     cpu_cross_acc(s, slow_start, slow_count, fast_start, fast_count, G, soft2);
@@ -832,8 +850,9 @@ static int cpu_hhs_recursive(CpuSubset& s, Particles& p, int start, int count,
     fast_count -= k;
 
     // Restore this level's subsystem state after recursion overwrote it
-    g_subsystem_mgr.restore_active(saved_active_cpu);
-    g_subsystem_mgr.update_particle_flags(p);
+#ifdef ENABLE_COLLISIONAL
+    restore_subsystems_cpu(s, p, saved_active_cpu, k > 0);
+#endif
 
     // Step 4: Cross-gradient kick (2dt/3)
     cpu_cross_acc(s, slow_start, slow_count, fast_start, fast_count, G, soft2);
@@ -847,8 +866,9 @@ static int cpu_hhs_recursive(CpuSubset& s, Particles& p, int start, int count,
     fast_count -= k;
 
     // Restore again for the second half-step on slow
-    g_subsystem_mgr.restore_active(saved_active_cpu);
-    g_subsystem_mgr.update_particle_flags(p);
+#ifdef ENABLE_COLLISIONAL
+    restore_subsystems_cpu(s, p, saved_active_cpu, k > 0);
+#endif
 
     // Step 6: FSI half-step on slow
     cpu_fsi_step(s, p, slow_start, slow_count, G, soft2, pivot_dt * 0.5);

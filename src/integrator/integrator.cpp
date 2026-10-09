@@ -2660,8 +2660,10 @@ static int hhs_fsi_recursive(
         g_profiler.stop(StepProfiler::TREE_MAINT);
     }
 
+#ifdef ENABLE_COLLISIONAL
     // Save subsystem state before recursive calls can overwrite it
     auto saved_active = g_subsystem_mgr.active;
+#endif
 
     // Step 1: Cross-force S<->F then kick (dt/6)
     g_profiler.start();
@@ -2698,10 +2700,12 @@ static int hhs_fsi_recursive(
     count -= k;
 
     // Restore subsystem state after recursion overwrote it
+#ifdef ENABLE_COLLISIONAL
     g_profiler.start();
     g_subsystem_mgr.restore_active(saved_active);
     g_subsystem_mgr.update_particle_flags(p);
     g_profiler.stop(StepProfiler::SUBSYSTEM_BOOKKEEP);
+#endif
 
     // Restore tree state after steps 2-3
     if (use_tree_cross || use_tree_self) {
@@ -2746,10 +2750,12 @@ static int hhs_fsi_recursive(
     count -= k;
 
     // Restore again for the second half-step on slow
+#ifdef ENABLE_COLLISIONAL
     g_profiler.start();
     g_subsystem_mgr.restore_active(saved_active);
     g_subsystem_mgr.update_particle_flags(p);
     g_profiler.stop(StepProfiler::SUBSYSTEM_BOOKKEEP);
+#endif
 
     // Restore tree state for step 6 and 7
     if (use_tree_cross || use_tree_self) {

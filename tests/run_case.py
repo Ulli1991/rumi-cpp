@@ -198,9 +198,9 @@ CASES = {
     "planets_fsi": lambda exe: sweep(exe, "planets fsi", dict(PLANETS, INTEGRATOR="fsi"), ["0.128", "0.064", "0.032"],
                                      [9.6e-8, 6.1e-9, 3.8e-10], (3.90, 4.30)),
     # Before the fix: segfault in step 1 (duplicated particle after compaction, LogH NaN), then mass loss on
-    # step restarts and |dE/E| ~ 1 from an incomplete merger sink. Measured on the host build: GPU-path
-    # recursion 2.2e-10 / 4.3e-14 km/s; CPU small-subset path (4 restarts) 1.9e-9 / 3.1e-12 km/s. Bounds:
-    # the restart threshold for E, P well above round-off but far below one lost binary member (~3 km/s).
+    # step restarts and |dE/E| ~ 1 from an incomplete merger sink. Measured on the host build: 2.2e-10 /
+    # 4.3e-14 km/s. Bounds: the restart threshold for E, P well above round-off but far below one lost
+    # binary member (~3 km/s).
     "mergers_gpu_path": lambda exe: mergers(exe, "mergers gpu path", dict(MERGERS, SERIAL_N2_CPU="0"), (1e-8, 1e-12)),
     # Before: LogH wrote a 15-body group past its 8-body arrays (bus error). Measured 9.4e-6 / 2.0e-14 km/s.
     # Before: the single-rank step skipped the global PN1 kicks (ratio 0.03). Measured 1.045 (sampled once
@@ -213,7 +213,11 @@ CASES = {
     # Mergers mid-recursion on 2 ranks: compaction must leave the replicas identical (MPI slices resynced)
     "mergers_mpi2": lambda exe: replicas(exe, "mergers, 2 ranks", dict(MERGERS, SERIAL_N2_CPU="0",
                                                                          REPLICA_CHECK_INTERVAL="1")),
-    "mergers_cpu_path": lambda exe: mergers(exe, "mergers cpu path", dict(MERGERS, SERIAL_N2_CPU="64"), (1e-8, 1e-11)),
+    # CPU path with restarts off: a merger in a nested CPU call used to drop the enclosing level's subsystem
+    # flags on the host (internal forces counted twice), |dE/E| 2e-5 per step, hidden by restarts. Measured
+    # now 2.2e-10 / 4.4e-14 km/s, as the GPU path.
+    "mergers_cpu_path": lambda exe: mergers(exe, "mergers cpu path", dict(MERGERS, SERIAL_N2_CPU="64", ETA_RESTART="0"),
+                                            (1e-8, 1e-12)),
 }
 
 if __name__ == "__main__":
