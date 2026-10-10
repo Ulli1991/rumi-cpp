@@ -85,6 +85,10 @@ SEC_BINARY = dict(TEST_CASE="binary_test", INTEGRATOR="hhs", BINARY_A_PC="1e-5",
 CLOSE_BINARIES = dict(BINARIES, BINARY_FRAC="0.5", BINARY_A_MIN_AU="0.01", BINARY_A_MAX_AU="0.1",
                       TOTAL_TIME_MYR="1e-5", DT_MAX_MYR="1e-5")
 # 16 stars inside r_ngb: one 15-body neighbour group, more than LogH's fixed storage (LOGH_MAX_BODIES = 8)
+# Collisional FSI run of a field binary (r_ngb below a, so no subsystem): the start-of-step kernel's criteria set the step
+FSI_BINARY = dict(TEST_CASE="binary_test", INTEGRATOR="fsi", TOTAL_TIME_MYR="1e-5", DT_MAX_MYR="1e-5", DT_MIN_MYR="1e-14",
+                  SOFTENING_PC="0", COLLISIONAL="true", R_NGB="1e-6", R_NGB_MAX="1e-6", PN_ORDER="0",
+                  SSE_ENABLED="false", BINARY_E="0.5", PRINT_INTERVAL="1", PROFILING="false")
 BIG_GROUP = dict(TEST_CASE="plummer", INTEGRATOR="hhs", TOTAL_TIME_MYR="1e-5", DT_MAX_MYR="1e-6", DT_MIN_MYR="1e-16",
                  SOFTENING_PC="0", COLLISIONAL="true", R_NGB="1e-3", R_NGB_MAX="0.1", PN_ORDER="0", SSE_ENABLED="false",
                  PLUMMER_N="16", PLUMMER_M_TOTAL="16", PLUMMER_R_HALF="2e-4", PLUMMER_SEED="3", PLUMMER_MASS_DIST="equal",
@@ -307,6 +311,13 @@ def no_ic_mergers(exe, label, cfg, bound):
     return check(f"{label} mergers in step 1", out.count("[MERGER #"), 0) & \
         check(f"{label} max|dE/E|", max(r[0] for r in rows), bound)
 
+def fsi_step(exe, label, cfg, bound):
+    """The FSI integrator's global step (the smallest particle time step at the start) must stay at a sane level."""
+    m = re.search(r"FSI global step: (\S+) Myr", run_output(exe, cfg))
+    if not m:
+        raise SystemExit("FAIL: no FSI global step printed")
+    return check(f"{label} FSI global step [Myr]", float(m.group(1)), bound, lower=True)
+
 
 def check(name, value, bound, lower=False):
     ok = value >= bound if lower else value <= bound
@@ -449,6 +460,9 @@ CASES = {
     # AUDIT F6: thermal e without r_p > R1 + R2 put pericentres inside the stars: 21 mergers in the first
     # 1e-5 Myr before, 0 after (322 of 5000 e redrawn in a 20k cluster). Measured |dE/E| 2.3e-14.
     "ic_binaries_no_mergers": lambda exe: no_ic_mergers(exe, "close primordial binaries", CLOSE_BINARIES, 3e-14),
+    # ETA_JERK = 0 turns the jerk criterion off. Before: the start-of-step kernel (AccDtK) still applied it,
+    # dt = 0 * |a| / |j| = 0, the run stepped at DT_MIN (1.86e-14 Myr, hung). Measured 1.5625e-7 (as with 0.1)
+    "eta_jerk0_fsi": lambda exe: fsi_step(exe, "ETA_JERK = 0", dict(FSI_BINARY, ETA_JERK="0"), 1.2e-7),
     "logh_big_group": lambda exe: big_group(exe, "big group", BIG_GROUP, (1.2e-5, 1e-12)),
     # MPI cases, run under NBODY_TEST_LAUNCHER (CTest sets 2 ranks). Spins were not broadcast: lost on every
     # rank of a GPU run (host backends alias the mirror, so the host build cannot fail this one).
