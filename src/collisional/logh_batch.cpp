@@ -8,11 +8,42 @@
 #include <Kokkos_Core.hpp>
 #include <algorithm>
 #include <cstring>
+#include <cstdlib>
+#include <cmath>
 #include <limits>
+#include <cstdio>
+#include <string>
 
 SubsystemBatch g_logh_batch;
 
 constexpr int GBS_MAX_STEPS = 1000;
+
+// GBS step limit of one LogH call: 1000, or 64 steps per orbit of the tightest bound pair over the interval
+// (a tight binary inside a fly-by or an unstable triple is integrated orbit by orbit: thousands of orbits per
+// interval at coarse levels hit the fixed limit after a few per cent of the interval, and the retry split it
+// into up to 256 pieces). Hard ceiling 4e6 steps; NBODY_GBS_STEPS_PER_ORBIT overrides 64 (0: fixed 1000).
+static int gbs_step_limit(const LogHState& st, double dt, double G) {
+    static const double per_orbit = std::getenv("NBODY_GBS_STEPS_PER_ORBIT")
+                                        ? std::atof(std::getenv("NBODY_GBS_STEPS_PER_ORBIT")) : 64.0;
+    double P_min = std::numeric_limits<double>::max();
+    for (int i = 0; i < st.n_bodies; i++)
+        for (int j = i + 1; j < st.n_bodies; j++) {
+            double r2 = 0.0, v2 = 0.0;
+            for (int k = 0; k < 3; k++) {
+                const double dx = st.pos[j*3+k] - st.pos[i*3+k], dv = st.vel[j*3+k] - st.vel[i*3+k];
+                r2 += dx * dx;
+                v2 += dv * dv;
+            }
+            const double mu = G * (st.mass[i] + st.mass[j]);
+            const double eps = 0.5 * v2 - mu / std::sqrt(r2);   // specific two-body energy
+            if (eps >= 0.0) continue;
+            const double a = -mu / (2.0 * eps);
+            P_min = std::min(P_min, 2.0 * M_PI * std::sqrt(a * a * a / mu));
+        }
+    if (per_orbit <= 0.0 || P_min == std::numeric_limits<double>::max()) return GBS_MAX_STEPS;
+    const double n = per_orbit * std::fabs(dt) / P_min;
+    return n > (double)GBS_MAX_STEPS ? (int)std::min(n, 4.0e6) : GBS_MAX_STEPS;
+}
 
 // ============================================================================
 // Allocate batch buffers
@@ -505,12 +536,13 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
         // Step 3: Integrate in normalized units via GBS
         // ==================================================================
         int n_gbs_steps = 0;
+        const int max_steps = gbs_step_limit(state, dt_norm, G_norm);
         {
             GBSIntegrator gbs(eta_gbs);
             double Omega_cur = logh_kinetic_energy(state) + state.B;
             double ds_est = (Omega_cur > 1e-30) ? dt_norm * Omega_cur : dt_norm;
             n_gbs_steps = gbs.integrate_to_time(state, dt_norm, G_norm, ds_est,
-                                                 c_norm, pn_order, GBS_MAX_STEPS);
+                                                 c_norm, pn_order, max_steps);
         }
 
         // ==================================================================
@@ -571,8 +603,43 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
         // With PN terms there is no energy this check can hold to eta_restart: E_N + E_1PN is conserved
         // only to O(v^4/c^4), and 2PN/3PN/radiation reaction change it further. PN subsystems restart on
         // GBS non-convergence instead; their Newtonian energy change is booked as E_pn by the caller.
-        bool converged = n_gbs_steps < GBS_MAX_STEPS;
-        if (any_compact && pn_order > 0 && c_norm > 0.0) dE_rel = converged ? 0.0 : 1e30;
+        // A step-limited integration stopped short of the end time: never accept it on its energy (the
+        // Newtonian check passed it and the members silently lagged behind the rest of the system)
+        bool converged = n_gbs_steps < max_steps;
+        if (any_compact && pn_order > 0 && c_norm > 0.0) dE_rel = 0.0;
+        if (!converged) {
+            dE_rel = 1e30;
+            // What stopped: the members, and the bound pairs with their orbits per interval (initial state)
+            std::string msg = "      LogH step limit " + std::to_string(max_steps) + ": n=" + std::to_string(nb) +
+                              " m[Msun]=";
+            char buf[160];
+            for (int b = 0; b < nb; b++) {
+                std::snprintf(buf, sizeof(buf), "%s%.3g", b ? "," : "", h_mass(off + b));
+                msg += buf;
+            }
+            for (int i = 0; i < nb; i++)
+                for (int j = i + 1; j < nb; j++) {
+                    double r2 = 0.0, v2 = 0.0;
+                    for (int k = 0; k < 3; k++) {
+                        const double dx = state_init_pos[j*3+k] - state_init_pos[i*3+k];
+                        const double dv = state_init_vel[j*3+k] - state_init_vel[i*3+k];
+                        r2 += dx * dx;
+                        v2 += dv * dv;
+                    }
+                    const double mu = state.mass[i] + state.mass[j];   // G_norm = 1
+                    const double eps = 0.5 * v2 - mu / std::sqrt(r2);
+                    const double a = -mu / (2.0 * eps);
+                    std::snprintf(buf, sizeof(buf), " | %d-%d r=%.3g a=%.3g pc%s", i, j, std::sqrt(r2) * R_scale,
+                                  a * R_scale, eps < 0.0 ? "" : " (unbound)");
+                    msg += buf;
+                    if (eps < 0.0) {
+                        std::snprintf(buf, sizeof(buf), " orbits/interval=%.3g",
+                                      dt_norm / (2.0 * M_PI * std::sqrt(a * a * a / mu)));
+                        msg += buf;
+                    }
+                }
+            std::printf("%s\n", msg.c_str());
+        }
         h_eerr(s) = dE_rel;
         h_conv(s) = converged ? 1 : 0;
 
@@ -581,7 +648,7 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
         batch.t_reached[s] = state.t * T_scale;
         if (dE_rel > dE_max) dE_max = dE_rel;
         if (dE_rel < dE_min) dE_min = dE_rel;
-        if (n_gbs_steps >= GBS_MAX_STEPS) caps++;
+        if (!converged) caps++;
     };
     if (n_sub == 1) {   // most deep-level batches: no host threads to start
         max_dE = std::numeric_limits<double>::lowest();

@@ -90,6 +90,13 @@ SEC_STELLAR = dict(SEC_BINARY, BINARY_A_PC="1e-7", BINARY_E="0.9", BINARY_M1="1.
                    BINARY_ROT_DEG="0")
 # 10+10 Msun BH binary, a = 0.01 AU, e = 0.5, all PN orders: 1.7 rad of 1PN precession per yr, t_GW ~ 1 Myr
 SEC_BH_TIGHT = dict(SEC_BINARY, BINARY_A_PC="5e-8", BINARY_ROT_DEG="0")
+# Tight binary (0.02 AU, P = 2.1e-3 yr) on a Mardling-unstable outer orbit (2 AU, e = 0.95, starts at
+# apocentre): LogH, ~140 inner orbits per half step of 0.3 yr, integrated orbit by orbit
+HIER_LOGH = dict(TEST_CASE="triple_test", INTEGRATOR="hhs", TRIPLE_A_IN_PC="1e-7", TRIPLE_E_IN="0.1", TRIPLE_M1="1.0",
+                 TRIPLE_M2="1.0", TRIPLE_A_OUT_PC="1e-5", TRIPLE_E_OUT="0.95", TRIPLE_M3="1.0", TRIPLE_INCL_DEG="30",
+                 TOTAL_TIME_MYR="6e-7", DT_MAX_MYR="6e-7", DT_MIN_MYR="1e-16", SOFTENING_PC="0", COLLISIONAL="true",
+                 R_NGB="1e-3", R_NGB_MAX="0.1", N_ORB_SECULAR="3", PN_ORDER="0", SSE_ENABLED="false",
+                 ETA_RESTART="1e-8", ETA_GBS="1e-10", PRINT_INTERVAL="1", PROFILING="false")
 # 16 stars inside r_ngb: one 15-body neighbour group, more than LogH's fixed storage (LOGH_MAX_BODIES = 8)
 # Collisional FSI run of a field binary (r_ngb below a, so no subsystem): the start-of-step kernel's criteria set the step
 FSI_BINARY = dict(TEST_CASE="binary_test", INTEGRATOR="fsi", TOTAL_TIME_MYR="1e-5", DT_MAX_MYR="1e-5", DT_MIN_MYR="1e-14",
@@ -304,6 +311,15 @@ def secular_steps(exe, label, cfg, per_call):
     return ok & check(f"{label} internal steps per evolution", n_sub / max(n_ev, 1), per_call)
 
 
+def logh_complete(exe, label, cfg, bound):
+    """Every LogH call must reach its end time: no GBS step-limit hits, no retries, energy within bound."""
+    out = run_output(exe, cfg)
+    caps = sum(int(c) for c in re.findall(r"cap=(\d+)", out))
+    ok = check(f"{label} LogH calls stopped by the GBS step limit", caps, 0)
+    ok &= check(f"{label} LogH retries", out.count("LogH restart:"), 0)
+    return ok & check(f"{label} |dE/E|", diagnostics(out)[-1][0], bound)
+
+
 def no_fsi_groups(exe, label, cfg, bound):
     """Neighbour chains in a dense core must be split along bound pairs, not left whole to the FSI."""
     out = run_output(exe, cfg)
@@ -472,6 +488,9 @@ CASES = {
     # internal steps per evolution here, the 100000-step cap (48 ms) for this binary at 1e-3 Myr steps.
     # Measured 1 after (eta_sec t_GW > dt).
     "secular_bh_tight_steps": lambda exe: secular_steps(exe, "BH binary at 0.01 AU", SEC_BH_TIGHT, 1.3),
+    # Before: both LogH calls stopped at the 1000-step limit after ~45 % of the interval, and passed the energy
+    # check (cap=4, no retry: the members lagged behind the system clock). Measured after: 0 caps, |dE/E| 8.5e-12
+    "logh_hierarchy_complete": lambda exe: logh_complete(exe, "tight binary in unstable triple", HIER_LOGH, 1.1e-11),
     "triple_id_order": lambda exe: triple_order(exe, "secular triple", SEC_TRIPLE, 1e-6),
     # Measured 9.8e-9 (dense core, at the restart threshold); 2.35e-8 before the pericentre check, 2.68e-8 with
     # it (seed 5): bound 3.5e-8
