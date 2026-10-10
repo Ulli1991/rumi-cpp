@@ -25,6 +25,8 @@
 #include <cfloat>
 #include <cmath>
 #include <cstring>
+#include <cstdio>
+#include <cstdlib>
 #include <chrono>
 
 // Global profiler instance
@@ -372,6 +374,58 @@ struct RangeMirror {
         pull(p, NF);
     }
 };
+
+// NBODY_CHECK_SUBSYS=1: every subsystem this call owns must be advanced exactly once, over the full dt, by
+// one of the paths (secular binary, secular triple, LogH). The FSI drifts no subsystem members, so a path that
+// skips a subsystem (a `continue`, an early return) or stops short freezes its members with no energy change,
+// invisible to the energy check and the restarts (AUDIT_2026-10.md F5). Aborts with the offending subsystem.
+struct SubsysAdvanceCheck {
+    bool on = false;
+    double dt = 0.0;
+    std::vector<int> owned;           // indices into g_subsystem_mgr.active this call must advance
+    std::vector<int> n_adv;           // per active index: number of advances
+    std::vector<double> t_adv;        // per active index: time advanced
+    std::vector<const char*> path;    // per active index: last path that advanced it
+
+    static bool enabled() {
+        static const bool e = [] { const char* v = std::getenv("NBODY_CHECK_SUBSYS"); return v && v[0] && v[0] != '0'; }();
+        return e;
+    }
+    void begin(int n_active, double dt_) {
+        on = enabled();
+        if (!on) return;
+        dt = dt_;
+        owned.clear();
+        n_adv.assign(n_active, 0);
+        t_adv.assign(n_active, 0.0);
+        path.assign(n_active, "none");
+    }
+    void own(int s) { if (on) owned.push_back(s); }
+    void advanced(int s, double t, const char* via) {
+        if (!on) return;
+        n_adv[s]++;
+        t_adv[s] += t;
+        path[s] = via;
+    }
+    void set_time(int s, double t) { if (on) t_adv[s] = t; }   // LogH retry replaces the first attempt
+    void verify(int start, int count) const {
+        if (!on) return;
+        // GBS lands on the end time to a relative 1e-4 (NBODY_GBS_TTOL); anything further off is a partial advance
+        const double tol = 1e-3 * std::fabs(dt);
+        for (int s : owned) {
+            if (n_adv[s] == 1 && std::fabs(t_adv[s] - dt) <= tol) continue;
+            const auto& sub = g_subsystem_mgr.active[s];
+            std::fprintf(stderr,
+                "NBODY_CHECK_SUBSYS: subsystem %d (n_bodies=%d, type=%d, is_secular=%d, pids", s, sub.n_bodies,
+                (int)sub.type, (int)sub.is_secular);
+            for (int pid : sub.particle_ids) std::fprintf(stderr, " %d", pid);
+            std::fprintf(stderr, ") advanced %d times over %.6e of dt=%.6e (last path: %s) in range [%d,%d)\n",
+                         n_adv[s], t_adv[s], dt, path[s], start, start + count);
+            std::fflush(stderr);
+            std::abort();
+        }
+    }
+};
 }  // namespace
 
 void advance_subsystems_in_range(Particles& p, int start, int count,
@@ -533,11 +587,14 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
     const EnergyBookkeeping books_before = g_energy_books;
 #endif
     std::vector<int> secular_idx, secular_triple_idx, logh_idx;
+    SubsysAdvanceCheck adv_check;
+    adv_check.begin((int)g_subsystem_mgr.active.size(), dt);
     for (int k = 0; k < (int)eligible.size(); k++) {
         const int s = eligible[k];
 #ifdef USE_MPI
-        if (distributed_subs && k % MPIComm::size() != MPIComm::rank()) continue;
+        if (distributed_subs && k % MPIComm::size() != MPIComm::rank()) continue;  // another rank advances it
 #endif
+        adv_check.own(s);
         const auto& sub = g_subsystem_mgr.active[s];
         if (sub.is_secular && sub.n_bodies == 2) {
             secular_idx.push_back(s);
@@ -627,6 +684,7 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
                 g_energy_books.L_sink[c] += sec_books[k].L_sink[c];
             }
             g_subsystem_mgr.step_secular_evolved += evolved[k];
+            if (evolved[k]) adv_check.advanced(secular_idx[k], dt, "secular binary");
             g_subsystem_mgr.step_secular_substeps += substeps[k];
         }
 
@@ -727,6 +785,7 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
             double a_in_pre = tri.inner.a;  // save for GW bookkeeping
 
             secular_evolve_triple(tri, dt, G, g_collisional.c_code, g_collisional.pn_order);
+            adv_check.advanced(s, dt, "secular triple");
 
             // GW energy bookkeeping for inner binary inspiral
             if (tri.inner.a > 0.0 && a_in_pre > 0.0) {
@@ -905,6 +964,7 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
 
         // Accumulate LogH stats into step-level counters
         g_subsystem_mgr.step_logh_calls += n_sub;
+        for (int si = 0; si < n_sub; si++) adv_check.advanced(logh_idx[si], g_logh_batch.t_reached[si], "LogH");
         g_subsystem_mgr.step_logh_gbs_total += g_logh_batch.stat_total_gbs;
         if (g_logh_batch.stat_worst_dE > g_subsystem_mgr.step_logh_worst_dE)
             g_subsystem_mgr.step_logh_worst_dE = g_logh_batch.stat_worst_dE;
@@ -952,6 +1012,8 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
 
                 bool all_passed = true;
                 double worst_dE = 0;
+                const bool last_try = (subdiv == MAX_SUBDIV);
+                std::vector<double> t_sum(failed.size(), 0.0);
 
                 for (int step = 0; step < n_steps; step++) {
                     SubsystemBatch retry_batch;
@@ -967,9 +1029,14 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
                     }
 
                     retry_batch.unpack(retry_mgr, p);
+                    for (size_t r = 0; r < failed.size(); r++) t_sum[r] += retry_batch.t_reached[r];
 
-                    if (!all_passed) break;  // no point continuing if a sub-step failed
+                    // No point continuing if a sub-step failed, except on the last try: there the result stands,
+                    // and stopping early would leave the members short of dt (frozen for the rest of the step)
+                    if (!all_passed && !last_try) break;
                 }
+                if (all_passed || last_try)
+                    for (size_t r = 0; r < failed.size(); r++) adv_check.set_time(logh_idx[failed[r]], t_sum[r]);
 
                 if (all_passed) {
                     std::printf("  LogH restart: OK with %d sub-steps (worst dE=%.2e)\n",
@@ -985,7 +1052,11 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
                 std::printf("  LogH restart: %d sub-steps failed (worst dE=%.2e)\n",
                             n_steps, worst_dE);
 
-                if (subdiv < MAX_SUBDIV) restore_failed();
+                if (!last_try) {
+                    restore_failed();
+                } else {   // keep the persistent state (aux velocities, scales) consistent with the members
+                    for (size_t r = 0; r < failed.size(); r++) logh_mgr.active[failed[r]] = retry_mgr.active[r];
+                }
             }
 
             if (!failed.empty())
@@ -1055,6 +1126,7 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
 #else
     (void)distributed_subs;
 #endif
+    adv_check.verify(start, count);
 }
 #endif
 

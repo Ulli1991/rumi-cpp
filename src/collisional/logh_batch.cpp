@@ -343,6 +343,7 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
 
     int total_gbs_steps = 0;
     std::vector<int> gbs_per_sub(n_sub, 0);   // per-depth load-balance statistics
+    batch.t_reached.assign(n_sub, 0.0);   // read by the subsystem-advance check
     double max_dE = 0.0;
     double min_dE = 1e30;
     int cap_hit = 0;
@@ -577,6 +578,7 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
 
         gbs_sum += n_gbs_steps;
         gbs_per_sub[s] = n_gbs_steps;
+        batch.t_reached[s] = state.t * T_scale;
         if (dE_rel > dE_max) dE_max = dE_rel;
         if (dE_rel < dE_min) dE_min = dE_rel;
         if (n_gbs_steps >= GBS_MAX_STEPS) caps++;

@@ -56,6 +56,7 @@ struct SubsystemBatch {
     double stat_worst_dE = 0;      // worst |dE/E|
     double stat_best_dE = 1e30;    // best |dE/E|
     int stat_cap_hit = 0;          // subsystems that hit GBS step limit
+    std::vector<double> t_reached; // physical time each subsystem's GBS integration reached (code units)
 
     // Allocate buffers
     void allocate(int n_sub, int total_bodies);
