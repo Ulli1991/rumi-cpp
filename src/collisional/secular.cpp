@@ -3,6 +3,7 @@
 #include "constants.h"
 #include <cmath>
 #include <algorithm>
+#include <cstdlib>
 
 // ============================================================================
 // Peters (1964) orbit-averaged GW dissipation
@@ -117,35 +118,38 @@ int secular_evolve_binary(SecularBinary& bin, double dt, double G, double c_code
     double c2 = c_code * c_code;
     double mu = G * (bin.m1 + bin.m2);
 
-    // Compute initial rates to estimate secular timescale for adaptive stepping
-    double da0 = compute_da_dt(bin.a, bin.e, beta, pn_order)
-               + compute_da_dt_pn35(bin.a, bin.e, beta, mu, c2, pn_order);
-    double de0 = compute_de_dt(bin.a, bin.e, beta, pn_order)
-               + compute_de_dt_pn35(bin.a, bin.e, beta, mu, c2, pn_order);
-    double dw0 = compute_domega_dt(bin.a, bin.e, mu, c2, pn_order);
-
-    // Secular timestep criterion: eta_sec * min(|a/da_dt|, |e/de_dt|, 1/|domega_dt|). BIFROST Eq. 30 writes
-    // omega/omega-dot, but omega is an angle: near omega = 0 that term vanished and every call ran the
-    // 100000-step cap. The precession enters through the time to turn by one radian.
+    // Secular timestep criterion: eta_sec * min(|a/da_dt|, |e/de_dt|) from the current state, re-evaluated every
+    // sub-step (t_GW ~ a^4 shrinks within one interval of an inspiral; a count fixed from the initial rates
+    // overshot coalescence). BIFROST Eq. 30 also has omega/omega-dot, but omega is an angle (near omega = 0
+    // every call ran the 100000-step cap), and the drift of omega is the midpoint rule of omega-dot(a, e):
+    // exact while a and e are constant; with a, e changing on t_GW its error over dt is ~ eta_sec^2 of the
+    // precession angle. A precession term (1/omega-dot) made a 10+10 Msun binary at 0.01 AU take the
+    // 100000-step cap in every evolution (48 ms each). NBODY_SECULAR_PREC_STEP=1 restores 1/|omega-dot|.
+    static const bool prec_step = std::getenv("NBODY_SECULAR_PREC_STEP") && std::atoi(std::getenv("NBODY_SECULAR_PREC_STEP"));
     const double eta_sec = 0.01;
-    double t_sec = 1e30;
-    if (std::fabs(da0) > 0.0)
-        t_sec = std::min(t_sec, std::fabs(bin.a / da0));
-    if (std::fabs(de0) > 0.0 && bin.e > 0.0)
-        t_sec = std::min(t_sec, std::fabs(bin.e / de0));
-    if (std::fabs(dw0) > 0.0)
-        t_sec = std::min(t_sec, 1.0 / std::fabs(dw0));
-    double dt_sec = eta_sec * t_sec;
-
-    // Adaptive number of internal steps
-    int n_steps = (dt_sec > 0.0 && dt / dt_sec < 100000.0) ? std::max(1, (int)std::ceil(dt / dt_sec)) : 100000;
-    double h = dt / n_steps;
+    constexpr int max_steps = 100000;
+    auto step_size = [&](double a, double e) {
+        const double da = compute_da_dt(a, e, beta, pn_order) + compute_da_dt_pn35(a, e, beta, mu, c2, pn_order);
+        const double de = compute_de_dt(a, e, beta, pn_order) + compute_de_dt_pn35(a, e, beta, mu, c2, pn_order);
+        double t_sec = 1e30;
+        if (std::fabs(da) > 0.0) t_sec = std::min(t_sec, std::fabs(a / da));
+        if (std::fabs(de) > 0.0 && e > 0.0) t_sec = std::min(t_sec, std::fabs(e / de));
+        if (prec_step) {
+            const double dw = compute_domega_dt(a, e, mu, c2, pn_order);
+            if (std::fabs(dw) > 0.0) t_sec = std::min(t_sec, 1.0 / std::fabs(dw));
+        }
+        return std::max(eta_sec * t_sec, dt / max_steps);
+    };
 
     // Initialize auxiliary variables equal to the physical state
     double a_aux = bin.a;
     double e_aux = bin.e;
 
-    for (int step = 0; step < n_steps; step++) {
+    int n_steps = 0;
+    for (double t_done = 0.0; t_done < dt && n_steps < max_steps; n_steps++) {
+        double h = step_size(bin.a, bin.e);
+        if (h >= (dt - t_done) * (1.0 - 1e-12)) h = dt - t_done;   // last sub-step lands on dt
+        t_done = (h == dt - t_done) ? dt : t_done + h;
         double a = bin.a;
         double e = bin.e;
 

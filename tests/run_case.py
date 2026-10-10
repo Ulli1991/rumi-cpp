@@ -84,6 +84,12 @@ SEC_BINARY = dict(TEST_CASE="binary_test", INTEGRATOR="hhs", BINARY_A_PC="1e-5",
 # unless the IC generator enforces r_p > R1 + R2 (AUDIT F6). One 1e-5 Myr step (hundreds of orbits).
 CLOSE_BINARIES = dict(BINARIES, BINARY_FRAC="0.5", BINARY_A_MIN_AU="0.01", BINARY_A_MAX_AU="0.1",
                       TOTAL_TIME_MYR="1e-5", DT_MAX_MYR="1e-5")
+# 1.0+0.8 Msun stellar binary, a = 0.02 AU, e = 0.9, all PN orders on (M_PN = 5): ~2400 orbits per half step,
+# secular path. Below m_pn it is a Kepler drift (as in LogH): no PN precession sub-steps
+SEC_STELLAR = dict(SEC_BINARY, BINARY_A_PC="1e-7", BINARY_E="0.9", BINARY_M1="1.0", BINARY_M2="0.8",
+                   BINARY_ROT_DEG="0")
+# 10+10 Msun BH binary, a = 0.01 AU, e = 0.5, all PN orders: 1.7 rad of 1PN precession per yr, t_GW ~ 1 Myr
+SEC_BH_TIGHT = dict(SEC_BINARY, BINARY_A_PC="5e-8", BINARY_ROT_DEG="0")
 # 16 stars inside r_ngb: one 15-body neighbour group, more than LogH's fixed storage (LOGH_MAX_BODIES = 8)
 # Collisional FSI run of a field binary (r_ngb below a, so no subsystem): the start-of-step kernel's criteria set the step
 FSI_BINARY = dict(TEST_CASE="binary_test", INTEGRATOR="fsi", TOTAL_TIME_MYR="1e-5", DT_MAX_MYR="1e-5", DT_MIN_MYR="1e-14",
@@ -459,6 +465,13 @@ CASES = {
     # The secular-triple driver took the inner pair from the first two ids (fixed 2026-10-10)
     # The secular step used omega / omega-dot (fixed 2026-10-11)
     "secular_omega0_steps": lambda exe: secular_steps(exe, "secular binary at omega = 1e-6", SEC_BINARY, 10),
+    # Stellar binaries got PN secular terms: 20 internal steps per evolution here (thousands at L0 of the 200k
+    # cluster, 5-7 ms secular calls). Measured 1 after (no PN below m_pn).
+    "secular_stellar_no_pn": lambda exe: secular_steps(exe, "stellar binary, PN on", SEC_STELLAR, 1.3),
+    # The step also had a precession term (1/omega-dot), but the omega drift is exact for constant (a, e): 1028
+    # internal steps per evolution here, the 100000-step cap (48 ms) for this binary at 1e-3 Myr steps.
+    # Measured 1 after (eta_sec t_GW > dt).
+    "secular_bh_tight_steps": lambda exe: secular_steps(exe, "BH binary at 0.01 AU", SEC_BH_TIGHT, 1.3),
     "triple_id_order": lambda exe: triple_order(exe, "secular triple", SEC_TRIPLE, 1e-6),
     # Measured 9.8e-9 (dense core, at the restart threshold); 2.35e-8 before the pericentre check, 2.68e-8 with
     # it (seed 5): bound 3.5e-8

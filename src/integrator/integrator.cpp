@@ -637,10 +637,12 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
             auto oe_pre = cartesian_to_elements(r_rel_pre, v_rel_pre, mu_sec);
             double E_orb_pre = -G * m1_sec * m2_sec / (2.0 * oe_pre.a);
 
-            substeps[k] = integrate_secular_binary(p1, v1, h_m(idx0 - start),
-                                     p2, v2, h_m(idx1 - start),
-                                     G, g_collisional.c_code,
-                                     g_collisional.pn_order, dt);
+            // PN terms only for compact binaries (a member above m_pn), as in LogH and BIFROST: stellar binaries
+            // are a Kepler drift. With PN on, a tight stellar binary took thousands of 1PN-precession sub-steps
+            // per evolution (5-7 ms secular calls at depths 3-6 of the 200k cluster)
+            const bool pn_binary = std::max(m1_sec, m2_sec) >= g_collisional.m_pn;
+            substeps[k] = integrate_secular_binary(p1, v1, m1_sec, p2, v2, m2_sec, G, g_collisional.c_code,
+                                                   pn_binary ? g_collisional.pn_order : 0, dt);
 
             // GW energy bookkeeping: energy radiated = E_orb_before - E_orb_after
             double r_rel_post[3] = {p2[0]-p1[0], p2[1]-p1[1], p2[2]-p1[2]};
@@ -784,7 +786,8 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
 
             double a_in_pre = tri.inner.a;  // save for GW bookkeeping
 
-            secular_evolve_triple(tri, dt, G, g_collisional.c_code, g_collisional.pn_order);
+            secular_evolve_triple(tri, dt, G, g_collisional.c_code,
+                                  std::max(m1, m2) >= g_collisional.m_pn ? g_collisional.pn_order : 0);
             adv_check.advanced(s, dt, "secular triple");
 
             // GW energy bookkeeping for inner binary inspiral
