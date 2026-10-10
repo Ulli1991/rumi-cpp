@@ -2,6 +2,9 @@
 
 #include "logh.h"
 
+// pos + vel + aux_vel per body, 2 spins + 2 auxiliary spins, t, B
+constexpr int GBS_DIM_MAX = LOGH_MAX_BODIES * 9 + 12 + 2;
+
 // GBS (Gragg-Bulirsch-Stoer) extrapolation integrator
 // for high-accuracy integration of LogH equations of motion
 
@@ -14,9 +17,9 @@ struct GBSIntegrator {
     // Extrapolation table (Neville-Aitken)
     // table[i] stores RAW midpoint result M(n_i) — never modified by extrapolation
     // work[i] stores the Neville table entries during extrapolation
-    double table[MAX_STAGES][LOGH_MAX_BODIES * 9 + 2];  // pos+vel+aux_vel+t+B per stage
-    double work[MAX_STAGES][LOGH_MAX_BODIES * 9 + 2];
-    double diag_prev[LOGH_MAX_BODIES * 9 + 2];  // T[k-1][k-1] saved between extrapolate() calls
+    double table[MAX_STAGES][GBS_DIM_MAX];  // pos+vel+aux_vel(+spins)+t+B per stage
+    double work[MAX_STAGES][GBS_DIM_MAX];
+    double diag_prev[GBS_DIM_MAX];  // T[k-1][k-1] saved between extrapolate() calls
 
     GBSIntegrator(double eta = 1e-10) : eta_gbs(eta) {}
 
@@ -47,4 +50,7 @@ private:
     void pack_state(const LogHState& state, double* y, int& dim);
     // Unpack flat array back into LogHState
     void unpack_state(const double* y, int dim, LogHState& state);
+    // |chi| of spin1, spin2, aux_spin1, aux_spin2, and their restoration after extrapolation
+    static void spin_norms(LogHState& state, double norm[4]);
+    static void restore_spin_norms(LogHState& state, const double norm[4]);
 };

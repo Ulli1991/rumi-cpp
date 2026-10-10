@@ -17,6 +17,7 @@
 #include "mergers.h"
 #include "merger_tree.h"
 #include "runtime_sse.h"
+#include "post_newtonian.h"
 CollisionalConfig g_collisional;
 
 // Binary orbit tracker for PN precession validation
@@ -143,6 +144,83 @@ struct BinaryTracker {
                     "  ratio_raw=%.4f  ratio_apo=%.4f (n_apo=%d, e_apo=%.6f)\n",
                     orbits_cumul, oe.a, oe.e,
                     ratio_raw, ratio_apo, n_apo, e_at_apo);
+        std::fflush(stdout);
+    }
+};
+
+// Spin tracker for a spinning BH binary (BIFROST sec. 3.7): |chi_i| (an exact invariant of dS/dt = Omega × S),
+// the conserved J = L_N + L_PN1 + L_SO + S1 + S2 (Kidder 1995 eq. 2.9), and the precession angle of S1 about
+// the initial J against the orbit-averaged spin-orbit rate (2 + 3 m2 / (2 m1)) G |J| / (c^2 a^3 (1-e^2)^1.5),
+// exact for simple precession (S2 = 0).
+struct SpinTracker {
+    double m1 = 0, m2 = 0, chi0[2] = {0, 0}, J0[3] = {0, 0, 0}, Jhat[3] = {0, 0, 0}, e1[3] = {0, 0, 0},
+           e2[3] = {0, 0, 0}, rate = 0, phi_prev = 0, phi_cumul = 0;
+    bool initialized = false;
+
+    static int find_pid(Particles& p, int pid) {
+        auto h_pid = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.particle_id);
+        for (int i = 0; i < p.N; i++) if (h_pid(i) == pid) return i;
+        return -1;
+    }
+    // x = x1 - x2, v = v1 - v2, physical spins and |chi|
+    bool state(Particles& p, double G, double x[3], double v[3], double S1[3], double S2[3], double chi[2]) {
+        int i1 = find_pid(p, 0), i2 = find_pid(p, 1);
+        if (i1 < 0 || i2 < 0) return false;
+        auto hx = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.x);
+        auto hy = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.y);
+        auto hz = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.z);
+        auto hvx = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vx);
+        auto hvy = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vy);
+        auto hvz = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vz);
+        auto hm = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.mass);
+        auto hs = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.spin_vec);
+        x[0] = hx(i1) - hx(i2); x[1] = hy(i1) - hy(i2); x[2] = hz(i1) - hz(i2);
+        v[0] = hvx(i1) - hvx(i2); v[1] = hvy(i1) - hvy(i2); v[2] = hvz(i1) - hvz(i2);
+        m1 = hm(i1); m2 = hm(i2);
+        double f1 = G * m1 * m1 / C_CODE, f2 = G * m2 * m2 / C_CODE;
+        for (int k = 0; k < 3; k++) { S1[k] = hs(i1, k) * f1; S2[k] = hs(i2, k) * f2; }
+        chi[0] = std::sqrt(hs(i1, 0)*hs(i1, 0) + hs(i1, 1)*hs(i1, 1) + hs(i1, 2)*hs(i1, 2));
+        chi[1] = std::sqrt(hs(i2, 0)*hs(i2, 0) + hs(i2, 1)*hs(i2, 1) + hs(i2, 2)*hs(i2, 2));
+        return true;
+    }
+    double angle(const double S1[3]) const {
+        double a = S1[0]*e1[0] + S1[1]*e1[1] + S1[2]*e1[2], b = S1[0]*e2[0] + S1[1]*e2[1] + S1[2]*e2[2];
+        return std::atan2(b, a);
+    }
+    void init(Particles& p, double G) {
+        if (p.N != 2 || !p.collisional) return;
+        double x[3], v[3], S1[3], S2[3];
+        if (!state(p, G, x, v, S1, S2, chi0) || chi0[0] + chi0[1] == 0.0) return;
+        binary_total_angular_momentum(x, v, m1, m2, S1, S2, G, C_CODE, g_collisional.pn_order & 1, J0);
+        double J = std::sqrt(J0[0]*J0[0] + J0[1]*J0[1] + J0[2]*J0[2]);
+        for (int k = 0; k < 3; k++) Jhat[k] = J0[k] / J;
+        double sJ = S1[0]*Jhat[0] + S1[1]*Jhat[1] + S1[2]*Jhat[2];
+        for (int k = 0; k < 3; k++) e1[k] = S1[k] - sJ * Jhat[k];
+        double ne1 = std::sqrt(e1[0]*e1[0] + e1[1]*e1[1] + e1[2]*e1[2]);
+        if (ne1 > 0) for (int k = 0; k < 3; k++) e1[k] /= ne1;
+        e2[0] = Jhat[1]*e1[2] - Jhat[2]*e1[1]; e2[1] = Jhat[2]*e1[0] - Jhat[0]*e1[2]; e2[2] = Jhat[0]*e1[1] - Jhat[1]*e1[0];
+        auto oe = cartesian_to_elements(x, v, G * (m1 + m2));
+        double ome2 = 1.0 - oe.e * oe.e;
+        rate = (2.0 + 1.5 * m2 / m1) * G * J / (C_CODE * C_CODE * oe.a * oe.a * oe.a * ome2 * std::sqrt(ome2));
+        phi_prev = angle(S1);
+        initialized = true;
+        std::printf("SpinTracker: chi1=%.4f chi2=%.4f, S1 spin-orbit precession %.4e rad/TU\n", chi0[0], chi0[1], rate);
+    }
+    void update(Particles& p, double G, double t_code) {
+        if (!initialized) return;
+        double x[3], v[3], S1[3], S2[3], chi[2], J[3];
+        if (!state(p, G, x, v, S1, S2, chi)) return;
+        binary_total_angular_momentum(x, v, m1, m2, S1, S2, G, C_CODE, g_collisional.pn_order & 1, J);
+        double dJ = std::sqrt((J[0]-J0[0])*(J[0]-J0[0]) + (J[1]-J0[1])*(J[1]-J0[1]) + (J[2]-J0[2])*(J[2]-J0[2])) /
+                    std::sqrt(J0[0]*J0[0] + J0[1]*J0[1] + J0[2]*J0[2]);
+        double phi = angle(S1), d = phi - phi_prev;
+        if (d > M_PI) d -= 2.0 * M_PI;
+        if (d < -M_PI) d += 2.0 * M_PI;
+        phi_cumul += d;
+        phi_prev = phi;
+        double dchi = std::max(std::fabs(chi[0] - chi0[0]), std::fabs(chi[1] - chi0[1]));
+        std::printf("  Spin: dchi=%.3e  dJ/J=%.3e  phi_S1=%.6e  ratio_so=%.6f\n", dchi, dJ, phi_cumul,
+                    t_code > 0 ? phi_cumul / (rate * t_code) : 0.0);
         std::fflush(stdout);
     }
 };
@@ -383,6 +461,26 @@ struct Config {
 };
 
 // ---------------------------------------------------------------------------
+// BINARY_CHI1 / BINARY_CHI2 = "cx,cy,cz" (or space-separated): dimensionless spin vectors of the two binary_test bodies
+static void set_binary_spins(Particles& p, const Config& cfg) {
+#ifdef ENABLE_COLLISIONAL
+    if (!p.collisional) return;
+    auto h_spin = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.spin_vec);
+    bool any = false;
+    for (int b = 0; b < 2; b++) {
+        std::string s = cfg.get_str(b == 0 ? "BINARY_CHI1" : "BINARY_CHI2", "");
+        double c[3] = {0, 0, 0};
+        for (char& ch : s) if (ch == ',' || ch == ';') ch = ' ';
+        if (s.empty() || std::sscanf(s.c_str(), "%lf %lf %lf", &c[0], &c[1], &c[2]) != 3) continue;
+        for (int k = 0; k < 3; k++) h_spin(b, k) = c[k];
+        any = true;
+    }
+    if (any) Kokkos::deep_copy(p.spin_vec, h_spin);
+#else
+    (void)p; (void)cfg;
+#endif
+}
+
 static void print_usage(const char* prog) {
     std::printf("Usage: %s [--config <file>] [--test <case>]\n", prog);
     std::printf("  --config <file>   Config file (default: config.txt)\n");
@@ -605,8 +703,10 @@ int main(int argc, char** argv) {
                              r_break_au, &ic_sse_cfg);
             } else if (test == "binary_test") {
                 init_binary_test(p, binary_a_pc, binary_e, binary_m1, binary_m2, binary_rot);
+                set_binary_spins(p, cfg);
             } else if (test == "binary_test_peri") {
                 init_binary_test_peri(p, binary_a_pc, binary_e, binary_m1, binary_m2);
+                set_binary_spins(p, cfg);
             } else if (test == "triple_test") {
                 init_triple_test(p, triple_a_in, triple_e_in, triple_m1, triple_m2,
                                  triple_a_out, triple_e_out, triple_m3, triple_incl, triple_outer_first);
@@ -822,8 +922,10 @@ int main(int argc, char** argv) {
 
 #ifdef ENABLE_COLLISIONAL
         BinaryTracker bin_tracker;
+        SpinTracker spin_tracker;
         if ((test == "binary_test" || test == "binary_test_peri") && g_collisional.enabled && my_rank == 0) {
             bin_tracker.init(work_p, G);
+            spin_tracker.init(work_p, G);
         }
         TripleTracker triple_tracker;
         if (test == "triple_test" && g_collisional.enabled && my_rank == 0) {
@@ -851,6 +953,9 @@ int main(int argc, char** argv) {
 #ifdef ENABLE_COLLISIONAL
                 if (bin_tracker.initialized) {
                     bin_tracker.update(work_p, G, t_now);
+                }
+                if (spin_tracker.initialized) {
+                    spin_tracker.update(work_p, G, t_now);
                 }
                 if (triple_tracker.initialized) {
                     triple_tracker.update(work_p, G, t_now);

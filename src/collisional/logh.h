@@ -24,8 +24,10 @@ struct LogHState {
     double aux_vel[LOGH_MAX_BODIES * 3];
     bool use_aux_vel;                       // whether PN is active
 
-    // Spin vectors for BH binaries (dimensionless chi vectors)
+    // Spin vectors for BH binaries (dimensionless chi vectors; S = chi G m^2 / c) and their auxiliary
+    // copies Z (Rantala+ 2017): S precesses with Omega(w, Z), Z with Omega(v, S)
     double spin1[3], spin2[3];
+    double aux_spin1[3], aux_spin2[3];
     bool has_spins;                          // true for 2-body BH binaries with spins
     double c_code;                           // speed of light (normalized units)
 

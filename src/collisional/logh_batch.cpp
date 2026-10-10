@@ -461,10 +461,11 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
             pn_order = 0;
         }
 
-        // Load spin vectors for 2-body BH binaries
+        // Load spin vectors for 2-body BH binaries; spin couplings (PN_ORDER bit 32, BIFROST sec. 3.7) need the
+        // PN path (state.use_aux_vel), otherwise the spins are carried unchanged
         state.has_spins = false;
         state.c_code = c_norm;
-        if (nb == 2 && batch.has_stored_spins[s]) {
+        if (nb == 2 && batch.has_stored_spins[s] && state.use_aux_vel && (pn_order & PN_SPIN)) {
             // Spins are dimensionless chi vectors — no normalization needed
             state.has_spins = true;
             state.spin1[0] = batch.stored_spins[s*6+0];
@@ -473,6 +474,8 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
             state.spin2[0] = batch.stored_spins[s*6+3];
             state.spin2[1] = batch.stored_spins[s*6+4];
             state.spin2[2] = batch.stored_spins[s*6+5];
+            std::memcpy(state.aux_spin1, state.spin1, sizeof(state.spin1));   // auxiliary spins Z = S
+            std::memcpy(state.aux_spin2, state.spin2, sizeof(state.spin2));
         }
 
         // Always recompute B = -(T+U) from current state.

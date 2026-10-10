@@ -49,6 +49,14 @@ PN_LOGH = dict(TEST_CASE="binary_test", INTEGRATOR="hhs", BINARY_A_PC="1e-7", BI
                BINARY_M2="500", TOTAL_TIME_MYR="2e-9", DT_MAX_MYR="2e-10", DT_MIN_MYR="1e-18", SOFTENING_PC="0",
                COLLISIONAL="true", PN_ORDER="31", M_PN="5.0", ETA_RESTART="1e-8", SSE_ENABLED="false",
                PRINT_INTERVAL="1", PROFILING="false")
+# Spinning BH binary in LogH (BIFROST sec. 3.7; PN_ORDER bit 32 = spin couplings), v/c ~ 0.02, ~21 orbits.
+# Precession: e = 0, PN1 + spins, small chi1 perpendicular to L (simple precession about J), chi2 = 0.
+SPIN_PREC = dict(PN_LOGH, BINARY_E="0.0", PN_ORDER="33", BINARY_CHI1="0.1 0 0", BINARY_CHI2="0 0 0")
+# Total J = L_N + L_SO + S1 + S2: e = 0.5, two large misaligned spins, spin couplings only (no orbital PN
+# terms, whose truncated L_PN1 alone leaves |dJ|/|J| ~ 5e-6 here)
+SPIN_J = dict(PN_LOGH, PN_ORDER="32", BINARY_CHI1="0.6 0 0.6", BINARY_CHI2="0 0.7 -0.4")
+# Same with PN1: J adds L_PN1; the error is the O((v/c)^4) truncation (5.3e-6 measured, 4.9e-6 with chi = 0)
+SPIN_J_PN1 = dict(SPIN_J, PN_ORDER="33")
 # 5000 Kroupa stars, 50 % primordial binaries (1250 pairs, more than the initial neighbour buffer of 1000)
 BINARIES50 = dict(BINARIES, PLUMMER_N="5000", PLUMMER_M_TOTAL="2000", BINARY_FRAC="0.5", TOTAL_TIME_MYR="1e-3")
 # Dense core (r_h = 0.05 pc), 50 % binaries of 1-20 AU: binary-single encounters form triples and multiplets
@@ -154,6 +162,29 @@ def spins(exe, label, cfg, chi):
     rows = re.findall(r"^\s+\d+\s+BIN\s+2\s+(?:\S+\s+){5}(\S+)\s+(\S+)", out, re.M)
     worst = max((abs(float(c) - chi) for row in rows for c in row), default=float("inf"))
     return check(f"{label} max | |chi| - {chi} |", worst, 1e-3)
+
+
+def spin_rows(exe, cfg):
+    """(dchi, dJ/J, phi_S1, ratio_so) rows printed by the spin tracker."""
+    rows = re.findall(r"Spin: dchi=(\S+)\s+dJ/J=(\S+)\s+phi_S1=(\S+)\s+ratio_so=(\S+)", run_output(exe, cfg))
+    if not rows:
+        raise SystemExit("FAIL: no spin tracker output")
+    return [[float(x) for x in r] for r in rows]
+
+
+def spin_precession(exe, label, cfg, tol, dchi_bound):
+    """S1 precession angle about J against the orbit-averaged 1.5PN spin-orbit rate; |chi| invariant."""
+    rows = spin_rows(exe, cfg)
+    ok = check(f"{label} |precession / spin-orbit rate - 1|", abs(rows[-1][3] - 1.0), tol)
+    return ok & check(f"{label} max | |chi| - |chi0| |", max(r[0] for r in rows), dchi_bound)
+
+
+def spin_j(exe, label, cfg, dj_bound, dchi_bound):
+    """Total J = L_N + L_PN1 + L_SO + S1 + S2 conserved; |chi| invariant."""
+    rows = spin_rows(exe, cfg)
+    ok = check(f"{label} max |dJ|/|J|", max(r[1] for r in rows), dj_bound)
+    ok &= check(f"{label} S1 precessed [rad]", abs(rows[-1][2]), 1e-3, lower=True)
+    return ok & check(f"{label} max | |chi| - |chi0| |", max(r[0] for r in rows), dchi_bound)
 
 
 def replicas(exe, label, cfg):
@@ -360,6 +391,14 @@ CASES = {
     "binaries_timestep": lambda exe: binaries(exe, "binaries", BINARIES, (1e-8, 1e-12)),
     # Before: 40 LogH give-ups (E_N + E_1PN cannot hold eta_restart under PN), |dE/E| 4.8e-5, |dL/L| 2.3e-5
     # unbooked. Measured 0 / 0 / 2.6e-13 km/s (the whole system is the PN subsystem, so all of it is booked).
+    # Spins in LogH (BIFROST sec. 3.7). Before: the spins were not in the GBS state vector, so they never
+    # changed (precession ratio 0, |dJ|/|J| 7.6e-6 with PN1), and the orbit had no spin-dependent terms.
+    # Measured: precession ratio - 1 = 5.5e-3 (PN1 shifts the orbit; < 5e-7 with spin couplings only),
+    # | |chi| - |chi0| | <= 3.0e-15 (Rodrigues rotations, norms restored after the extrapolation),
+    # |dJ|/|J| 3.5e-7 (spins only; 1.1e-8 at 4x the separation: the O((v/c)^5) truncation) and 5.25e-6 with PN1
+    "spin_precession": lambda exe: spin_precession(exe, "spin-orbit precession", SPIN_PREC, 7.2e-3, 4e-15),
+    "spin_j": lambda exe: spin_j(exe, "spinning BH binary", SPIN_J, 4.6e-7, 4e-15),
+    "spin_j_pn1": lambda exe: spin_j(exe, "spinning BH binary + PN1", SPIN_J_PN1, 6.9e-6, 4e-15),
     "pn_logh_books": lambda exe: pn_books(exe, "PN LogH binary", PN_LOGH, (1e-12, 1e-11)),
     # Before: merger remnants kept a progenitor's m_zams, so SSE shrank them back (56.7 M_sun lost in 46
     # mergers). Measured 1.3e-9 M_sun (winds over 5 steps).

@@ -20,6 +20,12 @@ void GBSIntegrator::pack_state(const LogHState& state, double* y, int& dim) {
     if (state.use_aux_vel) {
         for (int i = 0; i < n * 3; i++) y[dim++] = state.aux_vel[i];
     }
+    if (state.has_spins) {
+        for (int k = 0; k < 3; k++) y[dim++] = state.spin1[k];
+        for (int k = 0; k < 3; k++) y[dim++] = state.spin2[k];
+        for (int k = 0; k < 3; k++) y[dim++] = state.aux_spin1[k];
+        for (int k = 0; k < 3; k++) y[dim++] = state.aux_spin2[k];
+    }
     y[dim++] = state.t;
     y[dim++] = state.B;
 }
@@ -33,8 +39,35 @@ void GBSIntegrator::unpack_state(const double* y, int dim, LogHState& state) {
     if (state.use_aux_vel) {
         for (int i = 0; i < n * 3; i++) state.aux_vel[i] = y[idx++];
     }
+    if (state.has_spins) {
+        for (int k = 0; k < 3; k++) state.spin1[k] = y[idx++];
+        for (int k = 0; k < 3; k++) state.spin2[k] = y[idx++];
+        for (int k = 0; k < 3; k++) state.aux_spin1[k] = y[idx++];
+        for (int k = 0; k < 3; k++) state.aux_spin2[k] = y[idx++];
+    }
     state.t = y[idx++];
     state.B = y[idx++];
+}
+
+static double* spin_vec(LogHState& s, int i) {
+    return i == 0 ? s.spin1 : i == 1 ? s.spin2 : i == 2 ? s.aux_spin1 : s.aux_spin2;
+}
+
+void GBSIntegrator::spin_norms(LogHState& state, double norm[4]) {
+    for (int i = 0; i < 4; i++) {
+        const double* c = spin_vec(state, i);
+        norm[i] = std::sqrt(c[0]*c[0] + c[1]*c[1] + c[2]*c[2]);
+    }
+}
+
+void GBSIntegrator::restore_spin_norms(LogHState& state, const double norm[4]) {
+    double now[4];
+    spin_norms(state, now);
+    for (int i = 0; i < 4; i++) {
+        if (now[i] == 0.0) continue;
+        double* c = spin_vec(state, i);
+        for (int k = 0; k < 3; k++) c[k] *= norm[i] / now[i];
+    }
 }
 
 // ============================================================================
@@ -161,7 +194,7 @@ struct GbsStats {
 bool GBSIntegrator::step(LogHState& state, double ds, double G, double& ds_next,
                           double c_code, int pn_order) {
     int dim = 0;
-    double y0[LOGH_MAX_BODIES * 9 + 2];
+    double y0[GBS_DIM_MAX];
     pack_state(state, y0, dim);
 
     bool do_debug = (state.n_bodies == 2 && gbs_debug_counter < 5);
@@ -200,7 +233,12 @@ bool GBSIntegrator::step(LogHState& state, double ds, double G, double& ds_next,
             if (err < eta_gbs) {
                 g_gbs_stats.stage[stage]++;
                 // Converged: unpack best estimate from work[stage]
+                double chi_norm[4];
+                if (state.has_spins) spin_norms(state, chi_norm);
                 unpack_state(work[stage], dim, state);
+                // |chi| is an exact invariant of dS/dt = Omega × S (the leapfrog rotations keep it); the
+                // polynomial extrapolation does not, to within eta_gbs: restore the norms
+                if (state.has_spins) restore_spin_norms(state, chi_norm);
 
                 if (do_debug) {
                     double w_final = omega_from_packed(work[stage], 2);

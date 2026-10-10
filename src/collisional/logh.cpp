@@ -207,9 +207,50 @@ void logh_leapfrog_step(LogHState& state, double ds, double G) {
 // pn_out[i*3+k] = individual PN acceleration on body i
 // ============================================================================
 
+// Physical spin S = chi G m^2 / c of body b
+static void spin_from_chi(const LogHState& state, const double chi[3], int b, double G, double S[3]) {
+    double f = G * state.mass[b] * state.mass[b] / state.c_code;
+    for (int k = 0; k < 3; k++) S[k] = chi[k] * f;
+}
+
+// Spin-dependent PN accelerations (spin-orbit, spin-spin, Kerr quadrupole; BIFROST sec. 3.7) of a 2-body
+// subsystem, evaluated at velocities eval_vel and dimensionless spins chi1, chi2; added to pn_out
+static void add_spin_accel(const LogHState& state, const double* eval_vel, const double chi1[3],
+                           const double chi2[3], double G, double* pn_out) {
+    double x[3], v[3], S1[3], S2[3], a[3];
+    for (int k = 0; k < 3; k++) {
+        x[k] = state.pos[k] - state.pos[3 + k];
+        v[k] = eval_vel[k] - eval_vel[3 + k];
+    }
+    spin_from_chi(state, chi1, 0, G, S1);
+    spin_from_chi(state, chi2, 1, G, S2);
+    spin_pn_acceleration(x, v, state.mass[0], state.mass[1], S1, S2, G, state.c_code, a);
+    const double M = state.mass[0] + state.mass[1];
+    for (int k = 0; k < 3; k++) {
+        pn_out[k] += state.mass[1] / M * a[k];
+        pn_out[3 + k] -= state.mass[0] / M * a[k];
+    }
+}
+
+// Rotate the spins rot1, rot2 by the precession vectors evaluated at (x, eval_vel, chi1, chi2) over the
+// physical time dt: exact (norm-preserving, time-symmetric) solution of dS/dt = Omega × S with Omega frozen
+static void rotate_spins(const LogHState& state, const double* eval_vel, const double chi1[3],
+                         const double chi2[3], double G, double dt, double rot1[3], double rot2[3]) {
+    double x[3], v[3], S1[3], S2[3], O1[3], O2[3];
+    for (int k = 0; k < 3; k++) {
+        x[k] = state.pos[k] - state.pos[3 + k];
+        v[k] = eval_vel[k] - eval_vel[3 + k];
+    }
+    spin_from_chi(state, chi1, 0, G, S1);
+    spin_from_chi(state, chi2, 1, G, S2);
+    spin_precession(x, v, state.mass[0], state.mass[1], S1, S2, G, state.c_code, O1, O2);
+    rotate_about(rot1, O1, dt);
+    rotate_about(rot2, O2, dt);
+}
+
 static void compute_pn_all_pairs(const LogHState& state, const double* eval_vel,
                                   double G, double c_code, int pn_order,
-                                  double* pn_out) {
+                                  double* pn_out, const double* chi1 = nullptr, const double* chi2 = nullptr) {
     int n = state.n_bodies;
     std::memset(pn_out, 0, n * 3 * sizeof(double));
     for (int i = 0; i < n; i++) {
@@ -228,6 +269,7 @@ static void compute_pn_all_pairs(const LogHState& state, const double* eval_vel,
             }
         }
     }
+    if (state.has_spins && n == 2 && chi1) add_spin_accel(state, eval_vel, chi1, chi2, G, pn_out);
 }
 
 // ============================================================================
@@ -268,29 +310,6 @@ static void compute_pn_all_pairs(const LogHState& state, const double* eval_vel,
 //   C' = C - (eps/2)*W_old,  D' = D - (eps/4)*P
 //   C = ½ Σ mᵢ vᵢ·Δᵢ, D = ⅛ Σ mᵢ|Δᵢ|², Δ = eps*(a+g(w))
 //   W_old = Σ mᵢ vᵢ·gᵢ(w), P = Σ mᵢ Δᵢ·gᵢ(w)
-// Helper: evolve spins for a 2-body BH binary during a K_phys step
-static void evolve_spins_in_kphys(LogHState& state, double dt_phys, double G) {
-    if (!state.has_spins || state.n_bodies != 2 || state.c_code <= 0.0) return;
-
-    // Relative position and velocity
-    double r[3] = {state.pos[1*3+0]-state.pos[0*3+0],
-                   state.pos[1*3+1]-state.pos[0*3+1],
-                   state.pos[1*3+2]-state.pos[0*3+2]};
-    double v[3] = {state.vel[1*3+0]-state.vel[0*3+0],
-                   state.vel[1*3+1]-state.vel[0*3+1],
-                   state.vel[1*3+2]-state.vel[0*3+2]};
-
-    double m1 = state.mass[0], m2 = state.mass[1];
-
-    // Compute precession rates
-    double Omega1[3], Omega2[3];
-    spin_precession(r, v, m1, m2, state.spin1, state.spin2,
-                    G, state.c_code, Omega1, Omega2);
-
-    // Evolve spins by dt_phys
-    evolve_spins(state.spin1, state.spin2, Omega1, Omega2, dt_phys);
-}
-
 static void k_phys_cubic(LogHState& state, const double* accel, const double* pn,
                           double eps, double G) {
     int n = state.n_bodies;
@@ -347,11 +366,11 @@ static void k_phys_cubic(LogHState& state, const double* accel, const double* pn
     double W_mid = W_old + P / (2.0 * Omega);
     state.B -= eps * W_mid * inv_Omega;
 
-    // Evolve spins: physical time elapsed in this K_phys step = eps / Ω
-    if (state.has_spins) {
-        double dt_phys = eps * inv_Omega;
-        evolve_spins_in_kphys(state, dt_phys, G);
-    }
+    // Spins: S rotated by Omega(x, w, Z) over the physical time eps / Ω of this kick (auxiliary spins Z,
+    // Rantala+ 2017; w and Z are frozen during K_phys)
+    if (state.has_spins && n == 2)
+        rotate_spins(state, state.aux_vel, state.aux_spin1, state.aux_spin2, G, eps * inv_Omega,
+                     state.spin1, state.spin2);
 }
 
 void logh_leapfrog_step_pn(LogHState& state, double ds, double G,
@@ -376,22 +395,28 @@ void logh_leapfrog_step_pn(LogHState& state, double ds, double G,
     {
         double Omega = logh_kinetic_energy(state) + state.B;
         double inv_Omega = 1.0 / Omega;
-        compute_pn_all_pairs(state, state.vel, G, c_code, pn_order, pn);
+        compute_pn_all_pairs(state, state.vel, G, c_code, pn_order, pn, state.spin1, state.spin2);
         for (int i = 0; i < n3; i++)
             state.aux_vel[i] += ds_quarter * (accel[i] + pn[i]) * inv_Omega;
+        if (state.has_spins && n == 2)
+            rotate_spins(state, state.vel, state.spin1, state.spin2, G, ds_quarter * inv_Omega,
+                         state.aux_spin1, state.aux_spin2);
     }
 
     // K_phys(ds/2): cubic solve for implicit midpoint (v and B)
-    compute_pn_all_pairs(state, state.aux_vel, G, c_code, pn_order, pn);
+    compute_pn_all_pairs(state, state.aux_vel, G, c_code, pn_order, pn, state.aux_spin1, state.aux_spin2);
     k_phys_cubic(state, accel, pn, ds_half, G);
 
     // K_aux(ds/4): w += (ds/4) * [a + g(v')] / Omega   [EXPLICIT, v' and B' updated]
     {
         double Omega = logh_kinetic_energy(state) + state.B;
         double inv_Omega = 1.0 / Omega;
-        compute_pn_all_pairs(state, state.vel, G, c_code, pn_order, pn);
+        compute_pn_all_pairs(state, state.vel, G, c_code, pn_order, pn, state.spin1, state.spin2);
         for (int i = 0; i < n3; i++)
             state.aux_vel[i] += ds_quarter * (accel[i] + pn[i]) * inv_Omega;
+        if (state.has_spins && n == 2)
+            rotate_spins(state, state.vel, state.spin1, state.spin2, G, ds_quarter * inv_Omega,
+                         state.aux_spin1, state.aux_spin2);
     }
 
     // ============ DRIFT: x += ds * v / Omega,  t += ds / Omega  [EXPLICIT] ============
@@ -412,21 +437,27 @@ void logh_leapfrog_step_pn(LogHState& state, double ds, double G,
     {
         double Omega = logh_kinetic_energy(state) + state.B;
         double inv_Omega = 1.0 / Omega;
-        compute_pn_all_pairs(state, state.vel, G, c_code, pn_order, pn);
+        compute_pn_all_pairs(state, state.vel, G, c_code, pn_order, pn, state.spin1, state.spin2);
         for (int i = 0; i < n3; i++)
             state.aux_vel[i] += ds_quarter * (accel[i] + pn[i]) * inv_Omega;
+        if (state.has_spins && n == 2)
+            rotate_spins(state, state.vel, state.spin1, state.spin2, G, ds_quarter * inv_Omega,
+                         state.aux_spin1, state.aux_spin2);
     }
 
     // K_phys(ds/2): cubic solve with PN
-    compute_pn_all_pairs(state, state.aux_vel, G, c_code, pn_order, pn);
+    compute_pn_all_pairs(state, state.aux_vel, G, c_code, pn_order, pn, state.aux_spin1, state.aux_spin2);
     k_phys_cubic(state, accel, pn, ds_half, G);
 
     // K_aux(ds/4)   [EXPLICIT]
     {
         double Omega = logh_kinetic_energy(state) + state.B;
         double inv_Omega = 1.0 / Omega;
-        compute_pn_all_pairs(state, state.vel, G, c_code, pn_order, pn);
+        compute_pn_all_pairs(state, state.vel, G, c_code, pn_order, pn, state.spin1, state.spin2);
         for (int i = 0; i < n3; i++)
             state.aux_vel[i] += ds_quarter * (accel[i] + pn[i]) * inv_Omega;
+        if (state.has_spins && n == 2)
+            rotate_spins(state, state.vel, state.spin1, state.spin2, G, ds_quarter * inv_Omega,
+                         state.aux_spin1, state.aux_spin2);
     }
 }

@@ -300,69 +300,116 @@ double pn1_energy(const double* pos, const double* vel, const double* mass,
 }
 
 // ============================================================================
-// Spin precession
+// Spin-dependent PN dynamics of a binary (BIFROST sec. 3.7; Thorne & Hartle 1985; explicit forms of
+// Kidder 1995, PRD 52, 821, eqs. 2.2c-d, 2.4, 2.9, covariant spin supplementary condition) plus the
+// spin-induced quadrupole of a Kerr black hole (Poisson 1998, PRD 57, 5287; Racine 2008, PRD 78, 044021).
+// Relative coordinates x = x1 - x2, v = v1 - v2, n = x / r; S_i are physical spins (|S| = chi G m^2 / c).
 // ============================================================================
 
-void spin_precession(const double r[3], const double v[3],
+namespace {
+inline double dot3(const double a[3], const double b[3]) { return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]; }
+inline void cross3(const double a[3], const double b[3], double o[3]) {
+    o[0] = a[1]*b[2] - a[2]*b[1];
+    o[1] = a[2]*b[0] - a[0]*b[2];
+    o[2] = a[0]*b[1] - a[1]*b[0];
+}
+}  // namespace
+
+void spin_precession(const double x[3], const double v[3],
                      double m1, double m2, const double S1[3], const double S2[3],
                      double G, double c_code,
-                     double Omega_prec_1[3], double Omega_prec_2[3]) {
-    double r2 = r[0]*r[0] + r[1]*r[1] + r[2]*r[2];
-    double r_mag = std::sqrt(r2);
-    double inv_r = 1.0 / r_mag;
-    double inv_r2 = inv_r * inv_r;
-    double inv_r3 = inv_r2 * inv_r;
-    double c2 = c_code * c_code;
-
-    // Angular momentum L = m * r x v (relative)
-    double Lx = r[1]*v[2] - r[2]*v[1];
-    double Ly = r[2]*v[0] - r[0]*v[2];
-    double Lz = r[0]*v[1] - r[1]*v[0];
-
-    double mu_red = m1 * m2 / (m1 + m2);  // reduced mass
-    double M = m1 + m2;
-
-    // Spin-orbit precession (de Sitter / geodetic precession)
-    double coeff_SO_1 = G / (2.0 * c2 * r2 * r_mag) * (4.0 + 3.0 * m2 / m1);
-    double coeff_SO_2 = G / (2.0 * c2 * r2 * r_mag) * (4.0 + 3.0 * m1 / m2);
-
-    Omega_prec_1[0] = coeff_SO_1 * Lx;
-    Omega_prec_1[1] = coeff_SO_1 * Ly;
-    Omega_prec_1[2] = coeff_SO_1 * Lz;
-
-    Omega_prec_2[0] = coeff_SO_2 * (-Lx);
-    Omega_prec_2[1] = coeff_SO_2 * (-Ly);
-    Omega_prec_2[2] = coeff_SO_2 * (-Lz);
-
-    // Spin-spin precession
-    double n[3] = {r[0]*inv_r, r[1]*inv_r, r[2]*inv_r};
-    double S2_dot_n = S2[0]*n[0] + S2[1]*n[1] + S2[2]*n[2];
-    double S1_dot_n = S1[0]*n[0] + S1[1]*n[1] + S1[2]*n[2];
-
-    double coeff_SS = G / (c2 * r2 * r_mag);
-    Omega_prec_1[0] += coeff_SS * (S2[0] - 3.0 * S2_dot_n * n[0]);
-    Omega_prec_1[1] += coeff_SS * (S2[1] - 3.0 * S2_dot_n * n[1]);
-    Omega_prec_1[2] += coeff_SS * (S2[2] - 3.0 * S2_dot_n * n[2]);
-
-    Omega_prec_2[0] += coeff_SS * (S1[0] - 3.0 * S1_dot_n * n[0]);
-    Omega_prec_2[1] += coeff_SS * (S1[1] - 3.0 * S1_dot_n * n[1]);
-    Omega_prec_2[2] += coeff_SS * (S1[2] - 3.0 * S1_dot_n * n[2]);
+                     double Omega1[3], double Omega2[3]) {
+    const double r = std::sqrt(dot3(x, x));
+    const double n[3] = {x[0] / r, x[1] / r, x[2] / r};
+    const double mu = m1 * m2 / (m1 + m2);
+    double LN[3];
+    cross3(x, v, LN);
+    for (int k = 0; k < 3; k++) LN[k] *= mu;   // Newtonian orbital angular momentum mu x × v
+    const double pref = G / (c_code * c_code * r * r * r);
+    const double nS1 = dot3(n, S1), nS2 = dot3(n, S2);
+    // Spin-orbit (geodetic, 1.5PN): (2 + 3 m_j / (2 m_i)) L_N; spin-spin (2PN): -S_j + 3 (n·S_j) n;
+    // Kerr quadrupole (2PN): 3 (m_j / m_i) (n·S_i) n
+    const double so1 = 2.0 + 1.5 * m2 / m1, so2 = 2.0 + 1.5 * m1 / m2;
+    for (int k = 0; k < 3; k++) {
+        Omega1[k] = pref * (so1 * LN[k] - S2[k] + 3.0 * nS2 * n[k] + 3.0 * (m2 / m1) * nS1 * n[k]);
+        Omega2[k] = pref * (so2 * LN[k] - S1[k] + 3.0 * nS1 * n[k] + 3.0 * (m1 / m2) * nS2 * n[k]);
+    }
 }
 
-void evolve_spins(double S1[3], double S2[3],
-                  const double Omega_prec_1[3], const double Omega_prec_2[3],
-                  double dt) {
-    double dS1[3], dS2[3];
-    dS1[0] = (Omega_prec_1[1]*S1[2] - Omega_prec_1[2]*S1[1]) * dt;
-    dS1[1] = (Omega_prec_1[2]*S1[0] - Omega_prec_1[0]*S1[2]) * dt;
-    dS1[2] = (Omega_prec_1[0]*S1[1] - Omega_prec_1[1]*S1[0]) * dt;
+void spin_pn_acceleration(const double x[3], const double v[3],
+                          double m1, double m2, const double S1[3], const double S2[3],
+                          double G, double c_code, double a_rel[3]) {
+    const double M = m1 + m2, mu = m1 * m2 / M;
+    const double r = std::sqrt(dot3(x, x));
+    const double n[3] = {x[0] / r, x[1] / r, x[2] / r};
+    const double rdot = dot3(n, v);
+    const double c2 = c_code * c_code;
+    // Kidder's combinations with S = S1 + S2, Delta = M (S2/m2 - S1/m1), dm = m1 - m2:
+    //   A = 2S + (dm/M) Delta,  B = 7S + 3 (dm/M) Delta,  C = 3S + (dm/M) Delta
+    double A[3], B[3], C[3];
+    for (int k = 0; k < 3; k++) {
+        A[k] = (1.0 + m2 / m1) * S1[k] + (1.0 + m1 / m2) * S2[k];
+        B[k] = (4.0 + 3.0 * m2 / m1) * S1[k] + (4.0 + 3.0 * m1 / m2) * S2[k];
+        C[k] = (2.0 + m2 / m1) * S1[k] + (2.0 + m1 / m2) * S2[k];
+    }
+    double nxv[3], vxB[3], nxC[3];
+    cross3(n, v, nxv);
+    cross3(v, B, vxB);
+    cross3(n, C, nxC);
+    const double pso = G / (c2 * r * r * r);
+    const double nvA = dot3(nxv, A);
+    // Spin-orbit (1.5PN), Kidder eq. 2.2c
+    for (int k = 0; k < 3; k++) a_rel[k] = pso * (6.0 * n[k] * nvA - vxB[k] + 3.0 * rdot * nxC[k]);
+    // Spin-spin (2PN), Kidder eq. 2.2d
+    const double nS1 = dot3(n, S1), nS2 = dot3(n, S2), S1S2 = dot3(S1, S2);
+    const double pss = -3.0 * G / (c2 * mu * r * r * r * r);
+    for (int k = 0; k < 3; k++)
+        a_rel[k] += pss * (n[k] * S1S2 + S1[k] * nS2 + S2[k] * nS1 - 5.0 * n[k] * nS1 * nS2);
+    // Kerr spin-induced quadrupole (2PN, Q_i = -S_i^2 / m_i; Racine 2008 with kappa = 1), from the potential
+    // (G m_j / (2 c^2 m_i r^3)) [3 (n·S_i)^2 - S_i^2]
+    const double q1 = 0.5 * pss * m2 / m1, q2 = 0.5 * pss * m1 / m2;
+    const double S1S1 = dot3(S1, S1), S2S2 = dot3(S2, S2);
+    for (int k = 0; k < 3; k++) {
+        a_rel[k] += q1 * (n[k] * S1S1 + 2.0 * S1[k] * nS1 - 5.0 * n[k] * nS1 * nS1);
+        a_rel[k] += q2 * (n[k] * S2S2 + 2.0 * S2[k] * nS2 - 5.0 * n[k] * nS2 * nS2);
+    }
+}
 
-    dS2[0] = (Omega_prec_2[1]*S2[2] - Omega_prec_2[2]*S2[1]) * dt;
-    dS2[1] = (Omega_prec_2[2]*S2[0] - Omega_prec_2[0]*S2[2]) * dt;
-    dS2[2] = (Omega_prec_2[0]*S2[1] - Omega_prec_2[1]*S2[0]) * dt;
+void binary_total_angular_momentum(const double x[3], const double v[3],
+                                   double m1, double m2, const double S1[3], const double S2[3],
+                                   double G, double c_code, bool pn1, double J[3]) {
+    const double M = m1 + m2, mu = m1 * m2 / M, eta = mu / M;
+    const double r = std::sqrt(dot3(x, x));
+    const double n[3] = {x[0] / r, x[1] / r, x[2] / r};
+    const double c2 = c_code * c_code;
+    double LN[3];
+    cross3(x, v, LN);
+    // L_N (1 + L_PN / L_N), Kidder eq. 2.9b
+    const double fpn = pn1 ? (0.5 * dot3(v, v) * (1.0 - 3.0 * eta) + (3.0 + eta) * G * M / r) / c2 : 0.0;
+    double A[3], C[3];
+    for (int k = 0; k < 3; k++) {
+        A[k] = (m2 / m1) * S1[k] + (m1 / m2) * S2[k];
+        C[k] = (2.0 + m2 / m1) * S1[k] + (2.0 + m1 / m2) * S2[k];
+    }
+    // L_SO = (mu/M) [ (G M / r) n × (n × (3S + (dm/M) Delta)) - (1/2) v × (v × (S + (dm/M) Delta)) ] / c^2
+    // (Kidder eq. 2.9c; the combination makes dJ/dt = 0 at 1.5PN with the a_SO and Omega_SO above)
+    double nxC[3], nnC[3], vxA[3], vvA[3];
+    cross3(n, C, nxC);
+    cross3(n, nxC, nnC);
+    cross3(v, A, vxA);
+    cross3(v, vxA, vvA);
+    for (int k = 0; k < 3; k++)
+        J[k] = mu * LN[k] * (1.0 + fpn) + eta / c2 * (G * M / r * nnC[k] - 0.5 * vvA[k]) + S1[k] + S2[k];
+}
 
-    S1[0] += dS1[0]; S1[1] += dS1[1]; S1[2] += dS1[2];
-    S2[0] += dS2[0]; S2[1] += dS2[1]; S2[2] += dS2[2];
+void rotate_about(double S[3], const double Omega[3], double dt) {
+    const double w = std::sqrt(dot3(Omega, Omega));
+    if (w * std::fabs(dt) == 0.0) return;
+    const double th = w * dt, k[3] = {Omega[0] / w, Omega[1] / w, Omega[2] / w};
+    const double ct = std::cos(th), st = std::sin(th), kS = dot3(k, S);
+    double kxS[3];
+    cross3(k, S, kxS);
+    for (int i = 0; i < 3; i++) S[i] = S[i] * ct + kxS[i] * st + k[i] * kS * (1.0 - ct);   // Rodrigues
 }
 
 // ============================================================================
