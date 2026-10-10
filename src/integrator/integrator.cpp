@@ -2188,7 +2188,11 @@ static int hhs_fsi_recursive(
                 if (sk < 0 || (s0 != -2 && sk != s0)) { same = 0; break; }
                 s0 = sk;
             }
-            one_subsystem = same;
+            // Not for a triple: whether a (stable, re-evaluated in the advance) triple goes secular depends on the
+            // step it is advanced with (inner orbits per dt), so the longer pivot would hand it to the orbit-averaged
+            // evolution where the recursion uses LogH (200k, 10 % binaries: |dE/E| 5e-10 -> 3e-9 within three steps
+            // of the first secular triple)
+            one_subsystem = same && count != 3;
         }
         if (one_subsystem) {
             if (depth < HHSCounters::MAX_DEPTH) g_hhs_counters.isolated_sets[depth]++;
