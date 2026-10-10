@@ -609,7 +609,8 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
 
                     if (oe_out.a > 0) {
                         bool stable = SubsystemManager::mardling_stability(
-                            oe_in.a, oe_in.e, oe_out.a, oe_out.e, m1, m2, m3);
+                            oe_in.a, oe_out.a, oe_out.e, m1, m2, m3,
+                            SubsystemManager::mutual_inclination(r_in, v_in, r_out, v_out));
                         sub.type = stable ? SubsystemType::TRIPLE_STABLE : SubsystemType::TRIPLE_UNSTABLE;
 
                         if (stable) {

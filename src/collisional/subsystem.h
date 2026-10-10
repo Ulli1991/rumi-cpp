@@ -206,11 +206,13 @@ struct SubsystemManager {
     // Clear all subsystems
     void clear();
 
-    // Mardling (2001) stability criterion for hierarchical triples
-    // Returns true if the triple is stable
-    static bool mardling_stability(double a_in, double e_in,
-                                   double a_out, double e_out,
-                                   double m1, double m2, double m3);
+    // Mardling & Aarseth (2001) stability criterion for hierarchical triples (BIFROST Sec. 3.11); i_mut is the
+    // mutual inclination of the inner and outer orbits in radians. Returns true if the triple is stable
+    static bool mardling_stability(double a_in, double a_out, double e_out,
+                                   double m1, double m2, double m3, double i_mut);
+    // Angle between the inner and outer orbital angular momenta (relative coordinates), radians in [0, pi]
+    static double mutual_inclination(const double r_in[3], const double v_in[3],
+                                     const double r_out[3], const double v_out[3]);
 };
 
 // Global subsystem manager

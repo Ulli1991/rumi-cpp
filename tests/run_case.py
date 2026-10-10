@@ -425,6 +425,25 @@ def triple_order(exe, label, cfg, rel):
                       abs(e["true"] - e["false"]) / max(e["false"], 1e-300), rel)
 
 
+def triple_stability(exe, label, cfg, cases):
+    """Mardling & Aarseth (2001) as in BIFROST Sec. 3.11: R_p = a_out (1 - e_out) against
+    2.8 [(1 + q_out)(1 + e_out) / sqrt(1 - e_out)]^(2/5) (1 - 0.3 i / pi) a_in. Each case (a_out / a_in, mutual
+    inclination in degrees, stable?) must be classified so at detection (first step's type counts)."""
+    ok = True
+    a_in = float(cfg["TRIPLE_A_IN_PC"])
+    for ratio, incl, stable in cases:
+        out = run_output(exe, dict(cfg, TRIPLE_A_OUT_PC=f"{ratio * a_in:.6e}", TRIPLE_INCL_DEG=str(incl)))
+        m = re.search(r"tri_s=(\d+)\s+tri_u=(\d+)", out)
+        if not m:
+            raise SystemExit("FAIL: no subsystem type counts printed")
+        n_s, n_u = int(m.group(1)), int(m.group(2))
+        want, other = (n_s, n_u) if stable else (n_u, n_s)
+        name = f"{label} a_out/a_in={ratio} i={incl} deg {'stable' if stable else 'unstable'}"
+        ok &= check(f"{name}: detections as such", want, 1, lower=True)
+        ok &= check(f"{name}: detections as the other", other, 0)
+    return ok
+
+
 def secular_steps(exe, label, cfg, per_call):
     """Internal steps of the secular binary integrator per evolution: the step must not collapse when the
     argument of periapsis is near 0 (it used omega / omega-dot, and every call ran 100000 steps)."""
@@ -976,6 +995,11 @@ CASES = {
     # Measured 9.8e-9 (dense core, at the restart threshold); 2.35e-8 before the pericentre check, 2.68e-8 with
     # it (seed 5): bound 3.5e-8
     "triples_detected": lambda exe: triples(exe, "dense core", TRIPLES, 3.5e-8),
+    # Triple stability near the MA01 boundary (q_out = 1/3, e_out = 0.2: R_p,crit / a_in = 3.53 (1 - 0.3 i/pi),
+    # i.e. a_out / a_in > 4.42 coplanar, 3.98 at 60 deg, 3.53 at 120 deg). The old criterion (no inclination
+    # factor, R_p / (a_in (1 + e_in)) with e_in = 0.3: a_out / a_in > 5.74) called the first and last unstable.
+    "triple_stability": lambda exe: triple_stability(exe, "MA01", dict(SEC_TRIPLE, TOTAL_TIME_MYR="1e-4"),
+                                                     [(5.0, 60, True), (4.0, 0, False), (4.0, 120, True)]),
     # r_h = 0.03 pc: before, a 9+ body chain (linked by unbound fly-bys) went to the FSI whole, with its
     # tight binaries integrated orbit by orbit (r_h = 0.02 pc never finished a step). Measured 3.6e-8
     # (4.5e-8 with the pericentre check).

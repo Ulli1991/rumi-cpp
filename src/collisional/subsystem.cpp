@@ -228,17 +228,31 @@ struct UnionFind {
 // Mardling (2001) stability criterion
 // ============================================================================
 
-bool SubsystemManager::mardling_stability(double a_in, double e_in,
-                                           double a_out, double e_out,
-                                           double m1, double m2, double m3) {
-    // Mardling & Aarseth (2001) stability criterion:
-    // a_out/a_in > 2.8 * ((1+q_out)*(1+e_out)/sqrt(1-e_out))^{2/5} * (1 - 0.3*inc/pi)
-    // Using the simplified version without inclination:
-    double q_out = m3 / (m1 + m2);
-    double ratio_crit = 2.8 * std::pow((1.0 + q_out) * (1.0 + e_out) / std::sqrt(1.0 - e_out), 0.4);
-    double ratio_actual = a_out * (1.0 - e_out) / (a_in * (1.0 + e_in));
+bool SubsystemManager::mardling_stability(double a_in, double a_out, double e_out,
+                                           double m1, double m2, double m3, double i_mut) {
+    // Mardling & Aarseth (2001), as used by BIFROST (Rantala et al. 2023, Sec. 3.11): the triple is stable if
+    //   R_p = a_out (1 - e_out) > R_p,crit = 2.8 [(1 + q_out) (1 + e_out) / sqrt(1 - e_out)]^(2/5) (1 - 0.3 i/pi) a_in
+    // with q_out = m3 / (m1 + m2) and i the mutual inclination in radians (0..pi). (The BIFROST LaTeX misplaces a
+    // parenthesis, "(1+q_out (1+e_out)/...)"; this is the MA01 form.) The criterion does not involve e_in.
+    if (!(a_in > 0.0) || !(a_out > 0.0) || !(e_out < 1.0)) return false;
+    const double q_out = m3 / (m1 + m2);
+    const double i = std::min(std::max(i_mut, 0.0), M_PI);
+    const double Rp_crit = 2.8 * std::pow((1.0 + q_out) * (1.0 + e_out) / std::sqrt(1.0 - e_out), 0.4) *
+                           (1.0 - 0.3 * i / M_PI) * a_in;
+    return a_out * (1.0 - e_out) > Rp_crit;
+}
 
-    return ratio_actual > ratio_crit;
+double SubsystemManager::mutual_inclination(const double r_in[3], const double v_in[3],
+                                            const double r_out[3], const double v_out[3]) {
+    const double L_in[3] = {r_in[1]*v_in[2] - r_in[2]*v_in[1], r_in[2]*v_in[0] - r_in[0]*v_in[2],
+                            r_in[0]*v_in[1] - r_in[1]*v_in[0]};
+    const double L_out[3] = {r_out[1]*v_out[2] - r_out[2]*v_out[1], r_out[2]*v_out[0] - r_out[0]*v_out[2],
+                             r_out[0]*v_out[1] - r_out[1]*v_out[0]};
+    const double n_in = std::sqrt(L_in[0]*L_in[0] + L_in[1]*L_in[1] + L_in[2]*L_in[2]);
+    const double n_out = std::sqrt(L_out[0]*L_out[0] + L_out[1]*L_out[1] + L_out[2]*L_out[2]);
+    if (!(n_in > 0.0) || !(n_out > 0.0)) return 0.0;
+    const double c = (L_in[0]*L_out[0] + L_in[1]*L_out[1] + L_in[2]*L_out[2]) / (n_in * n_out);
+    return std::acos(std::min(1.0, std::max(-1.0, c)));
 }
 
 // ============================================================================
@@ -700,8 +714,11 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
                     // 0.02 AU binary + fly-by at 20 AU periapsis (test weak_flyby_split) runs 60x faster but
                     // |dE/E| 5.3e-9 vs 1.5e-9 (3.6e-8 at periapsis: the FSI samples the tide at one binary phase).
                     const double gamma_crit = g_collisional.weak_perturber_gamma;
+                    const double r_in3[3] = {h_x(idx_j)-h_x(idx_i), h_y(idx_j)-h_y(idx_i), h_z(idx_j)-h_z(idx_i)};
+                    const double v_in3[3] = {h_vx(idx_j)-h_vx(idx_i), h_vy(idx_j)-h_vy(idx_i), h_vz(idx_j)-h_vz(idx_i)};
                     if (gamma_crit > 0.0 && a_in > 0.0 && !(a_out > 0.0 &&
-                            mardling_stability(a_in, e_in, a_out, e_out, m1, m2, m3))) {
+                            mardling_stability(a_in, a_out, e_out, m1, m2, m3,
+                                               mutual_inclination(r_in3, v_in3, r_out, v_out)))) {
                         const double r_now = std::sqrt(r_out[0]*r_out[0] + r_out[1]*r_out[1] + r_out[2]*r_out[2]);
                         const double rv = r_out[0]*v_out[0] + r_out[1]*v_out[1] + r_out[2]*v_out[2];
                         double r_close = r_now;
@@ -745,7 +762,11 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
                     }
 
                     if (a_out > 0) {
-                        bool stable = mardling_stability(a_in, e_in, a_out, e_out, m1, m2, m3);
+                        const double r_in[3] = {h_x(idx_j)-h_x(idx_i), h_y(idx_j)-h_y(idx_i), h_z(idx_j)-h_z(idx_i)};
+                        const double v_in[3] = {h_vx(idx_j)-h_vx(idx_i), h_vy(idx_j)-h_vy(idx_i),
+                                                h_vz(idx_j)-h_vz(idx_i)};
+                        bool stable = mardling_stability(a_in, a_out, e_out, m1, m2, m3,
+                                                         mutual_inclination(r_in, v_in, r_out, v_out));
                         sub.type = stable ? SubsystemType::TRIPLE_STABLE : SubsystemType::TRIPLE_UNSTABLE;
                         sub.inner_binary_id = inner_i;  // store inner binary info
                         sub.outer_companion_pid = outer_pid;
