@@ -50,3 +50,11 @@ Thumbs.db
 kokkos-src/
 kokkos-build/
 kokkos/
+
+# Hand-built tool binaries and bench outputs
+tools/fmm/fmm_ref
+tools/fmm/fmm_sph
+tools/fmm/harm_test
+tools/hip_bench/nbody_bench
+tools/hip_bench/bench.out.*
+tools/hip_bench/bench.err.*

@@ -148,3 +148,46 @@ FROST is 10.1093/mnras/stab057, BIFROST 10.1093/mnras/stad1360; the HHS-FSI is F
 
 After cpp-nbody: the standalone Python/JAX/Pallas port (`~/jax-nbody/DESIGN.md`), measured against
 this code.
+
+## Hand-over 2026-10-10: viper GPU partition down, work continues on raven
+
+State when the viper session died (2026-10-10 02:44, hardware failure; apu/apudev all down or drained since):
+
+- 200k, 10 % binaries, 1 viper node, 30 steps (job 12148154, outputs in `/viper/ptmp2/uli/cpp-nbody-ab/run/{old,new,new_cap10}`):
+  old code f8676d6 14.65 s/step, max late |dE/E| 5.4e-10; new code 6.86 s/step but 2.8e-9 (2.1x faster, 5x worse late
+  energy); new with the old GBS cap (DYNCAP 10) 2.9e-9, so the GBS cap is not the cause.
+- Diagnosis: old and new agree until step 27. From step 29 the new code sends stable triples to the orbit-averaged
+  secular-triple solver (16/8/16 calls in steps 29-31); the old code never does. The isolated-set stop advances a set that
+  is one subsystem over the whole pivot step, and the LogH/secular choice depends on the step length
+  (`n_orb_per_dt = dt / P_in`), so the longer step pushes triples into the secular path, which does not conserve their
+  instantaneous energy. Fix (committed after this note): 3-member sets are excluded from the stop and recurse as before.
+  Host ctest 24/24 with the fix. **Unverified on the GPU**: the verification jobs never ran:
+  - 12148543: fixed binary (`fix.run`), seeds 42, 7, 13 (`jobC.sh`);
+  - 12148506 / 12148507: old vs new on seeds 7 and 13, and new with `NBODY_SMALL_FOR=0 NBODY_SMALL_N2=0` and
+    `NBODY_TILE256_MIN=100000000` (`jobA.sh`, `jobB.sh`); `base_config.txt` is the common config.
+  Pass criterion (energy rule): the fixed code must match the old code's late-time |dE/E| on every seed.
+  If not, bisect: small-set host paths, 256 tiles (summation order at the top levels), a build without the isolated-set stop.
+- GPU ctest (job 12144484): 28/29. `floor_planets` misses the |dL/L| bound 3.3e-15 by round-off only (3.3e-15 with the
+  host small-set paths, 3.9e-15 on the device path; energy identical, 8.8e-14 against 1.25e-13). Loosen the bound after
+  the seed runs, not before.
+- Pending user decisions: dense-core floor (keep digging with single-binary reference tests, or park: findings in the
+  dense-core section above); the two agreed speed items: wire the spline `Softening` into the kernels, CPU path,
+  diagnostics and FMM, and build the FMM interaction lists on the GPU.
+- Later: full 5 Myr BIFROST Fig. 9 run with binaries; spin evolution (§3.9) exists but is never called; MSTAR for groups
+  of more than 8 bodies; far field item 7 above.
+
+On raven:
+
+- Clone at `/raven/u/uli/cpp-nbody` (was at b6a681a with uncommitted work from 2026-03-10; that work is kept on the
+  branch `raven-wip-2026-03-10` and is not merged: BINARY_FRAC pairing, PN2.5 energy-check skip, GBS/LogH diagnostics were
+  redone on viper. Nine old stashes remain there too). `main` fast-forwarded to origin/main.
+- Kokkos 5.0.99 CUDA (AMPERE80) at `/raven/u/uli/kokkos-cuda-mpi`, modules `gcc/13 cuda/12.6 openmpi_gpu/5.0`:
+  `cmake -DCMAKE_CXX_COMPILER=/u/uli/kokkos-cuda-mpi/bin/nvcc_wrapper -DKokkos_ROOT=/u/uli/kokkos-cuda-mpi -DUSE_MPI=ON
+  -DUSE_GPU_AWARE_MPI=ON -DENABLE_COLLISIONAL=ON` in `build-mpi/`; submit script `submit_kokkos_mpi_raven.sh`
+  (partition gpu, 4 x A100, `--kokkos-map-device-id-by=mpi_rank`), 15 min default.
+- Everything since 37aa7bf was built and run with HIP on the MI300A only. First CUDA build: expect compile issues in
+  `n2_driver.h` / `n2_kernels.h` (templated tile sizes, nvcc_wrapper), and check that the unified-memory paths
+  (`kHostAccessibleDevice`, `NBODY_SMALL_FOR`, `NBODY_SMALL_N2`) are off on the A100. `RSQRT_NEWTON` is on by default
+  (GPU accuracy = CPU). A host Kokkos (OpenMP+Serial) is needed for the CPU ctest as on viper (`viper-host-build` memory).
+- Order: build, host + GPU ctest, then the seed A/B above (old f8676d6 vs new vs fix, 200k, 10 % binaries, 30 steps),
+  then the pending decisions.
