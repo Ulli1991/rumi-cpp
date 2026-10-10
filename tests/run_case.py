@@ -17,14 +17,15 @@ FROST4 = dict(KEPLER, TOTAL_TIME_MYR=f"{1000 * P_MYR:.10e}", DT_MAX_MYR=f"{P_MYR
 # FROST Fig. 5: Sun and the four giant planets (Tables A1-A2), 1000 yr
 PLANETS = dict(KEPLER, TEST_CASE="outer_planets", TOTAL_TIME_MYR="1.0e-3")
 # 400 Kroupa stars, half in contact binaries (a = 1-4 R_sun): ~75 stellar mergers in 20 steps, at HHS depths
-# 0-10. Each merger compacts the particle arrays mid-recursion and may trigger step restarts.
+# 0-10. Each merger compacts the particle arrays mid-recursion and may trigger step restarts. Contact binaries on
+# purpose: old mass-rank pairing, no pericentre check.
 MERGERS = dict(TEST_CASE="plummer", INTEGRATOR="hhs", TOTAL_TIME_MYR="2e-8", DT_MAX_MYR="1e-9",
                DT_MIN_MYR="1e-16", ETA_FF="0.2", ETA_FB="0.2", ETA_GRAD="0.1", ETA_JERK="0.1", SOFTENING_PC="0",
                COLLISIONAL="true", R_NGB="1e-3", R_NGB_MAX="0.1", ETA_PERT="0.02", ETA_GBS="1e-10",
                ETA_RESTART="1e-8", N_ORB_SECULAR="3", M_PN="5.0", PN_ORDER="0", R_ESCAPE_RH="100.0",
                SSE_ENABLED="false", PLUMMER_N="400", PLUMMER_M_TOTAL="200", PLUMMER_R_HALF="0.3", PLUMMER_SEED="7",
                PLUMMER_MASS_DIST="kroupa", BINARY_FRAC="0.5", BINARY_A_MIN_AU="0.005", BINARY_A_MAX_AU="0.02",
-               PRINT_INTERVAL="1", PROFILING="false")
+               BINARY_POP="mass_rank", BINARY_PERI_CHECK="false", PRINT_INTERVAL="1", PROFILING="false")
 # 1e5 Msun BH binary, a = 2e-3 pc > r_ngb (no subsystem), e = 0.5, ~10 orbits with PN1: only the global PN1
 # kick (BIFROST sec. 3.8) can precess it, 6.0e-5 rad/orbit
 PN1_WIDE = dict(TEST_CASE="binary_test", INTEGRATOR="hhs", BINARY_A_PC="2e-3", BINARY_E="0.5", BINARY_M1="5e4",
@@ -59,9 +60,13 @@ SPIN_J = dict(PN_LOGH, PN_ORDER="32", BINARY_CHI1="0.6 0 0.6", BINARY_CHI2="0 0.
 SPIN_J_PN1 = dict(SPIN_J, PN_ORDER="33")
 # 5000 Kroupa stars, 50 % primordial binaries (1250 pairs, more than the initial neighbour buffer of 1000)
 BINARIES50 = dict(BINARIES, PLUMMER_N="5000", PLUMMER_M_TOTAL="2000", BINARY_FRAC="0.5", TOTAL_TIME_MYR="1e-3")
-# Dense core (r_h = 0.05 pc), 50 % binaries of 1-20 AU: binary-single encounters form triples and multiplets
+# Dense core (r_h = 0.05 pc), 50 % binaries of 1-20 AU: binary-single encounters form triples and multiplets.
+# Kept on the old mass-rank pairing: its max |dE/E| sits at the restart threshold and scatters by 10x over seeds
+# for either population (seeds 5-8, mass_rank 1.3e-8 - 1.8e-7, bifrost 2.7e-8 - 1.7e-7), so a population change
+# would only re-roll that scatter.
 TRIPLES = dict(BINARIES, PLUMMER_N="2000", PLUMMER_M_TOTAL="800", PLUMMER_R_HALF="0.05", BINARY_FRAC="0.5",
-               BINARY_A_MIN_AU="1", BINARY_A_MAX_AU="20", TOTAL_TIME_MYR="2e-4", DT_MAX_MYR="1e-4")
+               BINARY_A_MIN_AU="1", BINARY_A_MAX_AU="20", TOTAL_TIME_MYR="2e-4", DT_MAX_MYR="1e-4",
+               BINARY_POP="mass_rank")
 # Stable hierarchical triple of stars (2 AU inner, 41 AU outer, 60 deg), steps of ~45 inner orbits: the
 # secular-triple path. TRIPLE_OUTER_FIRST stores the outer body at the lowest particle id.
 SEC_TRIPLE = dict(TEST_CASE="triple_test", INTEGRATOR="hhs", TRIPLE_A_IN_PC="1e-5", TRIPLE_E_IN="0.3", TRIPLE_M1="1.0",
@@ -75,6 +80,10 @@ SEC_BINARY = dict(TEST_CASE="binary_test", INTEGRATOR="hhs", BINARY_A_PC="1e-5",
                   BINARY_M2="10.0", BINARY_ROT_DEG="180.0000573", TOTAL_TIME_MYR="1e-4", DT_MAX_MYR="1e-5", DT_MIN_MYR="1e-14", SOFTENING_PC="0",
                   COLLISIONAL="true", R_NGB="1e-3", R_NGB_MAX="0.1", N_ORB_SECULAR="3", PN_ORDER="31", M_PN="5.0",
                   SSE_ENABLED="false", ETA_RESTART="0", PRINT_INTERVAL="1", PROFILING="false")
+# 2000 Kroupa stars, 50 % binaries of 0.01-0.1 AU (2-21 R_sun) with thermal e: many pericentres inside R1 + R2
+# unless the IC generator enforces r_p > R1 + R2 (AUDIT F6). One 1e-5 Myr step (hundreds of orbits).
+CLOSE_BINARIES = dict(BINARIES, BINARY_FRAC="0.5", BINARY_A_MIN_AU="0.01", BINARY_A_MAX_AU="0.1",
+                      TOTAL_TIME_MYR="1e-5", DT_MAX_MYR="1e-5")
 # 16 stars inside r_ngb: one 15-body neighbour group, more than LogH's fixed storage (LOGH_MAX_BODIES = 8)
 BIG_GROUP = dict(TEST_CASE="plummer", INTEGRATOR="hhs", TOTAL_TIME_MYR="1e-5", DT_MAX_MYR="1e-6", DT_MIN_MYR="1e-16",
                  SOFTENING_PC="0", COLLISIONAL="true", R_NGB="1e-3", R_NGB_MAX="0.1", PN_ORDER="0", SSE_ENABLED="false",
@@ -291,6 +300,14 @@ def no_fsi_groups(exe, label, cfg, bound):
         check(f"{label} max|dE/E|", max(r[0] for r in rows), bound)
 
 
+def no_ic_mergers(exe, label, cfg, bound):
+    """Primordial binaries must not start inside their contact distance: no mergers in the first step."""
+    out = run_output(exe, cfg)
+    rows = diagnostics(out)
+    return check(f"{label} mergers in step 1", out.count("[MERGER #"), 0) & \
+        check(f"{label} max|dE/E|", max(r[0] for r in rows), bound)
+
+
 def check(name, value, bound, lower=False):
     ok = value >= bound if lower else value <= bound
     print(f"{'ok  ' if ok else 'FAIL'} {name} = {value:.3e} ({'>=' if lower else '<='} {bound:.3e})")
@@ -388,6 +405,7 @@ CASES = {
     # partner (stale from the last force evaluation), so members got orbital time-steps down to level 29
     # and step 1 never finished (> 120 s; the 10 % binary production runs hung the same way). Measured
     # 2 s, 3.2e-10 / 6.0e-15 km/s (2 stellar collisions; their orbital L is not carried, so no L check).
+    # With the BIFROST population and the pericentre check (defaults since AUDIT F6): 6.6e-10, L 2.4e-14.
     "binaries_timestep": lambda exe: binaries(exe, "binaries", BINARIES, (1e-8, 1e-12)),
     # Before: 40 LogH give-ups (E_N + E_1PN cannot hold eta_restart under PN), |dE/E| 4.8e-5, |dL/L| 2.3e-5
     # unbooked. Measured 0 / 0 / 2.6e-13 km/s (the whole system is the PN subsystem, so all of it is booked).
@@ -405,26 +423,32 @@ CASES = {
     "mergers_sse": lambda exe: sse_mass(exe, "mergers + SSE", dict(MERGERS, SERIAL_N2_CPU="0", SSE_ENABLED="true",
                                                                    TOTAL_TIME_MYR="5e-9"), 1e-6),
     # Before: the neighbour buffer (max(1000, N/10) pairs) truncated silently, 250 binaries stayed field
-    # particles at level ~30 and step 1 never finished. Measured: all 1250 detected, 1.1 s, 1.7e-13.
+    # particles at level ~30 and step 1 never finished. Measured: all 1250 detected, 1.1 s, 1.7e-13 (BIFROST
+    # population + pericentre check: 1.05e-10; HHS_CC 8.0e-11).
     "binaries50_detected": lambda exe: all_binaries(exe, "50 % binaries", BINARIES50, 1250),
     # HHS_CC (connected components): a pair made fast only by the v/a criterion must stay one component (before the
     # dominant-partner edges: precession off by 50 %), and binaries keep their strongest perturber (before: 10x dE)
     "cc_pn1_wide": lambda exe: precession(exe, "wide PN1 binary, HHS_CC", dict(PN1_WIDE, HHS_CC="true"), 0.1),
     "cc_binaries50": lambda exe: all_binaries(exe, "50 % binaries, HHS_CC", dict(BINARIES50, HHS_CC="true"), 1250),
-    # measured 5.0e-11 / 3.8e-11 = 1.3 (10 before binaries kept their perturbers)
+    # measured 5.0e-11 / 3.8e-11 = 1.3 (10 before binaries kept their perturbers); BIFROST population: 0.76
     "cc_vs_plain_binaries50": lambda exe: cc_vs_plain(exe, "50 % binaries", BINARIES50, 3.0),
     # Triple branch of detect_from_pairs used a particle id where the union-find wanted a compact id
     # (out of bounds for ids >= the number of pair members; the tests' triples had ids 0-2)
-    # Measured 9.8e-9 (dense core, at the restart threshold): bound 3e-8
     # The secular-triple driver took the inner pair from the first two ids (fixed 2026-10-10)
     # The secular step used omega / omega-dot (fixed 2026-10-11)
     "secular_omega0_steps": lambda exe: secular_steps(exe, "secular binary at omega = 1e-6", SEC_BINARY, 10),
     "triple_id_order": lambda exe: triple_order(exe, "secular triple", SEC_TRIPLE, 1e-6),
-    "triples_detected": lambda exe: triples(exe, "dense core", TRIPLES, 3e-8),
+    # Measured 9.8e-9 (dense core, at the restart threshold); 2.35e-8 before the pericentre check, 2.68e-8 with
+    # it (seed 5): bound 3.5e-8
+    "triples_detected": lambda exe: triples(exe, "dense core", TRIPLES, 3.5e-8),
     # r_h = 0.03 pc: before, a 9+ body chain (linked by unbound fly-bys) went to the FSI whole, with its
-    # tight binaries integrated orbit by orbit (r_h = 0.02 pc never finished a step). Measured 3.6e-8.
+    # tight binaries integrated orbit by orbit (r_h = 0.02 pc never finished a step). Measured 3.6e-8
+    # (4.5e-8 with the pericentre check).
     "dense_core_split": lambda exe: no_fsi_groups(exe, "dense core", dict(TRIPLES, PLUMMER_R_HALF="0.03",
                                                                             TOTAL_TIME_MYR="1e-4"), 1e-7),
+    # AUDIT F6: thermal e without r_p > R1 + R2 put pericentres inside the stars: 21 mergers in the first
+    # 1e-5 Myr before, 0 after (322 of 5000 e redrawn in a 20k cluster). Measured |dE/E| 2.3e-14.
+    "ic_binaries_no_mergers": lambda exe: no_ic_mergers(exe, "close primordial binaries", CLOSE_BINARIES, 3e-14),
     "logh_big_group": lambda exe: big_group(exe, "big group", BIG_GROUP, (1.2e-5, 1e-12)),
     # MPI cases, run under NBODY_TEST_LAUNCHER (CTest sets 2 ranks). Spins were not broadcast: lost on every
     # rank of a GPU run (host backends alias the mirror, so the host build cannot fail this one).

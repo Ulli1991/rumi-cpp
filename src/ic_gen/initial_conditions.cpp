@@ -3,6 +3,7 @@
 #ifdef ENABLE_COLLISIONAL
 #include "collisional_config.h"
 #include "kepler.h"
+#include "mergers.h"
 #define COLL_ENABLED g_collisional.enabled
 #else
 #define COLL_ENABLED false
@@ -16,6 +17,9 @@
 #include <vector>
 #include <string>
 #include <unordered_map>
+#include <map>
+#include <utility>
+#include <cstdlib>
 
 void init_outer_planets(Particles& p) {
     p.allocate(5, COLL_ENABLED);
@@ -124,7 +128,8 @@ void init_plummer(Particles& p, int N, double M_total_msun, double r_half_pc, in
                   bool add_imbh, double imbh_m1, double imbh_m2,
                   double imbh_a_pc, double imbh_e, double imbh_spin,
                   double r_break_au,
-                  const SSEConfig* sse_cfg) {
+                  const SSEConfig* sse_cfg,
+                  const std::string& binary_pop, bool binary_peri_check) {
     // Use host-side std::vectors so we can resize for REMOVE_BH / ADD_IMBH
     double M_total = M_total_msun;
     double a_pc = r_half_pc / PLUMMER_SCALE_FACTOR;
@@ -478,31 +483,142 @@ void init_plummer(Particles& p, int N, double M_total_msun, double r_half_pc, in
         int N_bin = static_cast<int>(binary_frac * N / 2);
         if (2 * N_bin > N) N_bin = N / 2;
 
-        // Sort indices by mass (heaviest first) for mass-segregated pairing
-        std::vector<int> idx(N);
-        for (int i = 0; i < N; i++) idx[i] = i;
-        std::sort(idx.begin(), idx.end(), [&](int a, int b) { return hmass[a] > hmass[b]; });
-
         double bin_a_min_pc = bin_a_min_au * AU_TO_PC;
         double bin_a_max_pc = bin_a_max_au * AU_TO_PC;
         double log_a_min = std::log(bin_a_min_pc);
         double log_a_max = std::log(bin_a_max_pc);
 
-        std::printf("  BINARY_FRAC: pairing %d binaries (%.0f%% of %d particles)\n",
-                    N_bin, 100.0 * 2.0 * N_bin / N, N);
+        // ---- Pairing: list of (primary, secondary) indices ----------------------------------------
+        std::vector<std::pair<int,int>> pairs;
+        pairs.reserve(N_bin);
+        int n_massive_primaries = 0;
+        if (binary_pop == "mass_rank") {
+            // Old behaviour: heaviest with next heaviest (q ~ 1, mass-segregated pairing)
+            std::vector<int> idx(N);
+            for (int i = 0; i < N; i++) idx[i] = i;
+            std::sort(idx.begin(), idx.end(), [&](int a, int b) { return hmass[a] > hmass[b]; });
+            for (int b = 0; b < N_bin; b++) pairs.emplace_back(idx[2 * b], idx[2 * b + 1]);
+        } else if (binary_pop == "bifrost") {
+            // BIFROST (Rantala et al. 2023, MNRAS 522, 5180) App. A "Binary stars", Table A1:
+            //   N = N_s + 2 N_b, N_b = f_bin N / 2.
+            //   Primaries above m_pair = 5 M_sun get a secondary from a flat mass-ratio distribution
+            //   q = m_2/m_1 = const, 0.1 <= q < 1.0 (Kiminki 2012, Sana 2012, Kobulnicky 2014): "beginning from
+            //   the most massive star we assign secondary star masses by finding the actual closest mass to the
+            //   sampled random secondary mass from the remaining stars until no primary stars above 5 M_sun
+            //   remain".
+            //   Below m_pair the paper gives no rule; SCIC is "functionally very similar to mcluster" and the
+            //   above is mcluster's pairing = 3 (Kupper et al. 2011, MNRAS 417, 2300; main.c order(), "Uniform
+            //   distribution of mass ratio (0.1<q<1.0) for m>Msort and random pairing for remaining", Kiminki &
+            //   Kobulnicky 2012, Sana et al. 2012): every star above msort = 5 M_sun is a primary, the closest
+            //   unused mass to q m1 its secondary, the rest are paired at random; the first N_b pairs are binaries.
+            constexpr double m_pair = 5.0, q_min = 0.1, q_max = 1.0;
+            std::multimap<double, int> remaining;  // mass -> index, unpaired stars
+            for (int i = 0; i < N; i++) remaining.emplace(hmass[i], i);
+            while ((int)pairs.size() < N_bin && remaining.size() >= 2) {
+                auto top = std::prev(remaining.end());
+                if (top->first <= m_pair) break;
+                int i1 = top->second;
+                double m1 = top->first;
+                remaining.erase(top);
+                double m2_target = (q_min + uni(rng) * (q_max - q_min)) * m1;
+                auto it = remaining.lower_bound(m2_target);
+                if (it == remaining.end()) it = std::prev(it);
+                else if (it != remaining.begin()) {
+                    auto lo = std::prev(it);
+                    if (m2_target - lo->first < it->first - m2_target) it = lo;
+                }
+                pairs.emplace_back(i1, it->second);
+                remaining.erase(it);
+                n_massive_primaries++;
+            }
+            // Random pairing of the rest: draw 2 (N_b - n) stars without replacement, pair consecutively
+            std::vector<int> rest;
+            rest.reserve(remaining.size());
+            for (const auto& kv : remaining) rest.push_back(kv.second);
+            int n_more = std::min(N_bin - (int)pairs.size(), (int)rest.size() / 2);
+            for (int k = 0; k < 2 * n_more; k++) {  // partial Fisher-Yates
+                std::uniform_int_distribution<int> pick(k, (int)rest.size() - 1);
+                std::swap(rest[k], rest[pick(rng)]);
+            }
+            for (int b = 0; b < n_more; b++) {
+                int i = rest[2 * b], j = rest[2 * b + 1];
+                if (hmass[j] > hmass[i]) std::swap(i, j);
+                pairs.emplace_back(i, j);
+            }
+        } else {
+            std::fprintf(stderr, "ERROR: BINARY_POP must be bifrost or mass_rank, got '%s'\n", binary_pop.c_str());
+            std::exit(1);
+        }
 
-        for (int b = 0; b < N_bin; b++) {
-            int i = idx[2 * b];      // primary (heavier)
-            int j = idx[2 * b + 1];  // secondary
+        std::printf("  BINARY_FRAC: pairing %d binaries (%.0f%% of %d particles), BINARY_POP=%s",
+                    (int)pairs.size(), 100.0 * 2.0 * pairs.size() / N, N, binary_pop.c_str());
+        if (binary_pop == "bifrost") std::printf(" (%d primaries > 5 M_sun with flat q)", n_massive_primaries);
+        std::printf("\n");
 
+        // ---- Orbits ---------------------------------------------------------------------------------
+        // Contact distance below which the code merges the pair at once (collisional/mergers.cpp
+        // detect_mergers): R1 + R2 for two stars, the tidal-disruption radius for a star and a BH, the ISCO
+        // 6 G M / c^2 for two BHs. FROST-CLUSTERS II (Rantala et al. 2025) Sec. 2.3: "We ensure that for each
+        // sampled binary the pericenter distance initially fulfils r_p = a(1-e) > R_p + R_s"; BIFROST App. A
+        // merges such systems in the IC generator instead (SCIC), together with compact binaries whose GW
+        // inspiral takes less than 0.01 Myr. We keep the pair and redraw e (and, if even e = 0 cannot clear
+        // the contact distance, a): the thermal f(e) = 2e restricted to e < e_max is e = e_max sqrt(U), which
+        // is what redrawing e until r_p clears gives. The same truncated form is used by Moe & Di Stefano
+        // (2017, ApJS 230, 15) Eq. 3, p_e ~ e^eta on 0 < e < e_max(P) = 1 - (P / 2 d)^(-2/3) (Roche-lobe
+        // fill factor <~ 70 % at periastron); we only exclude actual contact, as FROST-CLUSTERS II does.
+        // Compact pairs additionally redraw e until t_GW (Peters 1964) > 0.01 Myr.
+        constexpr double R_sun_pc = 2.254e-8;      // as collisional/mergers.cpp
+        constexpr double c_kms = 299792.458;
+        const double t_gw_min = 1e4 / TIME_UNIT_YR;  // 0.01 Myr in code time units
+        int n_e_redrawn = 0, n_a_redrawn = 0, n_unpaired = 0;
+        std::vector<double> q_list, q_massive, a_list, e_list;
+        q_list.reserve(pairs.size()); a_list.reserve(pairs.size()); e_list.reserve(pairs.size());
+
+        for (auto [i, j] : pairs) {
             double m_i = hmass[i], m_j = hmass[j];
             double M_bin = m_i + m_j;
             double mu = G_CODE * M_bin;
 
-            // Log-uniform semi-major axis
+            double r_contact = 0.0;
+            bool bh_i = (h_kw[i] == 14), bh_j = (h_kw[j] == 14);
+            bool compact_i = (h_kw[i] >= 10), compact_j = (h_kw[j] >= 10);
+            if (bh_i && bh_j) r_contact = 6.0 * G_CODE * M_bin / (c_kms * c_kms);
+            else if (bh_i) r_contact = tidal_disruption_radius(m_j, h_srad[j] * R_sun_pc, m_i);
+            else if (bh_j) r_contact = tidal_disruption_radius(m_i, h_srad[i] * R_sun_pc, m_j);
+            else r_contact = (h_srad[i] + h_srad[j]) * R_sun_pc;
+            bool check_gw = binary_peri_check && compact_i && compact_j;
+
+            // Log-uniform semi-major axis (BIFROST Table A1: f(a) flat in log a)
             double a_bin = std::exp(log_a_min + uni(rng) * (log_a_max - log_a_min));
-            // Thermal eccentricity: e = sqrt(U)
+            // Thermal eccentricity f(e) = 2e (BIFROST App. A): e = sqrt(U)
             double e_bin = std::sqrt(uni(rng));
+            bool ok = true;
+            if (binary_peri_check && a_bin * (1.0 - e_bin) <= r_contact) {
+                n_e_redrawn++;
+                int tries = 0;
+                while (a_bin <= r_contact && tries < 1000) {  // no e clears it: redraw a as well
+                    a_bin = std::exp(log_a_min + uni(rng) * (log_a_max - log_a_min));
+                    tries++;
+                }
+                if (tries > 0) n_a_redrawn++;
+                if (a_bin <= r_contact) ok = false;
+                else e_bin = (1.0 - r_contact / a_bin) * std::sqrt(uni(rng));
+            }
+            if (ok && check_gw) {
+                int tries = 0;
+                while (gw_coalescence_time(a_bin, e_bin, m_i, m_j, G_CODE, c_kms) < t_gw_min && tries < 1000) {
+                    e_bin *= std::sqrt(uni(rng));  // thermal below the current e
+                    tries++;
+                }
+                if (gw_coalescence_time(a_bin, e_bin, m_i, m_j, G_CODE, c_kms) < t_gw_min) ok = false;
+            }
+            if (!ok) { n_unpaired++; continue; }  // both stay single at their own Plummer phase-space points
+
+            q_list.push_back(m_j / m_i);
+            if (m_i > 5.0) q_massive.push_back(m_j / m_i);
+            a_list.push_back(a_bin);
+            e_list.push_back(e_bin);
+
             // Isotropic orientation
             double inc = std::acos(2.0 * uni(rng) - 1.0);
             double Omega = 2.0 * M_PI * uni(rng);
@@ -534,6 +650,27 @@ void init_plummer(Particles& p, int N, double M_total_msun, double r_half_pc, in
             hvy[j] = cvy + (m_i / M_bin) * v_rel[1];
             hvz[j] = cvz + (m_i / M_bin) * v_rel[2];
         }
+
+        if (binary_peri_check)
+            std::printf("    pericentre check (r_p > contact distance): e redrawn for %d, a redrawn for %d, "
+                        "%d pairs left single (a_max too small)\n", n_e_redrawn, n_a_redrawn, n_unpaired);
+        else
+            std::printf("    BINARY_PERI_CHECK=false: no pericentre condition (contact binaries allowed)\n");
+        // Distribution summary (deciles of q, log10 a [AU], e)
+        auto deciles = [](std::vector<double> v, const char* name, double scale, bool log10v) {
+            if (v.empty()) return;
+            std::sort(v.begin(), v.end());
+            std::printf("    %s deciles:", name);
+            for (int k = 0; k <= 10; k++) {
+                double x = v[std::min((size_t)k * (v.size() - 1) / 10, v.size() - 1)] * scale;
+                std::printf(" %.3g", log10v ? std::log10(x) : x);
+            }
+            std::printf("\n");
+        };
+        deciles(q_list, "q", 1.0, false);
+        deciles(q_massive, "q (m1 > 5 M_sun)", 1.0, false);
+        deciles(a_list, "log10(a/AU)", 1.0 / AU_TO_PC, true);
+        deciles(e_list, "e", 1.0, false);
 
         // Re-center COM after binary placement
         double com_x = 0, com_y = 0, com_z = 0;

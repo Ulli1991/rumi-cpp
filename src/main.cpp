@@ -560,6 +560,8 @@ int main(int argc, char** argv) {
         double binary_frac  = cfg.get_double("BINARY_FRAC", 0.0);
         double bin_a_min_au = cfg.get_double("BINARY_A_MIN_AU", 0.01);
         double bin_a_max_au = cfg.get_double("BINARY_A_MAX_AU", 100.0);
+        std::string binary_pop = cfg.get_str("BINARY_POP", "bifrost");
+        bool binary_peri_check = cfg.get_bool("BINARY_PERI_CHECK", true);
         bool add_imbh       = cfg.get_bool("ADD_IMBH", false);
         double imbh_m1      = cfg.get_double("IMBH_M1", 500.0);
         double imbh_m2      = cfg.get_double("IMBH_M2", 500.0);
@@ -700,7 +702,7 @@ int main(int argc, char** argv) {
                 init_plummer(p, N_plummer, M_total_msun, r_half_pc, seed, mass_dist, age_gyr, metallicity,
                              remove_bh, binary_frac, bin_a_min_au, bin_a_max_au,
                              add_imbh, imbh_m1, imbh_m2, imbh_a_pc, imbh_e, imbh_spin,
-                             r_break_au, &ic_sse_cfg);
+                             r_break_au, &ic_sse_cfg, binary_pop, binary_peri_check);
             } else if (test == "binary_test") {
                 init_binary_test(p, binary_a_pc, binary_e, binary_m1, binary_m2, binary_rot);
                 set_binary_spins(p, cfg);

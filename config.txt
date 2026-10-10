@@ -104,6 +104,8 @@ R_BREAK_AU = 1000.0                 		# Remove artificial binaries with a < r_br
 BINARY_FRAC = 0.0                   		# Primordial binary fraction (0-1)
 BINARY_A_MIN_AU = 0.01              		# Min semi-major axis for binaries (AU)
 BINARY_A_MAX_AU = 100.0             		# Max semi-major axis for binaries (AU)
+BINARY_POP = bifrost                		# bifrost: BIFROST App. A (flat q in [0.1,1) above 5 M_sun, random pairs below); mass_rank: heaviest with next heaviest
+BINARY_PERI_CHECK = true            		# Redraw e (or a) until r_p = a(1-e) > R1+R2 (TDE radius / ISCO with BHs), FROST-CLUSTERS II Sec. 2.3
 
 # IMBH binary injection
 ADD_IMBH = false                    		# Inject IMBH binary at cluster center
