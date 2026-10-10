@@ -157,6 +157,7 @@ struct TripleTracker {
     double C_K0;             // initial Kozai integral
     double a_in0, e_in0;     // initial inner orbital elements
     double i_mut0;           // initial mutual inclination (rad)
+    int pid_in1 = 0, pid_in2 = 1, pid_out = 2;  // inner pair = closest pair at init (ids carry no hierarchy)
     bool initialized;
 
     TripleTracker() : initialized(false) {}
@@ -177,9 +178,9 @@ struct TripleTracker {
                           double& i_mut, double& C_K) {
         (void)G;
         // Look up particles by permanent ID (survives partition_by_level reordering)
-        int i0 = find_by_pid(p, 0);  // inner body 1
-        int i1 = find_by_pid(p, 1);  // inner body 2
-        int i2 = find_by_pid(p, 2);  // outer body
+        int i0 = find_by_pid(p, pid_in1);  // inner body 1
+        int i1 = find_by_pid(p, pid_in2);  // inner body 2
+        int i2 = find_by_pid(p, pid_out);  // outer body
         if (i0 < 0 || i1 < 0 || i2 < 0) return;
 
         auto h_x  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.x);
@@ -229,9 +230,23 @@ struct TripleTracker {
 
     void init(Particles& p, double G) {
         if (p.N != 3) return;
-        int i0 = find_by_pid(p, 0);
-        int i1 = find_by_pid(p, 1);
-        int i2 = find_by_pid(p, 2);
+        {
+            auto h_x = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.x);
+            auto h_y = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.y);
+            auto h_z = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.z);
+            auto h_pid = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.particle_id);
+            auto d2 = [&](int a, int b) {
+                double dx = h_x(a) - h_x(b), dy = h_y(a) - h_y(b), dz = h_z(a) - h_z(b);
+                return dx * dx + dy * dy + dz * dz;
+            };
+            int out = 2;  // the body not in the closest pair
+            if (d2(0, 2) < d2(0, 1) && d2(0, 2) <= d2(1, 2)) out = 1;
+            else if (d2(1, 2) < d2(0, 1) && d2(1, 2) < d2(0, 2)) out = 0;
+            pid_out = h_pid(out); pid_in1 = h_pid((out + 1) % 3); pid_in2 = h_pid((out + 2) % 3);
+        }
+        int i0 = find_by_pid(p, pid_in1);
+        int i1 = find_by_pid(p, pid_in2);
+        int i2 = find_by_pid(p, pid_out);
         if (i0 < 0 || i1 < 0 || i2 < 0) return;
         auto h_m = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.mass);
         m1 = h_m(i0); m2 = h_m(i1); m3 = h_m(i2);
@@ -576,6 +591,7 @@ int main(int argc, char** argv) {
         double triple_e_out = cfg.get_double("TRIPLE_E_OUT", 0.3);
         double triple_m3    = cfg.get_double("TRIPLE_M3", 10.0);
         double triple_incl  = cfg.get_double("TRIPLE_INCL_DEG", 85.0);
+        bool triple_outer_first = cfg.get_bool("TRIPLE_OUTER_FIRST", false);
 
         if (my_rank == 0 || !use_distributed) {
             if (test == "outer_planets") {
@@ -592,7 +608,7 @@ int main(int argc, char** argv) {
                 init_binary_test_peri(p, binary_a_pc, binary_e, binary_m1, binary_m2);
             } else if (test == "triple_test") {
                 init_triple_test(p, triple_a_in, triple_e_in, triple_m1, triple_m2,
-                                 triple_a_out, triple_e_out, triple_m3, triple_incl);
+                                 triple_a_out, triple_e_out, triple_m3, triple_incl, triple_outer_first);
             } else {
                 std::fprintf(stderr, "Unknown test case: %s\n", test.c_str());
                 MPIComm::finalize();

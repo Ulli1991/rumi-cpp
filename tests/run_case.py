@@ -54,6 +54,13 @@ BINARIES50 = dict(BINARIES, PLUMMER_N="5000", PLUMMER_M_TOTAL="2000", BINARY_FRA
 # Dense core (r_h = 0.05 pc), 50 % binaries of 1-20 AU: binary-single encounters form triples and multiplets
 TRIPLES = dict(BINARIES, PLUMMER_N="2000", PLUMMER_M_TOTAL="800", PLUMMER_R_HALF="0.05", BINARY_FRAC="0.5",
                BINARY_A_MIN_AU="1", BINARY_A_MAX_AU="20", TOTAL_TIME_MYR="2e-4", DT_MAX_MYR="1e-4")
+# Stable hierarchical triple of stars (2 AU inner, 41 AU outer, 60 deg), steps of ~45 inner orbits: the
+# secular-triple path. TRIPLE_OUTER_FIRST stores the outer body at the lowest particle id.
+SEC_TRIPLE = dict(TEST_CASE="triple_test", INTEGRATOR="hhs", TRIPLE_A_IN_PC="1e-5", TRIPLE_E_IN="0.3", TRIPLE_M1="1.0",
+                  TRIPLE_M2="0.8", TRIPLE_A_OUT_PC="2e-4", TRIPLE_E_OUT="0.2", TRIPLE_M3="0.6", TRIPLE_INCL_DEG="60",
+                  TOTAL_TIME_MYR="1e-3", DT_MAX_MYR="1e-4", DT_MIN_MYR="1e-14", SOFTENING_PC="0", COLLISIONAL="true",
+                  R_NGB="1e-3", R_NGB_MAX="0.1", N_ORB_SECULAR="3", PN_ORDER="0", SSE_ENABLED="false",
+                  ETA_RESTART="0", PRINT_INTERVAL="1", PROFILING="false")
 # 16 stars inside r_ngb: one 15-body neighbour group, more than LogH's fixed storage (LOGH_MAX_BODIES = 8)
 BIG_GROUP = dict(TEST_CASE="plummer", INTEGRATOR="hhs", TOTAL_TIME_MYR="1e-5", DT_MAX_MYR="1e-6", DT_MIN_MYR="1e-16",
                  SOFTENING_PC="0", COLLISIONAL="true", R_NGB="1e-3", R_NGB_MAX="0.1", PN_ORDER="0", SSE_ENABLED="false",
@@ -216,6 +223,19 @@ def triples(exe, label, cfg, bound):
         check(f"{label} max|dE/E|", max(r[0] for r in rows), bound)
 
 
+def triple_order(exe, label, cfg, rel):
+    """A triple must evolve the same whichever particle ids its members carry: the outer body at the lowest
+    id must not be taken as an inner-binary member (that pair is unbound and the triple was skipped, frozen)."""
+    out = {of: run_output(exe, dict(cfg, TRIPLE_OUTER_FIRST=of)) for of in ("false", "true")}
+    n_sec = {of: o.count("[SEC_TRI]") for of, o in out.items()}
+    e = {of: diagnostics(o)[-1][0] for of, o in out.items()}
+    ok = check(f"{label} secular-triple calls, outer body last", n_sec["false"], 1, lower=True)
+    ok &= check(f"{label} secular-triple calls, outer body first", n_sec["true"], n_sec["false"], lower=True)
+    ok &= check(f"{label} |dE/E| outer body first (evolves)", e["true"], 1e-30, lower=True)
+    return ok & check(f"{label} |dE/E| first vs last, relative difference",
+                      abs(e["true"] - e["false"]) / max(e["false"], 1e-300), rel)
+
+
 def no_fsi_groups(exe, label, cfg, bound):
     """Neighbour chains in a dense core must be split along bound pairs, not left whole to the FSI."""
     out = run_output(exe, cfg)
@@ -341,6 +361,8 @@ CASES = {
     # Triple branch of detect_from_pairs used a particle id where the union-find wanted a compact id
     # (out of bounds for ids >= the number of pair members; the tests' triples had ids 0-2)
     # Measured 9.8e-9 (dense core, at the restart threshold): bound 3e-8
+    # The secular-triple driver took the inner pair from the first two ids (fixed 2026-10-10)
+    "triple_id_order": lambda exe: triple_order(exe, "secular triple", SEC_TRIPLE, 1e-6),
     "triples_detected": lambda exe: triples(exe, "dense core", TRIPLES, 3e-8),
     # r_h = 0.03 pc: before, a 9+ body chain (linked by unbound fly-bys) went to the FSI whole, with its
     # tight binaries integrated orbit by orbit (r_h = 0.02 pc never finished a step). Measured 3.6e-8.

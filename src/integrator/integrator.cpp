@@ -646,13 +646,25 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
         for (int s : secular_triple_idx) {
             g_subsystem_mgr.step_secular_triples++;
             const auto& sub = g_subsystem_mgr.active[s];
-            if (sub.n_bodies != 3) continue;
+            // A triple this path cannot evolve goes to LogH: skipping it would leave its members frozen for the
+            // whole step (the FSI drifts no subsystem members)
+            if (sub.n_bodies != 3 || sub.inner_binary_id < 0 || sub.outer_companion_pid < 0) {
+                logh_idx.push_back(s);
+                continue;
+            }
 
-            // Identify inner binary (first two PIDs) and outer companion (third)
-            int idx0 = g_subsystem_mgr.safe_pid_to_idx(sub.particle_ids[0]);
-            int idx1 = g_subsystem_mgr.safe_pid_to_idx(sub.particle_ids[1]);
-            int idx2 = g_subsystem_mgr.safe_pid_to_idx(sub.particle_ids[2]);
-            if (idx0 < 0 || idx1 < 0 || idx2 < 0) continue;
+            // Inner binary and outer companion from the classification (particle_ids are sorted by id, so
+            // their order says nothing about the hierarchy)
+            int inner_j = -1;
+            for (int pid : sub.particle_ids)
+                if (pid != sub.inner_binary_id && pid != sub.outer_companion_pid) inner_j = pid;
+            int idx0 = g_subsystem_mgr.safe_pid_to_idx(sub.inner_binary_id);
+            int idx1 = inner_j >= 0 ? g_subsystem_mgr.safe_pid_to_idx(inner_j) : -1;
+            int idx2 = g_subsystem_mgr.safe_pid_to_idx(sub.outer_companion_pid);
+            if (idx0 < 0 || idx1 < 0 || idx2 < 0) {
+                logh_idx.push_back(s);
+                continue;
+            }
 
             double m1 = h_m(idx0 - start), m2 = h_m(idx1 - start), m3 = h_m(idx2 - start);
             double mu_in = G * (m1 + m2);
@@ -678,7 +690,10 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
             double mu_out = G * (M12 + m3);
             OrbitalElements oe_out = cartesian_to_elements(r_out, v_out, mu_out);
 
-            if (oe_in.a <= 0 || oe_out.a <= 0) continue;  // unbound
+            if (oe_in.a <= 0 || oe_out.a <= 0) {  // no longer hierarchical: integrate it directly
+                logh_idx.push_back(s);
+                continue;
+            }
 
             // Mutual inclination from angular momentum vectors
             double L_in[3] = {r_in[1]*v_in[2]-r_in[2]*v_in[1],
@@ -697,14 +712,14 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
             tri.inner.a = oe_in.a; tri.inner.e = oe_in.e; tri.inner.omega = oe_in.omega;
             tri.inner.inc = oe_in.inc; tri.inner.Omega = oe_in.Omega;
             tri.inner.m1 = m1; tri.inner.m2 = m2;
-            tri.inner.pid1 = sub.particle_ids[0]; tri.inner.pid2 = sub.particle_ids[1];
+            tri.inner.pid1 = sub.inner_binary_id; tri.inner.pid2 = inner_j;
             tri.a_out = oe_out.a; tri.e_out = oe_out.e;
             tri.omega_out = oe_out.omega; tri.inc_out = oe_out.inc; tri.Omega_out = oe_out.Omega;
-            tri.m3 = m3; tri.pid3 = sub.particle_ids[2];
+            tri.m3 = m3; tri.pid3 = sub.outer_companion_pid;
             tri.cos_i_mut = cos_i_mut;
 
             printf("  [SEC_TRI] pid=%d,%d,%d  a_in=%.4e  e_in=%.6f  a_out=%.4e  cos_i=%.4f  dt=%.4e\n",
-                   sub.particle_ids[0], sub.particle_ids[1], sub.particle_ids[2],
+                   sub.inner_binary_id, inner_j, sub.outer_companion_pid,
                    tri.inner.a, tri.inner.e, tri.a_out, cos_i_mut, dt);
 
             double a_in_pre = tri.inner.a;  // save for GW bookkeeping

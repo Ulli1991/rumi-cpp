@@ -793,7 +793,7 @@ void init_binary_test_peri(Particles& p, double a_pc, double e,
 void init_triple_test(Particles& p,
                       double a_in_pc, double e_in, double m1_msun, double m2_msun,
                       double a_out_pc, double e_out, double m3_msun,
-                      double i_deg) {
+                      double i_deg, bool outer_first) {
     p.allocate(3, COLL_ENABLED);
 
     double M_in  = m1_msun + m2_msun;
@@ -838,20 +838,18 @@ void init_triple_test(Particles& p,
     auto h_vz = Kokkos::create_mirror_view(p.vz);
     auto h_mass = Kokkos::create_mirror_view(p.mass);
 
-    // Particle 0 (m1): inner binary + COM shift
-    h_x(0) = x0 + f_in * r3_x;  h_y(0) = 0.0;                    h_z(0) = 0.0;
-    h_vx(0) = 0.0;               h_vy(0) = vy0 + f_in * v3_y;     h_vz(0) = f_in * v3_z;
-    h_mass(0) = m1_msun;
-
-    // Particle 1 (m2): inner binary + COM shift
-    h_x(1) = x1 + f_in * r3_x;  h_y(1) = 0.0;                    h_z(1) = 0.0;
-    h_vx(1) = 0.0;               h_vy(1) = vy1 + f_in * v3_y;     h_vz(1) = f_in * v3_z;
-    h_mass(1) = m2_msun;
-
-    // Particle 2 (m3): outer body
-    h_x(2) = f_out * r3_x;      h_y(2) = 0.0;                    h_z(2) = 0.0;
-    h_vx(2) = 0.0;               h_vy(2) = f_out * v3_y;          h_vz(2) = f_out * v3_z;
-    h_mass(2) = m3_msun;
+    // Inner members m1, m2 and the outer body m3; outer_first stores m3 at index 0 (lowest particle id), so
+    // code that takes the inner pair from the first two ids is caught
+    const double px[3] = {x0 + f_in * r3_x, x1 + f_in * r3_x, f_out * r3_x};
+    const double pvy[3] = {vy0 + f_in * v3_y, vy1 + f_in * v3_y, f_out * v3_y};
+    const double pvz[3] = {f_in * v3_z, f_in * v3_z, f_out * v3_z};
+    const double pm[3] = {m1_msun, m2_msun, m3_msun};
+    for (int k = 0; k < 3; k++) {
+        const int i = outer_first ? (k + 1) % 3 : k;
+        h_x(i) = px[k];  h_y(i) = 0.0;     h_z(i) = 0.0;
+        h_vx(i) = 0.0;   h_vy(i) = pvy[k]; h_vz(i) = pvz[k];
+        h_mass(i) = pm[k];
+    }
 
     Kokkos::deep_copy(p.x, h_x);   Kokkos::deep_copy(p.y, h_y);   Kokkos::deep_copy(p.z, h_z);
     Kokkos::deep_copy(p.vx, h_vx); Kokkos::deep_copy(p.vy, h_vy); Kokkos::deep_copy(p.vz, h_vz);
@@ -861,9 +859,7 @@ void init_triple_test(Particles& p,
     // in collisional mode; writing them otherwise overruns an empty View)
     if (p.collisional) {
         auto h_stype = Kokkos::create_mirror_view(p.stellar_type);
-        h_stype(0) = (m1_msun >= 5.0) ? 14 : 0;
-        h_stype(1) = (m2_msun >= 5.0) ? 14 : 0;
-        h_stype(2) = (m3_msun >= 5.0) ? 14 : 0;
+        for (int i = 0; i < 3; i++) h_stype(i) = (h_mass(i) >= 5.0) ? 14 : 0;
         Kokkos::deep_copy(p.stellar_type, h_stype);
     }
 
