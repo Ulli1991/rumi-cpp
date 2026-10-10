@@ -557,6 +557,7 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
         const int n_sec = (int)secular_idx.size();
         std::vector<double> dE_gw(n_sec, 0.0);
         std::vector<char> evolved(n_sec, 0);
+        std::vector<int> substeps(n_sec, 0);
         std::vector<EnergyBookkeeping> sec_books(n_sec);  // P/L the secular evolution moves (PN, GW)
         auto evolve = [&](int k) {
             const auto& sub = g_subsystem_mgr.active[secular_idx[k]];
@@ -579,7 +580,7 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
             auto oe_pre = cartesian_to_elements(r_rel_pre, v_rel_pre, mu_sec);
             double E_orb_pre = -G * m1_sec * m2_sec / (2.0 * oe_pre.a);
 
-            integrate_secular_binary(p1, v1, h_m(idx0 - start),
+            substeps[k] = integrate_secular_binary(p1, v1, h_m(idx0 - start),
                                      p2, v2, h_m(idx1 - start),
                                      G, g_collisional.c_code,
                                      g_collisional.pn_order, dt);
@@ -626,6 +627,7 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
                 g_energy_books.L_sink[c] += sec_books[k].L_sink[c];
             }
             g_subsystem_mgr.step_secular_evolved += evolved[k];
+            g_subsystem_mgr.step_secular_substeps += substeps[k];
         }
 
         // Copy modified host subviews back to device
@@ -1279,6 +1281,8 @@ void hhs_fsi_step_dynamic(Particles& p, int start, int count, double pivot_dt,
 #ifdef ENABLE_COLLISIONAL
     if (do_global_pn)
         global_pn1_kick(p, start, count - n_removed, G, g_collisional.c_code, g_collisional.m_pn, pivot_dt * 0.5);
+    // Per-step subsystem summary, as hhs_fsi_step_distributed prints it (tests read its counters)
+    if (p.collisional) g_subsystem_mgr.print_step_summary();
     if (p.collisional && g_subsys_phase.any()) g_subsys_phase.report_and_reset();
 #else
     (void)n_removed;

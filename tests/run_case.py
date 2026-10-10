@@ -61,6 +61,12 @@ SEC_TRIPLE = dict(TEST_CASE="triple_test", INTEGRATOR="hhs", TRIPLE_A_IN_PC="1e-
                   TOTAL_TIME_MYR="1e-3", DT_MAX_MYR="1e-4", DT_MIN_MYR="1e-14", SOFTENING_PC="0", COLLISIONAL="true",
                   R_NGB="1e-3", R_NGB_MAX="0.1", N_ORB_SECULAR="3", PN_ORDER="0", SSE_ENABLED="false",
                   ETA_RESTART="0", PRINT_INTERVAL="1", PROFILING="false")
+# 10+10 Msun BH binary, a = 2 AU, e = 0.5, rotated to omega = 1e-6 rad (apoapsis start has omega = pi), all PN
+# orders, steps of ~16 orbits: the secular binary path; 1PN precession ~4e-5 rad per step
+SEC_BINARY = dict(TEST_CASE="binary_test", INTEGRATOR="hhs", BINARY_A_PC="1e-5", BINARY_E="0.5", BINARY_M1="10.0",
+                  BINARY_M2="10.0", BINARY_ROT_DEG="180.0000573", TOTAL_TIME_MYR="1e-4", DT_MAX_MYR="1e-5", DT_MIN_MYR="1e-14", SOFTENING_PC="0",
+                  COLLISIONAL="true", R_NGB="1e-3", R_NGB_MAX="0.1", N_ORB_SECULAR="3", PN_ORDER="31", M_PN="5.0",
+                  SSE_ENABLED="false", ETA_RESTART="0", PRINT_INTERVAL="1", PROFILING="false")
 # 16 stars inside r_ngb: one 15-body neighbour group, more than LogH's fixed storage (LOGH_MAX_BODIES = 8)
 BIG_GROUP = dict(TEST_CASE="plummer", INTEGRATOR="hhs", TOTAL_TIME_MYR="1e-5", DT_MAX_MYR="1e-6", DT_MIN_MYR="1e-16",
                  SOFTENING_PC="0", COLLISIONAL="true", R_NGB="1e-3", R_NGB_MAX="0.1", PN_ORDER="0", SSE_ENABLED="false",
@@ -236,6 +242,16 @@ def triple_order(exe, label, cfg, rel):
                       abs(e["true"] - e["false"]) / max(e["false"], 1e-300), rel)
 
 
+def secular_steps(exe, label, cfg, per_call):
+    """Internal steps of the secular binary integrator per evolution: the step must not collapse when the
+    argument of periapsis is near 0 (it used omega / omega-dot, and every call ran 100000 steps)."""
+    out = run_output(exe, cfg)
+    pairs = [(int(a), int(b)) for a, b in re.findall(r"Secular=(\d+) \(substeps=(\d+)\)", out)]
+    n_ev, n_sub = sum(a for a, _ in pairs), sum(b for _, b in pairs)
+    ok = check(f"{label} secular evolutions", n_ev, 1, lower=True)
+    return ok & check(f"{label} internal steps per evolution", n_sub / max(n_ev, 1), per_call)
+
+
 def no_fsi_groups(exe, label, cfg, bound):
     """Neighbour chains in a dense core must be split along bound pairs, not left whole to the FSI."""
     out = run_output(exe, cfg)
@@ -362,6 +378,8 @@ CASES = {
     # (out of bounds for ids >= the number of pair members; the tests' triples had ids 0-2)
     # Measured 9.8e-9 (dense core, at the restart threshold): bound 3e-8
     # The secular-triple driver took the inner pair from the first two ids (fixed 2026-10-10)
+    # The secular step used omega / omega-dot (fixed 2026-10-11)
+    "secular_omega0_steps": lambda exe: secular_steps(exe, "secular binary at omega = 1e-6", SEC_BINARY, 10),
     "triple_id_order": lambda exe: triple_order(exe, "secular triple", SEC_TRIPLE, 1e-6),
     "triples_detected": lambda exe: triples(exe, "dense core", TRIPLES, 3e-8),
     # r_h = 0.03 pc: before, a 9+ body chain (linked by unbound fly-bys) went to the FSI whole, with its

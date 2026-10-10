@@ -675,7 +675,7 @@ void init_plummer(Particles& p, int N, double M_total_msun, double r_half_pc, in
 // =========================================================================
 
 void init_binary_test(Particles& p, double a_pc, double e,
-                      double m1_msun, double m2_msun) {
+                      double m1_msun, double m2_msun, double rot_deg) {
     p.allocate(2, COLL_ENABLED);
 
     double mu = G_CODE * (m1_msun + m2_msun);
@@ -706,6 +706,15 @@ void init_binary_test(Particles& p, double a_pc, double e,
     h_vx(1) = 0.0; h_vy(1) = -f2 * v_apo; h_vz(1) = 0.0;
     h_mass(0) = m1_msun;
     h_mass(1) = m2_msun;
+    // Rotate the orbit in its plane by rot_deg (moves the argument of periapsis; default pi)
+    if (rot_deg != 0.0) {
+        const double c = std::cos(rot_deg * M_PI / 180.0), s = std::sin(rot_deg * M_PI / 180.0);
+        for (int i = 0; i < 2; i++) {
+            const double x = h_x(i), y = h_y(i), vx = h_vx(i), vy = h_vy(i);
+            h_x(i) = c * x - s * y;   h_y(i) = s * x + c * y;
+            h_vx(i) = c * vx - s * vy; h_vy(i) = s * vx + c * vy;
+        }
+    }
 
     Kokkos::deep_copy(p.x, h_x);   Kokkos::deep_copy(p.y, h_y);   Kokkos::deep_copy(p.z, h_z);
     Kokkos::deep_copy(p.vx, h_vx); Kokkos::deep_copy(p.vy, h_vy); Kokkos::deep_copy(p.vz, h_vz);

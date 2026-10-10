@@ -27,8 +27,8 @@ struct SecularTriple {
     double cos_i_mut;         // mutual inclination cosine
 };
 
-// Evolve a secular binary by dt
-void secular_evolve_binary(SecularBinary& bin, double dt, double G, double c_code, int pn_order);
+// Evolve a secular binary by dt; returns the number of internal steps
+int secular_evolve_binary(SecularBinary& bin, double dt, double G, double c_code, int pn_order);
 
 // Evolve a secular triple by dt (Kozai-Lidov + GW dissipation)
 void secular_evolve_triple(SecularTriple& tri, double dt, double G, double c_code, int pn_order);
@@ -41,8 +41,8 @@ void secular_to_cartesian(const SecularBinary& bin, double G,
                           double mean_anomaly, double r[3], double v[3]);
 
 // Full secular integration of a binary: Cartesian -> elements -> secular evolve -> advance M -> Cartesian
-// Works in absolute coordinates (handles CM frame internally)
-void integrate_secular_binary(
+// Works in absolute coordinates (handles CM frame internally); returns the number of internal steps
+int integrate_secular_binary(
     double pos1[3], double vel1[3], double m1,
     double pos2[3], double vel2[3], double m2,
     double G, double c_code, int pn_order, double dt);

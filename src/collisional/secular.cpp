@@ -112,7 +112,7 @@ static double compute_de_dt_pn35(double a, double e, double beta, double mu,
 //   2) drift:      advance omega by dt using rates at the half-stepped (a, e)
 //   3) half-kick:  same as step 1
 
-void secular_evolve_binary(SecularBinary& bin, double dt, double G, double c_code, int pn_order) {
+int secular_evolve_binary(SecularBinary& bin, double dt, double G, double c_code, int pn_order) {
     double beta = peters_beta(bin.m1, bin.m2, G, c_code);
     double c2 = c_code * c_code;
     double mu = G * (bin.m1 + bin.m2);
@@ -124,20 +124,21 @@ void secular_evolve_binary(SecularBinary& bin, double dt, double G, double c_cod
                + compute_de_dt_pn35(bin.a, bin.e, beta, mu, c2, pn_order);
     double dw0 = compute_domega_dt(bin.a, bin.e, mu, c2, pn_order);
 
-    // Secular timestep criterion: eta_sec * min(|a/da_dt|, |e/de_dt|, |omega/domega_dt|)
+    // Secular timestep criterion: eta_sec * min(|a/da_dt|, |e/de_dt|, 1/|domega_dt|). BIFROST Eq. 30 writes
+    // omega/omega-dot, but omega is an angle: near omega = 0 that term vanished and every call ran the
+    // 100000-step cap. The precession enters through the time to turn by one radian.
     const double eta_sec = 0.01;
     double t_sec = 1e30;
     if (std::fabs(da0) > 0.0)
         t_sec = std::min(t_sec, std::fabs(bin.a / da0));
-    if (std::fabs(de0) > 0.0)
+    if (std::fabs(de0) > 0.0 && bin.e > 0.0)
         t_sec = std::min(t_sec, std::fabs(bin.e / de0));
     if (std::fabs(dw0) > 0.0)
-        t_sec = std::min(t_sec, std::fabs(bin.omega / dw0));
+        t_sec = std::min(t_sec, 1.0 / std::fabs(dw0));
     double dt_sec = eta_sec * t_sec;
 
     // Adaptive number of internal steps
-    int n_steps = std::max(1, (int)std::ceil(dt / dt_sec));
-    n_steps = std::min(n_steps, 100000);
+    int n_steps = (dt_sec > 0.0 && dt / dt_sec < 100000.0) ? std::max(1, (int)std::ceil(dt / dt_sec)) : 100000;
     double h = dt / n_steps;
 
     // Initialize auxiliary variables equal to the physical state
@@ -210,6 +211,7 @@ void secular_evolve_binary(SecularBinary& bin, double dt, double G, double c_cod
     bin.de_dt = compute_de_dt(bin.a, bin.e, beta, pn_order)
               + compute_de_dt_pn35(bin.a, bin.e, beta, mu, c2, pn_order);
     bin.domega_dt = compute_domega_dt(bin.a, bin.e, mu, c2, pn_order);
+    return n_steps;
 }
 
 // ============================================================================
@@ -415,7 +417,7 @@ void secular_to_cartesian(const SecularBinary& bin, double G,
 // Works in absolute coordinates (handles CM frame internally)
 // ============================================================================
 
-void integrate_secular_binary(
+int integrate_secular_binary(
     double pos1[3], double vel1[3], double m1,
     double pos2[3], double vel2[3], double m2,
     double G, double c_code, int pn_order, double dt) {
@@ -441,7 +443,7 @@ void integrate_secular_binary(
     OrbitalElements oe = cartesian_to_elements(r, v, mu);
 
     // Safety: skip if unbound or degenerate
-    if (oe.a <= 0.0 || oe.e >= 1.0) return;
+    if (oe.a <= 0.0 || oe.e >= 1.0) return 0;
 
     // 4. Populate SecularBinary and evolve (a, e, omega)
     SecularBinary bin;
@@ -452,20 +454,20 @@ void integrate_secular_binary(
     bin.Omega = oe.Omega;
     bin.m1 = m1;
     bin.m2 = m2;
-    secular_evolve_binary(bin, dt, G, c_code, pn_order);
+    const int n_sub = secular_evolve_binary(bin, dt, G, c_code, pn_order);
 
     // 5. Check for merger (secular_evolve_binary sets a=0 on coalescence)
     if (bin.a <= 0.0) {
         printf("  [SEC] WARNING: binary merged during secular evolution "
                "(pericenter < ISCO)\n");
-        return;  // leave particles at their original positions
+        return n_sub;  // leave particles at their original positions
     }
 
     // Check for unbound after evolution
     if (bin.e >= 1.0) {
         printf("  [SEC] WARNING: binary became unbound during secular evolution "
                "(e=%.6f)\n", bin.e);
-        return;
+        return n_sub;
     }
 
     // 6. Advance mean anomaly: M_new = M_old + n * dt
@@ -490,4 +492,5 @@ void integrate_secular_binary(
         pos2[k] = cm_pos_new[k] - (m1 / M_tot) * r_new[k];
         vel2[k] = cm_vel[k]     - (m1 / M_tot) * v_new[k];
     }
+    return n_sub;
 }

@@ -19,7 +19,7 @@ void init_plummer(Particles& p, int N, double M_total_msun, double r_half_pc, in
 // Isolated binary test case (2 particles): configurable orbital elements
 // a_pc: semi-major axis in parsecs, e: eccentricity, m1/m2: masses in M_sun
 void init_binary_test(Particles& p, double a_pc, double e,
-                      double m1_msun, double m2_msun);
+                      double m1_msun, double m2_msun, double rot_deg = 0.0);
 void init_binary_test_peri(Particles& p, double a_pc, double e,
                            double m1_msun, double m2_msun);
 

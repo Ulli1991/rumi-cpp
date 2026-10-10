@@ -957,6 +957,7 @@ void SubsystemManager::reset_step_diagnostics() {
     step_logh_restarts = 0;
     step_logh_restart_ok = 0;
     step_secular_evolved = 0;
+    step_secular_substeps = 0;
     step_secular_triples = 0;
     step_mergers = 0;
     step_escapers = 0;
@@ -1003,7 +1004,9 @@ void SubsystemManager::print_step_summary() const {
             std::printf(", restart=%d/%d", step_logh_restart_ok, step_logh_restarts);
         std::printf(")");
     }
-    std::printf("  Secular=%d  SecTriple=%d\n", step_secular_evolved, step_secular_triples);
+    std::printf("  Secular=%d", step_secular_evolved);
+    if (step_secular_evolved > 0) std::printf(" (substeps=%lld)", step_secular_substeps);
+    std::printf("  SecTriple=%d\n", step_secular_triples);
 
     // Events
     std::printf("    Events: mergers=%d  escapers=%d\n", step_mergers, step_escapers);

@@ -581,6 +581,7 @@ int main(int argc, char** argv) {
         double binary_e     = cfg.get_double("BINARY_E", 0.0);
         double binary_m1    = cfg.get_double("BINARY_M1", 10.0);
         double binary_m2    = cfg.get_double("BINARY_M2", 10.0);
+        double binary_rot   = cfg.get_double("BINARY_ROT_DEG", 0.0);
 
         // Triple test parameters
         double triple_a_in  = cfg.get_double("TRIPLE_A_IN_PC", 1e-8);
@@ -603,7 +604,7 @@ int main(int argc, char** argv) {
                              add_imbh, imbh_m1, imbh_m2, imbh_a_pc, imbh_e, imbh_spin,
                              r_break_au, &ic_sse_cfg);
             } else if (test == "binary_test") {
-                init_binary_test(p, binary_a_pc, binary_e, binary_m1, binary_m2);
+                init_binary_test(p, binary_a_pc, binary_e, binary_m1, binary_m2, binary_rot);
             } else if (test == "binary_test_peri") {
                 init_binary_test_peri(p, binary_a_pc, binary_e, binary_m1, binary_m2);
             } else if (test == "triple_test") {
