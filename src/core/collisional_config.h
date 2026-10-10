@@ -23,6 +23,8 @@ struct CollisionalConfig {
     double eta_jerk = 0.1;             // jerk timestep parameter
     double eta_gbs = 1e-10;            // GBS accuracy for LogH
     double eta_pert = 0.02;            // perturbation timestep for subsystems
+    double tidal_gamma = 0.0;          // TIDAL_GAMMA: binaries with |tidal accel| / |internal accel| above this resolve
+    double tidal_res = 0.05;           //   their orbit, dt <= TIDAL_RES x period (0 = off; dense cores)
     double eta_restart = 1e-6;         // energy error restart threshold
 
     // Secular evolution

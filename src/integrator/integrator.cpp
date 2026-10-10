@@ -2038,7 +2038,9 @@ static int hhs_fsi_recursive(
     if (!dt_valid && count > 1) {
 #ifdef ENABLE_COLLISIONAL
         // Step 1: Standalone neighbor search + detection (before timestep)
-        if (p.collisional) {
+        // NBODY_DETECT_TOP_ONLY (diagnostic): detect at depth 0 only and keep those subsystems below
+        static const bool detect_top_only = std::getenv("NBODY_DETECT_TOP_ONLY") != nullptr;
+        if (p.collisional && !(detect_top_only && depth > 0)) {
             g_profiler.start();
             g_subsystem_mgr.reset_ngb_count();
             neighbor_search_subset(p, start, count, G,

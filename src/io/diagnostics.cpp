@@ -1,3 +1,4 @@
+#include <cstdlib>
 #include "diagnostics.h"
 #include "constants.h"
 #include "mpi_comm.h"
@@ -249,7 +250,46 @@ void print_timebin_table(const Particles& p, const std::vector<double>& levels,
 }
 
 #ifdef ENABLE_COLLISIONAL
+// NBODY_ESPLIT=1 (diagnosis of the dense-core energy floor): total energy and the internal energy of a fixed list
+// of binaries (the bound two-body subsystems at the first call), both direct sums on the host
+static void energy_split(const Particles& p, double G) {
+    static std::vector<std::pair<int, int>> fixed;
+    auto h_x = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.x);
+    auto h_y = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.y);
+    auto h_z = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.z);
+    auto h_vx = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vx);
+    auto h_vy = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vy);
+    auto h_vz = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vz);
+    auto h_m = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.mass);
+    auto h_pid = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.particle_id);
+    const int N = p.N;
+    std::unordered_map<int, int> idx;
+    for (int i = 0; i < N; i++) idx[h_pid(i)] = i;
+    if (fixed.empty())
+        for (const auto& sub : g_subsystem_mgr.active)
+            if (sub.n_bodies == 2 && sub.type == SubsystemType::BINARY) fixed.push_back({sub.particle_ids[0], sub.particle_ids[1]});
+    long double T = 0, U = 0, Eint = 0;
+    for (int i = 0; i < N; i++) {
+        T += 0.5L * h_m(i) * (h_vx(i) * h_vx(i) + h_vy(i) * h_vy(i) + h_vz(i) * h_vz(i));
+        for (int j = i + 1; j < N; j++) {
+            double dx = h_x(j) - h_x(i), dy = h_y(j) - h_y(i), dz = h_z(j) - h_z(i);
+            U -= (long double)G * h_m(i) * h_m(j) / std::sqrt(dx * dx + dy * dy + dz * dz);
+        }
+    }
+    for (auto [a, b] : fixed) {
+        auto ia = idx.find(a), ib = idx.find(b);
+        if (ia == idx.end() || ib == idx.end()) continue;
+        int i = ia->second, j = ib->second;
+        double m1 = h_m(i), m2 = h_m(j), mu = m1 * m2 / (m1 + m2);
+        double dvx = h_vx(j) - h_vx(i), dvy = h_vy(j) - h_vy(i), dvz = h_vz(j) - h_vz(i);
+        double dx = h_x(j) - h_x(i), dy = h_y(j) - h_y(i), dz = h_z(j) - h_z(i);
+        Eint += 0.5L * mu * (dvx * dvx + dvy * dvy + dvz * dvz) - (long double)G * m1 * m2 / std::sqrt(dx * dx + dy * dy + dz * dz);
+    }
+    std::printf("ESPLIT E_total %.17Le E_int_fixed_binaries %.17Le (%zu binaries)\n", T + U, Eint, fixed.size());
+}
+
 void print_subsystem_diagnostics(const Particles& p, double G) {
+    if (std::getenv("NBODY_ESPLIT")) energy_split(p, G);
     if (g_subsystem_mgr.active.empty()) return;
 
     // Mirror particle data to host (once)
