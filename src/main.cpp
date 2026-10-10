@@ -622,6 +622,7 @@ int main(int argc, char** argv) {
             g_collisional.r_ngb_max       = cfg.get_double("R_NGB_MAX", 0.1);
             g_collisional.eta_grad        = cfg.get_double("ETA_GRAD", 0.1);
             g_collisional.eta_jerk        = cfg.get_double("ETA_JERK", 0.1);
+            g_collisional.eta_va          = eta;
             g_collisional.eta_gbs         = cfg.get_double("ETA_GBS", 1e-10);
             g_collisional.eta_pert        = cfg.get_double("ETA_PERT", 0.02);
             g_collisional.tidal_gamma     = cfg.get_double("TIDAL_GAMMA", 0.0);
@@ -1055,6 +1056,7 @@ int main(int argc, char** argv) {
                     double eta_gbs_orig  = g_collisional.eta_gbs;
                     double eta_grad_orig = g_collisional.eta_grad;
                     double eta_jerk_orig = g_collisional.eta_jerk;
+                    double eta_va_orig   = g_collisional.eta_va;
                     double eta_pert_orig = g_collisional.eta_pert;
                     double r_ngb_orig    = g_collisional.r_ngb;
 
@@ -1115,6 +1117,7 @@ int main(int argc, char** argv) {
                         g_collisional.eta_gbs  *= 0.5;
                         g_collisional.eta_grad *= 0.5;
                         g_collisional.eta_jerk *= 0.5;
+                        g_collisional.eta_va   *= 0.5;
                         g_collisional.eta_pert *= 0.5;
 
                         // Increase r_ngb by 15%
@@ -1131,6 +1134,7 @@ int main(int argc, char** argv) {
                     g_collisional.eta_gbs  = eta_gbs_orig;
                     g_collisional.eta_grad = eta_grad_orig;
                     g_collisional.eta_jerk = eta_jerk_orig;
+                    g_collisional.eta_va   = eta_va_orig;
                     g_collisional.eta_pert = eta_pert_orig;
                     g_collisional.r_ngb    = r_ngb_orig;
                     g_collisional.r_ngb_sq = r_ngb_orig * r_ngb_orig;

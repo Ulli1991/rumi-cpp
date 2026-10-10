@@ -2175,20 +2175,20 @@ static int hhs_fsi_recursive(
             compute_timestep_subset(p, start, count, G, soft2, eta);
         }
 #ifdef ENABLE_COLLISIONAL
-        // Gradient + v/a timestep criteria (BIFROST Section 3.4.4, Eq. 24/26/27)
-        if (p.collisional && g_collisional.eta_grad > 0.0) {
+        // Gradient + v/a timestep criteria (BIFROST Section 3.4.4, Eq. 24/26/27), each off at eta = 0
+        if (p.collisional && (g_collisional.eta_grad > 0.0 || g_collisional.eta_va > 0.0)) {
             auto dt_f = p.dt_adapt;
             auto gm = p.grad_mag;
             RawView agx{p.ax.data()}, agy{p.ay.data()}, agz{p.az.data()};
             RawView vvx{p.vx.data()}, vvy{p.vy.data()}, vvz{p.vz.data()};
             double eta_g = g_collisional.eta_grad;
-            double eta_va = eta;
+            double eta_va = g_collisional.eta_va;   // halved by the restart loop like the other etas
             small_for("dt_grad", count, KOKKOS_LAMBDA(int ii) {
                 int i = start + ii;
                 double a_mag = Kokkos::sqrt(agx(i)*agx(i) + agy(i)*agy(i) + agz(i)*agz(i));
                 double v_mag = Kokkos::sqrt(vvx(i)*vvx(i) + vvy(i)*vvy(i) + vvz(i)*vvz(i));
                 double g = gm(i);
-                if (g > EPS) {
+                if (eta_g > 0.0 && g > EPS) {
                     if (a_mag > EPS) {
                         double dt_g2 = eta_g * Kokkos::sqrt(a_mag / g);
                         if (dt_g2 < dt_f(i)) dt_f(i) = dt_g2;
@@ -2198,7 +2198,7 @@ static int hhs_fsi_recursive(
                         if (dt_g1 < dt_f(i)) dt_f(i) = dt_g1;
                     }
                 }
-                if (a_mag > EPS && v_mag > EPS) {
+                if (eta_va > 0.0 && a_mag > EPS && v_mag > EPS) {
                     double dt_va = eta_va * v_mag / a_mag;
                     if (dt_va < dt_f(i)) dt_f(i) = dt_va;
                 }

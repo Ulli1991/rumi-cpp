@@ -194,7 +194,7 @@ struct AccDtK {
             double j_mag = Kokkos::sqrt(sum[3] * sum[3] + sum[4] * sum[4] + sum[5] * sum[5]);
             if (eta_jerk > 0.0 && j_mag > EPS && a_mag > EPS) d = Kokkos::fmin(d, eta_jerk * a_mag / j_mag);
             double v_mag = Kokkos::sqrt(a.vx * a.vx + a.vy * a.vy + a.vz * a.vz);
-            if (a_mag > EPS && v_mag > EPS) d = Kokkos::fmin(d, eta_va * v_mag / a_mag);
+            if (eta_va > 0.0 && a_mag > EPS && v_mag > EPS) d = Kokkos::fmin(d, eta_va * v_mag / a_mag);
         }
         dt(i) = d;
     }

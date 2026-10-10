@@ -89,6 +89,8 @@ CLOSE_BINARIES = dict(BINARIES, BINARY_FRAC="0.5", BINARY_A_MIN_AU="0.01", BINAR
 FSI_BINARY = dict(TEST_CASE="binary_test", INTEGRATOR="fsi", TOTAL_TIME_MYR="1e-5", DT_MAX_MYR="1e-5", DT_MIN_MYR="1e-14",
                   SOFTENING_PC="0", COLLISIONAL="true", R_NGB="1e-6", R_NGB_MAX="1e-6", PN_ORDER="0",
                   SSE_ENABLED="false", BINARY_E="0.5", PRINT_INTERVAL="1", PROFILING="false")
+# The same binary through the HHS with ETA_FF/FB = 10 and no jerk step: the v/a criterion (ETA) sets the step
+VA_BINARY = dict(FSI_BINARY, INTEGRATOR="hhs", TOTAL_TIME_MYR="1e-4", ETA_FF="10", ETA_FB="10", ETA_JERK="0")
 BIG_GROUP = dict(TEST_CASE="plummer", INTEGRATOR="hhs", TOTAL_TIME_MYR="1e-5", DT_MAX_MYR="1e-6", DT_MIN_MYR="1e-16",
                  SOFTENING_PC="0", COLLISIONAL="true", R_NGB="1e-3", R_NGB_MAX="0.1", PN_ORDER="0", SSE_ENABLED="false",
                  PLUMMER_N="16", PLUMMER_M_TOTAL="16", PLUMMER_R_HALF="2e-4", PLUMMER_SEED="3", PLUMMER_MASS_DIST="equal",
@@ -319,6 +321,15 @@ def fsi_step(exe, label, cfg, bound):
     return check(f"{label} FSI global step [Myr]", float(m.group(1)), bound, lower=True)
 
 
+def restarts(exe, label, cfg, bound):
+    """Every step that fails ETA_RESTART must pass after restarts with smaller etas (no give-up)."""
+    out = run_output(exe, cfg)
+    rows = diagnostics(out)
+    return check(f"{label} restarts", out.count("RESTART["), 1, lower=True) & \
+        check(f"{label} give-ups", out.count("accepting"), 0) & \
+        check(f"{label} max|dE/E|", max(r[0] for r in rows), bound)
+
+
 def check(name, value, bound, lower=False):
     ok = value >= bound if lower else value <= bound
     print(f"{'ok  ' if ok else 'FAIL'} {name} = {value:.3e} ({'>=' if lower else '<='} {bound:.3e})")
@@ -463,6 +474,16 @@ CASES = {
     # ETA_JERK = 0 turns the jerk criterion off. Before: the start-of-step kernel (AccDtK) still applied it,
     # dt = 0 * |a| / |j| = 0, the run stepped at DT_MIN (1.86e-14 Myr, hung). Measured 1.5625e-7 (as with 0.1)
     "eta_jerk0_fsi": lambda exe: fsi_step(exe, "ETA_JERK = 0", dict(FSI_BINARY, ETA_JERK="0"), 1.2e-7),
+    # ETA_GRAD = 0 used to switch the v/a criterion off as well (one shared branch): the binary then stepped at
+    # ETA_FF/FB = 10. Measured 2.8 before, 7.36e-7 after (v/a limited, ETA = 0.1)
+    "va_without_grad": lambda exe: binaries(exe, "v/a with ETA_GRAD = 0", dict(VA_BINARY, ETA_GRAD="0", ETA="0.1"),
+                                            (9.6e-7, 1e-12)),
+    # Restarts halve every eta (BIFROST sec. 3.19) but did not halve ETA (v/a): with v/a limiting, a retry repeated
+    # the failed step, "dE not decreasing", and the step was accepted above ETA_RESTART. ETA_GRAD = 1000 keeps the
+    # shared branch on without the gradient step limiting. Measured before 10 give-ups, 1.9e-5;
+    # after 13 restarts, 0 give-ups, 2.87e-7
+    "restart_halves_va": lambda exe: restarts(exe, "v/a restarts", dict(VA_BINARY, ETA_GRAD="1000", ETA="0.2",
+                                                                       ETA_RESTART="1e-7"), 3.7e-7),
     "logh_big_group": lambda exe: big_group(exe, "big group", BIG_GROUP, (1.2e-5, 1e-12)),
     # MPI cases, run under NBODY_TEST_LAUNCHER (CTest sets 2 ranks). Spins were not broadcast: lost on every
     # rank of a GPU run (host backends alias the mirror, so the host build cannot fail this one).

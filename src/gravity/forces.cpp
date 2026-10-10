@@ -16,7 +16,7 @@ struct Etas { double ff, fb, jerk, va; };
 Etas etas(double eta) {
 #ifdef ENABLE_COLLISIONAL
     (void)eta;
-    return {g_collisional.eta_ff, g_collisional.eta_fb, g_collisional.eta_jerk, g_collisional.eta_ff};
+    return {g_collisional.eta_ff, g_collisional.eta_fb, g_collisional.eta_jerk, g_collisional.eta_va};
 #else
     return {eta, eta, 0.0, eta};
 #endif

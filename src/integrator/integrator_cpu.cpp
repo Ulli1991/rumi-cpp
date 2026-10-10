@@ -714,14 +714,14 @@ static int cpu_hhs_recursive(CpuSubset& s, Particles& p, int start, int count,
         cpu_compute_timestep(s, start, count, G, soft2, eta);
 #ifdef ENABLE_COLLISIONAL
         // Gradient + v/a timestep criteria (BIFROST Section 3.4.4, Eq. 24/26/27)
-        if (s.collisional && g_collisional.eta_grad > 0.0) {
+        if (s.collisional && (g_collisional.eta_grad > 0.0 || g_collisional.eta_va > 0.0)) {
             double eta_g = g_collisional.eta_grad;
-            double eta_va = eta;  // v/a criterion uses general eta (0.2)
+            double eta_va = g_collisional.eta_va;  // ETA, halved by the restart loop
             for (int i = start; i < start + count; i++) {
                 double a_mag = std::sqrt(s.ax[i]*s.ax[i] + s.ay[i]*s.ay[i] + s.az[i]*s.az[i]);
                 double v_mag = std::sqrt(s.vx[i]*s.vx[i] + s.vy[i]*s.vy[i] + s.vz[i]*s.vz[i]);
                 double g = s.grad_mag[i];
-                if (g > EPS) {
+                if (eta_g > 0.0 && g > EPS) {
                     if (a_mag > EPS) {
                         double dt_g2 = eta_g * std::sqrt(a_mag / g);
                         if (dt_g2 < s.dt_adapt[i]) s.dt_adapt[i] = dt_g2;
@@ -732,7 +732,7 @@ static int cpu_hhs_recursive(CpuSubset& s, Particles& p, int start, int count,
                     }
                 }
                 // v/a criterion (BIFROST Eq. 24)
-                if (a_mag > EPS && v_mag > EPS) {
+                if (eta_va > 0.0 && a_mag > EPS && v_mag > EPS) {
                     double dt_va = eta_va * v_mag / a_mag;
                     if (dt_va < s.dt_adapt[i]) s.dt_adapt[i] = dt_va;
                 }

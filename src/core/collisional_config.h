@@ -21,6 +21,7 @@ struct CollisionalConfig {
     double eta_fb = 0.2;               // fly-by timestep parameter
     double eta_grad = 0.1;             // gradient timestep parameter
     double eta_jerk = 0.1;             // jerk timestep parameter
+    double eta_va = 0.2;               // velocity-per-acceleration timestep parameter (ETA; BIFROST Eq. 24)
     double eta_gbs = 1e-10;            // GBS accuracy for LogH
     double eta_pert = 0.02;            // perturbation timestep for subsystems
     double tidal_gamma = 0.0;          // TIDAL_GAMMA: binaries with |tidal accel| / |internal accel| above this resolve
