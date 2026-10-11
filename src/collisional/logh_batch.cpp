@@ -670,16 +670,24 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
             }
             for (int i = 0; i < nb; i++)
                 for (int j = i + 1; j < nb; j++) {
-                    double r2 = 0.0, v2 = 0.0;
+                    double r2 = 0.0, v2 = 0.0, dx[3], dv[3];
                     for (int k = 0; k < 3; k++) {
-                        const double dx = state_init_pos[j*3+k] - state_init_pos[i*3+k];
-                        const double dv = state_init_vel[j*3+k] - state_init_vel[i*3+k];
-                        r2 += dx * dx;
-                        v2 += dv * dv;
+                        dx[k] = state_init_pos[j*3+k] - state_init_pos[i*3+k];
+                        dv[k] = state_init_vel[j*3+k] - state_init_vel[i*3+k];
+                        r2 += dx[k] * dx[k];
+                        v2 += dv[k] * dv[k];
                     }
                     const double mu = state.mass[i] + state.mass[j];   // G_norm = 1
                     const double eps = 0.5 * v2 - mu / std::sqrt(r2);
                     const double a = -mu / (2.0 * eps);
+                    if (sd_on && eps < 0.0) {   // SDAR: pericentre over the collision distance (< 1: kappa = 1)
+                        const double hx = dx[1]*dv[2] - dx[2]*dv[1], hy = dx[2]*dv[0] - dx[0]*dv[2];
+                        const double hz = dx[0]*dv[1] - dx[1]*dv[0];
+                        const double e = std::sqrt(std::max(0.0, 1.0 + 2.0 * eps * (hx*hx + hy*hy + hz*hz) / (mu * mu)));
+                        const double rc = sd_par.coll_radius[i] + sd_par.coll_radius[j];
+                        std::snprintf(buf, sizeof(buf), " e=%.4f r_p/r_coll=%.3g", e, rc > 0.0 ? a * (1.0 - e) / rc : -1.0);
+                        msg += buf;
+                    }
                     std::snprintf(buf, sizeof(buf), " | %d-%d r=%.3g a=%.3g pc%s", i, j, std::sqrt(r2) * R_scale,
                                   a * R_scale, eps < 0.0 ? "" : " (unbound)");
                     msg += buf;
@@ -701,6 +709,28 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
                 std::snprintf(buf, sizeof(buf), "%s%.3g", b ? "," : "", h_mass(off + b));
                 msg += buf;
             }
+            // Bound pairs at the start: a, e, pericentre over the collision distance (< 1: collision candidate,
+            // kept at kappa = 1)
+            for (int i = 0; i < nb; i++)
+                for (int j = i + 1; j < nb; j++) {
+                    double r[3], v[3], r2 = 0.0, v2 = 0.0;
+                    for (int k = 0; k < 3; k++) {
+                        r[k] = state_init_pos[j*3+k] - state_init_pos[i*3+k];
+                        v[k] = state_init_vel[j*3+k] - state_init_vel[i*3+k];
+                        r2 += r[k] * r[k];
+                        v2 += v[k] * v[k];
+                    }
+                    const double mu = state.mass[i] + state.mass[j];
+                    const double eps = 0.5 * v2 - mu / std::sqrt(r2);
+                    if (eps >= 0.0) continue;
+                    const double hx = r[1]*v[2] - r[2]*v[1], hy = r[2]*v[0] - r[0]*v[2], hz = r[0]*v[1] - r[1]*v[0];
+                    const double a = -mu / (2.0 * eps);
+                    const double e = std::sqrt(std::max(0.0, 1.0 + 2.0 * eps * (hx*hx + hy*hy + hz*hz) / (mu * mu)));
+                    const double rc = sd_par.coll_radius[i] + sd_par.coll_radius[j];
+                    std::snprintf(buf, sizeof(buf), " | %d-%d a=%.3g pc e=%.4f r_p/r_coll=%.3g", i, j, a * R_scale, e,
+                                  rc > 0.0 ? a * (1.0 - e) / rc : -1.0);
+                    msg += buf;
+                }
             std::printf("%s\n", msg.c_str());
         }
         h_eerr(s) = dE_rel;
