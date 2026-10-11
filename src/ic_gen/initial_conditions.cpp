@@ -617,9 +617,13 @@ void init_plummer(Particles& p, int N, double M_total_msun, double r_half_pc, in
             double mu = G_CODE * M_bin;
 
             bool compact_i = (h_kw[i] >= 10), compact_j = (h_kw[j] >= 10);
+            // Pairs with a BH from collision_distance (FC-I tidal radius); two non-BHs keep (R1 + R2) R_sun as before,
+            // bit for bit (R1 R_sun + R2 R_sun rounds differently and changes the redrawn e, hence the ICs)
             MergerType contact_type;
-            const double r_contact = collision_distance(h_kw[i], m_i, h_srad[i] * R_sun_pc, h_kw[j], m_j,
-                                                        h_srad[j] * R_sun_pc, G_CODE, c_kms, contact_type);
+            const double r_contact = (h_kw[i] == 14 || h_kw[j] == 14)
+                ? collision_distance(h_kw[i], m_i, h_srad[i] * R_sun_pc, h_kw[j], m_j, h_srad[j] * R_sun_pc, G_CODE,
+                                     c_kms, contact_type)
+                : (h_srad[i] + h_srad[j]) * R_sun_pc;
             bool check_gw = binary_peri_check && compact_i && compact_j;
 
             // Log-uniform semi-major axis (BIFROST Table A1: f(a) flat in log a)
