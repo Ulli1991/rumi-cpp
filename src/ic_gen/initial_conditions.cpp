@@ -118,6 +118,189 @@ static std::vector<double> sample_kroupa_imf(int N, std::mt19937_64& rng,
 }
 
 // =========================================================================
+// SCIC helpers (BIFROST, Rantala et al. 2023, MNRAS 522, 5180, App. A)
+// =========================================================================
+
+double scic_mass_size_r_half(double M) {
+    // Eq. (A2), star clusters: r_h / pc = 2.55 (M / 1e4 M_sun)^0.24, after Brown & Gnedin (2021, MNRAS 508, 5935).
+    // Eq. (A3), nuclear star clusters: log10(R_e / pc) = 1/2 below M = 10^6.5 M_sun, (1/2) log10(M / M_sun) - 11/4
+    // above, "with r_h = ((1/2)^(-2/3) - 1)^(-1) R_e for the Plummer model" -- as printed that factor is 1.70, but
+    // the projected half-mass radius of a Plummer sphere is a_p and r_h = (2^(2/3) - 1)^(-1/2) a_p = 1.305 a_p
+    // (the paper's own relation in App. A), so we use r_h = 1.305 R_e (exponent -1/2, a typo in the paper).
+    // Where SCIC switches from (A2) to (A3) is not stated; we switch at the (A3) break, 10^6.5 M_sun.
+    if (M < std::pow(10.0, 6.5)) return 2.55 * std::pow(M / 1e4, 0.24);
+    double log_re = 0.5 * std::log10(M) - 11.0 / 4.0;
+    return PLUMMER_SCALE_FACTOR * std::pow(10.0, log_re);
+}
+
+namespace {
+
+// BIFROST App. A, "Avoiding artificial binaries and multiplets": "impose a minimum distance r_break ~ a few times
+// a_max between particles which are not members of the same binary system ... If an artificial binary is detected
+// (i.e. a < r_break) the positions and velocities of the particles in question are re-sampled ... A practical
+// algorithm in our SCIC code first performs the angular re-sampling method [keeping |r_i| and |v_i|] for the
+// artificial binaries using up to 10 iterations before switching to the original re-sampling if artificial systems
+// remain. After another 5-10 iteration rounds typically only few or zero artificial binaries remain."
+// The objects are the N_s + N_b singles and binary centres of mass ("the binaries treated as point particles before
+// assigning the positions and velocities of the binary components"); a binary's centre of mass is its primary's
+// Plummer point (pairs[].first), the secondary's own draw is unused. The text uses both a separation (minimum
+// distance) and a semi-major axis (a < r_break); we flag a pair of objects for either, r < r_break or bound with
+// a < r_break (a bound pair with a < r_break has r < 2 r_break, the search radius). Both objects of a flagged pair
+// are re-sampled: 10 angular rounds, then up to 10 full rounds.
+template <class FR, class FD, class FS>
+void avoid_artificial_binaries(const std::vector<std::pair<int,int>>& pairs,
+                               std::vector<double>& hx, std::vector<double>& hy, std::vector<double>& hz,
+                               std::vector<double>& hvx, std::vector<double>& hvy, std::vector<double>& hvz,
+                               const std::vector<double>& hmass, double r_break_pc,
+                               FR plummer_radius, FD set_direction, FS plummer_speed) {
+    const int N = (int)hmass.size();
+    std::vector<double> m_obj(hmass);      // object mass carried by each particle index
+    std::vector<char> is_object(N, 1);
+    for (auto [i, j] : pairs) { m_obj[i] = hmass[i] + hmass[j]; is_object[j] = 0; }
+    std::vector<int> obj;
+    obj.reserve(N);
+    for (int i = 0; i < N; i++) if (is_object[i]) obj.push_back(i);
+    const int n_obj = (int)obj.size();
+
+    const double search_r = 2.0 * r_break_pc, search_r2 = search_r * search_r;
+    struct Key { long long x, y, z; bool operator==(const Key& o) const { return x == o.x && y == o.y && z == o.z; } };
+    struct KeyHash {
+        size_t operator()(const Key& k) const {
+            return (size_t)(k.x * 73856093LL) ^ (size_t)(k.y * 19349663LL) ^ (size_t)(k.z * 83492791LL);
+        }
+    };
+    auto key = [&](int i) {
+        return Key{(long long)std::floor(hx[i] / search_r), (long long)std::floor(hy[i] / search_r),
+                   (long long)std::floor(hz[i] / search_r)};
+    };
+    std::vector<char> flagged(n_obj);
+    auto detect = [&]() {
+        std::unordered_map<Key, std::vector<int>, KeyHash> grid;
+        grid.reserve(2 * n_obj);
+        for (int k = 0; k < n_obj; k++) grid[key(obj[k])].push_back(k);
+        std::fill(flagged.begin(), flagged.end(), 0);
+        int n_pairs = 0;
+        for (int k = 0; k < n_obj; k++) {
+            int i = obj[k];
+            Key c = key(i);
+            for (long long dx = -1; dx <= 1; dx++)
+            for (long long dy = -1; dy <= 1; dy++)
+            for (long long dz = -1; dz <= 1; dz++) {
+                auto it = grid.find(Key{c.x + dx, c.y + dy, c.z + dz});
+                if (it == grid.end()) continue;
+                for (int l : it->second) {
+                    if (l <= k) continue;
+                    int j = obj[l];
+                    double rx = hx[i] - hx[j], ry = hy[i] - hy[j], rz = hz[i] - hz[j];
+                    double r2 = rx*rx + ry*ry + rz*rz;
+                    if (r2 >= search_r2) continue;
+                    double r = std::sqrt(r2);
+                    bool close = r < r_break_pc;
+                    if (!close) {
+                        double ux = hvx[i] - hvx[j], uy = hvy[i] - hvy[j], uz = hvz[i] - hvz[j];
+                        double mu = G_CODE * (m_obj[i] + m_obj[j]);
+                        double eps = 0.5 * (ux*ux + uy*uy + uz*uz) - mu / r;
+                        close = eps < 0.0 && -mu / (2.0 * eps) < r_break_pc;
+                    }
+                    if (close) { flagged[k] = flagged[l] = 1; n_pairs++; }
+                }
+            }
+        }
+        return n_pairs;
+    };
+    constexpr int n_angular = 10, n_full = 10;
+    int before = 0, after = 0, round = 0, n_resampled = 0;
+    while (true) {
+        int n = detect();
+        if (round == 0) before = n;
+        if (n == 0 || round == n_angular + n_full) { after = n; break; }
+        for (int k = 0; k < n_obj; k++) {
+            if (!flagged[k]) continue;
+            int i = obj[k];
+            n_resampled++;
+            double r = std::sqrt(hx[i]*hx[i] + hy[i]*hy[i] + hz[i]*hz[i]);
+            double v = std::sqrt(hvx[i]*hvx[i] + hvy[i]*hvy[i] + hvz[i]*hvz[i]);
+            if (round >= n_angular) { r = plummer_radius(); v = plummer_speed(r); }
+            set_direction(r, hx[i], hy[i], hz[i]);
+            set_direction(v, hvx[i], hvy[i], hvz[i]);
+        }
+        round++;
+    }
+    // Keep the objects' centre of mass at rest at the origin (secondaries are placed relative to their primary)
+    double M = 0, c[6] = {0, 0, 0, 0, 0, 0};
+    for (int i : obj) {
+        double mk = m_obj[i];
+        M += mk;
+        c[0] += mk * hx[i]; c[1] += mk * hy[i]; c[2] += mk * hz[i];
+        c[3] += mk * hvx[i]; c[4] += mk * hvy[i]; c[5] += mk * hvz[i];
+    }
+    for (int i : obj) {
+        hx[i] -= c[0] / M; hy[i] -= c[1] / M; hz[i] -= c[2] / M;
+        hvx[i] -= c[3] / M; hvy[i] -= c[4] / M; hvz[i] -= c[5] / M;
+    }
+    std::printf("  IC_R_BREAK: r_break=%.4g pc, close pairs before=%d after=%d (%d objects, %d re-sampled in %d rounds:"
+                " %d angular, %d full)\n", r_break_pc, before, after, n_obj, n_resampled, round,
+                std::min(round, n_angular), std::max(0, round - n_angular));
+}
+
+// IC summary on objects (singles, binary centres of mass): half-mass radius of all particles about the centre of
+// mass, virial ratio Q = T / |W| of the objects (W direct up to 20000 objects, else the Plummer value
+// -3 pi G M^2 / (32 a)), and the binaries' internal binding energy relative to |T + W| of the objects
+void print_ic_check(const std::vector<int>& partner,
+                    const std::vector<double>& hx, const std::vector<double>& hy, const std::vector<double>& hz,
+                    const std::vector<double>& hvx, const std::vector<double>& hvy, const std::vector<double>& hvz,
+                    const std::vector<double>& hmass, double a_plummer) {
+    const int N = (int)hmass.size();
+    double M = 0, c[3] = {0, 0, 0};
+    for (int i = 0; i < N; i++) { M += hmass[i]; c[0] += hmass[i] * hx[i]; c[1] += hmass[i] * hy[i]; c[2] += hmass[i] * hz[i]; }
+    std::vector<std::pair<double,double>> rm(N);
+    for (int i = 0; i < N; i++) {
+        double dx = hx[i] - c[0] / M, dy = hy[i] - c[1] / M, dz = hz[i] - c[2] / M;
+        rm[i] = {std::sqrt(dx*dx + dy*dy + dz*dz), hmass[i]};
+    }
+    std::sort(rm.begin(), rm.end());
+    double cum = 0, r_h = 0;
+    for (auto& [r, m] : rm) { cum += m; if (cum >= 0.5 * M) { r_h = r; break; } }
+
+    std::vector<double> ox, oy, oz, om;
+    double T = 0, E_bin = 0;
+    for (int i = 0; i < N; i++) {
+        int j = partner[i];
+        if (j >= 0 && j < i) continue;
+        if (j < 0) {
+            ox.push_back(hx[i]); oy.push_back(hy[i]); oz.push_back(hz[i]); om.push_back(hmass[i]);
+            T += 0.5 * hmass[i] * (hvx[i]*hvx[i] + hvy[i]*hvy[i] + hvz[i]*hvz[i]);
+            continue;
+        }
+        double mi = hmass[i], mj = hmass[j], mb = mi + mj;
+        double vx = (mi * hvx[i] + mj * hvx[j]) / mb, vy = (mi * hvy[i] + mj * hvy[j]) / mb;
+        double vz = (mi * hvz[i] + mj * hvz[j]) / mb;
+        ox.push_back((mi * hx[i] + mj * hx[j]) / mb); oy.push_back((mi * hy[i] + mj * hy[j]) / mb);
+        oz.push_back((mi * hz[i] + mj * hz[j]) / mb); om.push_back(mb);
+        T += 0.5 * mb * (vx*vx + vy*vy + vz*vz);
+        double rx = hx[i] - hx[j], ry = hy[i] - hy[j], rz = hz[i] - hz[j];
+        double ux = hvx[i] - hvx[j], uy = hvy[i] - hvy[j], uz = hvz[i] - hvz[j];
+        E_bin += 0.5 * mi * mj / mb * (ux*ux + uy*uy + uz*uz) - G_CODE * mi * mj / std::sqrt(rx*rx + ry*ry + rz*rz);
+    }
+    const int n_obj = (int)om.size();
+    double W = 0;
+    const bool direct = n_obj <= 20000;
+    if (direct) {
+        for (int k = 0; k < n_obj; k++)
+            for (int l = k + 1; l < n_obj; l++) {
+                double dx = ox[k] - ox[l], dy = oy[k] - oy[l], dz = oz[k] - oz[l];
+                W -= G_CODE * om[k] * om[l] / std::sqrt(dx*dx + dy*dy + dz*dz);
+            }
+    } else {
+        W = -3.0 * M_PI * G_CODE * M * M / (32.0 * a_plummer);
+    }
+    std::printf("  IC check: N_obj=%d r_h(measured)=%.6g pc Q_obj=%.6g E_bin/|E_obj|=%.6g (W %s)\n", n_obj, r_h,
+                T / std::fabs(W), std::fabs(E_bin) / std::fabs(T + W), direct ? "direct" : "Plummer");
+}
+
+}  // namespace
+
+// =========================================================================
 // Plummer sphere generator
 // =========================================================================
 
@@ -129,11 +312,10 @@ void init_plummer(Particles& p, int N, double M_total_msun, double r_half_pc, in
                   double imbh_a_pc, double imbh_e, double imbh_spin,
                   double r_break_au,
                   const SSEConfig* sse_cfg,
-                  const std::string& binary_pop, bool binary_peri_check) {
+                  const std::string& binary_pop, bool binary_peri_check,
+                  bool binary_com_sampled) {
     // Use host-side std::vectors so we can resize for REMOVE_BH / ADD_IMBH
     double M_total = M_total_msun;
-    double a_pc = r_half_pc / PLUMMER_SCALE_FACTOR;
-    double a = a_pc;
 
     std::mt19937_64 rng(seed);
     std::uniform_real_distribution<double> uni(0.0, 1.0);
@@ -227,6 +409,17 @@ void init_plummer(Particles& p, int N, double M_total_msun, double r_half_pc, in
         if (n_bh > 0) std::printf("    BH masses:  %.4f - %.4f M_sun\n", bh_mn, bh_mx);
     }
 
+    // Half-mass radius: user-given, or the SCIC mass-size relation of the generated cluster mass (for an evolved
+    // population the present-day mass; BIFROST does not say which mass SCIC uses)
+    if (r_half_pc <= 0.0) {
+        r_half_pc = scic_mass_size_r_half(M_total_msun);
+        std::printf("  IC r_h = %.6g pc (SCIC mass-size relation, BIFROST App. A eq. A2/A3, M = %.6g M_sun)\n",
+                    r_half_pc, M_total_msun);
+    } else {
+        std::printf("  IC r_h = %.6g pc (PLUMMER_R_HALF)\n", r_half_pc);
+    }
+    const double a = r_half_pc / PLUMMER_SCALE_FACTOR;  // Plummer scale radius, r_h = (2^(2/3) - 1)^(-1/2) a_p
+
     // Crossing time
     double t_cr_code = std::sqrt(r_half_pc * r_half_pc * r_half_pc / (G_CODE * M_total_msun));
     double t_cr_myr = t_cr_code * TIME_UNIT_MYR;
@@ -235,33 +428,32 @@ void init_plummer(Particles& p, int N, double M_total_msun, double r_half_pc, in
     // =====================================================================
     // Sample Plummer positions and velocities
     // =====================================================================
-    for (int i = 0; i < N; i++) {
+    // Plummer (1911) radius from the inverted cumulative mass M(r) / M = r^3 / (r^2 + a^2)^(3/2), speed from the
+    // Plummer f(E) ~ (-E)^(7/2) by von Neumann rejection (Aarseth, Henon & Wielen 1974), isotropic directions
+    auto plummer_radius = [&]() {
         double U = std::clamp(uni(rng), 1e-10, 1.0 - 1e-10);
-        double r = a / std::sqrt(std::pow(U, -2.0/3.0) - 1.0);
-
-        double cos_theta = 2.0 * uni(rng) - 1.0;
-        double sin_theta = std::sqrt(1.0 - cos_theta * cos_theta);
-        double phi = 2.0 * M_PI * uni(rng);
-
-        hx[i] = r * sin_theta * std::cos(phi);
-        hy[i] = r * sin_theta * std::sin(phi);
-        hz[i] = r * cos_theta;
-
+        return a / std::sqrt(std::pow(U, -2.0/3.0) - 1.0);
+    };
+    auto set_direction = [&](double r, double& x, double& y, double& z) {
+        double ct = 2.0 * uni(rng) - 1.0;
+        double st = std::sqrt(1.0 - ct * ct);
+        double ph = 2.0 * M_PI * uni(rng);
+        x = r * st * std::cos(ph);
+        y = r * st * std::sin(ph);
+        z = r * ct;
+    };
+    auto plummer_speed = [&](double r) {
         double v_escape = std::sqrt(2.0 * G_CODE * M_total / std::sqrt(r*r + a*a));
         while (true) {
             double q = uni(rng);
             double g_q = q * q * std::pow(1.0 - q * q, 3.5);
-            if (uni(rng) * 0.1 < g_q) {
-                double v_mag = q * v_escape;
-                double vcos = 2.0 * uni(rng) - 1.0;
-                double vsin = std::sqrt(1.0 - vcos * vcos);
-                double vphi = 2.0 * M_PI * uni(rng);
-                hvx[i] = v_mag * vsin * std::cos(vphi);
-                hvy[i] = v_mag * vsin * std::sin(vphi);
-                hvz[i] = v_mag * vcos;
-                break;
-            }
+            if (uni(rng) * 0.1 < g_q) return q * v_escape;
         }
+    };
+    for (int i = 0; i < N; i++) {
+        double r = plummer_radius();
+        set_direction(r, hx[i], hy[i], hz[i]);
+        set_direction(plummer_speed(r), hvx[i], hvy[i], hvz[i]);
     }
 
     // Center of mass correction
@@ -277,173 +469,6 @@ void init_plummer(Particles& p, int N, double M_total_msun, double r_half_pc, in
         for (int i = 0; i < N; i++) {
             hx[i] -= com_x; hy[i] -= com_y; hz[i] -= com_z;
             hvx[i] -= com_vx; hvy[i] -= com_vy; hvz[i] -= com_vz;
-        }
-    }
-
-    // =====================================================================
-    // Artificial binary removal: find and break spurious close bound pairs
-    // =====================================================================
-    if (r_break_au > 0.0) {
-        double r_break_pc = r_break_au * AU_TO_PC;
-        double search_r = 2.0 * r_break_pc;  // max separation for a < r_break
-        double cell_size = search_r;
-
-        // Spatial hash cell key
-        struct CellKey {
-            int ix, iy, iz;
-            bool operator==(const CellKey& o) const {
-                return ix == o.ix && iy == o.iy && iz == o.iz;
-            }
-        };
-        struct CellHash {
-            size_t operator()(const CellKey& k) const {
-                size_t h = std::hash<int>()(k.ix);
-                h ^= std::hash<int>()(k.iy) + 0x9e3779b9 + (h << 6) + (h >> 2);
-                h ^= std::hash<int>()(k.iz) + 0x9e3779b9 + (h << 6) + (h >> 2);
-                return h;
-            }
-        };
-        auto to_cell = [&](double x, double y, double z) -> CellKey {
-            return { static_cast<int>(std::floor(x / cell_size)),
-                     static_cast<int>(std::floor(y / cell_size)),
-                     static_cast<int>(std::floor(z / cell_size)) };
-        };
-
-        constexpr int max_angular_iter = 10;
-        constexpr int max_full_iter = 5;
-        int total_removed = 0;
-
-        std::printf("  Artificial binary removal (r_break=%.1f AU = %.3e pc):\n",
-                    r_break_au, r_break_pc);
-
-        for (int iter = 0; iter < max_angular_iter + max_full_iter; iter++) {
-            // Build spatial hash
-            std::unordered_map<CellKey, std::vector<int>, CellHash> grid;
-            grid.reserve(N);
-            for (int i = 0; i < N; i++) {
-                grid[to_cell(hx[i], hy[i], hz[i])].push_back(i);
-            }
-
-            // Find artificial binaries
-            int n_found = 0;
-            std::vector<bool> flagged(N, false);
-            double search_r2 = search_r * search_r;
-
-            for (int i = 0; i < N; i++) {
-                if (flagged[i]) continue;
-                CellKey ci = to_cell(hx[i], hy[i], hz[i]);
-
-                for (int di = -1; di <= 1; di++)
-                for (int dj = -1; dj <= 1; dj++)
-                for (int dk = -1; dk <= 1; dk++) {
-                    CellKey cn = { ci.ix + di, ci.iy + dj, ci.iz + dk };
-                    auto it = grid.find(cn);
-                    if (it == grid.end()) continue;
-
-                    for (int j : it->second) {
-                        if (j <= i || flagged[j]) continue;
-                        double dx = hx[i] - hx[j], dy = hy[i] - hy[j], dz = hz[i] - hz[j];
-                        double r2 = dx*dx + dy*dy + dz*dz;
-                        if (r2 > search_r2 || r2 == 0.0) continue;
-
-                        double dvx = hvx[i] - hvx[j], dvy = hvy[i] - hvy[j], dvz = hvz[i] - hvz[j];
-                        double v2 = dvx*dvx + dvy*dvy + dvz*dvz;
-                        double r_sep = std::sqrt(r2);
-                        double M_pair = hmass[i] + hmass[j];
-                        double E_spec = 0.5 * v2 - G_CODE * M_pair / r_sep;
-
-                        if (E_spec < 0.0) {
-                            double a_pair = -G_CODE * M_pair / (2.0 * E_spec);
-                            if (a_pair < r_break_pc) {
-                                flagged[i] = true;
-                                flagged[j] = true;
-                                n_found++;
-                            }
-                        }
-                    }
-                }
-            }
-
-            if (n_found == 0) {
-                std::printf("    Iter %d: clean — no artificial binaries found\n", iter + 1);
-                break;
-            }
-
-            total_removed += n_found;
-
-            // Resample flagged particles
-            int n_resampled = 0;
-            for (int i = 0; i < N; i++) {
-                if (!flagged[i]) continue;
-                n_resampled++;
-
-                if (iter < max_angular_iter) {
-                    // Angular-only: preserve |r| and |v|, resample directions
-                    double r = std::sqrt(hx[i]*hx[i] + hy[i]*hy[i] + hz[i]*hz[i]);
-                    double v = std::sqrt(hvx[i]*hvx[i] + hvy[i]*hvy[i] + hvz[i]*hvz[i]);
-
-                    double ct = 2.0 * uni(rng) - 1.0;
-                    double st = std::sqrt(1.0 - ct * ct);
-                    double ph = 2.0 * M_PI * uni(rng);
-                    hx[i] = r * st * std::cos(ph);
-                    hy[i] = r * st * std::sin(ph);
-                    hz[i] = r * ct;
-
-                    double vct = 2.0 * uni(rng) - 1.0;
-                    double vst = std::sqrt(1.0 - vct * vct);
-                    double vph = 2.0 * M_PI * uni(rng);
-                    hvx[i] = v * vst * std::cos(vph);
-                    hvy[i] = v * vst * std::sin(vph);
-                    hvz[i] = v * vct;
-                } else {
-                    // Full resampling: new Plummer position + velocity
-                    double U = std::clamp(uni(rng), 1e-10, 1.0 - 1e-10);
-                    double r_new = a / std::sqrt(std::pow(U, -2.0/3.0) - 1.0);
-
-                    double ct = 2.0 * uni(rng) - 1.0;
-                    double st = std::sqrt(1.0 - ct * ct);
-                    double ph = 2.0 * M_PI * uni(rng);
-                    hx[i] = r_new * st * std::cos(ph);
-                    hy[i] = r_new * st * std::sin(ph);
-                    hz[i] = r_new * ct;
-
-                    double v_esc = std::sqrt(2.0 * G_CODE * M_total / std::sqrt(r_new*r_new + a*a));
-                    while (true) {
-                        double q = uni(rng);
-                        double g_q = q * q * std::pow(1.0 - q * q, 3.5);
-                        if (uni(rng) * 0.1 < g_q) {
-                            double v_mag = q * v_esc;
-                            double vct = 2.0 * uni(rng) - 1.0;
-                            double vst = std::sqrt(1.0 - vct * vct);
-                            double vph = 2.0 * M_PI * uni(rng);
-                            hvx[i] = v_mag * vst * std::cos(vph);
-                            hvy[i] = v_mag * vst * std::sin(vph);
-                            hvz[i] = v_mag * vct;
-                            break;
-                        }
-                    }
-                }
-            }
-
-            std::printf("    Iter %d: %d pairs (resampled %d particles, %s)\n",
-                        iter + 1, n_found, n_resampled,
-                        iter < max_angular_iter ? "angular" : "full");
-        }
-
-        if (total_removed > 0) {
-            // Re-center COM after resampling
-            double com_x = 0, com_y = 0, com_z = 0;
-            double com_vx = 0, com_vy = 0, com_vz = 0;
-            for (int i = 0; i < N; i++) {
-                com_x += hmass[i] * hx[i];   com_y += hmass[i] * hy[i];   com_z += hmass[i] * hz[i];
-                com_vx += hmass[i] * hvx[i]; com_vy += hmass[i] * hvy[i]; com_vz += hmass[i] * hvz[i];
-            }
-            com_x /= M_total; com_y /= M_total; com_z /= M_total;
-            com_vx /= M_total; com_vy /= M_total; com_vz /= M_total;
-            for (int i = 0; i < N; i++) {
-                hx[i] -= com_x; hy[i] -= com_y; hz[i] -= com_z;
-                hvx[i] -= com_vx; hvy[i] -= com_vy; hvz[i] -= com_vz;
-            }
         }
     }
 
@@ -478,18 +503,14 @@ void init_plummer(Particles& p, int N, double M_total_msun, double r_half_pc, in
     // =====================================================================
     // BINARY_FRAC: pair primordial binaries
     // =====================================================================
+    // ---- Pairing: list of (primary, secondary) indices ----------------------------------------------
+    // Decided before the artificial-binary pass so that it acts on the N_s + N_b objects (singles and binary
+    // centres of mass, BIFROST App. A); a binary's centre of mass is its primary's Plummer phase-space point.
+    std::vector<std::pair<int,int>> pairs;
 #ifdef ENABLE_COLLISIONAL
     if (binary_frac > 0.0 && N >= 2) {
         int N_bin = static_cast<int>(binary_frac * N / 2);
         if (2 * N_bin > N) N_bin = N / 2;
-
-        double bin_a_min_pc = bin_a_min_au * AU_TO_PC;
-        double bin_a_max_pc = bin_a_max_au * AU_TO_PC;
-        double log_a_min = std::log(bin_a_min_pc);
-        double log_a_max = std::log(bin_a_max_pc);
-
-        // ---- Pairing: list of (primary, secondary) indices ----------------------------------------
-        std::vector<std::pair<int,int>> pairs;
         pairs.reserve(N_bin);
         int n_massive_primaries = 0;
         if (binary_pop == "mass_rank") {
@@ -554,6 +575,22 @@ void init_plummer(Particles& p, int N, double M_total_msun, double r_half_pc, in
                     (int)pairs.size(), 100.0 * 2.0 * pairs.size() / N, N, binary_pop.c_str());
         if (binary_pop == "bifrost") std::printf(" (%d primaries > 5 M_sun with flat q)", n_massive_primaries);
         std::printf("\n");
+    }
+#endif
+
+    // =====================================================================
+    // Artificial binaries and multiplets (BIFROST App. A, "Avoiding artificial binaries and multiplets")
+    // =====================================================================
+    std::vector<int> partner(N, -1);  // other member of a binary (primary <-> secondary), -1 for singles
+    for (auto [i, j] : pairs) { partner[i] = j; partner[j] = i; }
+    if (r_break_au > 0.0)
+        avoid_artificial_binaries(pairs, hx, hy, hz, hvx, hvy, hvz, hmass, r_break_au * AU_TO_PC,
+                                  plummer_radius, set_direction, plummer_speed);
+
+#ifdef ENABLE_COLLISIONAL
+    if (!pairs.empty()) {
+        double log_a_min = std::log(bin_a_min_au * AU_TO_PC);
+        double log_a_max = std::log(bin_a_max_au * AU_TO_PC);
 
         // ---- Orbits ---------------------------------------------------------------------------------
         // Contact distance below which the code merges the pair at once (collisional/mergers.cpp
@@ -612,7 +649,11 @@ void init_plummer(Particles& p, int N, double M_total_msun, double r_half_pc, in
                 }
                 if (gw_coalescence_time(a_bin, e_bin, m_i, m_j, G_CODE, c_kms) < t_gw_min) ok = false;
             }
-            if (!ok) { n_unpaired++; continue; }  // both stay single at their own Plummer phase-space points
+            if (!ok) {  // both stay single at their own Plummer phase-space points
+                n_unpaired++;
+                partner[i] = partner[j] = -1;
+                continue;
+            }
 
             q_list.push_back(m_j / m_i);
             if (m_i > 5.0) q_massive.push_back(m_j / m_i);
@@ -628,12 +669,17 @@ void init_plummer(Particles& p, int N, double M_total_msun, double r_half_pc, in
             double r_rel[3], v_rel[3];
             elements_to_cartesian(a_bin, e_bin, inc, Omega, omega, M_anom, mu, r_rel, v_rel);
 
-            // COM position/velocity = particle i's Plummer values
+            // Centre of mass = particle i's Plummer phase-space point: the binary is sampled from f(E) as one
+            // object (BIFROST App. A; mcluster, Kupper et al. 2011). The mean of both members' independent draws
+            // (BINARY_COM_V = average, the old default) shrinks the c.o.m. velocity dispersion by
+            // sqrt(m_i^2 + m_j^2) / M_bin (1/sqrt(2) for q = 1): binaries start kinematically cold.
             double cx = hx[i], cy = hy[i], cz = hz[i];
-            // COM velocity = average of both particles' Plummer velocities
-            double cvx = (m_i * hvx[i] + m_j * hvx[j]) / M_bin;
-            double cvy = (m_i * hvy[i] + m_j * hvy[j]) / M_bin;
-            double cvz = (m_i * hvz[i] + m_j * hvz[j]) / M_bin;
+            double cvx = hvx[i], cvy = hvy[i], cvz = hvz[i];
+            if (!binary_com_sampled) {
+                cvx = (m_i * hvx[i] + m_j * hvx[j]) / M_bin;
+                cvy = (m_i * hvy[i] + m_j * hvy[j]) / M_bin;
+                cvz = (m_i * hvz[i] + m_j * hvz[j]) / M_bin;
+            }
 
             // Split binary around COM
             hx[i]  = cx - (m_j / M_bin) * r_rel[0];
@@ -656,6 +702,8 @@ void init_plummer(Particles& p, int N, double M_total_msun, double r_half_pc, in
                         "%d pairs left single (a_max too small)\n", n_e_redrawn, n_a_redrawn, n_unpaired);
         else
             std::printf("    BINARY_PERI_CHECK=false: no pericentre condition (contact binaries allowed)\n");
+        if (n_unpaired > 0 && r_break_au > 0.0)
+            std::printf("    WARNING: the %d secondaries left single were not in the IC_R_BREAK pass\n", n_unpaired);
         // Distribution summary (deciles of q, log10 a [AU], e)
         auto deciles = [](std::vector<double> v, const char* name, double scale, bool log10v) {
             if (v.empty()) return;
@@ -687,6 +735,8 @@ void init_plummer(Particles& p, int N, double M_total_msun, double r_half_pc, in
         }
     }
 #endif
+
+    print_ic_check(partner, hx, hy, hz, hvx, hvy, hvz, hmass, a);
 
     // =====================================================================
     // ADD_IMBH: inject IMBH binary at cluster center
