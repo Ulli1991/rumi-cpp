@@ -61,7 +61,7 @@ double logh_omega(const LogHState& state);
 // Jumping kappa (W20 sec. 2.4): re-identify the inner binaries, set kappa from W20 Eqs. 22 and 28, and apply
 // the instantaneous correction delta H_sd = H_sd(new) - H_sd(old) at the current phase-space point (W20 Eq. 24)
 // to B (B = -H_sd on shell) and to state.sd_jump. clear = true removes every slow-down (end of an integration).
-// Returns the shortest orbital period over bound pairs, kappa P for slowed ones, x sqrt(1 - e) (GBS step limit;
+// Returns the shortest orbital period over bound pairs, kappa P sqrt(1 - e) for slowed ones (GBS step limit;
 // 1e300: no bound pair).
 double logh_sd_update(LogHState& state, double G, const SdarParams& par, bool clear = false);
 // Smallest dynamical time sqrt(r^3 / (G M)) over pairs, x kappa for a slowed pair (its orbit takes kappa P)

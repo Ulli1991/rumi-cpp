@@ -345,14 +345,15 @@ double logh_sd_update(LogHState& state, double G, const SdarParams& par, bool cl
             state.n_sd++;
             state.sd_kappa_peak = std::max(state.sd_kappa_peak, kappa);
         }
-        // Shortest orbit over the bound pairs, a slowed pair's orbit taking kappa P, for the GBS step limit; x
-        // sqrt(1 - e): eccentric orbits need more GBS steps per orbit (e = 0.9: ~140 measured, vs ~17 at low e)
+        // Shortest orbit over the bound pairs for the GBS step limit: a slowed pair's orbit takes kappa P, x
+        // sqrt(1 - e) since eccentric orbits need more GBS steps per orbit (e = 0.9: ~140 measured, vs ~17 at low
+        // e); an unslowed pair counts P as in plain LogH (same budget before a call gives up)
         for (int q = 0; q < nc; q++) {
             double P = 2.0 * M_PI * std::sqrt(cand[q].a * cand[q].a * cand[q].a /
-                                              (G * (state.mass[cand[q].i] + state.mass[cand[q].j]))) *
-                       std::sqrt(std::max(1e-4, 1.0 - cand[q].e));
+                                              (G * (state.mass[cand[q].i] + state.mass[cand[q].j])));
             for (int k = 0; k < state.n_sd; k++)
-                if (state.sd_a[k] == cand[q].i && state.sd_b[k] == cand[q].j) P *= state.sd_kappa[k];
+                if (state.sd_a[k] == cand[q].i && state.sd_b[k] == cand[q].j)
+                    P *= state.sd_kappa[k] * std::sqrt(std::max(1e-4, 1.0 - cand[q].e));
             P_eff_min = std::min(P_eff_min, P);
         }
     }
