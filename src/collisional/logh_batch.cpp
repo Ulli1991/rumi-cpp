@@ -693,11 +693,10 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
         }
         // SDAR: name the integrations that fail the energy check (members, slowed binaries, steps)
         if (sd_on && converged && g_collisional.eta_restart > 0.0 && dE_rel > g_collisional.eta_restart) {
-            std::string msg = "      SDAR energy check: dE=" + std::to_string(dE_rel) + " n=" + std::to_string(nb) +
-                              " gbs=" + std::to_string(n_gbs_steps) + " kappa_peak=" +
-                              std::to_string(state.sd_kappa_peak) + " jump/E0=" +
-                              std::to_string(state.sd_jump / (std::fabs(E0_norm) + 1e-300)) + " m[Msun]=";
-            char buf[64];
+            char buf[256];
+            std::snprintf(buf, sizeof(buf), "      SDAR energy check: dE=%.3e n=%d gbs=%d kappa_peak=%.3g jump/E0=%.3e m[Msun]=",
+                          dE_rel, nb, n_gbs_steps, state.sd_kappa_peak, state.sd_jump / (std::fabs(E0_norm) + 1e-300));
+            std::string msg = buf;
             for (int b = 0; b < nb; b++) {
                 std::snprintf(buf, sizeof(buf), "%s%.3g", b ? "," : "", h_mass(off + b));
                 msg += buf;
