@@ -13,6 +13,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <type_traits>
 #include <vector>
 
 // All pairwise kernels run through run_n2 (n2_driver.h) with the interactions of n2_kernels.h.
@@ -92,6 +93,18 @@ TreeMode tree_mode(int nj, int min_n = tree_dt_min_n) {
     if (min_n > 0 && nj >= min_n) return TreeMode::Device;
     return TreeMode::None;
 }
+
+bool check_dt_f32() {
+    static const bool v = std::getenv("NBODY_CHECK_DT_FP32") && std::atoi(std::getenv("NBODY_CHECK_DT_FP32")) != 0;
+    return v;
+}
+struct DtF32Checked {
+    long long n = 0;
+    void operator++(int) { n++; }
+    ~DtF32Checked() {
+        if (n) { std::printf("DT_FP32 CHECK: %lld time-step kernels identical to fp64\n", n); std::fflush(stdout); }
+    }
+} g_dt_f32_checked;
 
 bool check_tree() {
     static const bool v = std::getenv("NBODY_CHECK_TREE_DT") && std::atoi(std::getenv("NBODY_CHECK_TREE_DT")) != 0;
@@ -284,18 +297,37 @@ static void dt_range(Particles& p, int i0, int ni, int j0, int nj, double G, dou
     Etas e = etas(eta);
     PairVel cv = pair_vel(p, COLL, range_lo(i0, ni, j0, nj), range_hi(i0, ni, j0, nj));
     // O(N^2) time-step kernel; with component fly-by velocities (cv = v) without the second staged velocity copy
-    auto run_dtk = [&](const char* name) {
+    // F32: with the single-precision pre-rejects (pair_dt_reject_f32, device code)
+    auto run_dtk_f = [&](const char* name, auto f32_tag) {
+        constexpr bool F32 = decltype(f32_tag)::value;
         if (COLL && cv.x.ptr == p.vx.data()) {
-            DtK<COLL, false, false> k{{p.x.data()}, {p.y.data()}, {p.z.data()}, {p.mass.data()}, {p.vx.data()}, {p.vy.data()},
+            DtK<COLL, false, false, F32> k{{p.x.data()}, {p.y.data()}, {p.z.data()}, {p.mass.data()}, {p.vx.data()}, {p.vy.data()},
                     {p.vz.data()}, {p.ax.data()}, {p.ay.data()}, {p.az.data()}, {p.dt_adapt.data()},
                     cv.x, cv.y, cv.z, cv.k, cv.kf, sid_ptr(p, COLL), G, soft2, e.ff, e.fb, COLL ? e.jerk : 0.0};
             run_n2(name, i0, ni, j0, nj, k);
         } else {
-            DtK<COLL> k{{p.x.data()}, {p.y.data()}, {p.z.data()}, {p.mass.data()}, {p.vx.data()}, {p.vy.data()},
+            DtK<COLL, false, true, F32> k{{p.x.data()}, {p.y.data()}, {p.z.data()}, {p.mass.data()}, {p.vx.data()}, {p.vy.data()},
                     {p.vz.data()}, {p.ax.data()}, {p.ay.data()}, {p.az.data()}, {p.dt_adapt.data()},
                     cv.x, cv.y, cv.z, cv.k, cv.kf, sid_ptr(p, COLL), G, soft2, e.ff, e.fb, COLL ? e.jerk : 0.0};
             run_n2(name, i0, ni, j0, nj, k);
         }
+    };
+    // NBODY_CHECK_DT_FP32=1: rerun without the pre-rejects and abort on any bitwise difference in dt, ax, ay, az
+    auto run_dtk = [&](const char* name) {
+        run_dtk_f(name, std::true_type{});
+        if (!check_dt_f32()) return;
+        Kokkos::fence();
+        std::vector<double> fdt = host_range(p.dt_adapt, i0, ni), fax, fay, faz;
+        if (COLL) { fax = host_range(p.ax, i0, ni); fay = host_range(p.ay, i0, ni); faz = host_range(p.az, i0, ni); }
+        run_dtk_f(name, std::false_type{});
+        Kokkos::fence();
+        compare_or_abort("dt (fp32 pre-reject)", fdt, host_range(p.dt_adapt, i0, ni), i0);
+        if (COLL) {
+            compare_or_abort("ax (fp32 pre-reject)", fax, host_range(p.ax, i0, ni), i0);
+            compare_or_abort("ay (fp32 pre-reject)", fay, host_range(p.ay, i0, ni), i0);
+            compare_or_abort("az (fp32 pre-reject)", faz, host_range(p.az, i0, ni), i0);
+        }
+        g_dt_f32_checked++;
     };
     // The tree bounds cover the ff/fb pair steps and the FLYBY_CM_EPS tidal-sampling step (cv.k, dt_tree.h)
     const TreeMode mode = tree_mode(nj);

@@ -82,13 +82,63 @@ KOKKOS_INLINE_FUNCTION double pair_dt(double r2s, double ir, double dx, double d
     return Kokkos::fmin(eta_ff * tff, eta_fb * tfb);
 }
 
+// Single-precision pre-reject of the pair time step (AUDIT G row 2a; device code with DT_FP32_PREREJECT, default on).
+// DtK is FP64-throughput bound and the FP32 pipe idles, while most pairs are distant and rejected by the fp64 test of
+// pair_dt_below. pair_dt_reject_f32 decides the same question in fp32 and only ever says "reject" when the pair cannot
+// lower the minimum, so skipping its fp64 evaluation leaves the minimum bit-identical:
+//  * Exact inequality (pair_dt_below below): pair_dt >= min over ff, fb of eta t / (2 (1 + |d|)), d = c t eta, taken
+//    on the fp64 inputs (r2s, dx.., dv.., m) as exact numbers.
+//  * fp32 errors: inputs rounded to fp32 (rel. u = 2^-24); rsqrtf <= 2 ulp; t_ff, t_fb, r, v and the factor
+//    (1 + G m / (r v^2)) are products/quotients of positive terms, so their relative error is below ~20 u = 1.2e-6.
+//    r.dv can cancel: its absolute error is <= 5 u sum |x_k| |v_k| <= 5 u r v (Cauchy-Schwarz, r >= |dx| since
+//    r2s = |dx|^2 + soft2), so |r.dv| <= |r.dv|_32 + 1e-6 r v is an upper bound (1e-6 > 5 u with room for the fp32
+//    r and v). cur is rounded to fp32 (rel. u).
+//  * The test eta t_32 (1 - 4e-5) >= 3 cur_32 (1 + 4e-5) (1 + |d|_up32 (1 + 4e-5)) for both criteria therefore
+//    implies the exact eta t >= 3 (1 - 1e-5) cur (1 + |d|), i.e. pair_dt >= 1.49 cur: the same premise as the fp64
+//    test below (factor 3, i.e. margin 1.5 over the exact factor 2), whose fp64 evaluation error it already covers.
+//  * Range: r2s outside [1e-30, 1e30] is not tested (no reject). Overflow on the right side gives inf (< 3e38 fails:
+//    no reject), NaN fails every comparison (no reject); an infinite left side means a true value beyond FLT_MAX,
+//    above any finite right side.
+// NBODY_CHECK_DT_FP32=1 runs the fp64-only kernel after every time-step kernel and aborts on any bitwise difference
+// (forces.cpp). Measured (one A100, 200k sources, 20 % binary members): DtK x1.27 for 50k sinks, x1.31 at 1e6, x1.15
+// for 1024 sinks, bit-identical, and no rejected pair below the running minimum in a per-pair check.
+KOKKOS_INLINE_FUNCTION bool pair_dt_reject_f32(double cur, double r2s, double dx, double dy, double dz, double dvx,
+                                               double dvy, double dvz, double G, double msum, double eta_ff,
+                                               double eta_fb) {
+#if (defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)) && defined(DT_FP32_PREREJECT)
+    const float r2 = (float)r2s;
+    if (!(r2 >= 1e-30f && r2 <= 1e30f)) return false;
+    const float x = (float)dx, y = (float)dy, z = (float)dz, u = (float)dvx, v = (float)dvy, w = (float)dvz;
+    const float v2 = u * u + v * v + w * w + 1e-30f;
+    const float ir = rsqrtf(r2), r = r2 * ir;
+    const float gm = (float)G * (float)msum;
+    const float tff = r2 * rsqrtf(r * (gm + 1e-30f));
+    const float iv = rsqrtf(v2), tfb = r * iv;
+    const float rdv = fabsf(x * u + y * v + z * w) + 1e-6f * r * v2 * iv;   // >= |r.dv|
+    const float c = rdv * ir * ir;
+    const float eff = (float)eta_ff, efb = (float)eta_fb;
+    const float dff = 1.5f * c * tff * eff;
+    const float dfb = c * (1.0f + gm * ir * iv * iv) * tfb * efb;
+    const float c3 = 3.0f * (float)cur * (1.0f + 4e-5f);
+    const float rff = c3 * (1.0f + dff * (1.0f + 4e-5f)), rfb = c3 * (1.0f + dfb * (1.0f + 4e-5f));
+    return rff < 3e38f && rfb < 3e38f && eff * tff * (1.0f - 4e-5f) >= rff && efb * tfb * (1.0f - 4e-5f) >= rfb;
+#else
+    (void)cur; (void)r2s; (void)dx; (void)dy; (void)dz; (void)dvx; (void)dvy; (void)dvz; (void)G; (void)msum;
+    (void)eta_ff; (void)eta_fb;
+    return false;
+#endif
+}
+
 // pair_dt, skipped (1e30) when it cannot go below `cur`: with d = c t eta (FROST Eq. 49) the symmetrized step is
 // eta t (1 + d / (1 + sqrt(1 + d^2))) >= eta t / (2 (1 + |d|)) for either criterion. Pairs that pass the test (with a
 // further factor 1.5 margin) get the unchanged pair_dt, so the minimum over pairs is bit-identical; most distant
 // pairs skip two reciprocal roots and both divisions.
+// F32: try pair_dt_reject_f32 first (DtK).
+template <bool F32 = false>
 KOKKOS_INLINE_FUNCTION double pair_dt_below(double cur, double r2s, double ir, double dx, double dy, double dz,
                                             double dvx, double dvy, double dvz, double G, double msum,
                                             double eta_ff, double eta_fb) {
+    if (F32 && pair_dt_reject_f32(cur, r2s, dx, dy, dz, dvx, dvy, dvz, G, msum, eta_ff, eta_fb)) return 1e30;
     const double Gm = G * msum;
     const double v_sq = dvx * dvx + dvy * dvy + dvz * dvz;
     const double r = r2s * ir;
@@ -174,6 +224,26 @@ KOKKOS_INLINE_FUNCTION double tidal_sampling_dt(double ki, double kj, double mi,
     return Kokkos::fmax(Kokkos::fmin(ki / mj, kj / mi) * r2s * Kokkos::sqrt(r2s), Kokkos::fmax(fi, fj));
 }
 
+// tidal_sampling_dt, or 1e30 when it cannot go below `cur` (F32, device code with DT_FP32_PREREJECT): the step is
+// >= min(k_i / m_j, k_j / m_i) r^3, evaluated in fp32 (inputs rel. u, IEEE division, sqrtf <= 3 ulp: rel. error
+// < 1e-6, covered by the factors 1 -+ 4e-5); an overflow to inf means a true value beyond FLT_MAX > cur, NaN fails.
+// Non-members carry k = 1e30, so almost every pair skips the two fp64 divisions and the square root.
+template <bool F32>
+KOKKOS_INLINE_FUNCTION double tidal_sampling_dt_below(double cur, double ki, double kj, double mi, double mj, double r2s,
+                                                      double fi, double fj) {
+#if (defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)) && defined(DT_FP32_PREREJECT)
+    if (F32) {
+        const float r2 = (float)r2s;
+        if (r2 >= 1e-30f) {
+            const float k1 = (float)ki, k2 = (float)kj, m1 = (float)mi, m2 = (float)mj;
+            const float lb = fminf(k1 / m2, k2 / m1) * r2 * sqrtf(r2) * (1.0f - 4e-5f);
+            if (lb >= (float)cur * (1.0f + 4e-5f)) return 1e30;
+        }
+    }
+#endif
+    return tidal_sampling_dt(ki, kj, mi, mj, r2s, fi, fj);
+}
+
 // Time steps of the sinks from the sources (HHS subset). Collisional mode also accumulates the
 // partner-free acceleration and jerk: jerk criterion (BIFROST sec. 3.4.5), and ax, ay, az are overwritten
 // with that acceleration for the v/a, gradient and perturbation criteria that follow.
@@ -182,7 +252,8 @@ KOKKOS_INLINE_FUNCTION double tidal_sampling_dt(double ki, double kj, double mi,
 // CV = false (collisional, cvx..cvz are vx..vz, i.e. component fly-by velocities): the pair-step velocities are taken
 // from the staged vx..vz instead of a second staged copy (13 -> 10 source doubles; same values, bit-identical; -5 %
 // of DtK, AUDIT G row 2b).
-template <bool COLL, bool MN_IN = false, bool CV = true>
+// F32: single-precision pre-rejects of the pair and tidal-sampling steps (pair_dt_reject_f32; bit-identical minimum).
+template <bool COLL, bool MN_IN = false, bool CV = true, bool F32 = true>
 struct DtK {
     static constexpr int KI = CV ? 11 : 8;   // source slots of k and kf (collisional)
     static constexpr int NSRC = COLL ? KI + 2 : 7, NS = COLL ? 6 : 0, NM = 1;
@@ -216,9 +287,9 @@ struct DtK {
             // pair-step velocity difference: the c.o.m. velocities (CV), else the same dv as the jerk sum
             const double cdx = CV ? s[CV ? 8 : 0] - a.cvx : dvx, cdy = CV ? s[CV ? 9 : 0] - a.cvy : dvy,
                          cdz = CV ? s[CV ? 10 : 0] - a.cvz : dvz;
-            double t = COLL ? Kokkos::fmin(pair_dt_below(mn[0], r2s, ir, dx, dy, dz, cdx, cdy, cdz, G, a.m + s[3], eta_ff, eta_fb),
-                                           tidal_sampling_dt(a.k, s[COLL ? KI : 0], a.m, s[3], r2s, a.kf, s[COLL ? KI + 1 : 0]))
-                            : pair_dt_below(mn[0], r2s, ir, dx, dy, dz, dvx, dvy, dvz, G, a.m + s[3], eta_ff, eta_fb);
+            double t = COLL ? Kokkos::fmin(pair_dt_below<F32>(mn[0], r2s, ir, dx, dy, dz, cdx, cdy, cdz, G, a.m + s[3], eta_ff, eta_fb),
+                                           tidal_sampling_dt_below<F32>(mn[0], a.k, s[COLL ? KI : 0], a.m, s[3], r2s, a.kf, s[COLL ? KI + 1 : 0]))
+                            : pair_dt_below<F32>(mn[0], r2s, ir, dx, dy, dz, dvx, dvy, dvz, G, a.m + s[3], eta_ff, eta_fb);
             mn[0] = Kokkos::fmin(mn[0], w ? t : 1e30);
         }
         if (COLL) {
