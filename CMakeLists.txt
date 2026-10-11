@@ -144,6 +144,7 @@ foreach(case kepler_e09 kepler_e0 frost4_e09 frost4_e099 planets_hhs planets_fsi
              mergers_sse binaries50_detected triples_detected
              cc_pn1_wide cc_binaries50 cc_vs_plain_binaries50 cm_cpu_vs_device cc_cm_consistent
              cm_eps_tidal_sampling cm_eps_cpu_vs_device dense_core_split triple_id_order secular_triples_off secular_omega0_steps spin_precession spin_j spin_j_pn1 ic_binaries_no_mergers eta_jerk0_fsi va_without_grad restart_halves_va secular_stellar_no_pn secular_bh_tight_steps logh_hierarchy_complete weak_flyby_split
+             sdar_kozai_triple sdar_f3_flyby sdar_pn_kappa1
              tree_dt_binaries tree_dt_binaries_cm tree_dt_binaries50 tree_dt_triples tree_dt_mergers tree_dt_softened tree_default_on)
     add_test(NAME ${case} COMMAND Python3::Interpreter ${CMAKE_SOURCE_DIR}/tests/run_case.py
              $<TARGET_FILE:nbody-kokkos> ${case})

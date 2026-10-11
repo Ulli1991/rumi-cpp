@@ -13,6 +13,10 @@ struct GBSIntegrator {
     static constexpr int STEP_SEQ[] = {2, 4, 6, 8, 12, 16, 24, 32, 48, 64};
     static constexpr int MAX_STAGES = 10;
     double eta_gbs;  // accuracy parameter (default 1e-10)
+    // SDAR (nullptr: plain LogH): kappa re-evaluated after every accepted GBS step (jumping kappa, Wang+2020
+    // sec. 2.4); the caller sets the initial kappa and removes the slow-down at the end (logh_sd_update)
+    const SdarParams* sdar = nullptr;
+    bool reached = false;   // integrate_to_time reached t_target (within its tolerance)
 
     // Extrapolation table (Neville-Aitken)
     // table[i] stores RAW midpoint result M(n_i) — never modified by extrapolation

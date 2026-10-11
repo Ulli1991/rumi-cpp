@@ -661,6 +661,10 @@ int main(int argc, char** argv) {
             g_collisional.tidal_gamma     = cfg.get_double("TIDAL_GAMMA", 0.0);
             g_collisional.weak_perturber_gamma = cfg.get_double("WEAK_PERTURBER_GAMMA", 0.0);
             g_collisional.secular_triples = cfg.get_bool("SECULAR_TRIPLES", true);
+            g_collisional.sdar            = cfg.get_bool("SDAR", false);
+            if (const char* e = std::getenv("NBODY_SDAR")) g_collisional.sdar = std::atoi(e) != 0;
+            g_collisional.sdar_kref       = cfg.get_double("SDAR_KREF", 1e-6);
+            g_collisional.sdar_c          = cfg.get_double("SDAR_C", 0.1);
             g_collisional.tidal_res       = cfg.get_double("TIDAL_RES", 0.05);
             g_collisional.flyby_cm_eps    = cfg.get_double("FLYBY_CM_EPS", 0.0);
             g_collisional.eta_restart     = cfg.get_double("ETA_RESTART", 0.0);
@@ -862,6 +866,9 @@ int main(int argc, char** argv) {
                             g_collisional.r_ngb, g_collisional.r_ngb_max, g_collisional.eta_gbs);
                 std::printf("  PN order=%d, M_PN=%.1f M_sun, MSTAR threshold=%d\n",
                             g_collisional.pn_order, g_collisional.m_pn, g_collisional.mstar_threshold);
+                if (g_collisional.sdar)
+                    std::printf("  SDAR slow-down in LogH subsystems: k_ref=%.1e, c=%.3g\n",
+                                g_collisional.sdar_kref, g_collisional.sdar_c);
                 if (g_collisional.sse_enabled) {
                     std::printf("  SSE: Z=%.4f, wind=%s, remnant=%s, ppisn=%s, ecsn=%s\n",
                                 g_collisional.sse_metallicity,
@@ -999,6 +1006,13 @@ int main(int argc, char** argv) {
             if (my_rank == 0) {
                 print_timebin_table(work_p, levels, dE, dP, dL, t_now*TIME_UNIT_MYR, step_now, is_cluster);
 #ifdef ENABLE_COLLISIONAL
+                // SDAR: |dE/E| above includes the booked slow-down energy E_sd; the physical energy alone is off
+                // by E_sd (bounded oscillation of the slowed binaries' two-body energies, Wang+2020 Eq. 29)
+                if (g_collisional.enabled && g_collisional.sdar)
+                    std::printf("SDAR step %d E_sd/E0 %.6e unbooked_dE/E0 %.6e\n", step_now,
+                                g_energy_books.E_sd / std::fabs(diag0.E_total),
+                                (diag.E_total + g_energy_books.total_sink() - g_energy_books.E_sd - diag0.E_total) /
+                                    std::fabs(diag0.E_total));
                 dump_particles(work_p, step_now);
                 if (g_eattr.on) {
                     const double E0 = std::fabs(diag0.E_total);

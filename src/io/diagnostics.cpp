@@ -460,6 +460,8 @@ void print_final(const DiagnosticState& cur, const DiagnosticState& ini,
             std::printf("E_merge = %.15e (merger dissipation)\n", g_energy_books.E_merge);
         if (g_energy_books.E_escape != 0.0)
             std::printf("E_esc   = %.15e (escaper removal)\n", g_energy_books.E_escape);
+        if (g_energy_books.E_sd != 0.0)
+            std::printf("E_sd    = %.15e (SDAR slow-down)\n", g_energy_books.E_sd);
         if (g_energy_books.E_sse != 0.0)
             std::printf("E_sse   = %.15e (stellar mass loss)\n", g_energy_books.E_sse);
     }

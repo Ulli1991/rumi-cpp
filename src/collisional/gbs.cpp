@@ -295,9 +295,10 @@ int GBSIntegrator::integrate_to_time(LogHState& state, double t_target, double G
     }
     double r_min = std::sqrt(r_min_sq);
     double t_dyn = std::sqrt(r_min * r_min * r_min / (G * M_total));
+    // SDAR: a slowed binary's orbit takes kappa P, its dynamical time kappa times longer
+    if (state.n_sd > 0) t_dyn = logh_sd_dyn_time(state, G, M_total);
 
-    double T0 = logh_kinetic_energy(state);
-    double Omega0 = T0 + state.B;
+    double Omega0 = logh_omega(state);   // T + B (T_sd + B with slowed binaries)
     if (Omega0 < 1e-30) Omega0 = 1e-30;
 
     // Scale ds so each GBS step covers at most ~1/dyn_cap dynamical times (default 3; was 10, which cost 4x the
@@ -319,10 +320,22 @@ int GBSIntegrator::integrate_to_time(LogHState& state, double t_target, double G
     double ds_min_used = ds;
     double ds_max_used = ds;
 
-    for (int iter = 0; iter < max_iter; iter++) {
+    // SDAR: the step limit follows the slowed orbits actually integrated (kappa changes during the call): at
+    // most steps_per_orbit x (slowed orbits done + remaining time / current shortest slowed orbit), at least
+    // max_iter (the caller's limit at the initial kappa), at most 4e6
+    double sd_orbits_done = 0.0, sd_P_eff = 0.0;
+    if (sdar && sdar->steps_per_orbit > 0.0) {
+        LogHState probe = state;   // current shortest slowed orbit; no jump (same kappa as the caller set)
+        sd_P_eff = logh_sd_update(probe, G, *sdar);
+    }
+    const int iter_cap = (sdar && sdar->steps_per_orbit > 0.0) ? std::max(max_iter, 4000000) : max_iter;
+    for (int iter = 0; iter < iter_cap; iter++) {
         // Check if we've reached the target time
         double dt_remain = t_target - state.t;
         if (std::fabs(dt_remain) < time_tol * std::fabs(t_target)) break;
+        if (iter_cap != max_iter && iter >= max_iter &&
+            iter >= sdar->steps_per_orbit * (sd_orbits_done + std::fabs(dt_remain) / sd_P_eff))
+            break;
 
         // Recompute dynamical time constraint at current state
         // Prevents ds from growing too large when orbit approaches periapsis
@@ -338,10 +351,10 @@ int GBSIntegrator::integrate_to_time(LogHState& state, double t_target, double G
         }
         double r_min_now = std::sqrt(r_min_now_sq);
         double t_dyn_now = std::sqrt(r_min_now * r_min_now * r_min_now / (G * M_total));
+        if (state.n_sd > 0) t_dyn_now = logh_sd_dyn_time(state, G, M_total);
 
         // Estimate ds from dt_remain * Omega (BIFROST: ds = dt * Omega)
-        double T = logh_kinetic_energy(state);
-        double Omega = T + state.B;
+        double Omega = logh_omega(state);
         if (Omega < 1e-30) Omega = 1e-30;
         double ds_est = dt_remain * Omega;
 
@@ -387,14 +400,20 @@ int GBSIntegrator::integrate_to_time(LogHState& state, double t_target, double G
 
         // Success: use GBS-suggested step size (will be capped by ds_est next iter)
         ds = ds_next;
+        // Jumping kappa: new slow-down factors for the next step, energy jump booked into B (Wang+2020 Eq. 24)
+        if (sdar) {
+            if (sd_P_eff > 0.0) sd_orbits_done += std::fabs(state.t - saved.t) / sd_P_eff;
+            const double P_eff = logh_sd_update(state, G, *sdar);
+            if (sd_P_eff > 0.0) sd_P_eff = P_eff;
+        }
     }
 
     g_gbs_stats.calls++;
     g_gbs_stats.steps += n_steps;
     double dt_remain = t_target - state.t;
-    bool reached = std::fabs(dt_remain) < time_tol * std::fabs(t_target);
+    reached = std::fabs(dt_remain) < time_tol * std::fabs(t_target);
     if (!reached) {
-        double Omega_final = logh_kinetic_energy(state) + state.B;
+        double Omega_final = logh_omega(state);
         std::printf("      GBS: %d steps, t_final=%.6f/%.6f  Omega=%.3e  ds_range=[%.2e,%.2e]  fail=%d overshoot=%d"
                     " *** DID NOT REACH TARGET ***\n",
                     n_steps, state.t, t_target, Omega_final,

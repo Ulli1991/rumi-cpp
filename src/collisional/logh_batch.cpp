@@ -25,9 +25,15 @@ constexpr int GBS_MAX_STEPS = 1000;
 // The cost stays ~ orbits per interval: the remedy for weakly perturbed inner binaries is the slow-down of their
 // orbital motion (Mikkola & Aarseth 1996; SDAR, Wang, Nitadori & Makino 2020, MNRAS 493, 3398), which replaced
 // LogH in BIFROST (FROST-CLUSTERS I, Rantala et al. 2024, App. A2; kappa = 1 for PN subsystems there).
-static int gbs_step_limit(const LogHState& st, double dt, double G) {
+// With SDAR the limit counts slowed orbits: a slowed pair's period is kappa P (kappa at the start of the call).
+static double gbs_steps_per_orbit() {
     static const double per_orbit = std::getenv("NBODY_GBS_STEPS_PER_ORBIT")
                                         ? std::atof(std::getenv("NBODY_GBS_STEPS_PER_ORBIT")) : 64.0;
+    return per_orbit;
+}
+
+static int gbs_step_limit(const LogHState& st, double dt, double G) {
+    const double per_orbit = gbs_steps_per_orbit();
     double P_min = std::numeric_limits<double>::max();
     for (int i = 0; i < st.n_bodies; i++)
         for (int j = i + 1; j < st.n_bodies; j++) {
@@ -41,7 +47,10 @@ static int gbs_step_limit(const LogHState& st, double dt, double G) {
             const double eps = 0.5 * v2 - mu / std::sqrt(r2);   // specific two-body energy
             if (eps >= 0.0) continue;
             const double a = -mu / (2.0 * eps);
-            P_min = std::min(P_min, 2.0 * M_PI * std::sqrt(a * a * a / mu));
+            double P = 2.0 * M_PI * std::sqrt(a * a * a / mu);
+            for (int k = 0; k < st.n_sd; k++)
+                if (st.sd_a[k] == i && st.sd_b[k] == j) P *= st.sd_kappa[k];
+            P_min = std::min(P_min, P);
         }
     if (per_orbit <= 0.0 || P_min == std::numeric_limits<double>::max()) return GBS_MAX_STEPS;
     const double n = per_orbit * std::fabs(dt) / P_min;
@@ -109,8 +118,8 @@ void SubsystemBatch::pack(const SubsystemManager& mgr, const Particles& p,
     int n_mem = (int)member_indices.size();
 
     // Upload indices to device, gather only needed particle data
-    // Buffer layout per member: x,y,z,vx,vy,vz,mass,spin_x,spin_y,spin_z,stype_as_double (11 doubles)
-    constexpr int PACK_STRIDE = 11;
+    // Buffer layout per member: x,y,z,vx,vy,vz,mass,spin_x,spin_y,spin_z,stype_as_double,radius (12 doubles)
+    constexpr int PACK_STRIDE = 12;
     Kokkos::View<int*> d_idx("pack_idx", n_mem);
     Kokkos::View<double*> d_buf("pack_gather", n_mem * PACK_STRIDE);
     {
@@ -120,7 +129,7 @@ void SubsystemBatch::pack(const SubsystemManager& mgr, const Particles& p,
     }
     auto px = p.x; auto py = p.y; auto pz = p.z;
     auto pvx = p.vx; auto pvy = p.vy; auto pvz = p.vz;
-    auto pm = p.mass; auto pspin = p.spin_vec; auto pstype = p.stellar_type;
+    auto pm = p.mass; auto pspin = p.spin_vec; auto pstype = p.stellar_type; auto prad = p.stellar_radius;
     small_for("pack_gather", n_mem, KOKKOS_LAMBDA(int i) {
         int k = d_idx(i);
         int base = i * PACK_STRIDE;
@@ -129,6 +138,7 @@ void SubsystemBatch::pack(const SubsystemManager& mgr, const Particles& p,
         d_buf(base + 6) = pm(k);
         d_buf(base + 7) = pspin(k, 0); d_buf(base + 8) = pspin(k, 1); d_buf(base + 9) = pspin(k, 2);
         d_buf(base + 10) = static_cast<double>(pstype(k));
+        d_buf(base + 11) = prad(k);
     });
     auto h_buf = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), d_buf);
 
@@ -196,6 +206,8 @@ void SubsystemBatch::pack(const SubsystemManager& mgr, const Particles& p,
         }
     }
 
+    flat_radius.assign(total, 0.0);
+    flat_stype.assign(total, 0);
     int off = 0;
     for (int s = 0; s < n_sub; s++) {
         const auto& sub = mgr.active[s];
@@ -214,6 +226,8 @@ void SubsystemBatch::pack(const SubsystemManager& mgr, const Particles& p,
             h_vel((off + b) * 3 + 1) = h_buf(base + 4);
             h_vel((off + b) * 3 + 2) = h_buf(base + 5);
             h_mass(off + b) = h_buf(base + 6);
+            flat_stype[off + b] = static_cast<int>(h_buf(base + 10));
+            flat_radius[off + b] = h_buf(base + 11);
         }
         off += sub.n_bodies;
     }
@@ -381,6 +395,8 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
     double max_dE = 0.0;
     double min_dE = 1e30;
     int cap_hit = 0;
+    batch.sd_jump.assign(n_sub, 0.0);
+    std::vector<double> sd_kappa_sub(n_sub, 0.0);
 
     // Subsystems are independent: integrate them on all host threads (one GBS integration is long
     // serial work; dynamic scheduling balances binaries against multiplets)
@@ -524,7 +540,6 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
         state.B = -U_norm - T_norm;
 
         double E0_norm = T_norm + U_norm;
-        double Omega_norm = T_norm + state.B;  // == -U_norm, always > 0
 
         // Save initial state for PN energy comparison after integration
         double state_init_pos[LOGH_MAX_BODIES * 3];
@@ -538,14 +553,44 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
         // ==================================================================
         // Step 3: Integrate in normalized units via GBS
         // ==================================================================
+        // SDAR (FROST-CLUSTERS I App. A2): slow-down of weakly perturbed inner binaries; kappa = 1 throughout
+        // for PN subsystems (any member above M_PN with PN on; FC-I sec. A2) and for 2-body subsystems (no
+        // perturber inside the subsystem: the external tide comes from the FSI kicks, which need the true phase)
+        const bool sd_on = g_collisional.sdar && !state.use_aux_vel && nb >= 3;
+        SdarParams sd_par;
+        if (sd_on) {
+            sd_par.k_ref = g_collisional.sdar_kref;
+            sd_par.c = g_collisional.sdar_c;
+            sd_par.steps_per_orbit = gbs_steps_per_orbit();   // the limit follows kappa during the call
+            constexpr double R_sun_to_pc = 2.254e-8;   // as mergers.cpp
+            for (int b = 0; b < nb; b++) {
+                // Collision radius: the star's radius; a BH contributes its ISCO share 6 G m / c^2
+                const double r_pc = batch.flat_stype[off + b] == 14
+                                        ? 6.0 * G * h_mass(off + b) / (c_code * c_code)
+                                        : batch.flat_radius[off + b] * R_sun_to_pc;
+                sd_par.coll_radius[b] = r_pc / R_scale;
+            }
+            logh_sd_update(state, G_norm, sd_par);   // initial kappa: B = -H_sd
+        }
+
         int n_gbs_steps = 0;
         const int max_steps = gbs_step_limit(state, dt_norm, G_norm);
+        bool reached = false;
         {
             GBSIntegrator gbs(eta_gbs);
-            double Omega_cur = logh_kinetic_energy(state) + state.B;
+            if (sd_on) gbs.sdar = &sd_par;
+            double Omega_cur = logh_omega(state);
             double ds_est = (Omega_cur > 1e-30) ? dt_norm * Omega_cur : dt_norm;
             n_gbs_steps = gbs.integrate_to_time(state, dt_norm, G_norm, ds_est,
                                                  c_norm, pn_order, max_steps);
+            reached = gbs.reached;
+        }
+        // Remove the slow-down: the last jump back to H (W20 Eq. 24); then T + U + B is the integration error of
+        // the slowed Hamiltonian over the call (W20 Eq. 25), and sd_jump the booked physical energy change
+        if (sd_on) {
+            logh_sd_update(state, G_norm, sd_par, true);
+            batch.sd_jump[s] = state.sd_jump * E_scale;
+            sd_kappa_sub[s] = state.sd_kappa_peak;
         }
 
         // ==================================================================
@@ -600,6 +645,8 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
             double E0_total = E0_norm + E_pn_0;
             double Ef_total = Ef_norm + E_pn_f;
             dE_rel = std::fabs((Ef_total - E0_total) / (std::fabs(E0_total) + 1e-30));
+        } else if (sd_on) {
+            dE_rel = std::fabs((Ef_norm + state.B) / (std::fabs(E0_norm) + 1e-30));
         } else {
             dE_rel = std::fabs((Ef_norm - E0_norm) / (std::fabs(E0_norm) + 1e-30));
         }
@@ -608,12 +655,12 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
         // GBS non-convergence instead; their Newtonian energy change is booked as E_pn by the caller.
         // A step-limited integration stopped short of the end time: never accept it on its energy (the
         // Newtonian check passed it and the members silently lagged behind the rest of the system)
-        bool converged = n_gbs_steps < max_steps;
+        bool converged = sd_on ? reached : n_gbs_steps < max_steps;
         if (any_compact && pn_order > 0 && c_norm > 0.0) dE_rel = 0.0;
         if (!converged) {
             dE_rel = 1e30;
             // What stopped: the members, and the bound pairs with their orbits per interval (initial state)
-            std::string msg = "      LogH step limit " + std::to_string(max_steps) + ": n=" + std::to_string(nb) +
+            std::string msg = "      LogH step limit " + std::to_string(sd_on ? n_gbs_steps : max_steps) + ": n=" + std::to_string(nb) +
                               " m[Msun]=";
             char buf[160];
             for (int b = 0; b < nb; b++) {
@@ -673,6 +720,12 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
     batch.stat_worst_dE  = max_dE;
     batch.stat_best_dE   = min_dE;
     batch.stat_cap_hit   = cap_hit;
+    batch.stat_sd_calls = 0;
+    batch.stat_sd_kappa_max = 0.0;
+    for (double k : sd_kappa_sub) {
+        if (k > 1.0) batch.stat_sd_calls++;
+        batch.stat_sd_kappa_max = std::max(batch.stat_sd_kappa_max, k);
+    }
 
     Kokkos::deep_copy(batch.flat_pos_out, h_pos_out);
     Kokkos::deep_copy(batch.flat_vel_out, h_vel_out);

@@ -1,5 +1,6 @@
 #include "logh.h"
 #include "post_newtonian.h"
+#include <algorithm>
 #include <cstring>
 
 // ============================================================================
@@ -132,7 +133,240 @@ static double solve_kick_omega(double Omega0, double C, double D) {
     return Omega;
 }
 
+// ============================================================================
+// SDAR: slow-down algorithmic regularization (Mikkola & Aarseth 1996, CeMDA 64, 197; Wang, Nitadori & Makino
+// 2020, MNRAS 493, 3398 = W20; FROST-CLUSTERS I, Rantala et al. 2024, App. A2 = FC-I).
+//
+// Slow-down Hamiltonian (W20 Eq. 19, FC-I Eq. A3) with n_sd disjoint inner binaries k = (a, b):
+//   H_sd = sum_k H_b,k / kappa_k + (H - sum_k H_b,k),   H_b,k = mu_k v_ab^2 / 2 - G m_a m_b / r_ab
+// split as T_sd + U_sd (FC-I Eq. A4, W20 Eq. 50):
+//   T_sd = sum_k T_b,k / kappa_k + sum_k T_cm,k + sum_singles T_i,   U_sd = U + sum_k (1/kappa_k - 1) U_b,k
+// With the binary internal kinetic energy T_b = mu v_ab^2 / 2, T_sd is the quadratic form
+//   T_sd = <v, v>_sd / 2,  <u, w>_sd = sum_i m_i u_i.w_i + sum_k (1/kappa_k - 1) mu_k u_ab.w_ab.
+// Equations of motion (W20 Eq. 20-21, FC-I Eq. A6-A7), here in the LogH time ds = Omega dt with
+// Omega = T_sd + B, B = -H_sd on shell (FC-I Eq. A5):
+//   binary member i of k:  dx_i/dt = v_cm + (v_i - v_cm) / kappa_k,  dv_i/dt = a_i + (1/kappa_k - 1) a_bin,i
+//   single:                dx_i/dt = v_i,                           dv_i/dt = a_i
+// The kick and drift of logh_leapfrog_step carry over with the inner product <.,.>_sd in the cubic for Omega.
+// Momentum and angular momentum are conserved by H_sd (W20 sec. 2.5.2), so the subsystem c.o.m. still drifts
+// uniformly. n_sd = 0 takes the unchanged plain-LogH code paths.
+// ============================================================================
+
+static double sd_dot(const LogHState& s, const double* u, const double* w) {
+    double d = 0.0;
+    for (int b = 0; b < s.n_bodies; b++)
+        d += s.mass[b] * (u[b*3+0]*w[b*3+0] + u[b*3+1]*w[b*3+1] + u[b*3+2]*w[b*3+2]);
+    for (int k = 0; k < s.n_sd; k++) {
+        const int a = s.sd_a[k], b = s.sd_b[k];
+        const double mu = s.mass[a] * s.mass[b] / (s.mass[a] + s.mass[b]);
+        double p = 0.0;
+        for (int c = 0; c < 3; c++) p += (u[a*3+c] - u[b*3+c]) * (w[a*3+c] - w[b*3+c]);
+        d += (1.0 / s.sd_kappa[k] - 1.0) * mu * p;
+    }
+    return d;
+}
+
+double logh_sd_kinetic_energy(const LogHState& state) {
+    if (state.n_sd == 0) return logh_kinetic_energy(state);
+    return 0.5 * sd_dot(state, state.vel, state.vel);
+}
+
+double logh_sd_potential_energy(const LogHState& state, double G) {
+    double U = logh_potential_energy(state, G);
+    for (int k = 0; k < state.n_sd; k++) {
+        const int a = state.sd_a[k], b = state.sd_b[k];
+        double r2 = 0.0;
+        for (int c = 0; c < 3; c++) {
+            const double d = state.pos[b*3+c] - state.pos[a*3+c];
+            r2 += d * d;
+        }
+        U += (1.0 / state.sd_kappa[k] - 1.0) * (-G * state.mass[a] * state.mass[b] / std::sqrt(r2));
+    }
+    return U;
+}
+
+double logh_omega(const LogHState& state) {
+    return logh_sd_kinetic_energy(state) + state.B;
+}
+
+// a_i -> a_i + (1/kappa - 1) a_bin,i for the members of each slowed binary (W20 Eq. 20)
+static void sd_scale_binary_accel(const LogHState& s, double G, double* accel) {
+    for (int k = 0; k < s.n_sd; k++) {
+        const int a = s.sd_a[k], b = s.sd_b[k];
+        double d[3], r2 = 0.0;
+        for (int c = 0; c < 3; c++) {
+            d[c] = s.pos[b*3+c] - s.pos[a*3+c];
+            r2 += d[c] * d[c];
+        }
+        const double f = (1.0 / s.sd_kappa[k] - 1.0) * G / (r2 * std::sqrt(r2));
+        for (int c = 0; c < 3; c++) {
+            accel[a*3+c] += f * s.mass[b] * d[c];
+            accel[b*3+c] -= f * s.mass[a] * d[c];
+        }
+    }
+}
+
+// dx/dt of every body: v, with the internal velocity of slowed binary members divided by kappa (W20 Eq. 20)
+static void sd_drift_velocity(const LogHState& s, double* xdot) {
+    std::memcpy(xdot, s.vel, s.n_bodies * 3 * sizeof(double));
+    for (int k = 0; k < s.n_sd; k++) {
+        const int a = s.sd_a[k], b = s.sd_b[k];
+        const double ma = s.mass[a], mb = s.mass[b], inv_k = 1.0 / s.sd_kappa[k];
+        for (int c = 0; c < 3; c++) {
+            const double vcm = (ma * s.vel[a*3+c] + mb * s.vel[b*3+c]) / (ma + mb);
+            xdot[a*3+c] = vcm + (s.vel[a*3+c] - vcm) * inv_k;
+            xdot[b*3+c] = vcm + (s.vel[b*3+c] - vcm) * inv_k;
+        }
+    }
+}
+
+// Implicit-midpoint kick of logh_leapfrog_step with the slowed metric: Omega = T_sd(v_mid) + B gives the same
+// cubic Omega^3 - Omega0 Omega^2 - C Omega - D = 0 with C = <v, Delta>_sd / 2, D = <Delta, Delta>_sd / 8
+static void sd_kick(LogHState& s, double h, const double* accel) {
+    const int n3 = s.n_bodies * 3;
+    double delta[LOGH_MAX_BODIES * 3];
+    for (int i = 0; i < n3; i++) delta[i] = h * accel[i];
+    const double Omega0 = logh_sd_kinetic_energy(s) + s.B;
+    const double C = 0.5 * sd_dot(s, s.vel, delta), D = 0.125 * sd_dot(s, delta, delta);
+    const double inv_Omega = 1.0 / solve_kick_omega(Omega0, C, D);
+    for (int i = 0; i < n3; i++) s.vel[i] += delta[i] * inv_Omega;
+}
+
+static void logh_leapfrog_step_sd(LogHState& state, double ds, double G) {
+    const int n3 = state.n_bodies * 3;
+    double accel[LOGH_MAX_BODIES * 3], xdot[LOGH_MAX_BODIES * 3];
+    logh_internal_accel(state, G, accel);
+    sd_scale_binary_accel(state, G, accel);
+    sd_kick(state, 0.5 * ds, accel);
+
+    const double inv_Omega_half = 1.0 / (logh_sd_kinetic_energy(state) + state.B);
+    sd_drift_velocity(state, xdot);
+    for (int i = 0; i < n3; i++) state.pos[i] += ds * xdot[i] * inv_Omega_half;
+    state.t += ds * inv_Omega_half;
+
+    logh_internal_accel(state, G, accel);
+    sd_scale_binary_accel(state, G, accel);
+    sd_kick(state, 0.5 * ds, accel);
+}
+
+double logh_sd_dyn_time(const LogHState& state, double G, double M_total) {
+    double t_min = 1e300;
+    for (int i = 0; i < state.n_bodies; i++)
+        for (int j = i + 1; j < state.n_bodies; j++) {
+            double r2 = 0.0;
+            for (int c = 0; c < 3; c++) {
+                const double d = state.pos[j*3+c] - state.pos[i*3+c];
+                r2 += d * d;
+            }
+            double t = std::sqrt(r2 * std::sqrt(r2) / (G * M_total));
+            for (int k = 0; k < state.n_sd; k++)
+                if (state.sd_a[k] == i && state.sd_b[k] == j) t *= state.sd_kappa[k];
+            t_min = std::min(t_min, t);
+        }
+    return t_min;
+}
+
+// Jumping kappa (W20 sec. 2.4, steps i-iii). Inner binaries: bound pairs taken greedily from the smallest
+// semi-major axis, each body in at most one pair (SDAR builds a Kepler binary tree for the same purpose, W20
+// sec. 4); every other subsystem member is a perturber. Per pair:
+//   kappa_org = k_ref (m_a m_b / r_apo^3) / sum_j (m_ab m_j / |r_j - r_cm|^3)        (W20 Eq. 22, FC-I Eq. A8)
+// with the perturbations summed as in the SDAR library (pert_out += m_cm m_j / r^3; for one perturber this is
+// exactly Eq. 22, whose printed form sums |r_j - r_cm|^3 / m_j and would let the weakest perturber set kappa),
+//   kappa_max = c |<r_j - r_cm>_m| / (P |<v_j - v_cm>_m|)                             (W20 Eq. 28, FC-I Eq. A9)
+// with mass-weighted means over the perturbers, kappa = min(kappa_org, kappa_max); pairs with kappa <= 1 are
+// not slowed, nor collision candidates, pericentre < coll_factor (R_a + R_b) (FC-I App. B3).
+// The energy jump delta H_sd = H_sd(kappa') - H_sd(kappa) at fixed (x, v) (W20 Eq. 24) is booked into B, so
+// that T_sd + U_sd + B stays the accumulated integration error (W20 Eq. 25; B is the LogH momentum of time).
+double logh_sd_update(LogHState& state, double G, const SdarParams& par, bool clear) {
+    const double H_old = logh_sd_kinetic_energy(state) + logh_sd_potential_energy(state, G);
+    const int n = state.n_bodies;
+    state.n_sd = 0;
+    double P_eff_min = 1e300;
+    if (!clear && n >= 3) {
+        struct Cand { double a, e; int i, j; };
+        Cand cand[LOGH_MAX_BODIES * (LOGH_MAX_BODIES - 1) / 2];
+        int nc = 0;
+        for (int i = 0; i < n; i++)
+            for (int j = i + 1; j < n; j++) {
+                double r[3], v[3], r2 = 0.0, v2 = 0.0;
+                for (int c = 0; c < 3; c++) {
+                    r[c] = state.pos[j*3+c] - state.pos[i*3+c];
+                    v[c] = state.vel[j*3+c] - state.vel[i*3+c];
+                    r2 += r[c] * r[c];
+                    v2 += v[c] * v[c];
+                }
+                const double mu = G * (state.mass[i] + state.mass[j]);
+                const double eps = 0.5 * v2 - mu / std::sqrt(r2);
+                if (eps >= 0.0) continue;
+                const double hx = r[1]*v[2] - r[2]*v[1], hy = r[2]*v[0] - r[0]*v[2], hz = r[0]*v[1] - r[1]*v[0];
+                const double e2 = 1.0 + 2.0 * eps * (hx*hx + hy*hy + hz*hz) / (mu * mu);
+                cand[nc++] = {-mu / (2.0 * eps), std::sqrt(std::max(0.0, e2)), i, j};
+            }
+        std::sort(cand, cand + nc, [](const Cand& x, const Cand& y) { return x.a < y.a; });
+        bool used[LOGH_MAX_BODIES] = {};
+        for (int q = 0; q < nc; q++) {
+            const int i = cand[q].i, j = cand[q].j;
+            const double a = cand[q].a, e = cand[q].e;
+            const double mi = state.mass[i], mj = state.mass[j], mb = mi + mj;
+            const double P = 2.0 * M_PI * std::sqrt(a * a * a / (G * mb));
+            if (used[i] || used[j]) continue;
+            used[i] = used[j] = true;   // the tightest pair of a body is its inner orbit, slowed or not
+            const double r_apo = a * (1.0 + e);
+            const double r_coll = par.coll_radius[i] + par.coll_radius[j];
+            if (r_coll > 0.0 && a * (1.0 - e) < par.coll_factor * r_coll) continue;
+            double xcm[3], vcm[3];
+            for (int c = 0; c < 3; c++) {
+                xcm[c] = (mi * state.pos[i*3+c] + mj * state.pos[j*3+c]) / mb;
+                vcm[c] = (mi * state.vel[i*3+c] + mj * state.vel[j*3+c]) / mb;
+            }
+            double pert_out = 0.0, m_p = 0.0, R[3] = {0, 0, 0}, V[3] = {0, 0, 0};
+            for (int k = 0; k < n; k++) {
+                if (k == i || k == j) continue;
+                double d[3], d2 = 0.0;
+                for (int c = 0; c < 3; c++) {
+                    d[c] = state.pos[k*3+c] - xcm[c];
+                    d2 += d[c] * d[c];
+                    R[c] += state.mass[k] * d[c];
+                    V[c] += state.mass[k] * (state.vel[k*3+c] - vcm[c]);
+                }
+                m_p += state.mass[k];
+                pert_out += mb * state.mass[k] / (d2 * std::sqrt(d2));
+            }
+            if (pert_out <= 0.0) continue;
+            const double kappa_org = par.k_ref * (mi * mj / (r_apo * r_apo * r_apo)) / pert_out;
+            const double Rn = std::sqrt(R[0]*R[0] + R[1]*R[1] + R[2]*R[2]) / m_p;
+            const double Vn = std::sqrt(V[0]*V[0] + V[1]*V[1] + V[2]*V[2]) / m_p;
+            const double kappa_max = Vn > 0.0 ? par.c * Rn / (P * Vn) : kappa_org;
+            const double kappa = std::min(kappa_org, kappa_max);
+            if (!(kappa > 1.0)) continue;
+            state.sd_a[state.n_sd] = i;
+            state.sd_b[state.n_sd] = j;
+            state.sd_kappa[state.n_sd] = kappa;
+            state.n_sd++;
+            state.sd_kappa_peak = std::max(state.sd_kappa_peak, kappa);
+        }
+        // Shortest orbit over the bound pairs, a slowed pair's orbit taking kappa P, for the GBS step limit; x
+        // sqrt(1 - e): eccentric orbits need more GBS steps per orbit (e = 0.9: ~140 measured, vs ~17 at low e)
+        for (int q = 0; q < nc; q++) {
+            double P = 2.0 * M_PI * std::sqrt(cand[q].a * cand[q].a * cand[q].a /
+                                              (G * (state.mass[cand[q].i] + state.mass[cand[q].j]))) *
+                       std::sqrt(std::max(1e-4, 1.0 - cand[q].e));
+            for (int k = 0; k < state.n_sd; k++)
+                if (state.sd_a[k] == cand[q].i && state.sd_b[k] == cand[q].j) P *= state.sd_kappa[k];
+            P_eff_min = std::min(P_eff_min, P);
+        }
+    }
+    const double dH = logh_sd_kinetic_energy(state) + logh_sd_potential_energy(state, G) - H_old;
+    state.B -= dH;
+    state.sd_jump += dH;
+    return P_eff_min;
+}
+
 void logh_leapfrog_step(LogHState& state, double ds, double G) {
+    if (state.n_sd > 0) {
+        logh_leapfrog_step_sd(state, ds, G);
+        return;
+    }
     int n = state.n_bodies;
     int n3 = n * 3;
 

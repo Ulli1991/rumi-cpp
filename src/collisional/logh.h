@@ -31,7 +31,40 @@ struct LogHState {
     bool has_spins;                          // true for 2-body BH binaries with spins
     double c_code;                           // speed of light (normalized units)
 
+    // SDAR slow-down (Mikkola & Aarseth 1996; Wang, Nitadori & Makino 2020, MNRAS 493, 3398, hereafter W20;
+    // FROST-CLUSTERS I, Rantala et al. 2024, App. A2, hereafter FC-I): n_sd disjoint inner binaries
+    // (sd_a[k], sd_b[k]) whose internal motion runs 1/kappa_k times slower, W20 Eq. 19 / FC-I Eq. A3:
+    //   H_sd = sum_k H_b,k / kappa_k + (H - sum_k H_b,k).
+    // kappa is constant within a GBS step and jumps only between steps (W20 sec. 2.4); n_sd = 0 is plain LogH.
+    int n_sd;
+    int sd_a[LOGH_MAX_BODIES / 2], sd_b[LOGH_MAX_BODIES / 2];
+    double sd_kappa[LOGH_MAX_BODIES / 2];
+    double sd_jump;   // sum of the jumps delta H_sd (W20 Eq. 24) booked into B over this integration
+    double sd_kappa_peak;   // largest kappa set during this integration (statistics)
 };
+
+// SDAR parameters of one subsystem integration (not part of the integrated state)
+struct SdarParams {
+    double k_ref = 1e-6;                    // W20 Eq. 22, FC-I Eq. A8
+    double c = 0.1;                         // kappa_max coefficient, W20 Eq. 28, FC-I Eq. A9
+    double coll_factor = 3.0;               // collision candidate: pericentre < coll_factor (R_a + R_b) -> kappa = 1
+    double coll_radius[LOGH_MAX_BODIES] = {};   // collision radius per body (normalized units, 0: none)
+    double steps_per_orbit = 0.0;           // GBS step limit per slowed orbit (0: only the caller's max_iter)
+};
+
+// SDAR: slowed kinetic energy T_sd (FC-I Eq. A4; W20 Eq. 50) and potential U_sd; plain T, U when n_sd = 0
+double logh_sd_kinetic_energy(const LogHState& state);
+double logh_sd_potential_energy(const LogHState& state, double G);
+// Omega = T_sd + B (the time transformation dt/ds = 1/Omega, FC-I Eq. A5)
+double logh_omega(const LogHState& state);
+// Jumping kappa (W20 sec. 2.4): re-identify the inner binaries, set kappa from W20 Eqs. 22 and 28, and apply
+// the instantaneous correction delta H_sd = H_sd(new) - H_sd(old) at the current phase-space point (W20 Eq. 24)
+// to B (B = -H_sd on shell) and to state.sd_jump. clear = true removes every slow-down (end of an integration).
+// Returns the shortest orbital period over bound pairs, kappa P for slowed ones, x sqrt(1 - e) (GBS step limit;
+// 1e300: no bound pair).
+double logh_sd_update(LogHState& state, double G, const SdarParams& par, bool clear = false);
+// Smallest dynamical time sqrt(r^3 / (G M)) over pairs, x kappa for a slowed pair (its orbit takes kappa P)
+double logh_sd_dyn_time(const LogHState& state, double G, double M_total);
 
 // Compute internal accelerations for LogH system
 void logh_internal_accel(const LogHState& state, double G,
