@@ -97,6 +97,10 @@ HIER_LOGH = dict(TEST_CASE="triple_test", INTEGRATOR="hhs", TRIPLE_A_IN_PC="1e-7
                  TOTAL_TIME_MYR="6e-7", DT_MAX_MYR="6e-7", DT_MIN_MYR="1e-16", SOFTENING_PC="0", COLLISIONAL="true",
                  R_NGB="1e-3", R_NGB_MAX="0.1", N_ORB_SECULAR="3", PN_ORDER="0", SSE_ENABLED="false",
                  ETA_RESTART="1e-8", ETA_GBS="1e-10", PRINT_INTERVAL="1", PROFILING="false")
+# The same binary and a hyperbolic fly-by (periapsis 20 AU, e = 5, from 100 AU): tidal ratio ~1e-9, ~2400 binary
+# orbits per half step of 5 yr
+WEAK_FLYBY = dict(HIER_LOGH, TRIPLE_A_OUT_PC="1e-4", TRIPLE_E_OUT="5.0", TOTAL_TIME_MYR="4e-5", DT_MAX_MYR="1e-5",
+                  FLYBY_CM_VELOCITY="true")
 # 16 stars inside r_ngb: one 15-body neighbour group, more than LogH's fixed storage (LOGH_MAX_BODIES = 8)
 # Collisional FSI run of a field binary (r_ngb below a, so no subsystem): the start-of-step kernel's criteria set the step
 FSI_BINARY = dict(TEST_CASE="binary_test", INTEGRATOR="fsi", TOTAL_TIME_MYR="1e-5", DT_MAX_MYR="1e-5", DT_MIN_MYR="1e-14",
@@ -320,6 +324,15 @@ def logh_complete(exe, label, cfg, bound):
     return ok & check(f"{label} |dE/E|", diagnostics(out)[-1][0], bound)
 
 
+def weak_split(exe, label, cfg, bound):
+    """WEAK_PERTURBER_GAMMA: the weakly perturbed binary of a fly-by triple is split off (secular binary)."""
+    out = run_output(exe, cfg)
+    n = sum(int(c) for c in re.findall(r"weak_split=(\d+)", out))
+    gbs = sum(int(c) for c in re.findall(r"\(gbs=(\d+)", out))
+    ok = check(f"{label} triples split", n, 1, lower=True) & check(f"{label} LogH GBS steps", gbs, 0)
+    return ok & check(f"{label} max|dE/E|", max(r[0] for r in diagnostics(out)), bound)
+
+
 def no_fsi_groups(exe, label, cfg, bound):
     """Neighbour chains in a dense core must be split along bound pairs, not left whole to the FSI."""
     out = run_output(exe, cfg)
@@ -491,6 +504,10 @@ CASES = {
     # Before: both LogH calls stopped at the 1000-step limit after ~45 % of the interval, and passed the energy
     # check (cap=4, no retry: the members lagged behind the system clock). Measured after: 0 caps, |dE/E| 8.5e-12
     "logh_hierarchy_complete": lambda exe: logh_complete(exe, "tight binary in unstable triple", HIER_LOGH, 1.1e-11),
+    # Experimental split (off by default). Without: LogH, 575k GBS steps, 3.7 s, |dE/E| 1.5e-9 (max). With:
+    # 0.06 s, max 3.6e-8 at periapsis, 5.3e-9 at the end
+    "weak_flyby_split": lambda exe: weak_split(exe, "weak fly-by split", dict(WEAK_FLYBY, WEAK_PERTURBER_GAMMA="1e-8"),
+                                               4.7e-8),
     "triple_id_order": lambda exe: triple_order(exe, "secular triple", SEC_TRIPLE, 1e-6),
     # Measured 9.8e-9 (dense core, at the restart threshold); 2.35e-8 before the pericentre check, 2.68e-8 with
     # it (seed 5): bound 3.5e-8

@@ -22,6 +22,9 @@ constexpr int GBS_MAX_STEPS = 1000;
 // (a tight binary inside a fly-by or an unstable triple is integrated orbit by orbit: thousands of orbits per
 // interval at coarse levels hit the fixed limit after a few per cent of the interval, and the retry split it
 // into up to 256 pieces). Hard ceiling 4e6 steps; NBODY_GBS_STEPS_PER_ORBIT overrides 64 (0: fixed 1000).
+// The cost stays ~ orbits per interval: the remedy for weakly perturbed inner binaries is the slow-down of their
+// orbital motion (Mikkola & Aarseth 1996; SDAR, Wang, Nitadori & Makino 2020, MNRAS 493, 3398), which replaced
+// LogH in BIFROST (FROST-CLUSTERS I, Rantala et al. 2024, App. A2; kappa = 1 for PN subsystems there).
 static int gbs_step_limit(const LogHState& st, double dt, double G) {
     static const double per_orbit = std::getenv("NBODY_GBS_STEPS_PER_ORBIT")
                                         ? std::atof(std::getenv("NBODY_GBS_STEPS_PER_ORBIT")) : 64.0;

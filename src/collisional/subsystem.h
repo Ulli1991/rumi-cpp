@@ -135,12 +135,14 @@ struct SubsystemManager {
     // Per-level diagnostics: set by detect_from_pairs/accumulate_diagnostics
     int last_level_pairs = 0;       // neighbor pairs found at most recent detect_from_pairs
     int last_level_bound = 0;       // bound pairs at most recent detect_from_pairs
+    int last_level_weak_split = 0;  // triples split into binary + field star (weak perturber) there
 
     // Step-level diagnostics: accumulated across HHS recursion levels
     int step_total_pairs = 0;       // total neighbor pairs found across all levels
     int step_total_bound = 0;       // total bound pairs across all levels
     int step_total_subsystems = 0;  // total subsystems formed
     int step_n_bin = 0, step_n_fly = 0, step_n_trip_s = 0, step_n_trip_u = 0, step_n_multi = 0;
+    int step_weak_split = 0;
     int step_n_secular = 0;
     int step_total_members = 0;
 

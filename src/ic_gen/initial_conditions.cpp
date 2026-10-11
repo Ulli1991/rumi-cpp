@@ -962,13 +962,25 @@ void init_triple_test(Particles& p,
     // --- Outer orbit at apoapsis ---
     // Outer angular momentum direction: L_out = (0, sin(i), cos(i))
     // At apoapsis: position along +x, velocity along (0, cos(i), -sin(i))
-    double r_apo_out = a_out_pc * (1.0 + e_out);
-    double v_apo_out = std::sqrt(mu_out / a_out_pc * (1.0 - e_out) / (1.0 + e_out + 1e-30));
-
-    // Outer relative position and velocity (m3 relative to inner COM)
-    double r3_x = r_apo_out;
-    double v3_y =  v_apo_out * std::cos(i_rad);
-    double v3_z = -v_apo_out * std::sin(i_rad);
+    // Outer relative position and velocity (m3 relative to inner COM) in the plane of x and
+    // w = (0, cos i, -sin i). e_out > 1: hyperbolic fly-by with periapsis a_out_pc, starting inbound at 5
+    // periapsis distances (true anomaly f < 0)
+    double r3_x, r3_y, r3_z, v3_x, v3_y, v3_z;
+    {
+        double rx, rw, vx_, vw;
+        if (e_out > 1.0) {
+            const double q = a_out_pc, p_semi = q * (1.0 + e_out), r0 = 5.0 * q;
+            const double f = -std::acos(std::max(-1.0, std::min(1.0, (p_semi / r0 - 1.0) / e_out)));
+            const double vs = std::sqrt(mu_out / p_semi);
+            rx = r0 * std::cos(f);  rw = r0 * std::sin(f);
+            vx_ = -vs * std::sin(f); vw = vs * (e_out + std::cos(f));
+        } else {
+            rx = a_out_pc * (1.0 + e_out);  rw = 0.0;
+            vx_ = 0.0;  vw = std::sqrt(mu_out / a_out_pc * (1.0 - e_out) / (1.0 + e_out + 1e-30));
+        }
+        r3_x = rx;  r3_y = rw * std::cos(i_rad);  r3_z = -rw * std::sin(i_rad);
+        v3_x = vx_; v3_y = vw * std::cos(i_rad);  v3_z = -vw * std::sin(i_rad);
+    }
 
     // Shift to total COM frame:
     // inner COM offset = -(m3/M_tot) * r3_vec
@@ -987,13 +999,16 @@ void init_triple_test(Particles& p,
     // Inner members m1, m2 and the outer body m3; outer_first stores m3 at index 0 (lowest particle id), so
     // code that takes the inner pair from the first two ids is caught
     const double px[3] = {x0 + f_in * r3_x, x1 + f_in * r3_x, f_out * r3_x};
+    const double py[3] = {f_in * r3_y, f_in * r3_y, f_out * r3_y};
+    const double pz[3] = {f_in * r3_z, f_in * r3_z, f_out * r3_z};
+    const double pvx[3] = {f_in * v3_x, f_in * v3_x, f_out * v3_x};
     const double pvy[3] = {vy0 + f_in * v3_y, vy1 + f_in * v3_y, f_out * v3_y};
     const double pvz[3] = {f_in * v3_z, f_in * v3_z, f_out * v3_z};
     const double pm[3] = {m1_msun, m2_msun, m3_msun};
     for (int k = 0; k < 3; k++) {
         const int i = outer_first ? (k + 1) % 3 : k;
-        h_x(i) = px[k];  h_y(i) = 0.0;     h_z(i) = 0.0;
-        h_vx(i) = 0.0;   h_vy(i) = pvy[k]; h_vz(i) = pvz[k];
+        h_x(i) = px[k];   h_y(i) = py[k];   h_z(i) = pz[k];
+        h_vx(i) = pvx[k]; h_vy(i) = pvy[k]; h_vz(i) = pvz[k];
         h_mass(i) = pm[k];
     }
 
