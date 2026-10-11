@@ -179,9 +179,13 @@ KOKKOS_INLINE_FUNCTION double tidal_sampling_dt(double ki, double kj, double mi,
 // with that acceleration for the v/a, gradient and perturbation criteria that follow.
 // MN_IN (tree path, dt_tree.h): the minimum over the pair steps is already in dt (exact tree search); only the sums
 // are accumulated here, with the same per-pair expressions and order as without MN_IN, so they are bit-identical.
-template <bool COLL, bool MN_IN = false>
+// CV = false (collisional, cvx..cvz are vx..vz, i.e. component fly-by velocities): the pair-step velocities are taken
+// from the staged vx..vz instead of a second staged copy (13 -> 10 source doubles; same values, bit-identical; -5 %
+// of DtK, AUDIT G row 2b).
+template <bool COLL, bool MN_IN = false, bool CV = true>
 struct DtK {
-    static constexpr int NSRC = COLL ? 13 : 7, NS = COLL ? 6 : 0, NM = 1;
+    static constexpr int KI = CV ? 11 : 8;   // source slots of k and kf (collisional)
+    static constexpr int NSRC = COLL ? KI + 2 : 7, NS = COLL ? 6 : 0, NM = 1;
     RawView x, y, z, m, vx, vy, vz, ax, ay, az, dt;
     RawView cvx, cvy, cvz;   // velocities for the pair time step (subsystem CoM velocity or vx, vy, vz)
     RawView ktid, kfl;       // PairVelocities::k, kf (null: no tidal-sampling step)
@@ -189,16 +193,17 @@ struct DtK {
     double G, soft2, eta_ff, eta_fb, eta_jerk;
     struct Sink { double x, y, z, m, vx, vy, vz, cvx, cvy, cvz, k, kf; int sid; };
     KOKKOS_INLINE_FUNCTION Sink sink(int i) const {
-        return {x(i), y(i), z(i), m(i), vx(i), vy(i), vz(i), COLL ? cvx(i) : 0.0, COLL ? cvy(i) : 0.0,
-                COLL ? cvz(i) : 0.0, (COLL && ktid.ptr) ? ktid(i) : 1e30, (COLL && ktid.ptr) ? kfl(i) : 0.0,
+        return {x(i), y(i), z(i), m(i), vx(i), vy(i), vz(i), (COLL && CV) ? cvx(i) : 0.0, (COLL && CV) ? cvy(i) : 0.0,
+                (COLL && CV) ? cvz(i) : 0.0, (COLL && ktid.ptr) ? ktid(i) : 1e30, (COLL && ktid.ptr) ? kfl(i) : 0.0,
                 COLL ? sid[i] : -1};
     }
     KOKKOS_INLINE_FUNCTION void source(int j, double* s) const {
         s[0] = x(j); s[1] = y(j); s[2] = z(j); s[3] = m(j); s[4] = vx(j); s[5] = vy(j); s[6] = vz(j);
         if (COLL) {
-            s[7] = static_cast<double>(sid[j]); s[8] = cvx(j); s[9] = cvy(j); s[10] = cvz(j);
-            s[COLL ? 11 : 0] = ktid.ptr ? ktid(j) : 1e30;
-            s[COLL ? 12 : 0] = ktid.ptr ? kfl(j) : 0.0;
+            s[7] = static_cast<double>(sid[j]);
+            if (CV) { s[CV ? 8 : 0] = cvx(j); s[CV ? 9 : 0] = cvy(j); s[CV ? 10 : 0] = cvz(j); }
+            s[COLL ? KI : 0] = ktid.ptr ? ktid(j) : 1e30;
+            s[COLL ? KI + 1 : 0] = ktid.ptr ? kfl(j) : 0.0;
         }
     }
     KOKKOS_INLINE_FUNCTION void pair(const Sink& a, int i, const double* s, int j, double* sum, double* mn) const {
@@ -208,8 +213,11 @@ struct DtK {
         double r2s = w ? dx * dx + dy * dy + dz * dz + soft2 : 1.0;
         double ir = fast_rsqrt(r2s);
         if constexpr (!MN_IN) {
-            double t = COLL ? Kokkos::fmin(pair_dt_below(mn[0], r2s, ir, dx, dy, dz, s[8] - a.cvx, s[9] - a.cvy, s[10] - a.cvz, G, a.m + s[3], eta_ff, eta_fb),
-                                           tidal_sampling_dt(a.k, s[COLL ? 11 : 0], a.m, s[3], r2s, a.kf, s[COLL ? 12 : 0]))
+            // pair-step velocity difference: the c.o.m. velocities (CV), else the same dv as the jerk sum
+            const double cdx = CV ? s[CV ? 8 : 0] - a.cvx : dvx, cdy = CV ? s[CV ? 9 : 0] - a.cvy : dvy,
+                         cdz = CV ? s[CV ? 10 : 0] - a.cvz : dvz;
+            double t = COLL ? Kokkos::fmin(pair_dt_below(mn[0], r2s, ir, dx, dy, dz, cdx, cdy, cdz, G, a.m + s[3], eta_ff, eta_fb),
+                                           tidal_sampling_dt(a.k, s[COLL ? KI : 0], a.m, s[3], r2s, a.kf, s[COLL ? KI + 1 : 0]))
                             : pair_dt_below(mn[0], r2s, ir, dx, dy, dz, dvx, dvy, dvz, G, a.m + s[3], eta_ff, eta_fb);
             mn[0] = Kokkos::fmin(mn[0], w ? t : 1e30);
         }
