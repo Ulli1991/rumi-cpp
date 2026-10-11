@@ -461,6 +461,26 @@ struct Config {
 };
 
 // ---------------------------------------------------------------------------
+// NBODY_DUMP (diagnostics): the particle state at each print, rows (pid m x y z vx vy vz subsystem_id) of doubles
+// after the int N, to dump_<step>.bin in the run directory (step 0: the initial state)
+static void dump_particles(const Particles& p, int step) {
+    if (!std::getenv("NBODY_DUMP")) return;
+    char fn[64];
+    std::snprintf(fn, sizeof fn, "dump_%04d.bin", step);
+    auto h = [](const auto& v) { return Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), v); };
+    auto hx = h(p.x), hy = h(p.y), hz = h(p.z), hvx = h(p.vx), hvy = h(p.vy), hvz = h(p.vz), hm = h(p.mass);
+    auto hp = h(p.particle_id), hs = h(p.subsystem_id);
+    FILE* f = std::fopen(fn, "wb");
+    if (!f) return;
+    const int n = p.N;
+    std::fwrite(&n, sizeof n, 1, f);
+    for (int i = 0; i < n; i++) {
+        const double r[9] = {(double)hp(i), hm(i), hx(i), hy(i), hz(i), hvx(i), hvy(i), hvz(i), (double)hs(i)};
+        std::fwrite(r, sizeof r, 1, f);
+    }
+    std::fclose(f);
+}
+
 // BINARY_CHI1 / BINARY_CHI2 = "cx,cy,cz" (or space-separated): dimensionless spin vectors of the two binary_test bodies
 static void set_binary_spins(Particles& p, const Config& cfg) {
 #ifdef ENABLE_COLLISIONAL
@@ -588,6 +608,7 @@ int main(int argc, char** argv) {
         hhs_cc = cfg.get_bool("HHS_CC", false);
         hhs_cc_max = cfg.get_int("HHS_CC_MAX", -1);
         flyby_cm_velocity = cfg.get_bool("FLYBY_CM_VELOCITY", false);   // FROST-CLUSTERS II sec. 2.1
+        g_eattr.on = std::getenv("NBODY_EATTR") != nullptr;   // per-print energy attribution (diagnostics.h)
         distribute_subsystems = cfg.get_bool("DISTRIBUTE_SUBSYSTEMS", false);   // FROST Algorithm 3
         distribute_subsystems_min = cfg.get_int("DISTRIBUTE_MIN_SUBSYSTEMS", 256);
         use_integer_positions = cfg.get_bool("INTEGER_POSITIONS", false);
@@ -629,6 +650,7 @@ int main(int argc, char** argv) {
             g_collisional.weak_perturber_gamma = cfg.get_double("WEAK_PERTURBER_GAMMA", 0.0);
             g_collisional.secular_triples = cfg.get_bool("SECULAR_TRIPLES", true);
             g_collisional.tidal_res       = cfg.get_double("TIDAL_RES", 0.05);
+            g_collisional.flyby_cm_eps    = cfg.get_double("FLYBY_CM_EPS", 0.0);
             g_collisional.eta_restart     = cfg.get_double("ETA_RESTART", 0.0);
             g_collisional.n_orb_secular   = cfg.get_int("N_ORB_SECULAR", 3);
             g_collisional.m_pn            = cfg.get_double("M_PN", 5.0);
@@ -660,6 +682,9 @@ int main(int argc, char** argv) {
         double G = G_CODE;
         double soft2 = soft_pc * soft_pc;
         double dt_max = dt_max_myr / TIME_UNIT_MYR;   // Myr → code TU
+#ifdef ENABLE_COLLISIONAL
+        g_eattr.dt_cap = dt_max;
+#endif
         double dt_min = dt_min_myr / TIME_UNIT_MYR;   // Myr → code TU
         double t_final = t_final_myr / TIME_UNIT_MYR;  // Myr → code TU
 
@@ -873,6 +898,11 @@ int main(int argc, char** argv) {
         }
 #endif
 
+#ifdef ENABLE_COLLISIONAL
+        // FLYBY_CM_EPS scale: |E0| (the energy the run's |dE/E| refers to)
+        if (g_collisional.enabled && flyby_cm_velocity && g_collisional.flyby_cm_eps > 0.0)
+            g_collisional.e_ref = std::fabs(compute_diagnostics(work_p, G, soft2).E_total);
+#endif
         // Initial force computation + adaptive timestep
         if (my_rank == 0) {
             std::printf("Computing initial forces...\n"); std::fflush(stdout);
@@ -939,6 +969,7 @@ int main(int argc, char** argv) {
 #endif
 
         auto diag0 = compute_diagnostics(work_p, G, soft2);
+        if (my_rank == 0) dump_particles(work_p, 0);
 
         if (my_rank == 0) {
             std::printf("Running...\n"); std::fflush(stdout);
@@ -955,6 +986,24 @@ int main(int argc, char** argv) {
             compute_errors(diag, diag0, work_p, is_cluster, dE, dP, dL);
             if (my_rank == 0) {
                 print_timebin_table(work_p, levels, dE, dP, dL, t_now*TIME_UNIT_MYR, step_now, is_cluster);
+#ifdef ENABLE_COLLISIONAL
+                dump_particles(work_p, step_now);
+                if (g_eattr.on) {
+                    const double E0 = std::fabs(diag0.E_total);
+                    std::printf("EATTR step %d signed_dE %.6e logh %.6e logh_abs %.6e n_logh %d books: gw %.6e pn %.6e "
+                                "merge %.6e esc %.6e | worst %.6e n=%d type=%d pids %d %d a=%.4e e=%.4f dt=%.3e\n",
+                                step_now, (diag.E_total + g_energy_books.total_sink() - diag0.E_total) / E0,
+                                g_eattr.logh / E0, g_eattr.logh_abs / E0, g_eattr.n_logh, g_energy_books.E_gw / E0,
+                                g_energy_books.E_pn / E0, g_energy_books.E_merge / E0, g_energy_books.E_escape / E0,
+                                g_eattr.worst / E0, g_eattr.worst_n, g_eattr.worst_type, g_eattr.worst_pid0,
+                                g_eattr.worst_pid1, g_eattr.worst_a, g_eattr.worst_e, g_eattr.worst_dt * TIME_UNIT_MYR);
+                    std::printf("EATTR_TID step %d max_est %.6e pids %d %d m %.3f %.3f a=%.4e e=%.4f gamma=%.3e P=%.3e dt=%.3e\n",
+                                step_now, g_eattr.tid_max / E0, g_eattr.tid_pid0, g_eattr.tid_pid1, g_eattr.tid_m1,
+                                g_eattr.tid_m2, g_eattr.tid_a, g_eattr.tid_e, g_eattr.tid_gamma,
+                                g_eattr.tid_P * TIME_UNIT_MYR, g_eattr.tid_dt * TIME_UNIT_MYR);
+                    g_eattr.reset();
+                }
+#endif
 #ifdef ENABLE_COLLISIONAL
                 if (bin_tracker.initialized) {
                     bin_tracker.update(work_p, G, t_now);

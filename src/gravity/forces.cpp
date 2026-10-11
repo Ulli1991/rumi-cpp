@@ -26,10 +26,10 @@ Etas etas(double eta) {
 }
 const int* sid_ptr(const Particles& p, bool coll) { return coll ? p.subsystem_id.data() : nullptr; }
 
-struct PairVel { RawView x, y, z; };
+struct PairVel { RawView x, y, z, k; };
 PairVel pair_vel(Particles& p, bool coll, int lo, int hi) {
-    PairVelocities v = coll ? pair_velocities(p, lo, hi) : PairVelocities{p.vx.data(), p.vy.data(), p.vz.data()};
-    return {{v.x}, {v.y}, {v.z}};
+    PairVelocities v = coll ? pair_velocities(p, lo, hi) : PairVelocities{p.vx.data(), p.vy.data(), p.vz.data(), nullptr};
+    return {{v.x}, {v.y}, {v.z}, {v.k}};
 }
 // Union of the sink and source ranges of a pairwise kernel
 int range_lo(int i0, int ni, int j0, int nj) { return std::min(ni > 0 ? i0 : j0, nj > 0 ? j0 : i0); }
@@ -41,19 +41,20 @@ bool flyby_cm_velocity = false;
 PairVelocities pair_velocities(Particles& p, int lo, int hi) {
 #ifdef ENABLE_COLLISIONAL
     if (p.collisional && flyby_cm_velocity) {
-        static Kokkos::View<double*> cx("cm_vx", 0), cy("cm_vy", 0), cz("cm_vz", 0);
-        static bool hook = (Kokkos::push_finalize_hook([] { cx = cy = cz = Kokkos::View<double*>(); }), true);
+        static Kokkos::View<double*> cx("cm_vx", 0), cy("cm_vy", 0), cz("cm_vz", 0), ck("cm_k", 0);
+        static bool hook = (Kokkos::push_finalize_hook([] { cx = cy = cz = ck = Kokkos::View<double*>(); }), true);
         (void)hook;
         if ((int)cx.extent(0) < p.N) {
-            Kokkos::realloc(cx, p.N); Kokkos::realloc(cy, p.N); Kokkos::realloc(cz, p.N);
+            Kokkos::realloc(cx, p.N); Kokkos::realloc(cy, p.N); Kokkos::realloc(cz, p.N); Kokkos::realloc(ck, p.N);
         }
-        g_subsystem_mgr.fill_cm_velocity(p, std::max(lo, 0), std::min(hi, p.N), cx, cy, cz);
-        return {cx.data(), cy.data(), cz.data()};
+        const double tol = g_collisional.flyby_cm_eps * g_collisional.e_ref;   // FLYBY_CM_EPS x |E0|
+        g_subsystem_mgr.fill_cm_velocity(p, std::max(lo, 0), std::min(hi, p.N), cx, cy, cz, ck, tol);
+        return {cx.data(), cy.data(), cz.data(), tol > 0.0 ? ck.data() : nullptr};
     }
 #else
     (void)lo; (void)hi;
 #endif
-    return {p.vx.data(), p.vy.data(), p.vz.data()};
+    return {p.vx.data(), p.vy.data(), p.vz.data(), nullptr};
 }
 
 // ==========================================================================
@@ -65,7 +66,7 @@ static void acc_dt_range(Particles& p, int i0, int ni, int j0, int nj, double G,
     PairVel cv = pair_vel(p, COLL, range_lo(i0, ni, j0, nj), range_hi(i0, ni, j0, nj));
     AccDtK<COLL> k{{p.x.data()}, {p.y.data()}, {p.z.data()}, {p.mass.data()}, {p.vx.data()}, {p.vy.data()},
                    {p.vz.data()}, {p.ax.data()}, {p.ay.data()}, {p.az.data()}, {p.dt_adapt.data()},
-                   cv.x, cv.y, cv.z, sid_ptr(p, COLL), G, soft2, e.ff, e.fb, e.jerk, e.va};
+                   cv.x, cv.y, cv.z, cv.k, sid_ptr(p, COLL), G, soft2, e.ff, e.fb, e.jerk, e.va};
     run_n2("acc_dt", i0, ni, j0, nj, k);
 }
 
@@ -168,7 +169,7 @@ static void dt_range(Particles& p, int i0, int ni, int j0, int nj, double G, dou
     PairVel cv = pair_vel(p, COLL, range_lo(i0, ni, j0, nj), range_hi(i0, ni, j0, nj));
     DtK<COLL> k{{p.x.data()}, {p.y.data()}, {p.z.data()}, {p.mass.data()}, {p.vx.data()}, {p.vy.data()},
                 {p.vz.data()}, {p.ax.data()}, {p.ay.data()}, {p.az.data()}, {p.dt_adapt.data()},
-                cv.x, cv.y, cv.z, sid_ptr(p, COLL), G, soft2, e.ff, e.fb, COLL ? e.jerk : 0.0};
+                cv.x, cv.y, cv.z, cv.k, sid_ptr(p, COLL), G, soft2, e.ff, e.fb, COLL ? e.jerk : 0.0};
     run_n2("dt_subset", i0, ni, j0, nj, k);
 }
 
@@ -299,7 +300,7 @@ std::vector<int> cc_components(Particles& p, int start, int count, double pivot,
     // the pair time steps of DtK/AccDtK: with FLYBY_CM_VELOCITY the subsystem c.o.m. velocity of members
     // (FROST-CLUSTERS II sec. 2.1)
     PairVel cv = pair_vel(p, p.collisional, start, start + count);
-    PairMinK pm{{p.x.data()}, {p.y.data()}, {p.z.data()}, {p.mass.data()}, cv.x, cv.y, cv.z,
+    PairMinK pm{{p.x.data()}, {p.y.data()}, {p.z.data()}, {p.mass.data()}, cv.x, cv.y, cv.z, cv.k,
                 {dmin.data()}, start, sid_ptr(p, p.collisional), G, soft2, e.ff, e.fb};
     run_n2("cc_pair_min", start, count, start, count, pm);
     // NBODY_CHECK_CC: the split must see the pair time steps of the time-step kernel (DtK, over a superset of
@@ -316,7 +317,7 @@ std::vector<int> cc_components(Particles& p, int start, int count, double pivot,
     }
     auto launch = [&](auto coll_tag) {
         constexpr bool COLL = decltype(coll_tag)::value;
-        EdgeK<COLL> k{{p.x.data()}, {p.y.data()}, {p.z.data()}, {p.mass.data()}, cv.x, cv.y, cv.z,
+        EdgeK<COLL> k{{p.x.data()}, {p.y.data()}, {p.z.data()}, {p.mass.data()}, cv.x, cv.y, cv.z, cv.k,
                       sid_ptr(p, COLL), cc_buf(0).data(), cc_buf(1).data(), cc_buf(2).data(), max_edges,
                       G, soft2, e.ff, e.fb, pivot, {dmin.data()}, start};
         run_n2("cc_edges", start, count, start, count, k);

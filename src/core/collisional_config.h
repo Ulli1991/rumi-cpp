@@ -29,6 +29,9 @@ struct CollisionalConfig {
     double weak_perturber_gamma = 0.0;  // WEAK_PERTURBER_GAMMA (experimental, off): a non-secular triple whose third body perturbs the inner
                                         // binary below this tidal ratio is split (binary subsystem + field star); 0: off
     double tidal_gamma = 0.0;          // TIDAL_GAMMA: binaries with |tidal accel| / |internal accel| above this resolve
+    double flyby_cm_eps = 0.0;         // FLYBY_CM_EPS (with FLYBY_CM_VELOCITY; 0: off): tidal-sampling pair step that bounds the
+                                       //   energy a slow particle's kicks put into a subsystem per step by this x |E0|
+    double e_ref = 0.0;                //   |E0| of the run
     double tidal_res = 0.05;           //   their orbit, dt <= TIDAL_RES x period (0 = off; dense cores)
     double eta_restart = 1e-6;         // energy error restart threshold
 

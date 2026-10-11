@@ -1069,7 +1069,8 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
         // PN-active subsystems: the global diagnostics are Newtonian, so book the change of the members'
         // Newtonian energy, momentum and angular momentum over this advance (Newtonian LogH conserves
         // them; what changed is the PN dynamics, plus GBS error at its tolerance)
-        if (g_collisional.pn_order > 0 && g_collisional.c_code > 0.0) {
+        const bool pn_on = g_collisional.pn_order > 0 && g_collisional.c_code > 0.0;
+        if (pn_on || g_eattr.on) {
             mirror.pull(p, 6);
             for (int si = 0; si < n_sub; si++) {
                 const auto& sub = saved_subs[si];
@@ -1081,7 +1082,8 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
                     if (idx[b] < 0) { ok = false; break; }
                     if (h_m(idx[b] - start) >= g_collisional.m_pn) pn_active = true;
                 }
-                if (!ok || !pn_active) continue;
+                pn_active = pn_active && pn_on;
+                if (!ok || (!pn_active && !g_eattr.on)) continue;
                 double E_pre = 0.0, E_post = 0.0;
                 for (int b = 0; b < nb; b++) {
                     const auto& s0 = saved_bodies[si][b];
@@ -1091,8 +1093,10 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
                     double r1[3] = {h_x(i), h_y(i), h_z(i)}, v1[3] = {h_vx(i), h_vy(i), h_vz(i)};
                     E_pre  += 0.5 * m * (v0[0]*v0[0] + v0[1]*v0[1] + v0[2]*v0[2]);
                     E_post += 0.5 * m * (v1[0]*v1[0] + v1[1]*v1[1] + v1[2]*v1[2]);
-                    g_energy_books.sink_PL(m, r0, v0);
-                    g_energy_books.sink_PL(m, r1, v1, -1.0);
+                    if (pn_active) {
+                        g_energy_books.sink_PL(m, r0, v0);
+                        g_energy_books.sink_PL(m, r1, v1, -1.0);
+                    }
                     for (int c = b + 1; c < nb; c++) {
                         const auto& s1 = saved_bodies[si][c];
                         int j = idx[c] - start;
@@ -1102,7 +1106,17 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
                                                   (h_z(i)-h_z(j))*(h_z(i)-h_z(j)));
                     }
                 }
-                g_energy_books.E_pn += E_pre - E_post;
+                if (pn_active) {
+                    g_energy_books.E_pn += E_pre - E_post;
+                } else {
+                    const double d = E_post - E_pre;
+                    g_eattr.logh += d; g_eattr.logh_abs += std::fabs(d); g_eattr.n_logh++;
+                    if (std::fabs(d) > std::fabs(g_eattr.worst)) {
+                        g_eattr.worst = d; g_eattr.worst_n = nb; g_eattr.worst_type = (int)sub.type;
+                        g_eattr.worst_pid0 = sub.particle_ids[0]; g_eattr.worst_pid1 = sub.particle_ids[1];
+                        g_eattr.worst_a = sub.orb.a; g_eattr.worst_e = sub.orb.e; g_eattr.worst_dt = dt;
+                    }
+                }
             }
         }
 

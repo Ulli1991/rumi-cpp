@@ -40,6 +40,24 @@ struct EnergyBookkeeping {
 // Global energy bookkeeping instance
 extern EnergyBookkeeping g_energy_books;
 
+// NBODY_EATTR diagnostics: per print interval, the Newtonian energy change of LogH subsystems that is not
+// booked (GBS error of non-PN subsystems), with the worst single subsystem advance
+struct EnergyAttribution {
+    bool on = false;
+    double logh = 0.0;          // sum of E_post - E_pre over unbooked LogH advances
+    double logh_abs = 0.0;      // sum of |E_post - E_pre|
+    double worst = 0.0;         // largest |E_post - E_pre| of one advance (signed value)
+    int worst_n = 0, worst_pid0 = -1, worst_pid1 = -1, worst_type = -1;
+    double worst_a = 0.0, worst_e = 0.0, worst_dt = 0.0;
+    int n_logh = 0;
+    // tidal kick estimate mu |f| |v| dt of 2-body bound subsystems (subsystem_timesteps), max over the interval
+    double dt_cap = 1e30;
+    double tid_max = 0.0, tid_a = 0.0, tid_e = 0.0, tid_gamma = 0.0, tid_dt = 0.0, tid_P = 0.0, tid_m1 = 0.0, tid_m2 = 0.0;
+    int tid_pid0 = -1, tid_pid1 = -1;
+    void reset() { bool o = on; double c = dt_cap; *this = EnergyAttribution(); on = o; dt_cap = c; }
+};
+extern EnergyAttribution g_eattr;
+
 DiagnosticState compute_diagnostics(const Particles& p, double G, double soft2);
 
 // Tiled GPU potential energy computation (shared-memory tiled, O(N²))

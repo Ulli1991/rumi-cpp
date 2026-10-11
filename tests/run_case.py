@@ -101,6 +101,14 @@ HIER_LOGH = dict(TEST_CASE="triple_test", INTEGRATOR="hhs", TRIPLE_A_IN_PC="1e-7
 # orbits per half step of 5 yr
 WEAK_FLYBY = dict(HIER_LOGH, TRIPLE_A_OUT_PC="1e-4", TRIPLE_E_OUT="5.0", TOTAL_TIME_MYR="4e-5", DT_MAX_MYR="1e-5",
                   FLYBY_CM_VELOCITY="true")
+# Wide eccentric BH binary (30 + 5.6 Msun, a = 40 AU, e = 0.97, P = 50 yr: a subsystem, LogH) and a 0.55 Msun
+# star at ~30 binary apocentres (a_out = 0.012 pc, outside r_ngb): the 20k cluster's seed-13 configuration. With
+# the c.o.m. fly-by velocity the star's pair step is ~10 binary periods, and its kicks sample the binary's orbit
+CM_TIDE = dict(TEST_CASE="triple_test", INTEGRATOR="hhs", TRIPLE_A_IN_PC="2e-4", TRIPLE_E_IN="0.97", TRIPLE_M1="30.0",
+               TRIPLE_M2="5.6", TRIPLE_A_OUT_PC="1.2e-2", TRIPLE_E_OUT="0.3", TRIPLE_M3="0.55", TRIPLE_INCL_DEG="40",
+               TOTAL_TIME_MYR="1e-2", DT_MAX_MYR="1e-3", DT_MIN_MYR="1e-14", SOFTENING_PC="0", COLLISIONAL="true",
+               R_NGB="1e-3", R_NGB_MAX="0.1", N_ORB_SECULAR="3", PN_ORDER="0", SSE_ENABLED="false", ETA_RESTART="0",
+               PRINT_INTERVAL="1", PROFILING="false", FLYBY_CM_VELOCITY="true")
 # 16 stars inside r_ngb: one 15-body neighbour group, more than LogH's fixed storage (LOGH_MAX_BODIES = 8)
 # Collisional FSI run of a field binary (r_ngb below a, so no subsystem): the start-of-step kernel's criteria set the step
 FSI_BINARY = dict(TEST_CASE="binary_test", INTEGRATOR="fsi", TOTAL_TIME_MYR="1e-5", DT_MAX_MYR="1e-5", DT_MIN_MYR="1e-14",
@@ -287,6 +295,19 @@ def paths_agree(exe, label, cfg, bound):
                 sum(a != b for a, b in zip(stats(dev_out), stats(cpu_out))), 0)
     return ok & check(f"{label} max relative |dE/E| difference",
                       max(abs(a[0] - b[0]) / max(a[0], 1e-300) for a, b in zip(dev, cpu)), bound)
+
+
+def paths_same_steps(exe, label, cfg, min_logh):
+    """The CPU small-set path against the device path: the same LogH calls and GBS steps per step, and at least
+    `min_logh` LogH calls in all."""
+    def stats(out):
+        return [(int(a), int(b)) for a, b in re.findall(r"Integration: LogH=(\d+) \(gbs=(\d+)", out)]
+    dev = stats(run_output(exe, dict(cfg, SERIAL_N2_CPU="0")))
+    cpu = stats(run_output(exe, dict(cfg, SERIAL_N2_CPU="1000000")))
+    print(f"   LogH calls, GBS steps per step: device {dev}, cpu {cpu}")
+    ok = check(f"{label} steps with other LogH calls or GBS steps (device vs cpu)",
+               sum(a != b for a, b in zip(dev, cpu)) + abs(len(dev) - len(cpu)), 0)
+    return ok & check(f"{label} LogH calls", sum(a for a, _ in dev), min_logh, lower=True)
 
 
 def cc_consistent(exe, label, cfg, bound):
@@ -535,6 +556,17 @@ CASES = {
                                                 2.9e-5),
     "cc_cm_consistent": lambda exe: cc_consistent(exe, "50 % binaries, HHS_CC, c.o.m. fly-by step",
                                                   dict(BINARIES50, FLYBY_CM_VELOCITY="true"), 1e-8),
+    # FLYBY_CM_EPS: a slow particle's kicks sample a subsystem's orbit at the pair step; the tidal-sampling pair step
+    # bounds the energy they put in per step. Before (c.o.m. velocity alone): max |dE/E| 1.0e-5 (component
+    # velocities: 2.3e-5 over 2e-2 Myr). Measured with FLYBY_CM_EPS = 1e-5: 1.85e-7 (1e-6: 6.9e-9, 1e-7: 5.1e-10)
+    "cm_eps_tidal_sampling": lambda exe: floor(exe, "c.o.m. fly-by step, tidal sampling", dict(CM_TIDE, FLYBY_CM_EPS="1e-5"),
+                                               (2.4e-7, 2.4e-7, 1e30, 1e30)),
+    # The CPU small-set path takes the same tidal-sampling steps: same LogH calls and GBS steps per step as the
+    # device (|dE/E| then differs at the level of the GBS errors of these many short LogH advances, ~1e-13 each).
+    # Measured 19164 LogH calls on both paths (240 without the tidal step)
+    "cm_eps_cpu_vs_device": lambda exe: paths_same_steps(exe, "c.o.m. fly-by step with tidal sampling",
+                                                         dict(BINARIES, FLYBY_CM_VELOCITY="true", FLYBY_CM_EPS="1e-11"),
+                                                         14700),
     # Triple branch of detect_from_pairs used a particle id where the union-find wanted a compact id
     # (out of bounds for ids >= the number of pair members; the tests' triples had ids 0-2)
     # The secular-triple driver took the inner pair from the first two ids (fixed 2026-10-10)

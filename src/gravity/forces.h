@@ -9,7 +9,10 @@ extern bool flyby_cm_velocity;
 // vx, vy, vz, or in collisional mode with FLYBY_CM_VELOCITY the subsystem c.o.m. velocity of the members of
 // g_subsystem_mgr.active. Device pointers, valid until the next call. Used by every path that computes pair
 // time steps (DtK, AccDtK, the HHS_CC split, the CPU small-set path).
-struct PairVelocities { double* x; double* y; double* z; };
+// k: per slot, tidal-sampling constant of FLYBY_CM_EPS (null: none): a pair also takes dt <= min(k_i / m_j,
+// k_j / m_i) r^3, so that a slow particle's kicks, which sample a subsystem's internal motion at the pair's step,
+// change its internal energy by at most FLYBY_CM_EPS x |E0| per step
+struct PairVelocities { double* x; double* y; double* z; double* k; };
 PairVelocities pair_velocities(Particles& p, int lo, int hi);
 
 // Full N-body

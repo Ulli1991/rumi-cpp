@@ -44,6 +44,9 @@ COLLISIONAL = true 				# Master switch to enable proper collional treatment of t
 R_NGB = 1e-3                        		# Neighbor search radius (pc) for subsystem detection
 R_NGB_MAX = 0.1                     		# Max distance for orbital element check (pc)
 ETA_PERT = 0.02					# Perturbation timestep eta for subsystems (BIFROST Eq. 30)
+FLYBY_CM_VELOCITY = false			# Fly-by step of subsystem members with the c.o.m. velocity (FROST-CLUSTERS II sec. 2.1)
+FLYBY_CM_EPS = 0				# With it: tidal-sampling pair step, energy put into a subsystem by a slow particle's kicks
+						#   <= this x |E0| per step (0 = off; 1e-11: 20k Fig-9 cluster below the component-velocity error)
 ETA_GBS = 1e-10                     		# GBS extrapolation accuracy for LogH integrator
 ETA_RESTART = 1e-8				# Per-subsystem LogH restart threshold + step-level restart
 N_ORB_SECULAR = 3                   		# Orbits/timestep threshold for secular evolution
