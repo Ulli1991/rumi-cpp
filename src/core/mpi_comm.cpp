@@ -1,5 +1,9 @@
 #include "mpi_comm.h"
 #include "profiling.h"
+#include "constants.h"
+#ifdef USE_NCCL
+#include <nccl.h>
+#endif
 #include <cstdint>
 #include <cstdio>
 #include <algorithm>
@@ -289,11 +293,11 @@ void DistributedParticles::distribute_initial(Particles& global_particles) {
         std::printf("Replicated particles: %d total, rank 0 computes forces for [%d, %d)\n",
                     N_total, my_start, my_start + my_count);
         std::printf("  MPI topology: i-partitioned (allgatherv)\n");
-#if EFFECTIVE_GPU_AWARE_MPI
-        std::printf("  GPU-aware MPI: enabled (packed allgathers)\n");
-#else
-        std::printf("  GPU-aware MPI: disabled (host-staged)\n");
-#endif
+        std::printf("  MPI transport of the allgathers: %s\n",
+                    !HAVE_GPU_BACKEND ? "host memory"
+                    : mpi_transport == MpiTransport::Device ? "device buffers (GPU-aware MPI)"
+                    : mpi_transport == MpiTransport::Nccl   ? "NCCL"
+                                                            : "staged through pinned host memory");
     }
 
     // Pre-allocate persistent host-staged buffers
@@ -404,110 +408,193 @@ void DistributedParticles::get_force_slice(int start, int count, int& slice_star
 #endif
 }
 
+// =============================================================================
+// Allgather of per-particle fields over sink slices (AUDIT G rows 4, 5)
+// =============================================================================
+// Every rank holds, for each segment s (one or two index ranges [start_s, start_s + count_s)), the values of nf fields
+// (dt_adapt and/or ax, ay, az) of its slice of the segment (get_force_slice). One MPI_Allgatherv moves all of them:
+// rank r sends its slice of segment 0 then of segment 1, nf interleaved doubles per particle, so two segments or
+// dt + acc need one collective instead of two. The bytes that arrive are the computed values, so the result is
+// bit-identical to separate gathers.
+// Transport (MPI_TRANSPORT): "host" packs on the device, copies the send block to pinned host memory, gathers host
+// buffers and copies the result back; "device" hands device buffers to a GPU-aware MPI (USE_GPU_AWARE_MPI builds);
+// "nccl" pads every rank's block to the largest and runs ncclAllGather on the Kokkos stream (USE_NCCL builds).
+// raven's Open MPI 5.0.10 has no coll/ucc or hcoll, so collectives on device buffers fall back to generic p2p
+// algorithms: 3-30x slower than host staging; NCCL is fastest (table in the commit / bench/xport.cpp in the run
+// directory). Host builds gather in place either way.
+MpiTransport mpi_transport = MpiTransport::Host;
+
+MpiTransport parse_mpi_transport(const std::string& s) {
+#ifdef USE_NCCL
+    const bool nccl = true;
+#else
+    const bool nccl = false;
+#endif
+    if (s == "nccl" || (s == "auto" && nccl)) {
+        if (nccl) return MpiTransport::Nccl;
+        if (MPIComm::rank() == 0) std::fprintf(stderr, "MPI_TRANSPORT = nccl: not built with USE_NCCL, using host\n");
+        return MpiTransport::Host;
+    }
+    if (s == "device") {
+        if (EFFECTIVE_GPU_AWARE_MPI) return MpiTransport::Device;
+        if (MPIComm::rank() == 0)
+            std::fprintf(stderr, "MPI_TRANSPORT = device: not a GPU-aware GPU build, using host\n");
+    } else if (s != "host" && s != "auto" && MPIComm::rank() == 0) {
+        std::fprintf(stderr, "MPI_TRANSPORT = %s unknown, using host\n", s.c_str());
+    }
+    return MpiTransport::Host;
+}
+
+#if defined(USE_MPI) && defined(USE_NCCL)
+// One NCCL communicator over MPI_COMM_WORLD, created at the first gather (after Kokkos chose the device)
+static ncclComm_t nccl_comm() {
+    static ncclComm_t comm = nullptr;
+    if (!comm) {
+        ncclUniqueId id;
+        if (MPIComm::rank() == 0) ncclGetUniqueId(&id);
+        MPI_CHECK(MPI_Bcast(&id, sizeof id, MPI_BYTE, 0, MPI_COMM_WORLD));
+        if (ncclCommInitRank(&comm, MPIComm::size(), id, MPIComm::rank()) != ncclSuccess) {
+            std::fprintf(stderr, "ncclCommInitRank failed\n");
+            MPI_Abort(MPI_COMM_WORLD, 1);
+        }
+        Kokkos::push_finalize_hook([] { ncclCommDestroy(comm); comm = nullptr; });
+    }
+    return comm;
+}
+#endif
+
+namespace {
+// Owner rank of index ii of a segment of c particles split as get_force_slice does, and the slice start
+KOKKOS_INLINE_FUNCTION void slice_owner(int c, int n, int ii, int& r, int& off) {
+    const int base = c / n, rem = c % n;
+    if (ii < rem * (base + 1)) { r = ii / (base + 1); off = ii - r * (base + 1); }
+    else { r = rem + (ii - rem * (base + 1)) / base; off = ii - (r * base + rem); }
+}
+KOKKOS_INLINE_FUNCTION int slice_begin(int c, int n, int r) { const int b = c / n, m = c % n; return r * b + (r < m ? r : m); }
+KOKKOS_INLINE_FUNCTION int slice_len(int c, int n, int r) { return c / n + (r < c % n ? 1 : 0); }
+}  // namespace
+
+void DistributedParticles::allgather_fields(const int* seg_start, const int* seg_count, int nseg, const int* fields,
+                                            int nf) {
+#ifdef USE_MPI
+    const int n_ranks = MPIComm::size();
+    if (n_ranks == 1) return;
+    const int s0 = seg_start[0], c0 = seg_count[0];
+    const int s1 = nseg > 1 ? seg_start[1] : 0, c1 = nseg > 1 ? seg_count[1] : 0;
+    const int total = c0 + c1;
+    if (total == 0) return;
+    const int me = MPIComm::rank();
+
+    for (int r = 0; r < n_ranks; r++) {
+        mpi_counts[r] = nf * (slice_len(c0, n_ranks, r) + slice_len(c1, n_ranks, r));
+        mpi_displs[r] = r == 0 ? 0 : mpi_displs[r - 1] + mpi_counts[r - 1];
+    }
+    const int n_send = mpi_counts[me], n_recv = nf * total;
+    // NCCL gathers equal blocks: every rank's block padded to the largest (one particle more at most per segment)
+    const bool nccl = mpi_transport == MpiTransport::Nccl;
+    const int blk = nccl ? *std::max_element(mpi_counts.begin(), mpi_counts.end()) : 0;
+    const int n_send_buf = nccl ? blk : n_send, n_recv_buf = nccl ? blk * n_ranks : n_recv;
+    if ((int)mpi_acc_send_buf.extent(0) < n_send_buf) Kokkos::realloc(mpi_acc_send_buf, n_send_buf);
+    if ((int)mpi_acc_recv_buf.extent(0) < n_recv_buf) Kokkos::realloc(mpi_acc_recv_buf, n_recv_buf);
+
+    // fields: 0 = dt_adapt, 1 = ax, 2 = ay, 3 = az
+    Kokkos::View<double*> F[4] = {local.dt_adapt, local.ax, local.ay, local.az};
+    RawView f0{F[fields[0]].data()}, f1{nf > 1 ? F[fields[1]].data() : nullptr},
+        f2{nf > 2 ? F[fields[2]].data() : nullptr}, f3{nf > 3 ? F[fields[3]].data() : nullptr};
+    RawView send{mpi_acc_send_buf.data()}, recv{mpi_acc_recv_buf.data()};
+    const int b0 = s0 + slice_begin(c0, n_ranks, me), l0 = slice_len(c0, n_ranks, me);
+    const int b1 = s1 + slice_begin(c1, n_ranks, me);
+    const int nmine = n_send / nf;
+    Kokkos::parallel_for("gather_pack", nmine, KOKKOS_LAMBDA(int k) {
+        const int i = k < l0 ? b0 + k : b1 + (k - l0);
+        double* o = &send(nf * k);
+        o[0] = f0(i);
+        if (nf > 1) o[1] = f1(i);
+        if (nf > 2) o[2] = f2(i);
+        if (nf > 3) o[3] = f3(i);
+    });
+
+    const bool stage = HAVE_GPU_BACKEND && mpi_transport == MpiTransport::Host;
+    if (nccl) {
+#ifdef USE_NCCL
+        // same stream as the pack and unpack kernels: no fence needed around it
+        g_profiler.mpi_start();
+        if (ncclAllGather(mpi_acc_send_buf.data(), mpi_acc_recv_buf.data(), blk, ncclDouble, nccl_comm(),
+                          Kokkos::DefaultExecutionSpace().cuda_stream()) != ncclSuccess) {
+            std::fprintf(stderr, "ncclAllGather failed\n");
+            MPI_Abort(MPI_COMM_WORLD, 1);
+        }
+        g_profiler.mpi_stop();
+#endif
+    } else if (stage) {
+        if ((int)host_send_pinned.extent(0) < n_send) host_send_pinned = PinnedView("mpi_send_pinned", n_send);
+        if ((int)host_recv_pinned.extent(0) < n_recv) host_recv_pinned = PinnedView("mpi_recv_pinned", n_recv);
+        Kokkos::deep_copy(Kokkos::subview(host_send_pinned, Kokkos::make_pair(0, n_send)),
+                          Kokkos::subview(mpi_acc_send_buf, Kokkos::make_pair(0, n_send)));
+        g_profiler.mpi_start();
+        MPI_CHECK(MPI_Allgatherv(host_send_pinned.data(), n_send, MPI_DOUBLE, host_recv_pinned.data(),
+                                 mpi_counts.data(), mpi_displs.data(), MPI_DOUBLE, MPI_COMM_WORLD));
+        g_profiler.mpi_stop();
+        Kokkos::deep_copy(Kokkos::subview(mpi_acc_recv_buf, Kokkos::make_pair(0, n_recv)),
+                          Kokkos::subview(host_recv_pinned, Kokkos::make_pair(0, n_recv)));
+    } else {
+        Kokkos::fence();
+        g_profiler.mpi_start();
+        MPI_CHECK(MPI_Allgatherv(mpi_acc_send_buf.data(), n_send, MPI_DOUBLE, mpi_acc_recv_buf.data(),
+                                 mpi_counts.data(), mpi_displs.data(), MPI_DOUBLE, MPI_COMM_WORLD));
+        g_profiler.mpi_stop();
+    }
+
+    const int nr = n_ranks;
+    Kokkos::parallel_for("gather_unpack", total, KOKKOS_LAMBDA(int k) {
+        const int s = k < c0 ? 0 : 1;
+        const int ii = s == 0 ? k : k - c0;
+        int r, off;
+        slice_owner(s == 0 ? c0 : c1, nr, ii, r, off);
+        // rank r's block: nf x (slices of both segments of the ranks before r), then its segment-0 slice
+        int pos = blk > 0 ? r * blk : nf * (slice_begin(c0, nr, r) + slice_begin(c1, nr, r));
+        if (s == 1) pos += nf * slice_len(c0, nr, r);
+        pos += nf * off;
+        const int i = (s == 0 ? s0 : s1) + ii;
+        const double* q = &recv(pos);
+        f0(i) = q[0];
+        if (nf > 1) f1(i) = q[1];
+        if (nf > 2) f2(i) = q[2];
+        if (nf > 3) f3(i) = q[3];
+    });
+    Kokkos::fence();
+#else
+    (void)seg_start; (void)seg_count; (void)nseg; (void)fields; (void)nf;
+#endif
+}
+
 void DistributedParticles::allgather_accelerations() {
     allgather_accelerations_subset(0, N_total);
 }
 
 void DistributedParticles::allgather_accelerations_subset(int start, int count) {
-#ifdef USE_MPI
-    if (MPIComm::size() == 1 || count == 0) return;
+    const int f[3] = {1, 2, 3};
+    allgather_fields(&start, &count, 1, f, 3);
+}
 
-    int n_ranks = MPIComm::size();
-    int my_slice_start, my_slice_count;
-    get_force_slice(start, count, my_slice_start, my_slice_count);
+void DistributedParticles::allgather_dt_acc_subset(int start, int count) {
+    const int f[4] = {0, 1, 2, 3};
+    allgather_fields(&start, &count, 1, f, 4);
+}
 
-    // Compute per-rank counts and displacements using pre-allocated vectors
-    int base = count / n_ranks;
-    int remainder = count % n_ranks;
-    mpi_displs[0] = 0;
-    for (int r = 0; r < n_ranks; r++) {
-        mpi_counts[r] = base + (r < remainder ? 1 : 0);
-        if (r > 0) mpi_displs[r] = mpi_displs[r-1] + mpi_counts[r-1];
-    }
-
-    // Packed: 3 doubles (ax,ay,az) per particle in single MPI message
-    for (int r = 0; r < n_ranks; r++) {
-        mpi_packed_counts[r] = 3 * mpi_counts[r];
-        mpi_packed_displs[r] = 3 * mpi_displs[r];
-    }
-
-    Kokkos::fence();
-
-#if EFFECTIVE_GPU_AWARE_MPI
-    // GPU-aware: pack on device, single MPI call, unpack on device
-    // Uses pre-allocated buffers (no cudaMalloc per call)
-    auto send = mpi_acc_send_buf;
-    auto recv = mpi_acc_recv_buf;
-    auto lax = local.ax; auto lay = local.ay; auto laz = local.az;
-    int ss = my_slice_start;
-
-    Kokkos::parallel_for("pack_acc", my_slice_count, KOKKOS_LAMBDA(int ii) {
-        int i = ss + ii;
-        send(3*ii)   = lax(i);
-        send(3*ii+1) = lay(i);
-        send(3*ii+2) = laz(i);
-    });
-    Kokkos::fence();
-
-    g_profiler.mpi_start();
-    MPI_CHECK(MPI_Allgatherv(send.data(), 3 * my_slice_count, MPI_DOUBLE,
-                   recv.data(), mpi_packed_counts.data(), mpi_packed_displs.data(), MPI_DOUBLE,
-                   MPI_COMM_WORLD));
-    g_profiler.mpi_stop();
-
-    int st = start;
-    Kokkos::parallel_for("unpack_acc", count, KOKKOS_LAMBDA(int ii) {
-        int i = st + ii;
-        lax(i) = recv(3*ii);
-        lay(i) = recv(3*ii+1);
-        laz(i) = recv(3*ii+2);
-    });
-    Kokkos::fence();
-
-#else
-    // Host-staged: copy only the slice (not full array), single packed MPI call
-    auto h_ax = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
-        Kokkos::subview(local.ax, Kokkos::make_pair(my_slice_start, my_slice_start + my_slice_count)));
-    auto h_ay = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
-        Kokkos::subview(local.ay, Kokkos::make_pair(my_slice_start, my_slice_start + my_slice_count)));
-    auto h_az = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
-        Kokkos::subview(local.az, Kokkos::make_pair(my_slice_start, my_slice_start + my_slice_count)));
-
-    // Pack interleaved (reuse persistent buffers)
-    for (int i = 0; i < my_slice_count; i++) {
-        host_send_buf[3*i]   = h_ax(i);
-        host_send_buf[3*i+1] = h_ay(i);
-        host_send_buf[3*i+2] = h_az(i);
-    }
-
-    g_profiler.mpi_start();
-    MPI_CHECK(MPI_Allgatherv(host_send_buf.data(), 3 * my_slice_count, MPI_DOUBLE,
-                   host_recv_buf.data(), mpi_packed_counts.data(), mpi_packed_displs.data(), MPI_DOUBLE,
-                   MPI_COMM_WORLD));
-    g_profiler.mpi_stop();
-
-    // Unpack and copy only the subset back to device
-    for (int i = 0; i < count; i++) {
-        host_recv_ax[i] = host_recv_buf[3*i];
-        host_recv_ay[i] = host_recv_buf[3*i+1];
-        host_recv_az[i] = host_recv_buf[3*i+2];
-    }
-
-    Kokkos::View<double*, Kokkos::HostSpace, Kokkos::MemoryUnmanaged> h_recv_ax(host_recv_ax.data(), count);
-    Kokkos::View<double*, Kokkos::HostSpace, Kokkos::MemoryUnmanaged> h_recv_ay(host_recv_ay.data(), count);
-    Kokkos::View<double*, Kokkos::HostSpace, Kokkos::MemoryUnmanaged> h_recv_az(host_recv_az.data(), count);
-
-    Kokkos::deep_copy(Kokkos::subview(local.ax, Kokkos::make_pair(start, start + count)), h_recv_ax);
-    Kokkos::deep_copy(Kokkos::subview(local.ay, Kokkos::make_pair(start, start + count)), h_recv_ay);
-    Kokkos::deep_copy(Kokkos::subview(local.az, Kokkos::make_pair(start, start + count)), h_recv_az);
-#endif
-
-#endif // USE_MPI
+void DistributedParticles::allgather_accelerations_two(int start0, int count0, int start1, int count1) {
+    const int st[2] = {start0, start1}, ct[2] = {count0, count1}, f[3] = {1, 2, 3};
+    allgather_fields(st, ct, 2, f, 3);
 }
 
 void DistributedParticles::iallgather_accelerations_subset(int start, int count, int slot) {
 #ifdef USE_MPI
     if (MPIComm::size() == 1 || count == 0) return;
+    if (mpi_transport != MpiTransport::Device) {   // host / NCCL transport: blocking, nothing left to wait for
+        allgather_accelerations_subset(start, count);
+        mpi_reqs[slot] = MPI_REQUEST_NULL;
+        return;
+    }
 
     int n_ranks = MPIComm::size();
     int my_slice_start, my_slice_count;
@@ -600,6 +687,7 @@ void DistributedParticles::wait_and_unpack_accelerations(int start, int count, i
     if (MPIComm::size() == 1 || count == 0) return;
 
 #if EFFECTIVE_GPU_AWARE_MPI
+    if (mpi_transport != MpiTransport::Device) return;   // host / NCCL: the blocking gather already unpacked
     MPI_CHECK(MPI_Wait(&mpi_reqs[slot], MPI_STATUS_IGNORE));
 
     auto recv = (slot == 0) ? mpi_acc_recv_buf : mpi_acc_recv_buf2;
@@ -626,60 +714,8 @@ void DistributedParticles::allgather_timestep() {
 }
 
 void DistributedParticles::allgather_timestep_subset(int start, int count) {
-#ifdef USE_MPI
-    if (MPIComm::size() == 1 || count == 0) return;
-
-    int n_ranks = MPIComm::size();
-    int slice_start, slice_count;
-    get_force_slice(start, count, slice_start, slice_count);
-
-    // Compute per-rank counts and displacements using pre-allocated vectors
-    int base = count / n_ranks;
-    int remainder = count % n_ranks;
-    mpi_displs[0] = 0;
-    for (int r = 0; r < n_ranks; r++) {
-        mpi_counts[r] = base + (r < remainder ? 1 : 0);
-        if (r > 0) mpi_displs[r] = mpi_displs[r-1] + mpi_counts[r-1];
-    }
-
-    Kokkos::fence();
-
-#if EFFECTIVE_GPU_AWARE_MPI
-    // GPU-aware: use device pointers directly, reuse recv buffer
-    auto recv = Kokkos::subview(mpi_acc_recv_buf, Kokkos::make_pair(0, count));
-
-    g_profiler.mpi_start();
-    MPI_CHECK(MPI_Allgatherv(local.dt_adapt.data() + slice_start, slice_count, MPI_DOUBLE,
-                   recv.data(), mpi_counts.data(), mpi_displs.data(), MPI_DOUBLE,
-                   MPI_COMM_WORLD));
-    g_profiler.mpi_stop();
-
-    auto dt_f = local.dt_adapt;
-    int st = start;
-    Kokkos::parallel_for("unpack_dt", count, KOKKOS_LAMBDA(int i) {
-        dt_f(st + i) = recv(i);
-    });
-    Kokkos::fence();
-
-#else
-    // Host-staged: copy only the slice, not the full array
-    auto h_dt = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
-        Kokkos::subview(local.dt_adapt, Kokkos::make_pair(slice_start, slice_start + slice_count)));
-
-    // Reuse persistent buffers
-    for (int i = 0; i < slice_count; i++) host_send_dt[i] = h_dt(i);
-
-    g_profiler.mpi_start();
-    MPI_CHECK(MPI_Allgatherv(host_send_dt.data(), slice_count, MPI_DOUBLE,
-                   host_recv_dt.data(), mpi_counts.data(), mpi_displs.data(), MPI_DOUBLE,
-                   MPI_COMM_WORLD));
-    g_profiler.mpi_stop();
-
-    Kokkos::View<double*, Kokkos::HostSpace, Kokkos::MemoryUnmanaged> h_recv_dt(host_recv_dt.data(), count);
-    Kokkos::deep_copy(Kokkos::subview(local.dt_adapt, Kokkos::make_pair(start, start + count)), h_recv_dt);
-#endif
-
-#endif // USE_MPI
+    const int f[1] = {0};
+    allgather_fields(&start, &count, 1, f, 1);
 }
 
 void DistributedParticles::gather_to_root(Particles& global_particles) {

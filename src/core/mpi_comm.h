@@ -4,6 +4,7 @@
 #include <Kokkos_Core.hpp>
 #include <vector>
 #include <cstdio>
+#include <string>
 
 #ifdef USE_MPI
 #include <mpi.h>
@@ -44,6 +45,14 @@
 
 // Effective GPU-aware MPI: only use if both compiled with support AND on GPU backend
 #define EFFECTIVE_GPU_AWARE_MPI (USE_GPU_AWARE_MPI && HAVE_GPU_BACKEND)
+
+// MPI_TRANSPORT of the per-particle allgathers (mpi_comm.cpp allgather_fields): host = pack on the device, stage
+// through pinned host memory; device = device buffers to a GPU-aware MPI (USE_GPU_AWARE_MPI builds); nccl =
+// ncclAllGather on the Kokkos stream (USE_NCCL builds). Default: nccl where built in, else host.
+enum class MpiTransport { Host, Device, Nccl };
+extern MpiTransport mpi_transport;
+// Parse MPI_TRANSPORT ("auto", "host", "device", "nccl"); falls back to host for one the build lacks
+MpiTransport parse_mpi_transport(const std::string& s);
 
 // =============================================================================
 // MPI Communication Module for Multi-GPU N-Body
@@ -123,6 +132,10 @@ struct DistributedParticles {
     std::vector<int> mpi_packed_counts_slot[2];
     std::vector<int> mpi_packed_displs_slot[2];
 
+    // Pinned host staging buffers of allgather_fields (grown on demand)
+    using PinnedView = Kokkos::View<double*, Kokkos::SharedHostPinnedSpace>;
+    PinnedView host_send_pinned, host_recv_pinned;
+
     // Persistent host-staged buffers (reused across calls, avoids per-call allocation)
     std::vector<double> host_send_buf;   // packed [ax,ay,az] for send
     std::vector<double> host_recv_buf;   // packed [ax,ay,az] for recv
@@ -157,6 +170,16 @@ struct DistributedParticles {
 
     // Wait for iallgather to complete + unpack recv buffer into ax/ay/az
     void wait_and_unpack_accelerations(int start, int count, int slot);
+
+    // One MPI_Allgatherv of nf fields (0 = dt_adapt, 1 = ax, 2 = ay, 3 = az; nf <= 4) over the force slices of one or
+    // two segments [seg_start[s], seg_start[s] + seg_count[s]) (nseg <= 2). Transport: mpi_transport.
+    void allgather_fields(const int* seg_start, const int* seg_count, int nseg, const int* fields, int nf);
+
+    // dt_adapt and ax, ay, az of [start, start+count) in one collective (collisional time step)
+    void allgather_dt_acc_subset(int start, int count);
+
+    // ax, ay, az of two ranges (slow and fast sets of a cross force or gradient) in one collective
+    void allgather_accelerations_two(int start0, int count0, int start1, int count1);
 
     // Allgather adaptive timesteps after distributed computation
     void allgather_timestep();

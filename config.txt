@@ -24,6 +24,8 @@ SERIAL_N2_CPU = 0                          	# Full N² on CPU below this count; 
 INTEGER_POSITIONS = false                  	# Use int64 positions (exact drift, MPI-safe)
 DOMAIN_HALFSIZE_PC = 200                   	# Integer position domain half-size in pc
 MPI_NON_BLOCKING = false                    	# Use MPI_Iallgatherv for overlapped transfers
+MPI_TRANSPORT = auto                        	# Allgathers: nccl (USE_NCCL builds; default there) / host (staged through pinned host
+                                            	# memory; default otherwise) / device (device buffers to a GPU-aware MPI: 2.5-30x slower on raven)
 
 
 # =============================================================================

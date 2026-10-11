@@ -628,6 +628,7 @@ int main(int argc, char** argv) {
         use_integer_positions = cfg.get_bool("INTEGER_POSITIONS", false);
         double domain_halfsize = cfg.get_double("DOMAIN_HALFSIZE_PC", 200.0);
         use_nonblocking_mpi = cfg.get_bool("MPI_NON_BLOCKING", false);
+        mpi_transport = parse_mpi_transport(cfg.get_str("MPI_TRANSPORT", "auto"));   // AUDIT G row 4
 
         // Barnes-Hut tree configuration
         use_tree = cfg.get_bool("USE_TREE", false);
