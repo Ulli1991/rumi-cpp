@@ -24,6 +24,8 @@ SERIAL_N2_CPU = 0                          	# Full N² on CPU below this count; 
 INTEGER_POSITIONS = false                  	# Use int64 positions (exact drift, MPI-safe)
 DOMAIN_HALFSIZE_PC = 200                   	# Integer position domain half-size in pc
 MPI_NON_BLOCKING = false                    	# Use MPI_Iallgatherv for overlapped transfers
+MPI_TRANSPORT = auto                        	# Allgathers: nccl (USE_NCCL builds; default there) / host (staged through pinned host
+                                            	# memory; default otherwise) / device (device buffers to a GPU-aware MPI: 2.5-30x slower on raven)
 
 
 # =============================================================================
@@ -147,3 +149,5 @@ RESTART_DIR = .                         	# Directory of restart_<step>.h5 (the n
 RESTART_FILE =                          	# Continue from this file; latest: newest in RESTART_DIR; auto: that or a fresh start
 SNAPSHOT_INTERVAL = 0                   	# LUNA-layout snapshot every this many steps, at step 0 and at the end (0: off)
 SNAPSHOT_DIR = .                        	# snapdir_NNN/snapshot_NNN.0.hdf5 go here
+PROFILING_FENCES = true            		# Fence the device at each timer stop (exact per-component times; ~4 % of a 200k step). false: host
+                                    		# wall times only, queued GPU work charged to the next synchronising component

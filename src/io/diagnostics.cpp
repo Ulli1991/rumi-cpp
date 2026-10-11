@@ -10,6 +10,7 @@
 #include <unordered_map>
 #endif
 #include <Kokkos_Core.hpp>
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <vector>
@@ -23,7 +24,9 @@ EnergyAttribution g_eattr;
 
 // ==========================================================================
 // Tiled GPU potential energy computation (shared-memory, TILE_SIZE tiles)
-// Computes PE for i in [i_start, i_start+i_count) against all j > i
+// Computes PE for i in [i_start, i_start+i_count) against all j > i. A team starts at the tile holding j = r0 + 1
+// (r0 its first row) instead of tile 0: the skipped tiles held only j <= i, which added nothing, so every row's sum
+// (same j, same order) and the reduction are bit-identical to the full loop, at half the work (AUDIT G row 3)
 // ==========================================================================
 double compute_potential_energy_tiled(const Particles& p, double G, double soft2,
                                       int i_start, int i_count) {
@@ -55,7 +58,8 @@ double compute_potential_energy_tiled(const Particles& p, double G, double soft2
             }
 
             double pe_i = 0;
-            for (int tile_start = 0; tile_start < N; tile_start += TILE_SIZE) {
+            const int r0 = i_start + team.league_rank() * TILE_SIZE;
+            for (int tile_start = ((r0 + 1) / TILE_SIZE) * TILE_SIZE; tile_start < N; tile_start += TILE_SIZE) {
                 int tile_end = (tile_start + TILE_SIZE < N) ? tile_start + TILE_SIZE : N;
                 int tile_count = tile_end - tile_start;
 
@@ -111,6 +115,37 @@ static double compute_potential_energy_distributed(const Particles& p, double G,
         double total_PE = 0;
         MPI_Allreduce(&local_PE, &total_PE, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
         return total_PE;
+    }
+#endif
+    return compute_potential_energy_tiled(p, G, soft2, 0, N);
+}
+
+// ==========================================================================
+// PE split over the MPI ranks for the per-step energy check (compute_total_energy): rank r takes the rows
+// [b_r, b_r+1) with about 1/n_ranks of the N (N - 1) / 2 pairs of the triangle (rows near 0 have most j > i), and
+// the partial sums are added in rank order on every rank (MPI_Allgather), so all ranks get the same bits, as the
+// restart decision requires. One rank: compute_potential_energy_tiled over all rows (unchanged sum).
+// ==========================================================================
+double compute_potential_energy_split(const Particles& p, double G, double soft2) {
+    const int N = p.N;
+#ifdef USE_MPI
+    const int n_ranks = MPIComm::size();
+    if (n_ranks > 1) {
+        const int r = MPIComm::rank();
+        // pairs in rows [b, N): (N - b)(N - b - 1) / 2; equal shares: N - b_r = N sqrt(1 - r / n_ranks)
+        auto bound = [&](int k) {
+            if (k <= 0) return 0;
+            if (k >= n_ranks) return N;
+            int b = N - (int)std::lround(N * std::sqrt(1.0 - (double)k / n_ranks));
+            return std::min(std::max(b, 0), N);
+        };
+        const int b0 = bound(r), b1 = bound(r + 1);
+        double mine = b1 > b0 ? compute_potential_energy_tiled(p, G, soft2, b0, b1 - b0) : 0.0;
+        std::vector<double> all(n_ranks);
+        MPI_Allgather(&mine, 1, MPI_DOUBLE, all.data(), 1, MPI_DOUBLE, MPI_COMM_WORLD);
+        double PE = 0;
+        for (double v : all) PE += v;
+        return PE;
     }
 #endif
     return compute_potential_energy_tiled(p, G, soft2, 0, N);

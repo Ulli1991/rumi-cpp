@@ -49,6 +49,7 @@ struct Checkpoint {
 };
 
 // Compute total energy E = KE + PE + sinks (BIFROST §3.18 bookkeeping).
+double compute_particle_energy(const Particles& p, double G, double soft2);   // KE + PE
 double compute_total_energy(const Particles& p, const EnergyBookkeeping& books,
                             double G, double soft2);
 

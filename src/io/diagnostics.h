@@ -63,6 +63,8 @@ DiagnosticState compute_diagnostics(const Particles& p, double G, double soft2);
 
 // Tiled GPU potential energy computation (shared-memory tiled, O(N²))
 // Computes PE for i in [i_start, i_start+i_count) against all N particles (j > i only)
+// PE of all pairs split over the MPI ranks (area-balanced rows, rank-order sum: the same bits on every rank)
+double compute_potential_energy_split(const Particles& p, double G, double soft2);
 double compute_potential_energy_tiled(const Particles& p, double G, double soft2,
                                       int i_start, int i_count);
 

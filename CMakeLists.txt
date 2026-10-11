@@ -137,6 +137,18 @@ if(USE_MPI)
         message(STATUS "GPU-aware MPI enabled - ensure your MPI supports CUDA/ROCm")
     endif()
 
+    # NCCL allgathers (MPI_TRANSPORT = nccl, the default when built in; CUDA only). NCCL_ROOT or $NCCL_HOME
+    # (raven: module load nccl/2.23.4 after cuda/12.6)
+    option(USE_NCCL "Per-particle allgathers through NCCL (CUDA builds)" OFF)
+    if(USE_NCCL)
+        find_path(NCCL_INCLUDE_DIR nccl.h HINTS ${NCCL_ROOT} $ENV{NCCL_HOME} PATH_SUFFIXES include REQUIRED)
+        find_library(NCCL_LIBRARY nccl HINTS ${NCCL_ROOT} $ENV{NCCL_HOME} PATH_SUFFIXES lib lib64 REQUIRED)
+        target_include_directories(nbody-kokkos PRIVATE ${NCCL_INCLUDE_DIR})
+        target_link_libraries(nbody-kokkos ${NCCL_LIBRARY})
+        target_compile_definitions(nbody-kokkos PRIVATE USE_NCCL)
+        message(STATUS "NCCL allgathers: ${NCCL_LIBRARY}")
+    endif()
+
 endif()
 
 # Disable profiling fences (removes Kokkos::fence() around profiler regions for production runs)
@@ -170,6 +182,7 @@ foreach(case kepler_e09 kepler_e0 frost4_e09 frost4_e099 planets_hhs planets_fsi
              cm_eps_tidal_components flyby_member_com ngb_mass_scaling
              coll_headon_triple coll_contact_flyby coll_contact_flyby_logh coll_tde_parabolic coll_bh_isco
              tree_dt_binaries tree_dt_binaries_cm tree_dt_binaries50 tree_dt_triples tree_dt_mergers tree_dt_softened tree_default_on
+             tree_dt_tidal tree_dt_tidal_cm
              ic_mass_size_rh ic_binary_com_virial ic_r_break)
     add_test(NAME ${case} COMMAND Python3::Interpreter ${CMAKE_SOURCE_DIR}/tests/run_case.py
              $<TARGET_FILE:nbody-kokkos> ${case})

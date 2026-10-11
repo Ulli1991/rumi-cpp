@@ -24,6 +24,8 @@
 #include <Kokkos_Core.hpp>
 #include <vector>
 #include <set>
+#include <map>
+#include <tuple>
 #include <cfloat>
 #include <cmath>
 #include <cstring>
@@ -92,8 +94,7 @@ void compute_acceleration_and_timestep_distributed(DistributedParticles& dp,
     const int my_count = dp.my_count;
 
     if (my_count == 0) {
-        dp.allgather_accelerations();
-        dp.allgather_timestep();
+        dp.allgather_dt_acc_subset(0, N);
         return;
     }
 
@@ -103,9 +104,8 @@ void compute_acceleration_and_timestep_distributed(DistributedParticles& dp,
     acceleration_and_timestep_range(dp.local, my_start, my_count, 0, N, G, soft2, eta);
     Kokkos::fence();
 
-    // Allgather accelerations and timesteps
-    dp.allgather_accelerations();
-    dp.allgather_timestep();
+    // Accelerations and time steps in one collective
+    dp.allgather_dt_acc_subset(0, N);
 #else
     compute_acceleration_and_timestep(dp.local, G, soft2, eta);
 #endif
@@ -1491,6 +1491,69 @@ void fsi_step(Particles& p, int start, int count,
 // IMPORTANT: This must be DETERMINISTIC across MPI ranks! We use prefix sums
 // instead of atomics to ensure all ranks produce identical permutations.
 // ==========================================================================
+#ifdef ENABLE_COLLISIONAL
+// NBODY_SLOW0_STATS (diagnostics, AUDIT G row 1a): sets of <= 4 particles in which every particle is fast, so the
+// recursion halves the pivot without a slow set. Per (size, distinct subsystems, singles): how often, and in how many
+// of them every particle (pert_all) or at least one (pert_any) had a step >= the pivot before subsystem_timesteps
+// (shared + perturbation step), i.e. the subsystem step drove the set down. Printed by rank 0 at the end of the run.
+namespace {
+struct Slow0Stats {
+    bool on = std::getenv("NBODY_SLOW0_STATS") != nullptr;
+    Kokkos::View<double*> dt_pre{"slow0_dt_pre", 0};   // by particle id: dt_adapt before subsystem_timesteps
+    struct Row { long long calls = 0, pert_all = 0, pert_any = 0; };
+    std::map<std::tuple<int, int, int>, Row> rows;
+    void print() const {
+        if (!on || MPIComm::rank() != 0) return;
+        std::printf("SLOW0_STATS: size subsystems singles | calls pert_all pert_any%s\n", rows.empty() ? " (none)" : "");
+        for (const auto& kv : rows)
+            std::printf("SLOW0_STATS: %d %d %d | %lld %lld %lld\n", std::get<0>(kv.first), std::get<1>(kv.first),
+                        std::get<2>(kv.first), kv.second.calls, kv.second.pert_all, kv.second.pert_any);
+        std::fflush(stdout);
+    }
+    void record_pre(const Particles& p, int start, int count) {
+        if (!on || count <= 0) return;
+        auto pid = p.particle_id;
+        int maxpid = 0;
+        Kokkos::parallel_reduce("slow0_maxpid", count, KOKKOS_LAMBDA(int ii, int& m) {
+            if (pid(start + ii) > m) m = pid(start + ii);
+        }, Kokkos::Max<int>(maxpid));
+        if ((int)dt_pre.extent(0) <= maxpid) Kokkos::resize(dt_pre, 2 * (maxpid + 1));
+        auto pre = dt_pre;
+        auto dt = p.dt_adapt;
+        Kokkos::parallel_for("slow0_pre", count, KOKKOS_LAMBDA(int ii) { pre(pid(start + ii)) = dt(start + ii); });
+    }
+    void record_set(const Particles& p, int start, int count, double pivot) {
+        if (!on || count > 4) return;
+        auto r = Kokkos::make_pair(start, start + count);
+        auto hp = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Kokkos::subview(p.particle_id, r));
+        auto hs = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Kokkos::subview(p.subsystem_id, r));
+        std::set<int> subs;
+        int singles = 0, slow_pre = 0;
+        for (int k = 0; k < count; k++) {
+            if (hs(k) >= 0) subs.insert(hs(k)); else singles++;
+            if (hp(k) < (int)dt_pre.extent(0)) {
+                double v = 0;
+                Kokkos::deep_copy(v, Kokkos::subview(dt_pre, hp(k)));
+                if (v >= pivot) slow_pre++;
+            }
+        }
+        Row& row = rows[std::make_tuple(count, (int)subs.size(), singles)];
+        row.calls++;
+        if (slow_pre == count) row.pert_all++;
+        if (slow_pre > 0) row.pert_any++;
+    }
+};
+Slow0Stats& slow0() {
+    static Slow0Stats* s = nullptr;
+    if (!s) {
+        s = new Slow0Stats();
+        Kokkos::push_finalize_hook([] { s->print(); delete s; s = nullptr; });
+    }
+    return *s;
+}
+}  // namespace
+#endif
+
 static int partition_by_pivot(Particles& p, int start, int count, double pivot) {
     if (count <= 1) return count;
 
@@ -2060,16 +2123,14 @@ static void cross_acceleration_distributed(DistributedParticles& dp,
     acceleration_range(dp.local, slice_start_f, slice_count_f, slow_start, slow_count, G, soft2);
     Kokkos::fence();
 
-    // Must use separate allgathers: each rank computed its slice of slow and
-    // its slice of fast independently, so the distributions don't match a combined range
+    // Each rank computed its slice of slow and its slice of fast: one gather of both slices (AUDIT G row 5)
     if (use_nonblocking_mpi) {
         dp.iallgather_accelerations_subset(slow_start, slow_count, 0);
         dp.iallgather_accelerations_subset(fast_start, fast_count, 1);
         dp.wait_and_unpack_accelerations(slow_start, slow_count, 0);
         dp.wait_and_unpack_accelerations(fast_start, fast_count, 1);
     } else {
-        dp.allgather_accelerations_subset(slow_start, slow_count);
-        dp.allgather_accelerations_subset(fast_start, fast_count);
+        dp.allgather_accelerations_two(slow_start, slow_count, fast_start, fast_count);   // one collective
     }
 }
 
@@ -2134,15 +2195,14 @@ static void cross_acceleration_and_gradient_distributed(DistributedParticles& dp
                               G, soft2, dt, false);
     Kokkos::fence();
 
-    // Must use separate allgathers: force slices were computed independently
+    // Slices of slow and fast computed independently: one gather of both (AUDIT G row 5)
     if (use_nonblocking_mpi) {
         dp.iallgather_accelerations_subset(slow_start, slow_count, 0);
         dp.iallgather_accelerations_subset(fast_start, fast_count, 1);
         dp.wait_and_unpack_accelerations(slow_start, slow_count, 0);
         dp.wait_and_unpack_accelerations(fast_start, fast_count, 1);
     } else {
-        dp.allgather_accelerations_subset(slow_start, slow_count);
-        dp.allgather_accelerations_subset(fast_start, fast_count);
+        dp.allgather_accelerations_two(slow_start, slow_count, fast_start, fast_count);   // one collective
     }
 }
 
@@ -2156,22 +2216,19 @@ static void compute_timestep_distributed(DistributedParticles& dp, int start, in
     int slice_start, slice_count;
     dp.get_force_slice(start, count, slice_start, slice_count);
 
-    if (slice_count == 0) {
-        dp.allgather_timestep_subset(start, count);
-        return;
+    if (slice_count > 0) {
+        timestep_range(dp.local, slice_start, slice_count, start, count, G, soft2, eta);
+        Kokkos::fence();
     }
 
-    timestep_range(dp.local, slice_start, slice_count, start, count, G, soft2, eta);
+    // dt_adapt, and in collisional mode the partner-free accelerations, in one collective (AUDIT G row 5)
 #ifdef ENABLE_COLLISIONAL
-    bool coll = dp.local.collisional;
+    if (dp.local.collisional) {
+        dp.allgather_dt_acc_subset(start, count);
+        return;
+    }
 #endif
-    Kokkos::fence();
-
-    // Allgather dt_adapt values (uses GPU-aware MPI when available)
     dp.allgather_timestep_subset(start, count);
-#ifdef ENABLE_COLLISIONAL
-    if (coll) dp.allgather_accelerations_subset(start, count);
-#endif
 }
 
 // CPU serial path: CpuSubset + all cpu_* functions in integrator_cpu.cpp
@@ -2513,8 +2570,9 @@ static int hhs_fsi_recursive(
         if (p.collisional) {
             g_profiler.start();
             PhaseClock dt_clock;
-            Kokkos::fence();   // profile: the time-step kernels above are asynchronous
+            if (g_profiler.fence) Kokkos::fence();   // profile: the time-step kernels above are asynchronous
             g_subsys_phase.add(SubsystemPhaseTimes::DT_WAIT, dt_clock.lap());
+            slow0().record_pre(p, start, count);
             g_subsystem_mgr.subsystem_timesteps(p, G, g_collisional.eta_pert);
             g_subsys_phase.add(SubsystemPhaseTimes::DT_SUBSYS, dt_clock.lap());
 
@@ -2637,6 +2695,9 @@ static int hhs_fsi_recursive(
     if (slow_count == 0) {
         if (use_mpi) g_hhs_counters.slow0_dist++;
         else g_hhs_counters.slow0_local++;
+#ifdef ENABLE_COLLISIONAL
+        if (p.collisional) slow0().record_set(p, start, count, pivot_dt);
+#endif
         double sub_pivot = pivot_dt * 0.5;
         int k = hhs_fsi_recursive(p, dp, start, count, sub_pivot,
                                   G, soft2, dt_min, eta, true, tree_for_subs, depth + 1);

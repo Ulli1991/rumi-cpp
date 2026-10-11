@@ -2,6 +2,8 @@
 #include "collisional_config.h"
 #include "diagnostics.h"
 #include "merger_tree.h"
+#include "mpi_comm.h"
+#include <cstdlib>
 #include <cstdio>
 #include <cmath>
 
@@ -216,6 +218,11 @@ void Checkpoint::restore(Particles& p, SubsystemManager& mgr,
 
 double compute_total_energy(const Particles& p, const EnergyBookkeeping& books,
                             double G, double soft2) {
+    return compute_particle_energy(p, G, soft2) + books.total_sink();
+}
+
+// KE + PE (PE split over the MPI ranks, compute_potential_energy_split)
+double compute_particle_energy(const Particles& p, double G, double soft2) {
     double KE = 0;
     auto pvx = p.vx; auto pvy = p.vy; auto pvz = p.vz;
     auto pm = p.mass;
@@ -227,8 +234,16 @@ double compute_total_energy(const Particles& p, const EnergyBookkeeping& books,
             lKE += 0.5 * pm(i) * v2;
         }, KE);
 
-    double PE = compute_potential_energy_tiled(p, G, soft2, 0, N);
-    return KE + PE + books.total_sink();
+    double PE = compute_potential_energy_split(p, G, soft2);
+    // NBODY_ECHECK_CMP (diagnostics): the split sum against the replicated whole-range sum of the previous code
+    static const bool cmp = std::getenv("NBODY_ECHECK_CMP") != nullptr;
+    if (cmp) {
+        const double PE_full = compute_potential_energy_tiled(p, G, soft2, 0, N);
+        if (MPIComm::rank() == 0)
+            std::printf("ECHECK_CMP PE_split %.17g PE_full %.17g rel %.3e (KE+PE) rel %.3e\n", PE, PE_full,
+                        (PE - PE_full) / std::fabs(PE_full), (PE - PE_full) / std::fabs(KE + PE_full));
+    }
+    return KE + PE;
 }
 
 // ============================================================================
