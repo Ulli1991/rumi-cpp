@@ -52,6 +52,7 @@ PairVel pair_velocities(Particles& p, bool coll) {
 
 bool flyby_cm_velocity = false;
 int tree_dt_min_n = 0;
+int tree_ngb_min_n = 0;
 int tree_dt_cpu_max = 0;
 double tree_dt_vc_fac = 30.0;
 
@@ -66,12 +67,12 @@ using DevExec = Kokkos::DefaultExecutionSpace;
 using HostExec = Kokkos::DefaultHostExecutionSpace;
 enum class TreeMode { None, Device, Host };
 
-TreeMode tree_mode(int nj) {
+TreeMode tree_mode(int nj, int min_n = tree_dt_min_n) {
     if (nj < 2) return TreeMode::None;
     if constexpr (kHostAccessibleDevice) {
         if (tree_dt_cpu_max > 0 && nj <= tree_dt_cpu_max) return TreeMode::Host;
     }
-    if (tree_dt_min_n > 0 && nj >= tree_dt_min_n) return TreeMode::Device;
+    if (min_n > 0 && nj >= min_n) return TreeMode::Device;
     return TreeMode::None;
 }
 
@@ -323,7 +324,7 @@ void compute_timestep_subset(Particles& p, int start, int count, double G, doubl
 static void neighbor_search_kernel(Particles& p, int start, int count, double G, double r_ngb, double r_ngb_max,
                                    double pivot_dt, bool allow_tree = true) {
     auto& mgr = g_subsystem_mgr;
-    const TreeMode mode = allow_tree ? tree_mode(count) : TreeMode::None;
+    const TreeMode mode = allow_tree ? tree_mode(count, tree_ngb_min_n) : TreeMode::None;
     if (mode != TreeMode::None) {
         dtt::NgbOut o{mgr.ngb_pair_i.data(), mgr.ngb_pair_j.data(), mgr.ngb_pair_bound.data(), mgr.ngb_count.data(),
                       mgr.ngb_pair_a.data(), mgr.ngb_pair_e.data(), mgr.ngb_pair_E.data(), mgr.max_ngb_pairs};
@@ -401,7 +402,7 @@ void neighbor_search_subset(Particles& p, int start, int count,
                             double G, double r_ngb, double r_ngb_max,
                             double pivot_dt) {
     if (count <= 1) return;
-    if (tree_mode(count) != TreeMode::None) g_tree_stats.ngb_calls++;   // once per search (a buffer overflow repeats it)
+    if (tree_mode(count, tree_ngb_min_n) != TreeMode::None) g_tree_stats.ngb_calls++;   // once per search (a buffer overflow repeats it)
     neighbor_search_kernel(p, start, count, G, r_ngb, r_ngb_max, pivot_dt);
     // The kernel counts every pair but stores only max_ngb_pairs: an overflow would silently drop pairs
     // (binaries left undetected are then integrated orbit by orbit by the FSI). Grow and search again.
@@ -412,7 +413,8 @@ void neighbor_search_subset(Particles& p, int start, int count,
         g_subsystem_mgr.reset_ngb_count();
         neighbor_search_kernel(p, start, count, G, r_ngb, r_ngb_max, pivot_dt);
     }
-    if (check_tree() && tree_mode(count) != TreeMode::None) check_ngb_against_n2(p, start, count, G, r_ngb, r_ngb_max, pivot_dt);
+    if (check_tree() && tree_mode(count, tree_ngb_min_n) != TreeMode::None)
+        check_ngb_against_n2(p, start, count, G, r_ngb, r_ngb_max, pivot_dt);
 }
 #else
 void neighbor_search_subset(Particles&, int, int, double, double, double, double) {}

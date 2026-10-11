@@ -7,6 +7,7 @@ extern bool flyby_cm_velocity;
 // Exact tree time-step / neighbour searches (dt_tree.h): device tree for source sets >= tree_dt_min_n, host tree for
 // sets <= tree_dt_cpu_max (host-accessible memory only); 0 = off. tree_dt_vc_fac: low-speed split (multiplier of V_c, default 30)
 extern int tree_dt_min_n;
+extern int tree_ngb_min_n;   // the same for the neighbour search
 extern int tree_dt_cpu_max;
 extern double tree_dt_vc_fac;
 

@@ -600,6 +600,7 @@ int main(int argc, char** argv) {
         tree_n_group = cfg.get_int("TREE_N_GROUP", 64);
         // Exact tree searches for the HHS time steps and neighbours (gravity/dt_tree.h); forces stay direct
         tree_dt_min_n = cfg.get_int("TREE_DT_MIN_N", 0);
+        tree_ngb_min_n = cfg.get_int("TREE_NGB_MIN_N", tree_dt_min_n);
         tree_dt_cpu_max = cfg.get_int("TREE_DT_CPU_MAX", 0);
         tree_dt_vc_fac = cfg.get_double("TREE_DT_VC_FAC", 30.0);
 
