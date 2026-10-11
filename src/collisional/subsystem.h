@@ -117,8 +117,12 @@ struct SubsystemManager {
 
     // cvx, cvy, cvz <- velocities on [lo, hi), except that subsystem members get their subsystem's
     // centre-of-mass velocity (fly-by time-step criterion with FLYBY_CM_VELOCITY, FROST-CLUSTERS II sec. 2.1)
+    // With tol > 0 (FLYBY_CM_EPS x |E0|) also ck <- tidal-sampling constants (PairVelocities::k): 1e30 for
+    // non-members, tol / (2 G R mu v) for members, with R the apocentre separation and v the pericentre relative
+    // speed of a bound pair (else the separation and relative speed), mu its reduced mass; for larger subsystems R
+    // is twice the largest member distance from the c.o.m. and mu v the sum of m |v - v_cm|
     void fill_cm_velocity(const Particles& p, int lo, int hi, Kokkos::View<double*> cvx, Kokkos::View<double*> cvy,
-                          Kokkos::View<double*> cvz);
+                          Kokkos::View<double*> cvz, Kokkos::View<double*> ck, double tol);
 
     // Enforce shared timestep: all members of each subsystem get min dt_adapt
     // Call after detection and before partition_by_pivot

@@ -2,6 +2,7 @@
 #include "subsystem.h"
 #include "collisional_config.h"
 #include "constants.h"
+#include "diagnostics.h"
 #include <algorithm>
 #include <unordered_map>
 #include <numeric>
@@ -683,11 +684,13 @@ void SubsystemManager::remap_indices(const Particles& p) {
 // host (one upload into a persistent buffer) and each subsystem sums its members in particle_ids order on the
 // device, so neither the member state nor an O(N) array crosses to the host.
 void SubsystemManager::fill_cm_velocity(const Particles& p, int lo, int hi, Kokkos::View<double*> cvx,
-                                         Kokkos::View<double*> cvy, Kokkos::View<double*> cvz) {
+                                         Kokkos::View<double*> cvy, Kokkos::View<double*> cvz,
+                                         Kokkos::View<double*> ck, double tol) {
     auto vx = p.vx, vy = p.vy, vz = p.vz;
     if (hi > lo)
         Kokkos::parallel_for("cm_vel_copy", Kokkos::RangePolicy<>(lo, hi), KOKKOS_LAMBDA(int i) {
             cvx(i) = vx(i); cvy(i) = vy(i); cvz(i) = vz(i);
+            if (tol > 0.0) ck(i) = 1e30;
         });
     if (active.empty()) return;
     rebuild_pid_to_idx(p);   // incremental: partitions since the last build moved slots
@@ -719,17 +722,50 @@ void SubsystemManager::fill_cm_velocity(const Particles& p, int lo, int hi, Kokk
                       Kokkos::subview(cm_buf_host_, Kokkos::pair<int,int>(0, n)));
     auto buf = cm_buf_;
     auto pm = p.mass;
+    auto px_ = p.x, py_ = p.y, pz_ = p.z;
+    const double G = G_CODE;
     small_for("cm_vel_members", n_sub, KOKKOS_LAMBDA(int k) {
         const int a = base + buf(k), e = base + buf(k + 1);
-        double M = 0, px = 0, py = 0, pz = 0;
+        double M = 0, px = 0, py = 0, pz = 0, cx = 0, cy = 0, cz = 0;
         for (int q = a; q < e; q++) {
             const int i = buf(q);
             M += pm(i); px += pm(i) * vx(i); py += pm(i) * vy(i); pz += pm(i) * vz(i);
+            cx += pm(i) * px_(i); cy += pm(i) * py_(i); cz += pm(i) * pz_(i);
         }
         if (M <= 0) return;
+        double kt = 1e30;
+        if (tol > 0.0) {
+            double ext = 0.0, muv = 0.0;
+            if (e - a == 2) {
+                const int i = buf(a), j = buf(a + 1);
+                const double rx = px_(j) - px_(i), ry = py_(j) - py_(i), rz = pz_(j) - pz_(i);
+                const double ux = vx(j) - vx(i), uy = vy(j) - vy(i), uz = vz(j) - vz(i);
+                const double r = Kokkos::sqrt(rx * rx + ry * ry + rz * rz), mu = G * M;
+                const double u2 = ux * ux + uy * uy + uz * uz, en = 0.5 * u2 - mu / r;
+                ext = r; muv = pm(i) * pm(j) / M * Kokkos::sqrt(u2);
+                if (en < 0.0) {
+                    const double sa = -mu / (2.0 * en);
+                    const double lx = ry * uz - rz * uy, ly = rz * ux - rx * uz, lz = rx * uy - ry * ux;
+                    const double e2 = 1.0 - (lx * lx + ly * ly + lz * lz) / (mu * sa);
+                    const double ecc = Kokkos::fmin(Kokkos::sqrt(e2 > 0.0 ? e2 : 0.0), 1.0 - 1e-12);
+                    ext = sa * (1.0 + ecc);
+                    muv = pm(i) * pm(j) / M * Kokkos::sqrt(mu * (1.0 + ecc) / (sa * (1.0 - ecc)));
+                }
+            } else {
+                for (int q = a; q < e; q++) {
+                    const int i = buf(q);
+                    const double dx = px_(i) - cx / M, dy = py_(i) - cy / M, dz = pz_(i) - cz / M;
+                    const double ux = vx(i) - px / M, uy = vy(i) - py / M, uz = vz(i) - pz / M;
+                    ext = Kokkos::fmax(ext, 2.0 * Kokkos::sqrt(dx * dx + dy * dy + dz * dz));
+                    muv += pm(i) * Kokkos::sqrt(ux * ux + uy * uy + uz * uz);
+                }
+            }
+            if (ext > 0.0 && muv > 0.0) kt = tol / (2.0 * G * ext * muv);
+        }
         for (int q = a; q < e; q++) {
             const int i = buf(q);
             cvx(i) = px / M; cvy(i) = py / M; cvz(i) = pz / M;
+            if (tol > 0.0) ck(i) = kt;
         }
     });
 }
@@ -890,6 +926,17 @@ static bool perturbation_timestep_md(const std::vector<Subsystem>& active, const
             if (std::fabs(edot) > 1e-30)
                 dt_e = 1.0 / std::fabs(edot);
             dt_pert = std::min(dt_a, dt_e) * eta_pert;
+            if (g_eattr.on && a > 0.0) {
+                const double mi = h_m(idx_i), mj = h_m(idx_j);
+                const double dte = std::min(std::min(h_dt(idx_i), dt_pert), g_eattr.dt_cap);
+                const double est = mi * mj / (mi + mj) * f_mag * std::sqrt(v2) * dte;
+                if (est > g_eattr.tid_max) {
+                    g_eattr.tid_max = est; g_eattr.tid_a = a; g_eattr.tid_e = e; g_eattr.tid_gamma = f_mag * r2 / mu;
+                    g_eattr.tid_dt = dte; g_eattr.tid_P = 2.0 * M_PI * std::sqrt(a * a * a / mu);
+                    g_eattr.tid_m1 = mi; g_eattr.tid_m2 = mj;
+                    g_eattr.tid_pid0 = sub.particle_ids[0]; g_eattr.tid_pid1 = sub.particle_ids[1];
+                }
+            }
 
             // Strongly perturbed binaries: the perturbation reaches them as kicks that sample the orbital phase, and
             // the phase-dependent tidal energy does not converge with the step unless the orbit is resolved

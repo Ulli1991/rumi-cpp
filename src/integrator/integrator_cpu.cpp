@@ -394,12 +394,14 @@ static void cpu_kick(CpuSubset& s, int start, int count, double kick_dt) {
 // device code as for the device kernels. The device must hold the subset (cpu_sync_to_device).
 #ifdef ENABLE_COLLISIONAL
 static void cpu_pair_velocities(Particles& p, int dev_start, int count, std::vector<double>& vx,
-                                std::vector<double>& vy, std::vector<double>& vz) {
+                                std::vector<double>& vy, std::vector<double>& vz, std::vector<double>& kt) {
     PairVelocities v = pair_velocities(p, dev_start, dev_start + count);
     using U = Kokkos::View<double*, Kokkos::MemoryTraits<Kokkos::Unmanaged>>;
-    double* src[3] = {v.x, v.y, v.z};
-    std::vector<double>* dst[3] = {&vx, &vy, &vz};
-    for (int k = 0; k < 3; k++) {
+    double* src[4] = {v.x, v.y, v.z, v.k};
+    std::vector<double>* dst[4] = {&vx, &vy, &vz, &kt};
+    kt.clear();
+    for (int k = 0; k < 4; k++) {
+        if (!src[k]) continue;   // no tidal-sampling constants (FLYBY_CM_EPS off)
         auto h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), U(src[k] + dev_start, count));
         dst[k]->assign(h.data(), h.data() + count);
     }
@@ -411,7 +413,7 @@ static void cpu_pair_velocities(Particles& p, int dev_start, int count, std::vec
 static void cpu_compute_timestep(CpuSubset& s, int start, int count,
                                  double G, double soft2, double eta,
                                  const std::vector<double>& pvx = {}, const std::vector<double>& pvy = {},
-                                 const std::vector<double>& pvz = {}) {
+                                 const std::vector<double>& pvz = {}, const std::vector<double>& pk = {}) {
     (void)soft2;
     (void)eta;
 #ifdef ENABLE_COLLISIONAL
@@ -456,6 +458,8 @@ static void cpu_compute_timestep(CpuSubset& s, int start, int count,
                                  t_sym_ff, t_sym_fb);
 
             double t_pair = std::min(eta_ff_v * t_sym_ff, eta_fb_v * t_sym_fb);
+            if (!pk.empty())   // FLYBY_CM_EPS tidal-sampling step (tidal_sampling_dt of the device kernels)
+                t_pair = std::min(t_pair, std::min(pk[i - start] / s.mass[j], pk[j - start] / s.mass[i]) * r2s * std::sqrt(r2s));
             s.dt_adapt[i] = std::min(s.dt_adapt[i], t_pair);
             s.dt_adapt[j] = std::min(s.dt_adapt[j], t_pair);
 
@@ -737,9 +741,9 @@ static int cpu_hhs_recursive(CpuSubset& s, Particles& p, int start, int count,
         // Step 2: CPU timestep (with subsystem exclusion via s.sid). The pair time steps take the device kernels'
         // velocities: the members' c.o.m. velocity with FLYBY_CM_VELOCITY (the device holds the subset since step 1)
 #ifdef ENABLE_COLLISIONAL
-        std::vector<double> pvx, pvy, pvz;
-        if (s.collisional && flyby_cm_velocity) cpu_pair_velocities(p, dev_start, count, pvx, pvy, pvz);
-        cpu_compute_timestep(s, start, count, G, soft2, eta, pvx, pvy, pvz);
+        std::vector<double> pvx, pvy, pvz, pk;
+        if (s.collisional && flyby_cm_velocity) cpu_pair_velocities(p, dev_start, count, pvx, pvy, pvz, pk);
+        cpu_compute_timestep(s, start, count, G, soft2, eta, pvx, pvy, pvz, pk);
 #else
         cpu_compute_timestep(s, start, count, G, soft2, eta);
 #endif
