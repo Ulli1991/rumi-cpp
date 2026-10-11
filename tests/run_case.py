@@ -162,6 +162,15 @@ COLL_ISCO = dict(COLL_HEADON, TRIPLE_A_IN_PC="8.6e-12", TRIPLE_E_IN="0.0", TRIPL
                  TRIPLE_A_OUT_PC="8.6e-10", TRIPLE_E_OUT="0.0", TRIPLE_M3="1.0", TOTAL_TIME_MYR="2e-14",
                  DT_MAX_MYR="1e-15", DT_MIN_MYR="1e-24", PN_ORDER="31", M_PN="5.0", TEST_STELLAR_RADIUS_RSUN="0")
 
+# Wide stellar binary (0.97 + 0.97 Msun, a = 46 AU, e = 0.5, P = 220 yr) and a 46.5 Msun black hole passing at 1.6 mpc
+# (outside r_ngb = 1 mpc; e = 2.5, from 8 mpc): tidal ratio ~0.1 at pericentre. The 200k, 10 % binaries seed-42
+# step-19 event (there a 23+23 Msun BH binary). NGB_MREF = the cluster's <m> (0.41 Msun)
+BH_FLYBY = dict(TEST_CASE="triple_test", INTEGRATOR="hhs", TRIPLE_A_IN_PC="2.2e-4", TRIPLE_E_IN="0.5", TRIPLE_M1="0.97",
+                TRIPLE_M2="0.97", TRIPLE_A_OUT_PC="1.6e-3", TRIPLE_E_OUT="2.5", TRIPLE_M3="46.5", TRIPLE_INCL_DEG="30",
+                TOTAL_TIME_MYR="2e-3", DT_MAX_MYR="1e-3", DT_MIN_MYR="1e-16", SOFTENING_PC="0", COLLISIONAL="true",
+                R_NGB="1e-3", R_NGB_MAX="0.1", N_ORB_SECULAR="3", PN_ORDER="0", SSE_ENABLED="false",
+                ETA_RESTART="1e-8", ETA_GBS="1e-10", PRINT_INTERVAL="1", PROFILING="false", NGB_MREF="0.41",
+                FLYBY_CM_EPS="1e-11")
 # 16 stars inside r_ngb: one 15-body neighbour group, more than LogH's fixed storage (LOGH_MAX_BODIES = 8)
 # Collisional FSI run of a field binary (r_ngb below a, so no subsystem): the start-of-step kernel's criteria set the step
 FSI_BINARY = dict(TEST_CASE="binary_test", INTEGRATOR="fsi", TOTAL_TIME_MYR="1e-5", DT_MAX_MYR="1e-5", DT_MIN_MYR="1e-14",
@@ -805,6 +814,10 @@ CASES = {
     # the binary in a 3-body LogH subsystem with ~1e6 inner orbits per step: no result within 120 s before
     # (FLYBY_NGB_CM = false). Measured after (host): no triple, no LogH call, max |dE/E| 1.68e-12
     "flyby_member_com": lambda exe: flyby_member(exe, "star passing a hard binary", FLYBY_TRIPLE, 2.2e-12),
+    # Before (fixed r_ngb): the hole stays outside the subsystem, the binary takes its tide as kicks (7256 LogH calls),
+    # |dE/E| 2.38e-9. Measured with NGB_MASS_SCALING (host): one 3-body subsystem, 8 LogH calls, 4.44e-14
+    "ngb_mass_scaling": lambda exe: floor(exe, "black hole passing a wide binary, mass-scaled r_ngb",
+                                          dict(BH_FLYBY, NGB_MASS_SCALING="true"), (5.8e-14, 5.8e-14, 1e30, 1e30)),
     "logh_hierarchy_complete": lambda exe: logh_complete(exe, "tight binary in unstable triple", HIER_LOGH, 1.1e-11),
     # Experimental split (off by default). Without: LogH, 575k GBS steps, 3.7 s, |dE/E| 1.5e-9 (max). With:
     # 0.06 s, max 3.6e-8 at periapsis, 5.3e-9 at the end
