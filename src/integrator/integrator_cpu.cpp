@@ -389,9 +389,29 @@ static void cpu_kick(CpuSubset& s, int start, int count, double kick_dt) {
     }
 }
 
-// CPU timestep computation (N3L: upper triangle, squared-space)
+// Host copy of the pair-time-step velocities of device slots [dev_start, dev_start + count) (pair_velocities: with
+// FLYBY_CM_VELOCITY the subsystem c.o.m. velocity of members, FROST-CLUSTERS II sec. 2.1), computed by the same
+// device code as for the device kernels. The device must hold the subset (cpu_sync_to_device).
+#ifdef ENABLE_COLLISIONAL
+static void cpu_pair_velocities(Particles& p, int dev_start, int count, std::vector<double>& vx,
+                                std::vector<double>& vy, std::vector<double>& vz) {
+    PairVelocities v = pair_velocities(p, dev_start, dev_start + count);
+    using U = Kokkos::View<double*, Kokkos::MemoryTraits<Kokkos::Unmanaged>>;
+    double* src[3] = {v.x, v.y, v.z};
+    std::vector<double>* dst[3] = {&vx, &vy, &vz};
+    for (int k = 0; k < 3; k++) {
+        auto h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), U(src[k] + dev_start, count));
+        dst[k]->assign(h.data(), h.data() + count);
+    }
+}
+#endif
+
+// CPU timestep computation (N3L: upper triangle, squared-space). pvx, pvy, pvz (index i - start; empty: vx, vy, vz)
+// are the velocities of the pair time steps; the jerk uses the particle velocities, as DtK does.
 static void cpu_compute_timestep(CpuSubset& s, int start, int count,
-                                 double G, double soft2, double eta) {
+                                 double G, double soft2, double eta,
+                                 const std::vector<double>& pvx = {}, const std::vector<double>& pvy = {},
+                                 const std::vector<double>& pvz = {}) {
     (void)soft2;
     (void)eta;
 #ifdef ENABLE_COLLISIONAL
@@ -427,8 +447,12 @@ static void cpu_compute_timestep(CpuSubset& s, int start, int count,
             (void)v_sq;
 
             // Symmetrized timestep (FROST Eq. 49 on the step eta*t), the same function as the device kernels
+            const bool pv = !pvx.empty();
+            const double tvx = pv ? pvx[j - start] - pvx[i - start] : dvx;
+            const double tvy = pv ? pvy[j - start] - pvy[i - start] : dvy;
+            const double tvz = pv ? pvz[j - start] - pvz[i - start] : dvz;
             double t_sym_ff, t_sym_fb;
-            symmetrized_timestep(r2s, inv_r, dx, dy, dz, dvx, dvy, dvz, G, mass_sum, eta_ff_v, eta_fb_v,
+            symmetrized_timestep(r2s, inv_r, dx, dy, dz, tvx, tvy, tvz, G, mass_sum, eta_ff_v, eta_fb_v,
                                  t_sym_ff, t_sym_fb);
 
             double t_pair = std::min(eta_ff_v * t_sym_ff, eta_fb_v * t_sym_fb);
@@ -710,8 +734,15 @@ static int cpu_hhs_recursive(CpuSubset& s, Particles& p, int start, int count,
             cpu_sync_sid_from_device(s, p, start, dev_start, count);
         }
 #endif
-        // Step 2: CPU timestep (with subsystem exclusion via s.sid)
+        // Step 2: CPU timestep (with subsystem exclusion via s.sid). The pair time steps take the device kernels'
+        // velocities: the members' c.o.m. velocity with FLYBY_CM_VELOCITY (the device holds the subset since step 1)
+#ifdef ENABLE_COLLISIONAL
+        std::vector<double> pvx, pvy, pvz;
+        if (s.collisional && flyby_cm_velocity) cpu_pair_velocities(p, dev_start, count, pvx, pvy, pvz);
+        cpu_compute_timestep(s, start, count, G, soft2, eta, pvx, pvy, pvz);
+#else
         cpu_compute_timestep(s, start, count, G, soft2, eta);
+#endif
 #ifdef ENABLE_COLLISIONAL
         // Gradient + v/a timestep criteria (BIFROST Section 3.4.4, Eq. 24/26/27)
         if (s.collisional && (g_collisional.eta_grad > 0.0 || g_collisional.eta_va > 0.0)) {

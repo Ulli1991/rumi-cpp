@@ -7,7 +7,10 @@
 #include "subsystem.h"
 #endif
 #include <Kokkos_Core.hpp>
+#include <algorithm>
 #include <cfloat>
+#include <cstdio>
+#include <cstdlib>
 
 // All pairwise kernels run through run_n2 (n2_driver.h) with the interactions of n2_kernels.h.
 
@@ -23,28 +26,35 @@ Etas etas(double eta) {
 }
 const int* sid_ptr(const Particles& p, bool coll) { return coll ? p.subsystem_id.data() : nullptr; }
 
-// Velocities for the pair time step: vx, vy, vz, or with FLYBY_CM_VELOCITY the subsystem CoM velocity for members
 struct PairVel { RawView x, y, z; };
-PairVel pair_velocities(Particles& p, bool coll) {
+PairVel pair_vel(Particles& p, bool coll, int lo, int hi) {
+    PairVelocities v = coll ? pair_velocities(p, lo, hi) : PairVelocities{p.vx.data(), p.vy.data(), p.vz.data()};
+    return {{v.x}, {v.y}, {v.z}};
+}
+// Union of the sink and source ranges of a pairwise kernel
+int range_lo(int i0, int ni, int j0, int nj) { return std::min(ni > 0 ? i0 : j0, nj > 0 ? j0 : i0); }
+int range_hi(int i0, int ni, int j0, int nj) { return std::max(i0 + ni, j0 + nj); }
+}  // namespace
+
+bool flyby_cm_velocity = false;
+
+PairVelocities pair_velocities(Particles& p, int lo, int hi) {
 #ifdef ENABLE_COLLISIONAL
-    if (coll && flyby_cm_velocity) {
+    if (p.collisional && flyby_cm_velocity) {
         static Kokkos::View<double*> cx("cm_vx", 0), cy("cm_vy", 0), cz("cm_vz", 0);
         static bool hook = (Kokkos::push_finalize_hook([] { cx = cy = cz = Kokkos::View<double*>(); }), true);
         (void)hook;
         if ((int)cx.extent(0) < p.N) {
             Kokkos::realloc(cx, p.N); Kokkos::realloc(cy, p.N); Kokkos::realloc(cz, p.N);
         }
-        g_subsystem_mgr.fill_cm_velocity(p, cx, cy, cz);
-        return {{cx.data()}, {cy.data()}, {cz.data()}};
+        g_subsystem_mgr.fill_cm_velocity(p, std::max(lo, 0), std::min(hi, p.N), cx, cy, cz);
+        return {cx.data(), cy.data(), cz.data()};
     }
 #else
-    (void)coll;
+    (void)lo; (void)hi;
 #endif
-    return {{p.vx.data()}, {p.vy.data()}, {p.vz.data()}};
+    return {p.vx.data(), p.vy.data(), p.vz.data()};
 }
-}  // namespace
-
-bool flyby_cm_velocity = false;
 
 // ==========================================================================
 // Accelerations and adaptive time steps of all particles
@@ -52,7 +62,7 @@ bool flyby_cm_velocity = false;
 template <bool COLL>
 static void acc_dt_range(Particles& p, int i0, int ni, int j0, int nj, double G, double soft2, double eta) {
     Etas e = etas(eta);
-    PairVel cv = pair_velocities(p, COLL);
+    PairVel cv = pair_vel(p, COLL, range_lo(i0, ni, j0, nj), range_hi(i0, ni, j0, nj));
     AccDtK<COLL> k{{p.x.data()}, {p.y.data()}, {p.z.data()}, {p.mass.data()}, {p.vx.data()}, {p.vy.data()},
                    {p.vz.data()}, {p.ax.data()}, {p.ay.data()}, {p.az.data()}, {p.dt_adapt.data()},
                    cv.x, cv.y, cv.z, sid_ptr(p, COLL), G, soft2, e.ff, e.fb, e.jerk, e.va};
@@ -155,7 +165,7 @@ void cross_gradient_correction(Particles& p, int a_start, int a_count, int b_sta
 template <bool COLL>
 static void dt_range(Particles& p, int i0, int ni, int j0, int nj, double G, double soft2, double eta) {
     Etas e = etas(eta);
-    PairVel cv = pair_velocities(p, COLL);
+    PairVel cv = pair_vel(p, COLL, range_lo(i0, ni, j0, nj), range_hi(i0, ni, j0, nj));
     DtK<COLL> k{{p.x.data()}, {p.y.data()}, {p.z.data()}, {p.mass.data()}, {p.vx.data()}, {p.vy.data()},
                 {p.vz.data()}, {p.ax.data()}, {p.ay.data()}, {p.az.data()}, {p.dt_adapt.data()},
                 cv.x, cv.y, cv.z, sid_ptr(p, COLL), G, soft2, e.ff, e.fb, COLL ? e.jerk : 0.0};
@@ -286,12 +296,27 @@ std::vector<int> cc_components(Particles& p, int start, int count, double pivot,
     static bool hook = (Kokkos::push_finalize_hook([] { dmin = Kokkos::View<double*>(); }), true);
     (void)hook;
     if ((int)dmin.extent(0) < count) Kokkos::realloc(dmin, count);
-    PairMinK pm{{p.x.data()}, {p.y.data()}, {p.z.data()}, {p.mass.data()}, {p.vx.data()}, {p.vy.data()}, {p.vz.data()},
+    // the pair time steps of DtK/AccDtK: with FLYBY_CM_VELOCITY the subsystem c.o.m. velocity of members
+    // (FROST-CLUSTERS II sec. 2.1)
+    PairVel cv = pair_vel(p, p.collisional, start, start + count);
+    PairMinK pm{{p.x.data()}, {p.y.data()}, {p.z.data()}, {p.mass.data()}, cv.x, cv.y, cv.z,
                 {dmin.data()}, start, sid_ptr(p, p.collisional), G, soft2, e.ff, e.fb};
     run_n2("cc_pair_min", start, count, start, count, pm);
+    // NBODY_CHECK_CC: the split must see the pair time steps of the time-step kernel (DtK, over a superset of
+    // this set, only lowered afterwards by other criteria), so no particle's pair minimum here may lie below
+    // its dt_adapt. Reports the particles that violate it (relative tolerance 1e-12 for FMA contraction).
+    static const bool check_cc = std::getenv("NBODY_CHECK_CC") != nullptr;
+    if (check_cc) {
+        RawView dm{dmin.data()}, dta{p.dt_adapt.data()};
+        int nbad = 0;
+        Kokkos::parallel_reduce("cc_check", count, KOKKOS_LAMBDA(int k, int& n) {
+            if (dm(k) < dta(start + k) * (1.0 - 1e-12)) n++;
+        }, nbad);
+        if (nbad > 0) std::printf("CC_CHECK: %d of %d particles with a pair step below dt_adapt\n", nbad, count);
+    }
     auto launch = [&](auto coll_tag) {
         constexpr bool COLL = decltype(coll_tag)::value;
-        EdgeK<COLL> k{{p.x.data()}, {p.y.data()}, {p.z.data()}, {p.mass.data()}, {p.vx.data()}, {p.vy.data()}, {p.vz.data()},
+        EdgeK<COLL> k{{p.x.data()}, {p.y.data()}, {p.z.data()}, {p.mass.data()}, cv.x, cv.y, cv.z,
                       sid_ptr(p, COLL), cc_buf(0).data(), cc_buf(1).data(), cc_buf(2).data(), max_edges,
                       G, soft2, e.ff, e.fb, pivot, {dmin.data()}, start};
         run_n2("cc_edges", start, count, start, count, k);

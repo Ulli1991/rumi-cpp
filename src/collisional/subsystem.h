@@ -67,6 +67,9 @@ struct SubsystemManager {
     void rebuild_pid_to_idx(const Particles& p);
     void check_pid_to_idx(const Particles& p) const;   // full comparison (NBODY_CHECK_PIDMAP)
     const Particles* map_source_ = nullptr;          // particle set the map was built for
+    Kokkos::View<int*> cm_buf_;                       // member offsets and slots of fill_cm_velocity
+    Kokkos::View<int*>::host_mirror_type cm_buf_host_;
+    std::vector<int> cm_host_;
     Kokkos::View<int*> flag_buf_;                     // (index, sid) pairs uploaded by update_particle_flags
     const SubsystemManager* shared_map_ = nullptr;   // local managers read the global map
     const std::vector<int>& pid_to_idx() const { return shared_map_ ? shared_map_->pid_to_idx_ : pid_to_idx_; }
@@ -112,10 +115,10 @@ struct SubsystemManager {
     // Update subsystem_id field in Particles based on active subsystems
     void update_particle_flags(Particles& p);
 
-    // cvx, cvy, cvz <- velocities, except that subsystem members get their subsystem's centre-of-mass
-    // velocity (fly-by time-step criterion with FLYBY_CM_VELOCITY, FROST-CLUSTERS II sec. 2.1)
-    void fill_cm_velocity(const Particles& p, Kokkos::View<double*> cvx, Kokkos::View<double*> cvy,
-                          Kokkos::View<double*> cvz) const;
+    // cvx, cvy, cvz <- velocities on [lo, hi), except that subsystem members get their subsystem's
+    // centre-of-mass velocity (fly-by time-step criterion with FLYBY_CM_VELOCITY, FROST-CLUSTERS II sec. 2.1)
+    void fill_cm_velocity(const Particles& p, int lo, int hi, Kokkos::View<double*> cvx, Kokkos::View<double*> cvy,
+                          Kokkos::View<double*> cvz);
 
     // Enforce shared timestep: all members of each subsystem get min dt_adapt
     // Call after detection and before partition_by_pivot

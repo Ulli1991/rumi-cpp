@@ -676,43 +676,61 @@ void SubsystemManager::remap_indices(const Particles& p) {
 // ============================================================================
 
 
-void SubsystemManager::fill_cm_velocity(const Particles& p, Kokkos::View<double*> cvx, Kokkos::View<double*> cvy,
-                                         Kokkos::View<double*> cvz) const {
-    const int N = p.N;
+// FROST-CLUSTERS II (Rantala et al. 2025, arXiv:2506.04330) sec. 2.1: "for the fly-by time-steps of binary stars
+// in subsystems, we now use binary centre-of-mass velocities in the BIFROST fly-by time-step criteria instead of
+// the velocities of the binary components". Non-members keep their velocity; members of one subsystem do not pair
+// in the FSI at all. Only [lo, hi) is copied (the kernels' sinks and sources); the member slots are listed on the
+// host (one upload into a persistent buffer) and each subsystem sums its members in particle_ids order on the
+// device, so neither the member state nor an O(N) array crosses to the host.
+void SubsystemManager::fill_cm_velocity(const Particles& p, int lo, int hi, Kokkos::View<double*> cvx,
+                                         Kokkos::View<double*> cvy, Kokkos::View<double*> cvz) {
     auto vx = p.vx, vy = p.vy, vz = p.vz;
-    Kokkos::parallel_for("cm_vel_copy", N, KOKKOS_LAMBDA(int i) { cvx(i) = vx(i); cvy(i) = vy(i); cvz(i) = vz(i); });
+    if (hi > lo)
+        Kokkos::parallel_for("cm_vel_copy", Kokkos::RangePolicy<>(lo, hi), KOKKOS_LAMBDA(int i) {
+            cvx(i) = vx(i); cvy(i) = vy(i); cvz(i) = vz(i);
+        });
     if (active.empty()) return;
+    rebuild_pid_to_idx(p);   // incremental: partitions since the last build moved slots
     const auto& p2i = pid_to_idx();
-    MemberData md(active, p2i, p);
-    auto mvx = md.col(MemberData::VX), mvy = md.col(MemberData::VY), mvz = md.col(MemberData::VZ);
-    auto mm = md.col(MemberData::M);
-    std::vector<int> slot;
-    std::vector<double> val;   // cm velocity per listed slot
+    const int N = p.N;
+    // cm_host_: [n_sub + 1 offsets into the slot list][member slots]
+    std::vector<int>& h = cm_host_;
+    const int base = (int)active.size() + 1;   // slot list start
+    h.assign(base, 0);
+    int n_sub = 0;
     for (const auto& sub : active) {
-        double M = 0, px = 0, py = 0, pz = 0;
-        std::vector<int> members;
+        const int n0 = (int)h.size();
         for (int pid : sub.particle_ids) {
             int i = (pid >= 0 && pid < (int)p2i.size()) ? p2i[pid] : -1;
-            if (i < 0 || i >= N) continue;
-            members.push_back(i);
-            M += mm(i); px += mm(i) * mvx(i); py += mm(i) * mvy(i); pz += mm(i) * mvz(i);
+            if (i >= 0 && i < N) h.push_back(i);
         }
-        if (M <= 0) continue;
-        for (int i : members) { slot.push_back(i); val.push_back(px / M); val.push_back(py / M); val.push_back(pz / M); }
+        if ((int)h.size() == n0) continue;
+        n_sub++;
+        h[n_sub] = (int)h.size() - base;
     }
-    const int n = (int)slot.size();
-    if (n == 0) return;
-    Kokkos::View<int*> d_slot("cm_slot", n);
-    Kokkos::View<double*> d_val("cm_val", 3 * (size_t)n);
-    auto h_slot = Kokkos::create_mirror_view(d_slot);
-    auto h_val = Kokkos::create_mirror_view(d_val);
-    std::copy(slot.begin(), slot.end(), h_slot.data());
-    std::copy(val.begin(), val.end(), h_val.data());
-    Kokkos::deep_copy(d_slot, h_slot);
-    Kokkos::deep_copy(d_val, h_val);
-    small_for("cm_vel_scatter", n, KOKKOS_LAMBDA(int k) {
-        int i = d_slot(k);
-        cvx(i) = d_val(3 * k); cvy(i) = d_val(3 * k + 1); cvz(i) = d_val(3 * k + 2);
+    if (n_sub == 0) return;
+    const int n = (int)h.size();
+    if ((int)cm_buf_.extent(0) < n) {
+        cm_buf_ = Kokkos::View<int*>("cm_members", 2 * n);
+        cm_buf_host_ = Kokkos::create_mirror_view(cm_buf_);
+    }
+    std::copy(h.begin(), h.end(), cm_buf_host_.data());
+    Kokkos::deep_copy(Kokkos::subview(cm_buf_, Kokkos::pair<int,int>(0, n)),
+                      Kokkos::subview(cm_buf_host_, Kokkos::pair<int,int>(0, n)));
+    auto buf = cm_buf_;
+    auto pm = p.mass;
+    small_for("cm_vel_members", n_sub, KOKKOS_LAMBDA(int k) {
+        const int a = base + buf(k), e = base + buf(k + 1);
+        double M = 0, px = 0, py = 0, pz = 0;
+        for (int q = a; q < e; q++) {
+            const int i = buf(q);
+            M += pm(i); px += pm(i) * vx(i); py += pm(i) * vy(i); pz += pm(i) * vz(i);
+        }
+        if (M <= 0) return;
+        for (int q = a; q < e; q++) {
+            const int i = buf(q);
+            cvx(i) = px / M; cvy(i) = py / M; cvz(i) = pz / M;
+        }
     });
 }
 

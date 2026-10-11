@@ -2,8 +2,15 @@
 
 #include "particles.h"
 
-// FLYBY_CM_VELOCITY: pair time steps use the subsystem centre-of-mass velocity of members (FROST-CLUSTERS II)
+// FLYBY_CM_VELOCITY: pair time steps use the subsystem centre-of-mass velocity of members
+// (FROST-CLUSTERS II, Rantala et al. 2025, arXiv:2506.04330, sec. 2.1)
 extern bool flyby_cm_velocity;
+// Velocities that enter the pair time steps (fly-by criterion and the time symmetrisation) of slots [lo, hi):
+// vx, vy, vz, or in collisional mode with FLYBY_CM_VELOCITY the subsystem c.o.m. velocity of the members of
+// g_subsystem_mgr.active. Device pointers, valid until the next call. Used by every path that computes pair
+// time steps (DtK, AccDtK, the HHS_CC split, the CPU small-set path).
+struct PairVelocities { double* x; double* y; double* z; };
+PairVelocities pair_velocities(Particles& p, int lo, int hi);
 
 // Full N-body
 void compute_acceleration_and_timestep(Particles& p, double G, double soft2, double eta);

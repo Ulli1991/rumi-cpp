@@ -272,6 +272,34 @@ def cc_vs_plain(exe, label, cfg, ratio):
     return check(f"{label} max|dE/E| HHS_CC / plain", cc / plain, ratio)
 
 
+def paths_agree(exe, label, cfg, bound):
+    """The CPU small-set path (SERIAL_N2_CPU covers the whole run) against the device path on the same run: the
+    same LogH calls and GBS steps per step, |dE/E| per step equal to `bound` (relative)."""
+    def stats(out):
+        return [(int(a), int(b)) for a, b in re.findall(r"Integration: LogH=(\d+) \(gbs=(\d+)", out)]
+    dev_out = run_output(exe, dict(cfg, SERIAL_N2_CPU="0"))
+    cpu_out = run_output(exe, dict(cfg, SERIAL_N2_CPU="1000000"))
+    dev, cpu = diagnostics(dev_out), diagnostics(cpu_out)
+    print(f"   LogH calls, GBS steps per step: device {stats(dev_out)}, cpu {stats(cpu_out)}")
+    print(f"   |dE/E| device {[f'{r[0]:.6e}' for r in dev]}, cpu {[f'{r[0]:.6e}' for r in cpu]}")
+    ok = check(f"{label} steps (device vs cpu)", abs(len(dev) - len(cpu)), 0)
+    ok &= check(f"{label} steps with other LogH calls or GBS steps",
+                sum(a != b for a, b in zip(stats(dev_out), stats(cpu_out))), 0)
+    return ok & check(f"{label} max relative |dE/E| difference",
+                      max(abs(a[0] - b[0]) / max(a[0], 1e-300) for a, b in zip(dev, cpu)), bound)
+
+
+def cc_consistent(exe, label, cfg, bound):
+    """HHS_CC must split the fast set with the pair time steps of the time-step kernel (NBODY_CHECK_CC reports a
+    particle whose pair minimum in the split lies below its dt_adapt)."""
+    os.environ["NBODY_CHECK_CC"] = "1"
+    out = run_output(exe, dict(cfg, HHS_CC="true"))
+    del os.environ["NBODY_CHECK_CC"]
+    bad = sum(int(n) for n in re.findall(r"CC_CHECK: (\d+) of", out))
+    ok = check(f"{label} particles with a split pair step below dt_adapt", bad, 0)
+    return ok & check(f"{label} max|dE/E|", max(r[0] for r in diagnostics(out)), bound)
+
+
 def ranks_agree(exe, label, cfg, bound):
     """The same run on 1 and 2 ranks: the energy series must agree to round-off (MPI-only paths)."""
     launcher = os.environ.get("NBODY_TEST_LAUNCHER", "")
@@ -489,6 +517,15 @@ CASES = {
     "cc_binaries50": lambda exe: all_binaries(exe, "50 % binaries, HHS_CC", dict(BINARIES50, HHS_CC="true"), 1250),
     # measured 5.0e-11 / 3.8e-11 = 1.3 (10 before binaries kept their perturbers); BIFROST population: 0.76
     "cc_vs_plain_binaries50": lambda exe: cc_vs_plain(exe, "50 % binaries", BINARIES50, 3.0),
+    # FLYBY_CM_VELOCITY (FROST-CLUSTERS II sec. 2.1): only the device kernels used the subsystem c.o.m. velocity;
+    # the CPU small-set path and the HHS_CC split kept the component velocities. Before: CPU 1.255e-10 vs device
+    # 6.42e-11 after step 1 (relative 0.95), LogH calls 136 vs 116 (6.4e-6 relative with the component velocities
+    # on both paths). Measured after: same LogH calls and GBS steps, 2.2e-5 relative (9.5e-6 with 2 threads).
+    # HHS_CC: 331 particles had a pair step in the split below their dt_adapt; 0 after (max |dE/E| 5.7e-11)
+    "cm_cpu_vs_device": lambda exe: paths_agree(exe, "c.o.m. fly-by step", dict(BINARIES, FLYBY_CM_VELOCITY="true"),
+                                                2.9e-5),
+    "cc_cm_consistent": lambda exe: cc_consistent(exe, "50 % binaries, HHS_CC, c.o.m. fly-by step",
+                                                  dict(BINARIES50, FLYBY_CM_VELOCITY="true"), 1e-8),
     # Triple branch of detect_from_pairs used a particle id where the union-find wanted a compact id
     # (out of bounds for ids >= the number of pair members; the tests' triples had ids 0-2)
     # The secular-triple driver took the inner pair from the first two ids (fixed 2026-10-10)
