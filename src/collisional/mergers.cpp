@@ -39,10 +39,32 @@ double gw_coalescence_time(double a, double e, double m1, double m2,
 // ============================================================================
 
 double tidal_disruption_radius(double m_star, double R_star, double M_bh) {
-    // R_td = η * ((m_star + M_bh) / m_star)^{1/3} * R_star
-    // η = 1.3: numerical prefactor from Rees (1988, Nature 333, 523)
-    // R_star should be in the same units as positions (pc)
-    return 1.3 * std::cbrt((m_star + M_bh) / m_star) * R_star;
+    // r_t = 1.3 (M_bh / m_star)^{1/3} R_star: FROST-CLUSTERS I (Rantala et al. 2024) App. B3.3 and FROST-CLUSTERS
+    // III sec. 2.1.4, the cube-root scaling of Kochanek (1992). (Was 1.3 ((m + M) / m)^{1/3} R, BIFROST 2023.)
+    // R_star in the same units as positions (pc)
+    return 1.3 * std::cbrt(M_bh / m_star) * R_star;
+}
+
+double collision_distance(int kw1, double m1, double R1, int kw2, double m2, double R2, double G, double c,
+                          MergerType& type) {
+    const bool bh1 = (kw1 == 14), bh2 = (kw2 == 14);
+    const double r_isco = c > 0.0 ? 6.0 * G * (m1 + m2) / (c * c) : 0.0;
+    if (bh1 && bh2) { type = MergerType::ISCO; return r_isco; }
+    if (bh1 || bh2) {
+        const double m_s = bh1 ? m2 : m1, R_s = bh1 ? R2 : R1, M_bh = bh1 ? m1 : m2;
+        const double r_t = R_s > 0.0 && m_s > 0.0 ? std::max(tidal_disruption_radius(m_s, R_s, M_bh), R_s) : 0.0;
+        if (r_isco >= r_t) { type = MergerType::ISCO; return r_isco; }
+        type = MergerType::TIDAL_DISRUPTION;
+        return r_t;
+    }
+    type = MergerType::STELLAR_COLLISION;
+    return R1 + R2;
+}
+
+double collision_remnant_mass(MergerType type, int kw1, double m1, int kw2, double m2) {
+    if (type == MergerType::TIDAL_DISRUPTION) return kw1 == 14 ? m1 : m2;
+    (void)kw1; (void)kw2;
+    return m1 + m2;
 }
 
 // ============================================================================
@@ -177,7 +199,9 @@ std::vector<MergerEvent> detect_mergers(const SubsystemManager& mgr,
 
         double m1 = h_m(r1), m2 = h_m(r2);
         int stype1 = h_stype(r1), stype2 = h_stype(r2);
-        bool is_bh1 = (stype1 == 14), is_bh2 = (stype2 == 14);
+        // A massless member is the placeholder of a body merged inside a subsystem integration
+        // (finalize_subsystem_collision): already merged, removed with the next compaction of its range
+        if (m1 <= 0.0 || m2 <= 0.0) continue;
 
         MergerEvent ev{};
         ev.type = MergerType::NONE;
@@ -186,11 +210,14 @@ std::vector<MergerEvent> detect_mergers(const SubsystemManager& mgr,
         ev.m1 = m1;
         ev.m2 = m2;
 
-        // ISCO check (BH)
-        double r_isco = 6.0 * G * (m1 + m2) / (c_code * c_code);
-        if ((is_bh1 || is_bh2) && r < r_isco) {
-            ev.type = MergerType::ISCO;
-            ev.m_remnant = m1 + m2;  // will be refined by bh_bh_remnant
+        // Contact: ISCO (two BHs, or a BH and a body it swallows whole), tidal disruption, stellar collision
+        // (FROST-CLUSTERS I App. B3 criteria, shared with the subsystem integrations: collision_distance)
+        MergerType ctype;
+        const double r_coll = collision_distance(stype1, m1, h_srad(r1) * R_sun_to_pc, stype2, m2,
+                                                 h_srad(r2) * R_sun_to_pc, G, c_code, ctype);
+        if (r < r_coll) {
+            ev.type = ctype;
+            ev.m_remnant = collision_remnant_mass(ctype, stype1, m1, stype2, m2);
         }
 
         // GW coalescence timescale
@@ -199,35 +226,6 @@ std::vector<MergerEvent> detect_mergers(const SubsystemManager& mgr,
             if (t_gw < dt) {
                 ev.type = MergerType::GW_COALESCENCE;
                 ev.m_remnant = m1 + m2;
-            }
-        }
-
-        // Stellar collision
-        if (ev.type == MergerType::NONE && !is_bh1 && !is_bh2) {
-            double R1_pc = h_srad(r1) * R_sun_to_pc;
-            double R2_pc = h_srad(r2) * R_sun_to_pc;
-            if (r < R1_pc + R2_pc) {
-                ev.type = MergerType::STELLAR_COLLISION;
-                ev.m_remnant = m1 + m2;
-            }
-        }
-
-        // Tidal disruption (star + BH)
-        if (ev.type == MergerType::NONE) {
-            if (is_bh1 && !is_bh2) {
-                double R_star_pc = h_srad(r2) * R_sun_to_pc;
-                double R_td = tidal_disruption_radius(m2, R_star_pc, m1);
-                if (r < R_td) {
-                    ev.type = MergerType::TIDAL_DISRUPTION;
-                    ev.m_remnant = m1;  // BH eats the star (simplified)
-                }
-            } else if (!is_bh1 && is_bh2) {
-                double R_star_pc = h_srad(r1) * R_sun_to_pc;
-                double R_td = tidal_disruption_radius(m1, R_star_pc, m2);
-                if (r < R_td) {
-                    ev.type = MergerType::TIDAL_DISRUPTION;
-                    ev.m_remnant = m2;
-                }
             }
         }
 
@@ -397,6 +395,136 @@ void execute_merger(const MergerEvent& event, Particles& p,
         }
     }
 
+}
+
+// ============================================================================
+// Collision decided inside a subsystem integration (FROST-CLUSTERS I App. B3)
+// ============================================================================
+
+void finalize_subsystem_collision(const SubsystemCollision& c, Particles& p, SubsystemManager& mgr,
+                                  EnergyBookkeeping& books, double G, double c_code) {
+    auto h_x  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.x);
+    auto h_y  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.y);
+    auto h_z  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.z);
+    auto h_vx = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vx);
+    auto h_vy = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vy);
+    auto h_vz = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vz);
+    auto h_m  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.mass);
+    auto h_stype = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.stellar_type);
+    auto h_spin = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.spin_vec);
+
+    const int ik = mgr.safe_pid_to_idx(c.pid_keep), ig = mgr.safe_pid_to_idx(c.pid_gone);
+    if (ik < 0 || ig < 0) {
+        std::printf("  [SUBSYS COLLISION] WARNING: pids %d / %d not found, event dropped\n", c.pid_keep, c.pid_gone);
+        return;
+    }
+    const double M = c.m_keep + c.m_gone;
+    const double xr[3] = {h_x(ik), h_y(ik), h_z(ik)}, vr[3] = {h_vx(ik), h_vy(ik), h_vz(ik)};
+    double x1[3], x2[3], v1[3], v2[3];   // the pair at its frozen relative state around the remnant
+    for (int k = 0; k < 3; k++) {
+        x1[k] = xr[k] + c.d_keep[k]; x2[k] = xr[k] + c.d_gone[k];
+        v1[k] = vr[k] + c.u_keep[k]; v2[k] = vr[k] + c.u_gone[k];
+    }
+    std::vector<int> mem;
+    for (int b = 0; b < c.n_members; b++) mem.push_back(mgr.safe_pid_to_idx(c.member_pids[b]));
+    auto is_member = [&](int k) { return std::find(mem.begin(), mem.end(), k) != mem.end(); };
+    auto dist = [&](int k, const double q[3]) {
+        const double ex = h_x(k) - q[0], ey = h_y(k) - q[1], ez = h_z(k) - q[2];
+        return std::sqrt(ex*ex + ey*ey + ez*ez);
+    };
+
+    // 1. The merge itself (mass and momentum conserved): the subsystem's internal energy change at the collision,
+    //    E_after - E_before, from the integrator (exact, with the other members at their positions then)
+    books.E_merge -= c.dE_int;
+    // 2. Potential with the bodies outside the subsystem: m_keep, m_gone at the frozen offsets become M at the
+    //    centre of mass (quadrupole order), evaluated at the remnant's final position
+    double dU_ext = 0.0;
+    for (int k = 0; k < p.N; k++) {
+        if (h_m(k) <= 0.0 || is_member(k)) continue;
+        dU_ext -= G * h_m(k) * (M / dist(k, xr) - c.m_keep / dist(k, x1) - c.m_gone / dist(k, x2));
+    }
+    books.E_merge -= dU_ext;
+    // 3. Orbital momentum and angular momentum of the pair (PN subsystems: booked by the caller's P / L books)
+    if (!c.pl_booked) {
+        books.sink_PL(c.m_keep, x1, v1);
+        books.sink_PL(c.m_gone, x2, v2);
+        books.sink_PL(M, xr, vr, -1.0);
+    }
+
+    // 4. Remnant physics at the remnant's final state, booked as execute_merger books it (all other bodies)
+    double m_rem = collision_remnant_mass(c.type, c.kw_keep, c.m_keep, c.kw_gone, c.m_gone);
+    double kick[3] = {0, 0, 0}, chi_rem[3] = {0, 0, 0};
+    double L_orb[3] = {0, 0, 0};
+    {
+        const double* d[2] = {c.d_keep, c.d_gone};
+        const double* u[2] = {c.u_keep, c.u_gone};
+        const double m[2] = {c.m_keep, c.m_gone};
+        for (int q = 0; q < 2; q++) {
+            L_orb[0] += m[q] * (d[q][1] * u[q][2] - d[q][2] * u[q][1]);
+            L_orb[1] += m[q] * (d[q][2] * u[q][0] - d[q][0] * u[q][2]);
+            L_orb[2] += m[q] * (d[q][0] * u[q][1] - d[q][1] * u[q][0]);
+        }
+    }
+    if (c.kw_keep == 14 && c.kw_gone == 14 && c_code > 0.0) {
+        const double chi1[3] = {h_spin(ik, 0), h_spin(ik, 1), h_spin(ik, 2)};
+        const double chi2[3] = {h_spin(ig, 0), h_spin(ig, 1), h_spin(ig, 2)};
+        bh_bh_remnant(c.m_keep, c.m_gone, chi1, chi2, L_orb, m_rem, chi_rem, kick, G, c_code);
+    }
+    const double u[3] = {vr[0] + kick[0], vr[1] + kick[1], vr[2] + kick[2]};
+    double E_before = 0.5 * M * (vr[0]*vr[0] + vr[1]*vr[1] + vr[2]*vr[2]);
+    double E_after = 0.5 * m_rem * (u[0]*u[0] + u[1]*u[1] + u[2]*u[2]);
+    if (m_rem != M)
+        for (int k = 0; k < p.N; k++) {
+            if (k == ik || k == ig || h_m(k) <= 0.0) continue;
+            E_after -= G * h_m(k) * (m_rem - M) / dist(k, xr);
+        }
+    books.E_merge += E_before - E_after;
+    books.sink_PL(M, xr, vr);
+    books.sink_PL(m_rem, xr, u, -1.0);
+
+    h_m(ik) = m_rem;
+    h_vx(ik) = u[0]; h_vy(ik) = u[1]; h_vz(ik) = u[2];
+    h_vx(ig) = u[0]; h_vy(ig) = u[1]; h_vz(ig) = u[2];   // the massless placeholder co-moves
+    h_m(ig) = 0.0;
+    {
+        const int k1 = c.kw_keep, k2 = c.kw_gone;
+        h_stype(ik) = (k1 >= 10 || k2 >= 10) ? std::max(k1, k2) : k1;
+    }
+    for (int k = 0; k < 3; k++) h_spin(ik, k) = chi_rem[k];
+    Kokkos::deep_copy(p.vx, h_vx); Kokkos::deep_copy(p.vy, h_vy); Kokkos::deep_copy(p.vz, h_vz);
+    p.zero_kick_compensation();
+    Kokkos::deep_copy(p.mass, h_m);
+    Kokkos::deep_copy(p.stellar_type, h_stype);
+    Kokkos::deep_copy(p.spin_vec, h_spin);
+    if (h_stype(ik) < 10) {   // a merged star restarts as a zero-age star of its mass (as execute_merger)
+        auto h_mzams = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.m_zams);
+        auto h_sage  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.stellar_age);
+        h_mzams(ik) = m_rem;
+        h_sage(ik) = 0.0;
+        Kokkos::deep_copy(p.m_zams, h_mzams);
+        Kokkos::deep_copy(p.stellar_age, h_sage);
+    }
+
+    mgr.ghost_pids.insert(c.pid_gone);
+    mgr.step_mergers++;
+
+    MergerEvent ev{};
+    ev.type = c.type;
+    ev.pid1 = c.pid_keep; ev.pid2 = c.pid_gone;
+    ev.m1 = c.m_keep; ev.m2 = c.m_gone; ev.m_remnant = m_rem;
+    for (int k = 0; k < 3; k++) { ev.v_kick[k] = kick[k]; ev.spin_remnant[k] = chi_rem[k]; }
+    Subsystem tmp{};
+    {
+        double rr[3], vv[3];
+        for (int k = 0; k < 3; k++) { rr[k] = c.d_gone[k] - c.d_keep[k]; vv[k] = c.u_gone[k] - c.u_keep[k]; }
+        auto oe = cartesian_to_elements(rr, vv, G * M);
+        tmp.orb = oe;
+    }
+    g_merger_tree.record(ev, tmp, g_sim_time);
+    static const char* names[] = {"GW", "ISCO", "TDE", "STELLAR", "NONE"};
+    std::printf("  [SUBSYS COLLISION] %s pids %d + %d, m %.4g + %.4g -> %.4g Msun, r_sep / r_coll = %.4g, a = %.4g pc,"
+                " e = %.6f, n = %d, dE_int = %.6e\n", names[(int)c.type], c.pid_keep, c.pid_gone, c.m_keep, c.m_gone,
+                m_rem, c.r_coll > 0.0 ? c.r_sep / c.r_coll : -1.0, tmp.orb.a, tmp.orb.e, c.n_members, c.dE_int);
 }
 
 // ============================================================================

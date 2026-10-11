@@ -616,13 +616,14 @@ void init_plummer(Particles& p, int N, double M_total_msun, double r_half_pc, in
             double M_bin = m_i + m_j;
             double mu = G_CODE * M_bin;
 
-            double r_contact = 0.0;
-            bool bh_i = (h_kw[i] == 14), bh_j = (h_kw[j] == 14);
             bool compact_i = (h_kw[i] >= 10), compact_j = (h_kw[j] >= 10);
-            if (bh_i && bh_j) r_contact = 6.0 * G_CODE * M_bin / (c_kms * c_kms);
-            else if (bh_i) r_contact = tidal_disruption_radius(m_j, h_srad[j] * R_sun_pc, m_i);
-            else if (bh_j) r_contact = tidal_disruption_radius(m_i, h_srad[i] * R_sun_pc, m_j);
-            else r_contact = (h_srad[i] + h_srad[j]) * R_sun_pc;
+            // Pairs with a BH from collision_distance (FC-I tidal radius); two non-BHs keep (R1 + R2) R_sun as before,
+            // bit for bit (R1 R_sun + R2 R_sun rounds differently and changes the redrawn e, hence the ICs)
+            MergerType contact_type;
+            const double r_contact = (h_kw[i] == 14 || h_kw[j] == 14)
+                ? collision_distance(h_kw[i], m_i, h_srad[i] * R_sun_pc, h_kw[j], m_j, h_srad[j] * R_sun_pc, G_CODE,
+                                     c_kms, contact_type)
+                : (h_srad[i] + h_srad[j]) * R_sun_pc;
             bool check_gw = binary_peri_check && compact_i && compact_j;
 
             // Log-uniform semi-major axis (BIFROST Table A1: f(a) flat in log a)
@@ -872,7 +873,7 @@ void init_binary_test(Particles& p, double a_pc, double e,
     // At periapsis, V_scale is maximal → dt_norm huge → large w=v init error.
     // At apoapsis: r_rel = (-a*(1+e), 0, 0), v_rel = (0, -sqrt(mu/a*(1-e)/(1+e)), 0)
     double r_apo_val = a_pc * (1.0 + e);
-    double v_apo = std::sqrt(mu / a_pc * (1.0 - e) / (1.0 + e + 1e-30));
+    double v_apo = e < 1.0 ? std::sqrt(mu / a_pc * (1.0 - e) / (1.0 + e + 1e-30)) : 0.0;
 
     // Split into two particles around COM at origin
     double f1 = m2_msun / M_total;  // particle 0 gets -f1 * r_rel
@@ -891,6 +892,17 @@ void init_binary_test(Particles& p, double a_pc, double e,
     h_x(1) = -f2 * r_apo_val;  h_y(1) = 0.0;  h_z(1) = 0.0;
     h_vx(0) = 0.0; h_vy(0) =  f1 * v_apo; h_vz(0) = 0.0;
     h_vx(1) = 0.0; h_vy(1) = -f2 * v_apo; h_vz(1) = 0.0;
+    if (e >= 1.0) {
+        // Parabolic or hyperbolic encounter: a_pc is the pericentre distance q; start inbound at r0 = 5 q (true
+        // anomaly f < 0), relative state r = r0 (cos f, sin f), v = sqrt(mu / p) (-sin f, e + cos f), p = q (1 + e)
+        const double q = a_pc, p_semi = q * (1.0 + e), r0 = 5.0 * q;
+        const double f = -std::acos(std::max(-1.0, std::min(1.0, (p_semi / r0 - 1.0) / e)));
+        const double vs = std::sqrt(mu / p_semi);
+        const double rr[2] = {r0 * std::cos(f), r0 * std::sin(f)};
+        const double vv[2] = {-vs * std::sin(f), vs * (e + std::cos(f))};
+        h_x(0) = -f1 * rr[0]; h_y(0) = -f1 * rr[1]; h_vx(0) = -f1 * vv[0]; h_vy(0) = -f1 * vv[1];
+        h_x(1) =  f2 * rr[0]; h_y(1) =  f2 * rr[1]; h_vx(1) =  f2 * vv[0]; h_vy(1) =  f2 * vv[1];
+    }
     h_mass(0) = m1_msun;
     h_mass(1) = m2_msun;
     // Rotate the orbit in its plane by rot_deg (moves the argument of periapsis; default pi)
@@ -1000,7 +1012,7 @@ void init_triple_test(Particles& p,
 
     // --- Inner binary at apoapsis (in x-y plane) ---
     double r_apo_in = a_in_pc * (1.0 + e_in);
-    double v_apo_in = std::sqrt(mu_in / a_in_pc * (1.0 - e_in) / (1.0 + e_in + 1e-30));
+    double v_apo_in = e_in < 1.0 ? std::sqrt(mu_in / a_in_pc * (1.0 - e_in) / (1.0 + e_in + 1e-30)) : 0.0;
     double f1 = m2_msun / M_in;   // particle 0 fraction
     double f2 = m1_msun / M_in;   // particle 1 fraction
 
@@ -1010,8 +1022,19 @@ void init_triple_test(Particles& p,
     double x1 = -f2 * r_apo_in,  vy1 = -f2 * v_apo_in;
     // TRIPLE_IN_ROT_DEG: inner orbit rotated about z by this angle (apoapsis direction, member velocities)
     const double cr = std::cos(in_rot_deg * M_PI / 180.0), sr = std::sin(in_rot_deg * M_PI / 180.0);
-    const double y0 = sr * x0, y1 = sr * x1, vx0 = -sr * vy0, vx1 = -sr * vy1;
+    double y0 = sr * x0, y1 = sr * x1, vx0 = -sr * vy0, vx1 = -sr * vy1;
     x0 *= cr; x1 *= cr; vy0 *= cr; vy1 *= cr;
+    if (e_in >= 1.0) {
+        // Parabolic / hyperbolic inner encounter (as init_binary_test): a_in_pc is the pericentre distance q,
+        // start inbound at 5 q; relative vector r_1 - r_0 = r0 (cos f, sin f)
+        const double q = a_in_pc, p_semi = q * (1.0 + e_in), r0 = 5.0 * q;
+        const double f = -std::acos(std::max(-1.0, std::min(1.0, (p_semi / r0 - 1.0) / e_in)));
+        const double vs = std::sqrt(mu_in / p_semi);
+        const double rr[2] = {r0 * std::cos(f), r0 * std::sin(f)};
+        const double vv[2] = {-vs * std::sin(f), vs * (e_in + std::cos(f))};
+        x0 = -f1 * rr[0]; y0 = -f1 * rr[1]; vx0 = -f1 * vv[0]; vy0 = -f1 * vv[1];
+        x1 =  f2 * rr[0]; y1 =  f2 * rr[1]; vx1 =  f2 * vv[0]; vy1 =  f2 * vv[1];
+    }
 
     // --- Outer orbit at apoapsis ---
     // Outer angular momentum direction: L_out = (0, sin(i), cos(i))
@@ -1022,7 +1045,7 @@ void init_triple_test(Particles& p,
     double r3_x, r3_y, r3_z, v3_x, v3_y, v3_z;
     {
         double rx, rw, vx_, vw;
-        if (e_out > 1.0) {
+        if (e_out >= 1.0) {
             const double q = a_out_pc, p_semi = q * (1.0 + e_out), r0 = 5.0 * q;
             const double f = -std::acos(std::max(-1.0, std::min(1.0, (p_semi / r0 - 1.0) / e_out)));
             const double vs = std::sqrt(mu_out / p_semi);

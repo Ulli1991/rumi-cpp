@@ -84,9 +84,22 @@ struct SubsystemManager {
     // Particle IDs removed by mergers. IDs are never reused, so the set only grows.
     std::unordered_set<int> removed_pids;
 
-    // Reinstate a subsystem list saved before a recursive call, dropping subsystems
-    // with a member that a merger removed in the meantime.
+    // Members merged away inside a subsystem integration (finalize_subsystem_collision) that are still in the
+    // particle arrays as massless placeholders: they stay members of their subsystem (so the FSI never applies the
+    // remnant's force to them) until the next compaction of their HHS range moves them to removed_pids
+    std::unordered_set<int> ghost_pids;
+
+    // Reinstate a subsystem list saved before a recursive call: removed members are dropped from their
+    // subsystems (strip_removed), subsystems left with fewer than two members are dropped.
     void restore_active(const std::vector<Subsystem>& saved);
+
+    // Drop removed_pids members from every active subsystem (persistent LogH state reset where members went),
+    // and subsystems left with fewer than two members
+    void strip_removed();
+
+    // After compact_remove_zero_mass: the compacted ghosts (p.removed_pid_log from log_from on) become removed
+    // pids, subsystems are stripped, the pid map and the flags rebuilt
+    void ghosts_compacted(Particles& p, size_t log_from);
 
     // GPU output buffer for neighbor pairs (written by pairwise kernels)
     Kokkos::View<int*>    ngb_pair_i;    // particle index i
@@ -174,6 +187,9 @@ struct SubsystemManager {
 
     // Step-level merger and escaper counters
     int step_mergers = 0;              // mergers executed this step
+    int step_subsys_collisions = 0;    // ... of them decided inside subsystem integrations (FROST-CLUSTERS I App. B3)
+    int step_peri_landings = 0;        // collision candidates a step was forced onto the pericentre of
+    int step_peri_misses = 0;          // ... whose actual pericentre cleared the collision distance
     int step_escapers = 0;             // escapers removed this step
 
     // Reset step-level counters (call at start of each outer step)

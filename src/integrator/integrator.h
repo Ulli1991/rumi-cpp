@@ -86,3 +86,10 @@ void compute_acceleration_and_timestep_distributed(DistributedParticles& dp,
 
 // Release global Kokkos Views held by the integrator (call before Kokkos::finalize)
 void release_integrator_globals();
+
+#ifdef ENABLE_COLLISIONAL
+// Remove massless particles from [start, start + count) (merger remnants' partners; placeholders of bodies merged
+// inside subsystem integrations become removed ids); the tail shifts down. Returns how many; the caller rebuilds the
+// pid map (and MPI slices) and the subsystem flags
+int compact_zero_mass_range(Particles& p, int start, int count);
+#endif

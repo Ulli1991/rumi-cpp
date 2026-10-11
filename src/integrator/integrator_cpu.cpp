@@ -637,11 +637,13 @@ static void cpu_sync_pos_vel_from_device(CpuSubset& s, Particles& p, int cpu_sta
     auto h_cvx = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Kokkos::subview(p.cvx, rng));
     auto h_cvy = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Kokkos::subview(p.cvy, rng));
     auto h_cvz = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Kokkos::subview(p.cvz, rng));
+    auto h_m = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Kokkos::subview(p.mass, rng));   // collisions
     Kokkos::fence();
     for (int i = 0; i < count; i++) {
         s.x[cpu_start + i] = h_x(i); s.y[cpu_start + i] = h_y(i); s.z[cpu_start + i] = h_z(i);
         s.vx[cpu_start + i] = h_vx(i); s.vy[cpu_start + i] = h_vy(i); s.vz[cpu_start + i] = h_vz(i);
         s.cvx[cpu_start + i] = h_cvx(i); s.cvy[cpu_start + i] = h_cvy(i); s.cvz[cpu_start + i] = h_cvz(i);
+        s.mass[cpu_start + i] = h_m(i);   // a collision inside a subsystem integration changes masses
     }
 }
 #endif
@@ -712,6 +714,25 @@ static int cpu_hhs_recursive(CpuSubset& s, Particles& p, int start, int count,
                              double dt_min, double eta, bool dt_valid, int depth = 0) {
     if (count == 0) return 0;
     int n_removed = 0;
+#ifdef ENABLE_COLLISIONAL
+    // Placeholders of bodies merged inside subsystem integrations leave before this range computes time steps or
+    // detects subsystems (as in hhs_fsi_recursive): compaction on the device copy, then reload the subset
+    if (s.collisional && !g_subsystem_mgr.ghost_pids.empty()) {
+        bool any = false;
+        for (int i = start; i < start + count && !any; i++) any = s.mass[i] <= 0.0;
+        if (any) {
+            s.copy_to_device(p, s.device_start);
+            const int k = compact_zero_mass_range(p, s.device_start + start, count);
+            g_subsystem_mgr.rebuild_pid_to_idx(p);
+            g_subsystem_mgr.update_particle_flags(p);
+            s.resize(s.count - k);
+            s.copy_from_device(p, s.device_start);
+            n_removed += k;
+            count -= k;
+            if (count <= 0) return n_removed;
+        }
+    }
+#endif
     if (depth < HHSCounters::MAX_DEPTH) {
         g_hhs_counters.cpu_depth_calls[depth]++;
         g_hhs_counters.cpu_depth_count[depth] += count;
@@ -831,8 +852,8 @@ static int cpu_hhs_recursive(CpuSubset& s, Particles& p, int start, int count,
                         execute_merger(ev, p, g_subsystem_mgr, g_energy_books,
                                        G, g_collisional.c_code);
                     }
-                    // The subset is a suffix of [0, N): compaction shortens it from the end
-                    int k = p.compact_remove_zero_mass(dev_start);
+                    // Compaction of this range only (the tail shifts down)
+                    int k = compact_zero_mass_range(p, dev_start, count);
                     g_subsystem_mgr.rebuild_pid_to_idx(p);
                     g_subsystem_mgr.update_particle_flags(p);
                     s.resize(s.count - k);

@@ -1,6 +1,7 @@
 #include "kepler.h"
 #include <cmath>
 #include <algorithm>
+#include <limits>
 
 // ============================================================================
 // Kepler equation solver: Mikkola (1987) cubic start with BIFROST empirical
@@ -274,4 +275,55 @@ void kepler_advance(double r[3], double v[3], double mu, double dt) {
 
     // Reconstruct Cartesian state
     elements_to_cartesian(oe.a, oe.e, oe.inc, oe.Omega, oe.omega, M_new, mu, r, v);
+}
+
+// x - sin x and sinh x - x without cancellation for small |x|
+static double x_minus_sin(double x) {
+    if (std::fabs(x) > 0.1) return x - std::sin(x);
+    const double x2 = x * x;
+    return x * x2 / 6.0 * (1.0 - x2 / 20.0 * (1.0 - x2 / 42.0 * (1.0 - x2 / 72.0)));
+}
+static double sinh_minus_x(double x) {
+    if (std::fabs(x) > 0.1) return std::sinh(x) - x;
+    const double x2 = x * x;
+    return x * x2 / 6.0 * (1.0 + x2 / 20.0 * (1.0 + x2 / 42.0 * (1.0 + x2 / 72.0)));
+}
+
+double kepler_time_to_pericentre(const double r[3], const double v[3], double mu, double* r_peri) {
+    const double rr = std::sqrt(r[0]*r[0] + r[1]*r[1] + r[2]*r[2]);
+    const double v2 = v[0]*v[0] + v[1]*v[1] + v[2]*v[2];
+    const double rv = r[0]*v[0] + r[1]*v[1] + r[2]*v[2];
+    const double hx = r[1]*v[2] - r[2]*v[1], hy = r[2]*v[0] - r[0]*v[2], hz = r[0]*v[1] - r[1]*v[0];
+    const double p = (hx*hx + hy*hy + hz*hz) / mu;              // semi-latus rectum
+    const double eps = 0.5 * v2 - mu / rr;                      // specific energy
+    const double e = std::sqrt(std::max(0.0, 1.0 + 2.0 * eps * p / mu));
+    if (r_peri) *r_peri = p / (1.0 + e);
+    constexpr double inf = std::numeric_limits<double>::infinity();
+    if (e < 1e-12) return 0.0;                                  // circular: every point is the pericentre
+    if (std::fabs(1.0 - e) < 1e-6) {
+        // Near-parabolic: Barker's equation, t - t_p = sqrt(p^3 / mu) (D + D^3 / 3) / 2 with D = tan(nu / 2) =
+        // r.v / sqrt(mu p) (relative error O(|1 - e|); the caller iterates on the pericentre anyway)
+        const double D = rv / std::sqrt(mu * p);
+        const double t_since = 0.5 * std::sqrt(p * p * p / mu) * (D + D * D * D / 3.0);
+        if (t_since <= 0.0) return -t_since;
+        if (e >= 1.0) return inf;
+        // bound by a hair: the next pericentre one (very long) period later
+        const double a = -mu / (2.0 * eps);
+        return 2.0 * M_PI * std::sqrt(a * a * a / mu) - t_since;
+    }
+    if (eps < 0.0) {
+        // Ellipse: r.v = e sqrt(mu a) sin E, r = a (1 - e cos E); M = E - e sin E with 1 - e = (p / a) / (1 + e)
+        const double a = -mu / (2.0 * eps);
+        const double n = std::sqrt(mu / (a * a * a));
+        const double E = std::atan2(rv / (e * std::sqrt(mu * a)), (1.0 - rr / a) / e);
+        const double M = x_minus_sin(E) + (p / a) / (1.0 + e) * std::sin(E);
+        return M < 0.0 ? -M / n : (2.0 * M_PI - M) / n;
+    }
+    // Hyperbola: r.v = e sqrt(mu A) sinh F (A = -a); M_h = e sinh F - F with e - 1 = (p / A) / (e + 1)
+    if (rv >= 0.0) return inf;
+    const double A = mu / (2.0 * eps);
+    const double n = std::sqrt(mu / (A * A * A));
+    const double F = std::asinh(rv / (e * std::sqrt(mu * A)));
+    const double Mh = sinh_minus_x(F) + (p / A) / (e + 1.0) * std::sinh(F);
+    return -Mh / n;
 }
