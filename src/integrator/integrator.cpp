@@ -1508,12 +1508,20 @@ struct Slow0Stats {
     Kokkos::View<double*> dt_pre{"slow0_dt_pre", 0};   // by particle id: dt_adapt before subsystem_timesteps
     struct Row { long long calls = 0, pert_all = 0, pert_any = 0; };
     std::map<std::tuple<int, int, int>, Row> rows;
+    // Pairs of two singles: bound or not, semi-major axis bins (AU), distinct pairs (by pid)
+    long long pair_unbound = 0;
+    std::map<int, long long> pair_abin;   // upper edge in AU -> calls
+    std::set<std::pair<int, int>> pair_ids;
+    std::map<int, long long> pair_rbin;   // separation / r_ngb bin -> calls
     void print() const {
         if (!on || MPIComm::rank() != 0) return;
         std::printf("SLOW0_STATS: size subsystems singles | calls pert_all pert_any%s\n", rows.empty() ? " (none)" : "");
         for (const auto& kv : rows)
             std::printf("SLOW0_STATS: %d %d %d | %lld %lld %lld\n", std::get<0>(kv.first), std::get<1>(kv.first),
                         std::get<2>(kv.first), kv.second.calls, kv.second.pert_all, kv.second.pert_any);
+        std::printf("SLOW0_PAIRS: two-single sets: distinct pairs %zu, unbound calls %lld\n", pair_ids.size(), pair_unbound);
+        for (const auto& kv : pair_abin) std::printf("SLOW0_PAIRS: bound a < %d AU: %lld calls\n", kv.first, kv.second);
+        for (const auto& kv : pair_rbin) std::printf("SLOW0_PAIRS: separation < %d r_ngb: %lld calls\n", kv.first, kv.second);
         std::fflush(stdout);
     }
     void record_pre(const Particles& p, int start, int count) {
@@ -1528,7 +1536,7 @@ struct Slow0Stats {
         auto dt = p.dt_adapt;
         Kokkos::parallel_for("slow0_pre", count, KOKKOS_LAMBDA(int ii) { pre(pid(start + ii)) = dt(start + ii); });
     }
-    void record_set(const Particles& p, int start, int count, double pivot) {
+    void record_set(const Particles& p, int start, int count, double pivot, double G) {
         if (!on || count > 4) return;
         auto r = Kokkos::make_pair(start, start + count);
         auto hp = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Kokkos::subview(p.particle_id, r));
@@ -1541,6 +1549,29 @@ struct Slow0Stats {
                 double v = 0;
                 Kokkos::deep_copy(v, Kokkos::subview(dt_pre, hp(k)));
                 if (v >= pivot) slow_pre++;
+            }
+        }
+        if (count == 2 && singles == 2) {
+            auto hx = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Kokkos::subview(p.x, r));
+            auto hy = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Kokkos::subview(p.y, r));
+            auto hz = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Kokkos::subview(p.z, r));
+            auto hvx = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Kokkos::subview(p.vx, r));
+            auto hvy = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Kokkos::subview(p.vy, r));
+            auto hvz = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Kokkos::subview(p.vz, r));
+            auto hm = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Kokkos::subview(p.mass, r));
+            const double dx = hx(1) - hx(0), dy = hy(1) - hy(0), dz = hz(1) - hz(0);
+            const double dvx = hvx(1) - hvx(0), dvy = hvy(1) - hvy(0), dvz = hvz(1) - hvz(0);
+            const double rr = std::sqrt(dx * dx + dy * dy + dz * dz), v2 = dvx * dvx + dvy * dvy + dvz * dvz;
+            const double mu = G * (hm(0) + hm(1));
+            const double beta = 2.0 * mu / rr - v2;   // 1 / a * mu
+            pair_ids.insert({std::min(hp(0), hp(1)), std::max(hp(0), hp(1))});
+            const int rb[] = {1, 2, 5, 10, 100, 1000000};
+            for (int e : rb) if (rr < e * g_collisional.r_ngb) { pair_rbin[e]++; break; }
+            if (!(beta > 0.0)) pair_unbound++;
+            else {
+                const double a_au = mu / beta / AU_TO_PC;
+                const int ab[] = {206, 500, 1000, 2000, 5000, 1000000000};
+                for (int e : ab) if (a_au < e) { pair_abin[e]++; break; }
             }
         }
         Row& row = rows[std::make_tuple(count, (int)subs.size(), singles)];
@@ -2702,7 +2733,7 @@ static int hhs_fsi_recursive(
         if (use_mpi) g_hhs_counters.slow0_dist++;
         else g_hhs_counters.slow0_local++;
 #ifdef ENABLE_COLLISIONAL
-        if (p.collisional) slow0().record_set(p, start, count, pivot_dt);
+        if (p.collisional) slow0().record_set(p, start, count, pivot_dt, G);
 #endif
         double sub_pivot = pivot_dt * 0.5;
         int k = hhs_fsi_recursive(p, dp, start, count, sub_pivot,
