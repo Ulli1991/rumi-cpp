@@ -120,9 +120,12 @@ struct SubsystemManager {
     // With tol > 0 (FLYBY_CM_EPS x |E0|) also ck <- tidal-sampling constants (PairVelocities::k): 1e30 for
     // non-members, tol / (2 G R mu v) for members, with R the apocentre separation and v the pericentre relative
     // speed of a bound pair (else the separation and relative speed), mu its reduced mass; for larger subsystems R
-    // is twice the largest member distance from the c.o.m. and mu v the sum of m |v - v_cm|
+    // is twice the largest member distance from the c.o.m. and mu v the sum of m |v - v_cm|.
+    // cf <- floor of the tidal-sampling step: res x P (1 - e)^(3/2) for members of a bound 2-body subsystem, else 0.
+    // cm = false (component velocities, FLYBY_CM_VELOCITY off): only ck, cf are written, cvx, cvy, cvz are not touched
     void fill_cm_velocity(const Particles& p, int lo, int hi, Kokkos::View<double*> cvx, Kokkos::View<double*> cvy,
-                          Kokkos::View<double*> cvz, Kokkos::View<double*> ck, double tol);
+                          Kokkos::View<double*> cvz, Kokkos::View<double*> ck, Kokkos::View<double*> cf, double tol,
+                          double res, bool cm = true);
 
     // Enforce shared timestep: all members of each subsystem get min dt_adapt
     // Call after detection and before partition_by_pivot
@@ -143,6 +146,7 @@ struct SubsystemManager {
     int last_level_pairs = 0;       // neighbor pairs found at most recent detect_from_pairs
     int last_level_bound = 0;       // bound pairs at most recent detect_from_pairs
     int last_level_weak_split = 0;  // triples split into binary + field star (weak perturber) there
+    int last_level_flyby_cm_dropped = 0;  // distant fly-by pairs of a binary member that fail the c.o.m. test (FLYBY_NGB_CM)
 
     // Step-level diagnostics: accumulated across HHS recursion levels
     int step_total_pairs = 0;       // total neighbor pairs found across all levels
@@ -150,6 +154,7 @@ struct SubsystemManager {
     int step_total_subsystems = 0;  // total subsystems formed
     int step_n_bin = 0, step_n_fly = 0, step_n_trip_s = 0, step_n_trip_u = 0, step_n_multi = 0;
     int step_weak_split = 0;
+    int step_flyby_cm_dropped = 0;
     int step_n_secular = 0;
     int step_total_members = 0;
 

@@ -989,7 +989,7 @@ void init_binary_test_peri(Particles& p, double a_pc, double e,
 void init_triple_test(Particles& p,
                       double a_in_pc, double e_in, double m1_msun, double m2_msun,
                       double a_out_pc, double e_out, double m3_msun,
-                      double i_deg, bool outer_first) {
+                      double i_deg, bool outer_first, double in_rot_deg) {
     p.allocate(3, COLL_ENABLED);
 
     double M_in  = m1_msun + m2_msun;
@@ -1008,6 +1008,10 @@ void init_triple_test(Particles& p,
     // Apoapsis along +x, velocity along +y (CCW orbit, L along +z)
     double x0 =  f1 * r_apo_in,  vy0 =  f1 * v_apo_in;
     double x1 = -f2 * r_apo_in,  vy1 = -f2 * v_apo_in;
+    // TRIPLE_IN_ROT_DEG: inner orbit rotated about z by this angle (apoapsis direction, member velocities)
+    const double cr = std::cos(in_rot_deg * M_PI / 180.0), sr = std::sin(in_rot_deg * M_PI / 180.0);
+    const double y0 = sr * x0, y1 = sr * x1, vx0 = -sr * vy0, vx1 = -sr * vy1;
+    x0 *= cr; x1 *= cr; vy0 *= cr; vy1 *= cr;
 
     // --- Outer orbit at apoapsis ---
     // Outer angular momentum direction: L_out = (0, sin(i), cos(i))
@@ -1049,9 +1053,9 @@ void init_triple_test(Particles& p,
     // Inner members m1, m2 and the outer body m3; outer_first stores m3 at index 0 (lowest particle id), so
     // code that takes the inner pair from the first two ids is caught
     const double px[3] = {x0 + f_in * r3_x, x1 + f_in * r3_x, f_out * r3_x};
-    const double py[3] = {f_in * r3_y, f_in * r3_y, f_out * r3_y};
+    const double py[3] = {y0 + f_in * r3_y, y1 + f_in * r3_y, f_out * r3_y};
     const double pz[3] = {f_in * r3_z, f_in * r3_z, f_out * r3_z};
-    const double pvx[3] = {f_in * v3_x, f_in * v3_x, f_out * v3_x};
+    const double pvx[3] = {vx0 + f_in * v3_x, vx1 + f_in * v3_x, f_out * v3_x};
     const double pvy[3] = {vy0 + f_in * v3_y, vy1 + f_in * v3_y, f_out * v3_y};
     const double pvz[3] = {f_in * v3_z, f_in * v3_z, f_out * v3_z};
     const double pm[3] = {m1_msun, m2_msun, m3_msun};

@@ -44,4 +44,4 @@ void init_binary_test_peri(Particles& p, double a_pc, double e,
 void init_triple_test(Particles& p,
                       double a_in_pc, double e_in, double m1_msun, double m2_msun,
                       double a_out_pc, double e_out, double m3_msun,
-                      double i_deg, bool outer_first = false);
+                      double i_deg, bool outer_first = false, double in_rot_deg = 0.0);

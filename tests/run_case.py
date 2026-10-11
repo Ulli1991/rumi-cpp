@@ -109,6 +109,16 @@ CM_TIDE = dict(TEST_CASE="triple_test", INTEGRATOR="hhs", TRIPLE_A_IN_PC="2e-4",
                TOTAL_TIME_MYR="1e-2", DT_MAX_MYR="1e-3", DT_MIN_MYR="1e-14", SOFTENING_PC="0", COLLISIONAL="true",
                R_NGB="1e-3", R_NGB_MAX="0.1", N_ORB_SECULAR="3", PN_ORDER="0", SSE_ENABLED="false", ETA_RESTART="0",
                PRINT_INTERVAL="1", PROFILING="false", FLYBY_CM_VELOCITY="true")
+# Hard stellar binary (0.92 + 0.92 Msun, a = 0.011 AU, e = 0.86, ~1e6 orbits per 1e-3 Myr: secular) and a slow star
+# passing at 0.011 pc (e = 22, from 0.057 pc): the 200k, 10 % binaries seed-13 configuration (component velocities).
+# The inner orbit is turned so that at t = 0 a member's velocity points at the star (its pair "pericentre" is ~0)
+FLYBY_TRIPLE = dict(TEST_CASE="triple_test", INTEGRATOR="hhs", TRIPLE_A_IN_PC="5.54e-8", TRIPLE_E_IN="0.86",
+                    TRIPLE_M1="0.923", TRIPLE_M2="0.923", TRIPLE_A_OUT_PC="0.0113", TRIPLE_E_OUT="22.0",
+                    TRIPLE_M3="0.352", TRIPLE_INCL_DEG="0", TRIPLE_IN_ROT_DEG="-170.58", TOTAL_TIME_MYR="2e-3",
+                    DT_MAX_MYR="1e-3",
+                    DT_MIN_MYR="1e-16", SOFTENING_PC="0", COLLISIONAL="true", R_NGB="1e-3", R_NGB_MAX="0.1",
+                    N_ORB_SECULAR="3", PN_ORDER="0", SSE_ENABLED="false", ETA_RESTART="1e-8", ETA_GBS="1e-10",
+                    PRINT_INTERVAL="1", PROFILING="false")
 # 16 stars inside r_ngb: one 15-body neighbour group, more than LogH's fixed storage (LOGH_MAX_BODIES = 8)
 # Collisional FSI run of a field binary (r_ngb below a, so no subsystem): the start-of-step kernel's criteria set the step
 FSI_BINARY = dict(TEST_CASE="binary_test", INTEGRATOR="fsi", TOTAL_TIME_MYR="1e-5", DT_MAX_MYR="1e-5", DT_MIN_MYR="1e-14",
@@ -301,16 +311,19 @@ def paths_agree(exe, label, cfg, bound):
                       max(abs(a[0] - b[0]) / max(a[0], 1e-300) for a, b in zip(dev, cpu)), bound)
 
 
-def paths_same_steps(exe, label, cfg, min_logh):
-    """The CPU small-set path against the device path: the same LogH calls and GBS steps per step, and at least
-    `min_logh` LogH calls in all."""
+def paths_same_steps(exe, label, cfg, min_logh, gbs_rel=0.0):
+    """The CPU small-set path against the device path: the same LogH calls per step, GBS steps per step equal to
+    within `gbs_rel` (relative; the two paths sum forces in other orders, and the GBS step count of a LogH call can
+    flip at round-off), and at least `min_logh` LogH calls in all."""
     def stats(out):
         return [(int(a), int(b)) for a, b in re.findall(r"Integration: LogH=(\d+) \(gbs=(\d+)", out)]
     dev = stats(run_output(exe, dict(cfg, SERIAL_N2_CPU="0")))
     cpu = stats(run_output(exe, dict(cfg, SERIAL_N2_CPU="1000000")))
     print(f"   LogH calls, GBS steps per step: device {dev}, cpu {cpu}")
-    ok = check(f"{label} steps with other LogH calls or GBS steps (device vs cpu)",
-               sum(a != b for a, b in zip(dev, cpu)) + abs(len(dev) - len(cpu)), 0)
+    ok = check(f"{label} steps with other LogH calls (device vs cpu)",
+               sum(a[0] != b[0] for a, b in zip(dev, cpu)) + abs(len(dev) - len(cpu)), 0)
+    ok &= check(f"{label} largest relative GBS step difference (device vs cpu)",
+                max([abs(a[1] - b[1]) / max(a[1], 1) for a, b in zip(dev, cpu)] + [0.0]), gbs_rel)
     return ok & check(f"{label} LogH calls", sum(a for a, _ in dev), min_logh, lower=True)
 
 
@@ -384,6 +397,16 @@ def logh_complete(exe, label, cfg, bound):
     ok = check(f"{label} LogH calls stopped by the GBS step limit", caps, 0)
     ok &= check(f"{label} LogH retries", out.count("LogH restart:"), 0)
     return ok & check(f"{label} |dE/E|", diagnostics(out)[-1][0], bound)
+
+
+def flyby_member(exe, label, cfg, bound):
+    """A star far outside r_ngb from a hard binary must not join it in a 3-body LogH subsystem: no unstable triples,
+    no LogH calls, energy within bound."""
+    out = run_output(exe, cfg)
+    tri = sum(int(c) for c in re.findall(r"tri_u=(\d+)", out))
+    logh = sum(int(c) for c in re.findall(r"Integration: LogH=(\d+)", out))
+    ok = check(f"{label} unstable triples", tri, 0) & check(f"{label} LogH calls", logh, 0)
+    return ok & check(f"{label} max|dE/E|", max(r[0] for r in diagnostics(out)), bound)
 
 
 def weak_split(exe, label, cfg, bound):
@@ -644,6 +667,14 @@ CASES = {
     # velocities: 2.3e-5 over 2e-2 Myr). Measured with FLYBY_CM_EPS = 1e-5: 1.85e-7 (1e-6: 6.9e-9, 1e-7: 5.1e-10)
     "cm_eps_tidal_sampling": lambda exe: floor(exe, "c.o.m. fly-by step, tidal sampling", dict(CM_TIDE, FLYBY_CM_EPS="1e-5"),
                                                (2.4e-7, 2.4e-7, 1e30, 1e30)),
+    # The same configuration with component velocities (FLYBY_CM_VELOCITY = false, the production default): the
+    # slow star's kicks sample the binary's orbit just the same (the 200k, 10 % binaries seed-7 jumps, a 29+29 Msun
+    # BH binary at 55 AU and a passing star, 1.2e-8). FLYBY_CM_EPS was ignored without the c.o.m. velocity.
+    # Before: max |dE/E| 1.60e-5, end 9.6e-6. Measured after (host, 1 thread): max 1.85e-7, end 9.13e-8 (the same
+    # values as with the c.o.m. velocity: the tidal step sets the star's pair step either way)
+    "cm_eps_tidal_components": lambda exe: floor(exe, "component fly-by step, tidal sampling",
+                                                 dict(CM_TIDE, FLYBY_CM_VELOCITY="false", FLYBY_CM_EPS="1e-5"),
+                                                 (1.2e-7, 2.4e-7, 1e30, 1e30)),
     # The CPU small-set path takes the same tidal-sampling steps: same LogH calls and GBS steps per step as the
     # device (|dE/E| then differs at the level of the GBS errors of these many short LogH advances, ~1e-13 each).
     # Measured 19164 LogH calls on both paths (240 without the tidal step)
@@ -652,7 +683,9 @@ CASES = {
                                                          # 2-5 of 88k GBS steps (seeds 6, 7 agree exactly); not yet traced
                                                          dict(BINARIES, FLYBY_CM_VELOCITY="true", FLYBY_CM_EPS="1e-11",
                                                               BINARY_COM_V="average"),
-                                                         14700),
+                                                         # TIDAL_STEP_RES floor (default 1): same LogH calls,
+                                                         # GBS steps 85647/85645 and 87750/87737 (1.5e-4, host)
+                                                         14700, 2e-4),
     # Triple branch of detect_from_pairs used a particle id where the union-find wanted a compact id
     # (out of bounds for ids >= the number of pair members; the tests' triples had ids 0-2)
     # The secular-triple driver took the inner pair from the first two ids (fixed 2026-10-10)
@@ -667,6 +700,10 @@ CASES = {
     "secular_bh_tight_steps": lambda exe: secular_steps(exe, "BH binary at 0.01 AU", SEC_BH_TIGHT, 1.3),
     # Before: both LogH calls stopped at the 1000-step limit after ~45 % of the interval, and passed the energy
     # check (cap=4, no retry: the members lagged behind the system clock). Measured after: 0 caps, |dE/E| 8.5e-12
+    # The star 0.057 pc from a hard binary whose member moves straight at it passed the pair fly-by test and joined
+    # the binary in a 3-body LogH subsystem with ~1e6 inner orbits per step: no result within 120 s before
+    # (FLYBY_NGB_CM = false). Measured after (host): no triple, no LogH call, max |dE/E| 1.68e-12
+    "flyby_member_com": lambda exe: flyby_member(exe, "star passing a hard binary", FLYBY_TRIPLE, 2.2e-12),
     "logh_hierarchy_complete": lambda exe: logh_complete(exe, "tight binary in unstable triple", HIER_LOGH, 1.1e-11),
     # Experimental split (off by default). Without: LogH, 575k GBS steps, 3.7 s, |dE/E| 1.5e-9 (max). With:
     # 0.06 s, max 3.6e-8 at periapsis, 5.3e-9 at the end

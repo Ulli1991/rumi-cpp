@@ -671,6 +671,8 @@ int main(int argc, char** argv) {
             g_collisional.eta_pert        = cfg.get_double("ETA_PERT", 0.02);
             g_collisional.tidal_gamma     = cfg.get_double("TIDAL_GAMMA", 0.0);
             g_collisional.weak_perturber_gamma = cfg.get_double("WEAK_PERTURBER_GAMMA", 0.0);
+            g_collisional.flyby_ngb_cm    = cfg.get_bool("FLYBY_NGB_CM", true);
+            g_collisional.tidal_step_res  = cfg.get_double("TIDAL_STEP_RES", 1.0);
             g_collisional.secular_triples = cfg.get_bool("SECULAR_TRIPLES", true);
             g_collisional.tidal_res       = cfg.get_double("TIDAL_RES", 0.05);
             g_collisional.flyby_cm_eps    = cfg.get_double("FLYBY_CM_EPS", 0.0);
@@ -744,6 +746,7 @@ int main(int argc, char** argv) {
         double triple_m3    = cfg.get_double("TRIPLE_M3", 10.0);
         double triple_incl  = cfg.get_double("TRIPLE_INCL_DEG", 85.0);
         bool triple_outer_first = cfg.get_bool("TRIPLE_OUTER_FIRST", false);
+        double triple_in_rot = cfg.get_double("TRIPLE_IN_ROT_DEG", 0.0);
 
         if (my_rank == 0 || !use_distributed) {
             if (test == "outer_planets") {
@@ -763,7 +766,8 @@ int main(int argc, char** argv) {
                 set_binary_spins(p, cfg);
             } else if (test == "triple_test") {
                 init_triple_test(p, triple_a_in, triple_e_in, triple_m1, triple_m2,
-                                 triple_a_out, triple_e_out, triple_m3, triple_incl, triple_outer_first);
+                                 triple_a_out, triple_e_out, triple_m3, triple_incl, triple_outer_first,
+                                 triple_in_rot);
             } else {
                 std::fprintf(stderr, "Unknown test case: %s\n", test.c_str());
                 MPIComm::finalize();
@@ -924,7 +928,7 @@ int main(int argc, char** argv) {
 
 #ifdef ENABLE_COLLISIONAL
         // FLYBY_CM_EPS scale: |E0| (the energy the run's |dE/E| refers to)
-        if (g_collisional.enabled && flyby_cm_velocity && g_collisional.flyby_cm_eps > 0.0)
+        if (g_collisional.enabled && g_collisional.flyby_cm_eps > 0.0)
             g_collisional.e_ref = std::fabs(compute_diagnostics(work_p, G, soft2).E_total);
 #endif
         // Initial force computation + adaptive timestep

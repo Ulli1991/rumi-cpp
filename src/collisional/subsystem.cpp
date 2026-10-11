@@ -342,6 +342,74 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
             return a.pid_lo == b.pid_lo && a.pid_hi == b.pid_hi;
         }), pairs.end());
 
+    // Distant fly-bys of a binary member (FLYBY_NGB_CM, default on). The pair test (BIFROST sec. 3.5, Eq. 4: r_peri <
+    // r_ngb and 0.5 r / v < dt) takes the member's instantaneous orbital velocity, which reverses every binary period:
+    // near a hard binary (hundreds of km/s) a passing star "reaches pericentre" with one member along a straight line
+    // the star never follows. The star then joins a 3-body LogH subsystem whose inner binary makes thousands of orbits
+    // per step (200k, 10 % binaries, seed 13: a 0.92+0.92 Msun binary at 0.011 AU and a star whose pericentre about the
+    // binary is 0.011 pc; LogH hit its step limit in every piece, gave up after 256 subdivisions, |dE/E| +1.1e-9).
+    // So for a distant fly-by (unbound, r >= r_ngb) of a particle with exactly one bound partner in this list, test
+    // the other particle against the pair's centre of mass instead, the same reasoning by which FROST-CLUSTERS II
+    // (Rantala et al. 2025, sec. 2.1) takes binary c.o.m. velocities in the fly-by time steps.
+    last_level_flyby_cm_dropped = 0;
+    if (g_collisional.flyby_ngb_cm) {
+        std::unordered_map<int, int> partner;   // pid -> its bound partner, -1 with more than one
+        for (const auto& pr : pairs) {
+            if (!pr.bound) continue;
+            for (int s = 0; s < 2; s++) {
+                const int a = s ? pr.pid_hi : pr.pid_lo, b = s ? pr.pid_lo : pr.pid_hi;
+                auto [it, fresh] = partner.emplace(a, b);
+                if (!fresh) it->second = -1;
+            }
+        }
+        if (!partner.empty()) {
+            auto mx = md.col(MemberData::X), my = md.col(MemberData::Y), mz = md.col(MemberData::Z);
+            auto mvx = md.col(MemberData::VX), mvy = md.col(MemberData::VY), mvz = md.col(MemberData::VZ);
+            auto mm = md.col(MemberData::M);
+            // Mass, position and velocity of a particle, or of the c.o.m. of it and its single bound partner
+            auto body = [&](int pid, int other, double s[7]) {
+                int ids[2] = {pid, -1};
+                auto it = partner.find(pid);
+                if (it != partner.end() && it->second >= 0 && it->second != other) ids[1] = it->second;
+                for (int k = 0; k < 7; k++) s[k] = 0.0;
+                for (int q = 0; q < 2 && ids[q] >= 0; q++) {
+                    const int i = pid_to_idx[ids[q]];
+                    const double m = mm(i);
+                    s[0] += m; s[1] += m * mx(i); s[2] += m * my(i); s[3] += m * mz(i);
+                    s[4] += m * mvx(i); s[5] += m * mvy(i); s[6] += m * mvz(i);
+                }
+                for (int k = 1; k < 7; k++) s[k] /= s[0];
+                return ids[1] >= 0;
+            };
+            std::vector<PairInfo> kept;
+            kept.reserve(pairs.size());
+            for (const auto& pr : pairs) {
+                bool keep = true;
+                if (!pr.bound) {
+                    const int ia = pid_to_idx[pr.pid_lo], ib = pid_to_idx[pr.pid_hi];
+                    const double dx = mx(ib) - mx(ia), dy = my(ib) - my(ia), dz = mz(ib) - mz(ia);
+                    double A[7], B[7];
+                    if (std::sqrt(dx * dx + dy * dy + dz * dz) >= r_ngb &&
+                        (body(pr.pid_lo, pr.pid_hi, A) | body(pr.pid_hi, pr.pid_lo, B))) {
+                        const double rx = B[1] - A[1], ry = B[2] - A[2], rz = B[3] - A[3];
+                        const double ux = B[4] - A[4], uy = B[5] - A[5], uz = B[6] - A[6];
+                        const double r = std::sqrt(rx * rx + ry * ry + rz * rz), u2 = ux * ux + uy * uy + uz * uz;
+                        const double mu = G * (A[0] + B[0]), en = 0.5 * u2 - mu / r;
+                        const double lx = ry * uz - rz * uy, ly = rz * ux - rx * uz, lz = rx * uy - ry * ux;
+                        const double a = -mu / (2.0 * en);
+                        const double e = std::sqrt(std::max(en < 0.0 ? 0.0 : 1.0,
+                                                            1.0 + 2.0 * en * (lx * lx + ly * ly + lz * lz) / (mu * mu)));
+                        if (en < 0.0) keep = a < r_ngb || r < r_ngb;
+                        else keep = r < r_ngb || (std::fabs(a) * (e - 1.0) < r_ngb && u2 > 0.0 &&
+                                                  0.5 * r / std::sqrt(u2) < dt_step);
+                    }
+                }
+                if (keep) kept.push_back(pr); else last_level_flyby_cm_dropped++;
+            }
+            pairs.swap(kept);
+        }
+    }
+
     // Union-find to identify connected components
     // Merge ALL pairs (bound and unbound fly-bys both form subsystems)
     // Union-find on compact ids (O(pairs), not sized by the largest particle id)
@@ -715,12 +783,14 @@ void SubsystemManager::remap_indices(const Particles& p) {
 // device, so neither the member state nor an O(N) array crosses to the host.
 void SubsystemManager::fill_cm_velocity(const Particles& p, int lo, int hi, Kokkos::View<double*> cvx,
                                          Kokkos::View<double*> cvy, Kokkos::View<double*> cvz,
-                                         Kokkos::View<double*> ck, double tol) {
+                                         Kokkos::View<double*> ck, Kokkos::View<double*> cf, double tol,
+                                         double res, bool cm) {
     auto vx = p.vx, vy = p.vy, vz = p.vz;
+    if (!cm && tol <= 0.0) return;
     if (hi > lo)
         Kokkos::parallel_for("cm_vel_copy", Kokkos::RangePolicy<>(lo, hi), KOKKOS_LAMBDA(int i) {
-            cvx(i) = vx(i); cvy(i) = vy(i); cvz(i) = vz(i);
-            if (tol > 0.0) ck(i) = 1e30;
+            if (cm) { cvx(i) = vx(i); cvy(i) = vy(i); cvz(i) = vz(i); }
+            if (tol > 0.0) { ck(i) = 1e30; cf(i) = 0.0; }
         });
     if (active.empty()) return;
     rebuild_pid_to_idx(p);   // incremental: partitions since the last build moved slots
@@ -763,7 +833,7 @@ void SubsystemManager::fill_cm_velocity(const Particles& p, int lo, int hi, Kokk
             cx += pm(i) * px_(i); cy += pm(i) * py_(i); cz += pm(i) * pz_(i);
         }
         if (M <= 0) return;
-        double kt = 1e30;
+        double kt = 1e30, kfl = 0.0;
         if (tol > 0.0) {
             double ext = 0.0, muv = 0.0;
             if (e - a == 2) {
@@ -779,6 +849,9 @@ void SubsystemManager::fill_cm_velocity(const Particles& p, int lo, int hi, Kokk
                     const double e2 = 1.0 - (lx * lx + ly * ly + lz * lz) / (mu * sa);
                     const double ecc = Kokkos::fmin(Kokkos::sqrt(e2 > 0.0 ? e2 : 0.0), 1.0 - 1e-12);
                     ext = sa * (1.0 + ecc);
+                    // resolve the pericentre passage: P (1 - e)^(3/2) = 2 pi (r_p^3 / mu)^(1/2)
+                    const double rp = sa * (1.0 - ecc);
+                    kfl = res * 2.0 * M_PI * Kokkos::sqrt(rp * rp * rp / mu);
                     muv = pm(i) * pm(j) / M * Kokkos::sqrt(mu * (1.0 + ecc) / (sa * (1.0 - ecc)));
                 }
             } else {
@@ -794,8 +867,8 @@ void SubsystemManager::fill_cm_velocity(const Particles& p, int lo, int hi, Kokk
         }
         for (int q = a; q < e; q++) {
             const int i = buf(q);
-            cvx(i) = px / M; cvy(i) = py / M; cvz(i) = pz / M;
-            if (tol > 0.0) ck(i) = kt;
+            if (cm) { cvx(i) = px / M; cvy(i) = py / M; cvz(i) = pz / M; }
+            if (tol > 0.0) { ck(i) = kt; cf(i) = kfl; }
         }
     });
 }
@@ -1096,6 +1169,7 @@ void SubsystemManager::reset_step_diagnostics() {
     step_total_subsystems = 0;
     step_n_bin = 0; step_n_fly = 0; step_n_trip_s = 0; step_n_trip_u = 0; step_n_multi = 0;
     step_weak_split = 0;
+    step_flyby_cm_dropped = 0;
     step_n_secular = 0;
     step_total_members = 0;
     last_level_pairs = 0;
@@ -1119,6 +1193,7 @@ void SubsystemManager::accumulate_diagnostics() {
     step_total_pairs += last_level_pairs;
     step_total_bound += last_level_bound;
     step_weak_split += last_level_weak_split;
+    step_flyby_cm_dropped += last_level_flyby_cm_dropped;
     step_total_subsystems += (int)active.size();
     for (const auto& sub : active) {
         step_total_members += sub.n_bodies;
@@ -1144,6 +1219,7 @@ void SubsystemManager::print_step_summary() const {
     std::printf("      Types:  bin=%d  fly=%d  tri_s=%d  tri_u=%d  multi=%d",
                 step_n_bin, step_n_fly, step_n_trip_s, step_n_trip_u, step_n_multi);
     if (step_weak_split > 0) std::printf("  weak_split=%d", step_weak_split);
+    if (step_flyby_cm_dropped > 0) std::printf("  flyby_cm_dropped=%d", step_flyby_cm_dropped);
     std::printf("\n");
 
     // Integration summary
