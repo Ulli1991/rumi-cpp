@@ -195,15 +195,28 @@ struct GbsStats {
 // Midpoint results of stages k0..k1 into table[] on the host threads, the largest stage handed out first
 void GBSIntegrator::compute_stages(const LogHState& state, int k0, int k1, double ds, double G,
                                    double c_code, int pn_order) {
-    using Policy = Kokkos::RangePolicy<Kokkos::DefaultHostExecutionSpace, Kokkos::Schedule<Kokkos::Dynamic>>;
-    Kokkos::parallel_for("gbs_stages", Policy(0, k1 - k0 + 1).set_chunk_size(1), [&](int i) {
-        const int k = k1 - i;
+    auto one = [&](int k) {
         LogHState result;
         result = state;
         midpoint(state, result, STEP_SEQ[k], ds, G, c_code, pn_order);
         int d = 0;
         pack_state(result, table[k], d);
-    });
+    };
+#ifdef _OPENMP
+    if (par_mode == PAR_TASKS) {
+        // Child tasks of the running (tied) subsystem task: while this thread waits it runs only these
+        auto* fn = &one;
+        for (int k = k1; k > k0; k--) {
+#pragma omp task firstprivate(fn, k)
+            (*fn)(k);
+        }
+        one(k0);
+#pragma omp taskwait
+        return;
+    }
+#endif
+    using Policy = Kokkos::RangePolicy<Kokkos::DefaultHostExecutionSpace, Kokkos::Schedule<Kokkos::Dynamic>>;
+    Kokkos::parallel_for("gbs_stages", Policy(0, k1 - k0 + 1).set_chunk_size(1), [&](int i) { one(k1 - i); });
 }
 
 bool GBSIntegrator::step(LogHState& state, double ds, double G, double& ds_next,
@@ -223,7 +236,9 @@ bool GBSIntegrator::step(LogHState& state, double ds, double G, double& ds_next,
     int computed = -1;   // table[0..computed] holds the raw midpoint results
     for (int stage = 0; stage < MAX_STAGES; stage++) {
         if (stage > computed) {
-            if (par_stages && !do_debug) {
+            const bool par = par_mode == PAR_HOST ||
+                             (par_mode == PAR_TASKS && pending->load(std::memory_order_relaxed) == 0);
+            if (par && !do_debug) {
                 // Stage-parallel: the substep divisions are independent (Rantala et al. 2020, MSTAR, Sec. 4);
                 // compute stage..k1 at once, k1 = the stage the last step converged at. The extrapolation below
                 // runs in the same order on the same table, so the result is the serial one; unused stages

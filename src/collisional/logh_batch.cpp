@@ -427,6 +427,19 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
                                                                          : 2;
     const int host_threads = Kokkos::DefaultHostExecutionSpace().concurrency();
     const bool serial_subs = n_sub == 1 || n_sub <= stage_par_max;
+    // Larger batches: one OpenMP task per subsystem; once all have started, the subsystems still running (the
+    // tail, often one long hierarchical system) take stage-parallel steps on the threads that are done
+    // (NBODY_GBS_TAIL_PAR=0: Kokkos parallel_reduce over the subsystems, no stage parallelism)
+    static const bool tail_par_env = !std::getenv("NBODY_GBS_TAIL_PAR") || std::atoi(std::getenv("NBODY_GBS_TAIL_PAR"));
+#ifdef _OPENMP
+    const bool tail_par = tail_par_env && stage_par_max > 0 && host_threads > 1 && !serial_subs;
+#else
+    const bool tail_par = false;
+    (void)tail_par_env;
+#endif
+    std::atomic<int> pending{n_sub};   // subsystems not yet started (tail_par)
+    const int gbs_mode = (serial_subs && stage_par_max > 0 && host_threads > 1) ? GBSIntegrator::PAR_HOST
+                         : tail_par ? GBSIntegrator::PAR_TASKS : GBSIntegrator::PAR_OFF;
     auto integrate_one = [&](int s, int& gbs_sum, double& dE_max, double& dE_min, int& caps) {
         const double t_s0 = wall_now();
         int nb = h_nbod(s);
@@ -585,7 +598,8 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
         const int max_steps = gbs_step_limit(state, dt_norm, G_norm);
         {
             GBSIntegrator gbs(eta_gbs);
-            gbs.par_stages = serial_subs && stage_par_max > 0 && host_threads > 1;
+            gbs.par_mode = gbs_mode;
+            gbs.pending = &pending;
             double Omega_cur = logh_kinetic_energy(state) + state.B;
             double ds_est = (Omega_cur > 1e-30) ? dt_norm * Omega_cur : dt_norm;
             n_gbs_steps = gbs.integrate_to_time(state, dt_norm, G_norm, ds_est,
@@ -703,6 +717,34 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
         max_dE = std::numeric_limits<double>::lowest();
         min_dE = std::numeric_limits<double>::max();
         for (int s = 0; s < n_sub; s++) integrate_one(s, total_gbs_steps, max_dE, min_dE, cap_hit);
+    } else if (tail_par) {
+#ifdef _OPENMP
+        // Per-subsystem results, reduced in order afterwards (sums of ints, max and min: order-independent)
+        std::vector<int> g_s(n_sub, 0), cap_s(n_sub, 0);
+        std::vector<double> dmax_s(n_sub, std::numeric_limits<double>::lowest());
+        std::vector<double> dmin_s(n_sub, std::numeric_limits<double>::max());
+        auto* run = &integrate_one;
+        auto* pend = &pending;
+#pragma omp parallel num_threads(host_threads)
+#pragma omp single
+        {
+            for (int s = 0; s < n_sub; s++) {
+#pragma omp task firstprivate(s) shared(g_s, cap_s, dmax_s, dmin_s) firstprivate(run, pend)
+                {
+                    pend->fetch_sub(1, std::memory_order_relaxed);
+                    (*run)(s, g_s[s], dmax_s[s], dmin_s[s], cap_s[s]);
+                }
+            }
+        }
+        max_dE = std::numeric_limits<double>::lowest();
+        min_dE = std::numeric_limits<double>::max();
+        for (int s = 0; s < n_sub; s++) {
+            total_gbs_steps += g_s[s];
+            cap_hit += cap_s[s];
+            max_dE = std::max(max_dE, dmax_s[s]);
+            min_dE = std::min(min_dE, dmin_s[s]);
+        }
+#endif
     } else {
         Kokkos::parallel_reduce("logh_batch_host", HostPolicy(0, n_sub).set_chunk_size(1), integrate_one,
                                 Kokkos::Sum<int>(total_gbs_steps), Kokkos::Max<double>(max_dE),

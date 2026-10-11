@@ -1,6 +1,7 @@
 #pragma once
 
 #include "logh.h"
+#include <atomic>
 
 // pos + vel + aux_vel per body, 2 spins + 2 auxiliary spins, t, B
 constexpr int GBS_DIM_MAX = LOGH_MAX_BODIES * 9 + 12 + 2;
@@ -21,10 +22,13 @@ struct GBSIntegrator {
     double work[MAX_STAGES][GBS_DIM_MAX];
     double diag_prev[GBS_DIM_MAX];  // T[k-1][k-1] saved between extrapolate() calls
 
-    // Stage-parallel steps (host threads; only outside other host-parallel regions): the midpoint integrations
-    // of stages k..par_hint run concurrently, par_hint = the stage the previous step converged at. Same result
-    // as serial
-    bool par_stages = false;
+    // Stage-parallel steps: the midpoint integrations of stages k..par_hint run concurrently, par_hint = the
+    // stage the previous step converged at. Same result as serial. PAR_HOST: Kokkos host parallel_for (only
+    // outside other host-parallel regions); PAR_TASKS: OpenMP tasks inside a task-parallel batch, once *pending
+    // (subsystems of the batch not yet started) is 0, i.e. when other threads would otherwise idle
+    enum { PAR_OFF, PAR_HOST, PAR_TASKS };
+    int par_mode = PAR_OFF;
+    const std::atomic<int>* pending = nullptr;
     int par_hint = 4;
 
     GBSIntegrator(double eta = 1e-10) : eta_gbs(eta) {}
