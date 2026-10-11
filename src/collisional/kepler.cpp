@@ -282,7 +282,8 @@ inline void stumpff_c(double z, double& c0, double& c1, double& c2, double& c3) 
 
 }  // namespace
 
-int kepler_drift(double r[3], double v[3], double mu, double dt) {
+// f and g drift from the state itself (kepler_drift below chooses the starting point)
+static int kepler_drift_fg(double r[3], double v[3], double mu, double dt) {
     const double r0 = std::sqrt(r[0]*r[0] + r[1]*r[1] + r[2]*r[2]);
     if (dt == 0.0 || !(r0 > 0.0) || !(mu > 0.0)) return 0;
     const double v2 = v[0]*v[0] + v[1]*v[1] + v[2]*v[2];
@@ -324,11 +325,29 @@ int kepler_drift(double r[3], double v[3], double mu, double dt) {
             }
         }
     }
+    if (beta <= 0.0) {
+        // Parabolic regime (|h| beyond the pericentre time, small |beta|): F ~ mu X^3 / 6; of the guesses, the
+        // smallest |X| (each overshoots outside its own regime)
+        const double Xc = std::cbrt(6.0 * h / mu);
+        if (std::fabs(Xc) < std::fabs(X)) X = Xc;
+    }
+    // dF/dX = r >= q (pericentre distance): the root lies within h / q of 0, so the bracket is always finite
+    {
+        double hv[3];
+        hv[0] = r[1]*v[2] - r[2]*v[1]; hv[1] = r[2]*v[0] - r[0]*v[2]; hv[2] = r[0]*v[1] - r[1]*v[0];
+        const double p = (hv[0]*hv[0] + hv[1]*hv[1] + hv[2]*hv[2]) / mu;
+        const double q = p / (1.0 + std::sqrt(std::max(0.0, 1.0 - p * beta / mu)));
+        if (q > 0.0) {
+            const double Xmax = std::fabs(h) / q * 1.001;   // margin: e (so q) from sqrt(1 - p beta / mu) is only good to ~1e-8
+            lo = std::max(lo, -Xmax);
+            hi = std::min(hi, Xmax);
+        }
+    }
     if (h > 0.0) lo = std::max(lo, 0.0); else hi = std::min(hi, 0.0);
     if (!(X > lo && X < hi)) X = (std::isfinite(lo) && std::isfinite(hi)) ? 0.5 * (lo + hi) : (h > 0.0 ? 1.0 : -1.0) * std::fabs(X_lin);
 
     // Laguerre-Conway iteration (n = 5; Conway 1986, as WHFast and Wisdom & Hernandez 2015 for long steps and high e),
-    // kept inside the bracket by bisection (or doubling while one side is open). Stops when X repeats (WHFast: the
+    // kept inside the bracket by bisection (doubling while one side is open: radial orbits only). Stops when X repeats (WHFast: the
     // iteration may cycle between neighbouring floating-point values once converged)
     double c0, c1, c2, c3, G1 = 0.0, G2 = 0.0, G3 = 0.0;
     double hist[8];
@@ -364,7 +383,7 @@ int kepler_drift(double r[3], double v[3], double mu, double dt) {
     // Gauss f and g functions in incremental form, r = r0 + (f - 1) r0 + g v0 (WHFast Eqs. 15-16, 20)
     const double rr = r0 + eta0 * G1 + zeta0 * G2;
     const double fm1 = -mu * G2 / r0;
-    const double g = h - mu * G3;
+    const double g = r0 * G1 + eta0 * G2;
     const double fd = -mu * G1 / (r0 * rr);
     const double gdm1 = -mu * G2 / rr;
     for (int k = 0; k < 3; k++) {
@@ -374,11 +393,6 @@ int kepler_drift(double r[3], double v[3], double mu, double dt) {
     }
     return it + 1;
 }
-
-void kepler_advance(double r[3], double v[3], double mu, double dt) {
-    kepler_drift(r, v, mu, dt);
-}
-
 
 // x - sin x and sinh x - x without cancellation for small |x|
 static double x_minus_sin(double x) {
@@ -391,6 +405,114 @@ static double sinh_minus_x(double x) {
     const double x2 = x * x;
     return x * x2 / 6.0 * (1.0 + x2 / 20.0 * (1.0 + x2 / 42.0 * (1.0 + x2 / 72.0)));
 }
+
+int kepler_drift(double r[3], double v[3], double mu, double dt) {
+    const double r0 = std::sqrt(r[0]*r[0] + r[1]*r[1] + r[2]*r[2]);
+    if (dt == 0.0 || !(r0 > 0.0) || !(mu > 0.0)) return 0;
+    // Invariants: L = r x v, p = L^2 / mu, e_vec = v x L / mu - r / r, beta = mu / a
+    const double h[3] = {r[1]*v[2] - r[2]*v[1], r[2]*v[0] - r[0]*v[2], r[0]*v[1] - r[1]*v[0]};
+    const double hn = std::sqrt(h[0]*h[0] + h[1]*h[1] + h[2]*h[2]);
+    const double ev[3] = {(v[1]*h[2] - v[2]*h[1]) / mu - r[0] / r0, (v[2]*h[0] - v[0]*h[2]) / mu - r[1] / r0,
+                          (v[0]*h[1] - v[1]*h[0]) / mu - r[2] / r0};
+    const double e = std::sqrt(ev[0]*ev[0] + ev[1]*ev[1] + ev[2]*ev[2]);
+    const double v2 = v[0]*v[0] + v[1]*v[1] + v[2]*v[2];
+    const double eta0 = r[0]*v[0] + r[1]*v[1] + r[2]*v[2];
+    const double beta = 2.0 * mu / r0 - v2;
+    // Near-circular orbits (and radial ones, no plane, and the exact parabola): universal f and g from the state, where
+    // elements are undefined. Eccentric orbits: f and g from a far point to one near the pericentre cancel (r = f r0
+    // + g v0 with |f r0|, |g v0| >> r; the energy error grew as eps / (1 - e)^2, 5e-10 at e = 0.9998 from the
+    // apocentre side), so the new state is built in the perifocal frame from the anomaly, every component without
+    // cancellation (1 - e = (p / a) / (1 + e), cos E - e = (1 - e) - 2 sin^2(E / 2); Danby 1992, sec. 6.3-6.4): its
+    // error is the round-off of the new point itself, as in the elements route, while the frame (P along e_vec,
+    // Q = L_hat x P) and the anomaly (atan2 / asinh of r.v and e cos E) come from the state without acos
+    // Near the parabola the anomaly form loses the phase (bound, 1 - e < 1e-5: 1 vs 16 drifts 3e-11 ... 4e-4 at
+    // 1 - e = 1e-12) or fails (hyperbolic, e - 1 < 1e-4), where the universal variables stay at round-off
+    if (e < 0.1 || !(hn > 0.0) || beta == 0.0 || (e < 1.0 && 1.0 - e < 1e-5) || (e >= 1.0 && e - 1.0 < 1e-4))
+        return kepler_drift_fg(r, v, mu, dt);
+    const double zeta0 = mu - beta * r0;                 // mu e cos E (bound), mu e cosh F (hyperbolic)
+    const double p = hn * hn / mu;
+    double Ph[3], Qh[3];
+    for (int c = 0; c < 3; c++) Ph[c] = ev[c] / e;
+    const double Lh[3] = {h[0] / hn, h[1] / hn, h[2] / hn};
+    Qh[0] = Lh[1]*Ph[2] - Lh[2]*Ph[1]; Qh[1] = Lh[2]*Ph[0] - Lh[0]*Ph[2]; Qh[2] = Lh[0]*Ph[1] - Lh[1]*Ph[0];
+    double x, y, vx, vy;
+    int it = 0;
+    if (beta > 0.0) {
+        const double a = mu / beta, sb = std::sqrt(beta), n = beta * sb / mu;
+        const double ome = (p / a) / (1.0 + e);            // 1 - e
+        const double E0 = std::atan2(eta0 * sb, zeta0);
+        // Mean anomaly advanced over dt mod P; Kepler's equation for the change dE (Newton in a bracket):
+        // dE - e cos E0 sin dE + e sin E0 (1 - cos dE) = dM, |dE - dM| <= 2 e
+        double h_red = dt;
+        const double P = 2.0 * M_PI / n;
+        if (std::fabs(h_red) > 0.5 * P) h_red = std::remainder(h_red, P);
+        const double dM = n * h_red;
+        const double C = zeta0 / mu, S = eta0 * sb / mu;   // e cos E0, e sin E0
+        double lo = dM - 2.0 * e, hi = dM + 2.0 * e;
+        double d = dM + C * std::sin(dM) - S * (1.0 - std::cos(dM));
+        if (!(d > lo && d < hi)) d = dM;
+        for (it = 0; it < 100; it++) {
+            const double sd = std::sin(d), sh = std::sin(0.5 * d);
+            const double f = d - C * sd + 2.0 * S * sh * sh - dM;
+            if (f == 0.0) break;
+            if (f < 0.0) lo = std::max(lo, d); else hi = std::min(hi, d);
+            double dn = d - f / (1.0 - C * std::cos(d) + S * sd);
+            if (!(dn > lo && dn < hi)) dn = 0.5 * (lo + hi);
+            if (dn == d) break;
+            const double step = std::fabs(dn - d);
+            d = dn;
+            if (step <= 4e-16 * std::max(1.0, std::fabs(d)) || !(hi > lo)) break;
+        }
+        const double E1 = E0 + d;
+        const double s1 = std::sin(E1), c1 = std::cos(E1), sh1 = std::sin(0.5 * E1);
+        const double b_a = std::sqrt(p / a);                // sqrt(1 - e^2)
+        const double den = ome + 2.0 * e * sh1 * sh1;       // 1 - e cos E1
+        x = a * (ome - 2.0 * sh1 * sh1);                    // a (cos E1 - e)
+        y = a * b_a * s1;
+        const double vs = std::sqrt(mu / a) / den;
+        vx = -vs * s1;
+        vy = vs * b_a * c1;
+    } else {
+        const double A = -mu / beta, k = std::sqrt(-beta), n = k * k * k / mu;
+        const double em1 = (p / A) / (e + 1.0);             // e - 1
+        const double F0 = std::asinh(eta0 * k / (mu * e));
+        // e sinh F - F = M0 + n dt, with e sinh F - F = (e - 1) sinh F + (sinh F - F); monotonic in F
+        const double M1 = em1 * std::sinh(F0) + sinh_minus_x(F0) + n * dt;
+        auto kep = [&](double F) { return em1 * std::sinh(F) + sinh_minus_x(F) - M1; };
+        double F = std::fabs(M1) / e > 1.0 ? std::copysign(std::log(2.0 * std::fabs(M1) / e), M1) : std::asinh(M1 / e);
+        double lo = -std::numeric_limits<double>::infinity(), hi = std::numeric_limits<double>::infinity();
+        for (it = 0; it < 200; it++) {
+            const double f = kep(F);
+            if (f == 0.0) break;
+            if (f < 0.0) lo = std::max(lo, F); else hi = std::min(hi, F);
+            double Fn = F - f / (e * std::cosh(F) - 1.0);
+            if (!(Fn > lo && Fn < hi))
+                Fn = (std::isfinite(lo) && std::isfinite(hi)) ? 0.5 * (lo + hi) : (f < 0.0 ? F + 1.0 : F - 1.0);
+            if (Fn == F) break;
+            const double step = std::fabs(Fn - F);
+            F = Fn;
+            if (step <= 4e-16 * std::max(1.0, std::fabs(F))) break;
+        }
+        const double sF = std::sinh(F), cF = std::cosh(F), shF = std::sinh(0.5 * F);
+        const double b_A = std::sqrt(p / A);                // sqrt(e^2 - 1)
+        const double den = em1 + 2.0 * e * shF * shF;       // e cosh F - 1
+        x = A * (em1 - 2.0 * shF * shF);                    // A (e - cosh F)
+        y = A * b_A * sF;
+        const double vs = std::sqrt(mu / A) / den;
+        vx = -vs * sF;
+        vy = vs * b_A * cF;
+    }
+    for (int c = 0; c < 3; c++) {
+        r[c] = x * Ph[c] + y * Qh[c];
+        v[c] = vx * Ph[c] + vy * Qh[c];
+    }
+    return it + 1;
+}
+
+void kepler_advance(double r[3], double v[3], double mu, double dt) {
+    kepler_drift(r, v, mu, dt);
+}
+
 
 double kepler_time_to_pericentre(const double r[3], const double v[3], double mu, double* r_peri) {
     const double rr = std::sqrt(r[0]*r[0] + r[1]*r[1] + r[2]*r[2]);

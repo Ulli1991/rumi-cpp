@@ -522,6 +522,7 @@ int integrate_secular_binary(
         r[k] = pos1[k] - pos2[k];
         v[k] = vel1[k] - vel2[k];
     }
+    const double r_in[3] = {r[0], r[1], r[2]}, v_in[3] = {v[0], v[1], v[2]};
 
     int n_sub = 1;
     double a1 = 0.0, k_e = 1.0, dw = 0.0, dM = 0.0;
@@ -586,6 +587,28 @@ int integrate_secular_binary(
         vel1[k] = cm_vel[k] + (m2 / M_tot) * v[k];
         pos2[k] = cm_new - (m1 / M_tot) * r[k];
         vel2[k] = cm_vel[k] - (m1 / M_tot) * v[k];
+    }
+    // Without PN the two-body energy is exactly conserved, but the members are stored in absolute coordinates: at
+    // |x| / |r| ~ 1e7 (a 0.02 AU binary 1 pc from the centre) rounding the new positions changes E_orb by ~1e-9 of
+    // itself, which the energy check sees (043190d booked that change as E_gw, which hid it). Scaling the relative
+    // velocity, stored to ~eps of itself, restores the orbit's energy (manifold correction for Kepler energy
+    // consistency, Fukushima 2003, AJ 126, 1097); two passes for the rounding of the velocities themselves
+    if (pn_order == 0 && !reshape) {
+        const double E_target = 0.5 * dot3(v_in, v_in) - mu / std::sqrt(dot3(r_in, r_in));
+        for (int pass = 0; pass < 2; pass++) {
+            double ro[3], vo[3];
+            for (int k = 0; k < 3; k++) { ro[k] = pos1[k] - pos2[k]; vo[k] = vel1[k] - vel2[k]; }
+            const double vo2 = dot3(vo, vo);
+            const double arg = 2.0 * (E_target + mu / std::sqrt(dot3(ro, ro)));
+            if (!(arg > 0.0) || !(vo2 > 0.0)) break;
+            const double sm1 = std::sqrt(arg / vo2) - 1.0;
+            if (sm1 == 0.0) break;
+            for (int k = 0; k < 3; k++) {
+                const double dv = sm1 * vo[k];
+                vel1[k] += (m2 / M_tot) * dv;
+                vel2[k] -= (m1 / M_tot) * dv;
+            }
+        }
     }
     return n_sub;
 }

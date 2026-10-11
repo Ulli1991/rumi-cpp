@@ -100,6 +100,22 @@ int main() {
         elements_to_cartesian(1.0, e, inc, Om, om, std::fmod(0.7 + dt, 2.0 * M_PI), mu, rr, vr);
         run_case(longrun, r0, v0, mu, dt, rr, std::fabs(energy(r0, v0, mu)));
     }
+    // Thermal eccentricities (e = sqrt(U), here capped at 0.999), random orientation, phase and interval up to 1e3
+    // orbits: universal f and g from the apocentre side to near the pericentre lost energy as eps / (1 - e)^2
+    // (5e-10 at e = 0.9998), which the perifocal construction removes
+    Worst thermal;
+    {
+        unsigned long long s = 12345;
+        auto U = [&]() { s = s * 6364136223846793005ULL + 1442695040888963407ULL; return (s >> 11) * (1.0 / 9007199254740992.0); };
+        for (int k = 0; k < 20000; k++) {
+            const double e = std::min(std::sqrt(U()), 0.999);
+            double r0[3], v0[3];
+            elements_to_cartesian(1.0, e, 3.0 * U(), 6.0 * U(), 6.0 * U(), 6.28 * U(), mu, r0, v0);
+            run_case(thermal, r0, v0, mu, 2.0 * M_PI * std::pow(10.0, 5.0 * U() - 2.0), nullptr,
+                     std::fabs(energy(r0, v0, mu)));
+        }
+    }
+    thermal.print("bound_thermal");
     low.print("bound_e<0.5");
     high.print("bound_e>=0.5");
     longrun.print("bound_1e5_orbits");

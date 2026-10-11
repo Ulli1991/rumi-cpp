@@ -962,8 +962,11 @@ CASES = {
     # SDAR 1.56e5 steps (0.032), 2.56e-9 (books; 8e-8 physical), e_in within 2e-6 of LogH
     "sdar_kozai_triple": lambda exe: sdar_vs_logh(exe, "Wang+2020 B-S triple", KL_TRIPLE, 0.042, 3e-6, 3.4e-9,
                                                   {"NBODY_GBS_STEPS_PER_ORBIT": "1024"}),
-    # F3 fly-by: LogH 1.52e6 GBS steps, max|dE/E| 5.6e-7 (restarts); SDAR 389 steps (2.6e-4), 3.1e-11
-    "sdar_f3_flyby": lambda exe: sdar_vs_logh(exe, "F3 fly-by", F3_FLYBY, 3.4e-4, None, 4e-11),
+    # F3 fly-by: LogH 1.52e6 GBS steps, max|dE/E| 5.6e-7 (restarts); SDAR 389 steps (2.6e-4), 3.1e-11. The SDAR
+    # error depends on the binary's phase when the star arrives (after 60 Kepler drifts of ~3e4 orbits): over
+    # TRIPLE_IN_ROT_DEG = 0, 10, ..., 70 it ranges 1.3e-11 - 3.2e-10 (median 1.6e-10) with 043190d's elements drift and
+    # 1.5e-11 - 3.9e-10 (median 8e-11) with the new drift; this phase gives 8.0e-11 (043190d 1.3e-11)
+    "sdar_f3_flyby": lambda exe: sdar_vs_logh(exe, "F3 fly-by", F3_FLYBY, 3.4e-4, None, 1.05e-10),
     # Before: the control (PN off) has no slowed call either
     "sdar_pn_kappa1": lambda exe: sdar_pn_off(exe, "PN BH binary + star", PN_TRIPLE),
     # SECULAR_TRIPLES = false (FROST-CLUSTERS I): the switch was ignored by the per-level re-classification
@@ -1020,38 +1023,41 @@ CASES = {
                                                             min_landings=1),
     "coll_tde_parabolic": lambda exe: subsys_collision(exe, "TDE, parabolic", COLL_TDE, "TDE", 1.5e-12),
     "coll_bh_isco": lambda exe: subsys_collision(exe, "BH binary to ISCO, PN", COLL_ISCO, "ISCO", 1e-14),
-    # Universal-variable Kepler drift (kepler_drift, subsystem audit #2). Bounds 1.3x measured (raven host build,
-    # 2026-10-11); 043190d's elements route: bound e < 0.5 1v16 = 2.0, ref = 1.2 (phase lost at e <= 1e-8), parabolic
-    # and hyperbolic dE = 1.8e9 / 1.5e8 (leapfrog fallback). 1e5 orbits and the far hyperbolae sit at the conditioning
+    # Kepler drift (kepler_drift, subsystem audit #2): universal variables below e = 0.1 and near the parabola, the
+    # perifocal construction from the anomaly otherwise. Bounds 1.3x measured (raven host, 2026-10-11); 043190d's
+    # elements route: bound e < 0.5 1v16 = 2.0, ref = 1.2 (phase lost at e <= 1e-8), parabolic and hyperbolic
+    # dE = 1.8e9 / 1.5e8 (leapfrog fallback), thermal dE 1.5e-13. 4422c7d (universal f and g from any state): thermal
+    # dE 7.8e-13 (5e-10 for random binaries at e = 0.9998). 1e5 orbits and the far hyperbolae sit at the conditioning
     # of the problem (eps n dt of phase; |r| |v| eps of L at r = 1e6 A)
     "kepler_drift_unit": lambda exe: kepler_unit(exe, {
-        "bound_e<0.5": (5.2e-11, 1.2e-11, 7.8e-12, 2.6e-15, 1.3e-15),
-        "bound_e>=0.5": (2.7e-12, 2.2e-12, 1.2e-12, 9e-15, 3.4e-15),
-        "bound_1e5_orbits": (3.6e-10, 1.04e-9, 7.5e-10, 1e-15, 3.5e-15),
-        "parabolic": (2.1e-14, 7.7e-9, None, 1.3e-15, 6.9e-13),
-        "hyperbolic": (2.4e-14, 2e-9, 1.1e-14, 1.16e-13, 7.6e-11),
-        "hyperbolic_far": (3e-14, None, 1e-14, 2.9e-13, None)}),
-    # Secular (Kepler-drift) binary at e = 0 and 1e-8, 100.37 orbits as 1 or 16 steps. Measured: 1 vs 16 3.7e-13 /
-    # 1.2e-12, vs analytic 2.2e-13 / 1.5e-12, |dE/E| 5.3e-16 / 4.0e-16, |dL/L| 0. 043190d: 1 vs 16 = 2.0 / 0.55,
+        "bound_thermal": (7.6e-9, 4.2e-10, None, 7.4e-14, 3.4e-15),
+        "bound_e<0.5": (8.6e-11, 1.5e-11, 7.8e-12, 3.2e-15, 1.6e-15),
+        "bound_e>=0.5": (2.1e-12, 2.8e-12, 1.2e-12, 3.9e-15, 1e-15),
+        "bound_1e5_orbits": (2.6e-10, 1.3e-9, 7.5e-10, 1.5e-15, 1e-15),
+        "parabolic": (2e-15, 7.7e-10, None, 1.3e-15, 1.4e-12),
+        "hyperbolic": (2.3e-14, 1.4e-11, 2.6e-14, 1.16e-13, 9.7e-11),
+        "hyperbolic_far": (3.4e-11, None, 8.2e-14, 2.9e-13, None)}),
+    # Secular (Kepler-drift) binary at e = 0 and 1e-8, 100.37 orbits as 1 or 16 steps. Measured: 1 vs 16 9.5e-13 /
+    # 1.1e-12, vs analytic 1.1e-12 / 9.2e-13, |dE/E| 3.3e-15 / 3.0e-15, |dL/L| 0. 043190d: 1 vs 16 = 2.0 / 0.55,
     # vs analytic up to 2.0 / 1.3 (elements route)
+    "secular_drift_e0": lambda exe: secular_drift(exe, "e = 0", SEC_DRIFT, (1.25e-12, 1.45e-12, 4.3e-15, 1e-15)),
+    "secular_drift_e1e-8": lambda exe: secular_drift(exe, "e = 1e-8", dict(SEC_DRIFT, BINARY_E="1e-8"),
+                                                     (1.4e-12, 1.2e-12, 4e-15, 1e-15)),
     # KEPLER_2BODY (subsystem audit #1): the Kepler drift is exact (vs the analytic orbit at round-off) and agrees with
     # LogH + GBS to its accuracy (LogH landing on the end time to 1e-12; with the default NBODY_GBS_TTOL = 1e-4 LogH
-    # is off by 2.8e-6 / 1.6e-6 / 1.2e-5 of r here). Measured (raven host, 2026-10-11): Kepler vs analytic 6.7e-14 /
-    # 5.1e-17 / 5.3e-16, LogH vs analytic 5.4e-13 / 7.2e-11 / 1.1e-13, Kepler max |dE/E| 2.4e-14 / 0 / 3.0e-15; bounds
+    # is off by 2.8e-6 / 1.6e-6 / 1.2e-5 of r here). Measured (raven host, 2026-10-11): Kepler vs analytic 1.1e-15 /
+    # 2e-32 / 2.4e-15, LogH vs analytic 5.4e-13 / 7.2e-11 / 1.1e-13, Kepler max |dE/E| 1.2e-15 / 0 / 2.0e-15; bounds
     # 1.3x (1e-15 floor). 043190d ignores the key: no Kepler2 drift, LogH calls in the Kepler run
-    "kepler2_norb05": lambda exe: kepler_vs_logh(exe, "0.5 orbits per step", KEP_2B, (8.7e-14, 7.1e-13, 6.3e-13, 3.1e-14)),
+    "kepler2_norb05": lambda exe: kepler_vs_logh(exe, "0.5 orbits per step", KEP_2B, (1.4e-15, 7.1e-13, 7.1e-13, 1.6e-15)),
     "kepler2_norb2": lambda exe: kepler_vs_logh(exe, "2 orbits per step",
                                                 dict(KEP_2B, TOTAL_TIME_MYR=f"{4.0 * P_SEC_MYR:.15e}",
                                                      DT_MAX_MYR=f"{2.0 * P_SEC_MYR:.15e}"), (1e-15, 9.3e-11, 9.3e-11, 1e-15)),
     "kepler2_hyperbolic": lambda exe: kepler_vs_logh(exe, "hyperbolic encounter", KEP_2B_HYP,
-                                                     (1e-15, 1.4e-13, 1.4e-13, 4e-15)),
+                                                     (3.1e-15, 1.4e-13, 1.4e-13, 2.6e-15)),
     # Grazing contact binary: two Kepler drifts, then the drift containing the pericentre goes to LogH, whose step is
-    # aimed at the pericentre and merges there (r_sep / r_coll = 0.9997); measured |dE/E| 1.2e-14 with the merger sink
+    # aimed at the pericentre and merges there (r_sep / r_coll = 0.9997); measured |dE/E| 1.0e-15 with the merger sink
     "kepler2_contact": lambda exe: subsys_collision(exe, "contact binary via the Kepler path", KEP_2B_CONTACT, "STELLAR",
-                                                    1.6e-14, min_kepler2=1),
-    "secular_drift_e0": lambda exe: secular_drift(exe, "e = 0", SEC_DRIFT, (5e-13, 3e-13, 7e-16, 1e-15)),
-    "secular_drift_e1e-8": lambda exe: secular_drift(exe, "e = 1e-8", dict(SEC_DRIFT, BINARY_E="1e-8"),
-                                                     (1.6e-12, 2e-12, 7e-16, 1e-15)),
+                                                    1.4e-15, min_kepler2=1),
     "logh_big_group": lambda exe: big_group(exe, "big group", BIG_GROUP, (1.2e-5, 1e-12)),
     # Exact tree searches (M7.4), forced at every set size, each search checked bitwise against O(N^2)
     # Tree searches on by default above the break-even set size (host builds 2048): 5000 stars use them at the top
