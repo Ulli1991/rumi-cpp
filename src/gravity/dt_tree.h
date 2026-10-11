@@ -29,6 +29,13 @@
 // The computed t' = t + c t^2 eta / (u + 1) carries an absolute round-off of ~20 eps t (cancellation for d << 0), so
 // 1e-13 eta t_max is subtracted, and the result is scaled by (1 - 1e-6) for the relative round-off of t and the bound.
 //
+// Tidal-sampling pair step (FLYBY_CM_EPS, n2_kernels.h tidal_sampling_dt): t = max(min(k_i / m_j, k_j / m_i) r^3,
+// max(f_i, f_j)) enters the minimum next to pair_dt. Over a node (k_j >= k_min, m_j <= m_max, r >= r_min, f_j >= 0):
+// t >= max(min(k_i / m_max, k_min / m_i) r_min^3, f_i). fmin, fmax and the f floor are exact; the product and r^3
+// carry a few ulp, covered by the factor (1 - 1e-6). The node bound is the smaller of the two bounds, so a pruned
+// node holds no pair whose min(pair_dt, t) is below the running minimum, and leaves evaluate DtK's expression: the
+// minimum stays bit-identical to the O(N^2) kernel with the tidal step too.
+//
 // Low relative velocities: H -> r^2 v / (G m) -> 0 for v -> 0 (an approaching pair at rest has a vanishing fly-by step),
 // and a spatial node's velocity box almost always contains the sink velocity, so v_min = 0 would block all pruning.
 // Each sink therefore picks a speed V_c: members with |dv| < V_c are found in a second tree over the velocities (its
@@ -48,10 +55,10 @@ namespace dtt {
 #define DTT_LEAF 8
 #endif
 constexpr int LEAF = DTT_LEAF;    // points per leaf
-constexpr int NB = 14;            // node record: key box lo[3] hi[3], position box lo[3] hi[3] ... see below
+constexpr int NB = 15;            // node record: key box lo[3] hi[3], position box lo[3] hi[3] ... see below
 constexpr int STACK = 64;
 // node record layout: [0..2] position lo, [3..5] position hi, [6..8] velocity lo, [9..11] velocity hi, [12] m max,
-// [13] m min (empty node: lo = +inf, hi = -inf)
+// [13] m min, [14] k min of the tidal-sampling step (1e300 without it) (empty node: lo = +inf, hi = -inf)
 
 KOKKOS_INLINE_FUNCTION uint64_t spread21(uint64_t v) {
     v &= 0x1fffffULL;
@@ -101,6 +108,14 @@ KOKKOS_INLINE_FUNCTION double dt_lower_bound(double r2lo, double r2hi, double so
     return (1.0 - 1e-6) * Kokkos::fmin(lb_ff, lb_fb);
 }
 
+// Lower bound of the tidal-sampling step of sink (k_i, m_i, f_i) over sources with k >= kmin, m <= mmax at softened
+// distance >= sqrt(r2lo + soft2) (derivation at the top of this file)
+KOKKOS_INLINE_FUNCTION double tidal_lower_bound(double r2lo, double soft2, double ki, double mi, double fi, double kmin,
+                                                double mmax) {
+    const double r2 = r2lo + soft2;
+    return Kokkos::fmax((1.0 - 1e-6) * Kokkos::fmin(ki / mmax, kmin / mi) * r2 * Kokkos::sqrt(r2), fi);
+}
+
 // Source set of one tree: points sorted by the Morton key of (kx, ky, kz) = positions (position tree) or pair
 // velocities (velocity tree). Positions, velocities and masses are copied in sorted order (bitwise copies).
 template <class Exec>
@@ -108,7 +123,8 @@ struct PointTree {
     using Mem = typename Exec::memory_space;
     int n = 0, P = 1, nlev = 0, j0 = 0;   // j0: first particle index of the source range
     double vmean[3] = {0, 0, 0}, vsig = 0;   // mean and rms deviation of the velocities (vx, vy, vz)
-    Kokkos::View<double*, Mem> px, py, pz, vx, vy, vz, m;
+    Kokkos::View<double*, Mem> px, py, pz, vx, vy, vz, m, k, kf;   // k, kf: tidal-sampling step (has_k)
+    bool has_k = false;
     Kokkos::View<int*, Mem> idx;          // sorted position -> particle index
     Kokkos::View<double**, Kokkos::LayoutRight, Mem> node;
     Kokkos::View<uint64_t*, Mem> key;
@@ -117,7 +133,7 @@ struct PointTree {
     void reserve(int nn) {
         if ((int)px.extent(0) < nn) {
             const int c = nn + nn / 4;
-            for (auto* v : {&px, &py, &pz, &vx, &vy, &vz, &m}) *v = Kokkos::View<double*, Mem>("dtt_pt", c);
+            for (auto* v : {&px, &py, &pz, &vx, &vy, &vz, &m, &k, &kf}) *v = Kokkos::View<double*, Mem>("dtt_pt", c);
             idx = Kokkos::View<int*, Mem>("dtt_idx", c);
             perm = Kokkos::View<int*, Mem>("dtt_perm", c);
             key = Kokkos::View<uint64_t*, Mem>("dtt_key", c);
@@ -132,9 +148,12 @@ struct PointTree {
     // velocities) then do not widen the velocity boxes of the nodes of field stars (8192-body cluster with 10 %
     // binaries, leaf 8: 2.6x fewer pair evaluations than without classes; finer classes or velocity octants lose
     // spatial resolution: the sink falls inside the boxes of many sparse leaves, where no bound can prune).
+    // K, KF (optional): the tidal-sampling arrays (PairVelocities::k, kf), copied in sorted order with a per-node k min.
     void build(int j0, int nj, const double* X, const double* Y, const double* Z, const double* VX, const double* VY,
-               const double* VZ, const double* M, bool by_velocity, bool vclass = false) {
+               const double* VZ, const double* M, bool by_velocity, bool vclass = false, const double* K = nullptr,
+               const double* KF = nullptr) {
         n = nj; this->j0 = j0;
+        has_k = K != nullptr;
         const int nleaf = (n + LEAF - 1) / LEAF;
         P = 1; nlev = 0;
         while (P < nleaf) { P *= 2; nlev++; }
@@ -195,21 +214,23 @@ struct PointTree {
         auto ks = Kokkos::subview(key, Kokkos::make_pair(0, n));
         auto ps = Kokkos::subview(perm, Kokkos::make_pair(0, n));
         Kokkos::Experimental::sort_by_key(Exec(), ks, ps);
-        auto px_ = px, py_ = py, pz_ = pz, vx_ = vx, vy_ = vy, vz_ = vz, m_ = m;
+        auto px_ = px, py_ = py, pz_ = pz, vx_ = vx, vy_ = vy, vz_ = vz, m_ = m, k_ = k, kf_ = kf;
         auto idx_ = idx;
-        Kokkos::parallel_for("dtt_gather", Kokkos::RangePolicy<Exec>(0, n), KOKKOS_LAMBDA(int k) {
-            const int j = j0 + perm_(k);
-            idx_(k) = j;
-            px_(k) = X[j]; py_(k) = Y[j]; pz_(k) = Z[j]; vx_(k) = VX[j]; vy_(k) = VY[j]; vz_(k) = VZ[j]; m_(k) = M[j];
+        Kokkos::parallel_for("dtt_gather", Kokkos::RangePolicy<Exec>(0, n), KOKKOS_LAMBDA(int q) {
+            const int j = j0 + perm_(q);
+            idx_(q) = j;
+            px_(q) = X[j]; py_(q) = Y[j]; pz_(q) = Z[j]; vx_(q) = VX[j]; vy_(q) = VY[j]; vz_(q) = VZ[j]; m_(q) = M[j];
+            if (K) { k_(q) = K[j]; kf_(q) = KF[j]; }
         });
         auto nd = node;
         const int nn = n, PP = P;
         Kokkos::parallel_for("dtt_leaves", Kokkos::RangePolicy<Exec>(0, P), KOKKOS_LAMBDA(int l) {
             double r[NB];
             for (int d = 0; d < 3; d++) { r[d] = r[6 + d] = 1e300; r[3 + d] = r[9 + d] = -1e300; }
-            r[12] = -1e300; r[13] = 1e300;
+            r[12] = -1e300; r[13] = 1e300; r[14] = 1e300;
             const int k1 = Kokkos::min(nn, (l + 1) * LEAF);
             for (int k = l * LEAF; k < k1; k++) {
+                if (K) r[14] = Kokkos::fmin(r[14], k_(k));
                 const double q[6] = {px_(k), py_(k), pz_(k), vx_(k), vy_(k), vz_(k)};
                 for (int d = 0; d < 3; d++) {
                     r[d] = Kokkos::fmin(r[d], q[d]); r[3 + d] = Kokkos::fmax(r[3 + d], q[d]);
@@ -230,6 +251,7 @@ struct PointTree {
                 }
                 nd(c, 12) = Kokkos::fmax(nd(2 * c, 12), nd(2 * c + 1, 12));
                 nd(c, 13) = Kokkos::fmin(nd(2 * c, 13), nd(2 * c + 1, 13));
+                nd(c, 14) = Kokkos::fmin(nd(2 * c, 14), nd(2 * c + 1, 14));
             });
         }
     }
@@ -239,6 +261,8 @@ struct PointTree {
 struct DtParams {
     double G, soft2, eta_ff, eta_fb;
     double vc_fac;   // V_c = min(sigma, vc_fac * 2 G m mn / R_c^2): split between the velocity and position searches
+    const double* k = nullptr;    // tidal-sampling step of the sinks (PairVelocities::k, kf; the trees must carry it)
+    const double* kf = nullptr;
 };
 
 // Minimum pair step of each sink i in [i0, i0 + ni) over the sources of the trees, written to dt(i). sid: subsystem
@@ -249,6 +273,10 @@ void min_pair_dt(const PointTree<Exec>& T, const PointTree<Exec>& V, int i0, int
                  double* dt, const DtParams& prm, long long* npairs = nullptr, long long* npairsB = nullptr) {
     auto tn = T.node; auto tpx = T.px, tpy = T.py, tpz = T.pz, tvx = T.vx, tvy = T.vy, tvz = T.vz, tm = T.m;
     auto tidx = T.idx;
+    auto tk = T.k, tkf = T.kf, vk = V.k, vkf = V.kf;
+    const double* K = prm.k;
+    const double* KF = prm.kf;
+    if (K && !(T.has_k && V.has_k)) Kokkos::abort("dt_tree: tidal-sampling step without the trees' k arrays");
     auto vn = V.node; auto vpx = V.px, vpy = V.py, vpz = V.pz, vvx = V.vx, vvy = V.vy, vvz = V.vz, vm = V.m;
     auto vidx = V.idx;
     const int TP = T.P, VP = V.P, Tn = T.n, Vn = V.n;
@@ -261,10 +289,12 @@ void min_pair_dt(const PointTree<Exec>& T, const PointTree<Exec>& V, int i0, int
         const int i = same ? tidx(ii) : i0 + ii;   // sinks in Morton order when they are the sources (coherent walks)
         const double xi = X[i], yi = Y[i], zi = Z[i], ui = CVX[i], vi = CVY[i], wi = CVZ[i], mi = M[i];
         const int si = sid ? sid[i] : -1;
+        const double ki = K ? K[i] : 1e30, fi = K ? KF[i] : 0.0;
         double mn = 1e30;
         // leaf members k (sorted arrays of one tree): the pair expression of DtK
         auto eval = [&](const double* qx, const double* qy, const double* qz, const double* qu, const double* qv,
-                        const double* qw, const double* qm, const int* qi, int k0, int k1) {
+                        const double* qw, const double* qm, const double* qk, const double* qkf, const int* qi, int k0,
+                        int k1) {
             for (int k = k0; k < k1; k++) {
                 const int j = qi[k];
                 const bool w = pair_weight(i, j, si, sid ? sid[j] : -1);
@@ -273,6 +303,7 @@ void min_pair_dt(const PointTree<Exec>& T, const PointTree<Exec>& V, int i0, int
                 double r2s = dx * dx + dy * dy + dz * dz + soft2;
                 double ir = fast_rsqrt(r2s);
                 double t = pair_dt_below(mn, r2s, ir, dx, dy, dz, qu[k] - ui, qv[k] - vi, qw[k] - wi, G, mi + qm[k], eff, efb);
+                if (K) t = Kokkos::fmin(t, tidal_sampling_dt(ki, qk[k], mi, qm[k], r2s, fi, qkf[k]));
                 mn = Kokkos::fmin(mn, t);
             }
             npair += k1 - k0;
@@ -288,8 +319,8 @@ void min_pair_dt(const PointTree<Exec>& T, const PointTree<Exec>& V, int i0, int
         const int leaf0 = c;
         {
             const int l = leaf0 - TP;
-            eval(tpx.data(), tpy.data(), tpz.data(), tvx.data(), tvy.data(), tvz.data(), tm.data(), tidx.data(), l * LEAF,
-                 Kokkos::min(Tn, (l + 1) * LEAF));
+            eval(tpx.data(), tpy.data(), tpz.data(), tvx.data(), tvy.data(), tvz.data(), tm.data(), tk.data(), tkf.data(),
+                 tidx.data(), l * LEAF, Kokkos::min(Tn, (l + 1) * LEAF));
         }
         // 2. V_c: a node of slow particles at distance r is pruned by the fly-by bound at its largest relative speed
         // (~ |v_i - <v>| + 2 sigma) beyond R_c = mn (2 + eta) v / eta, and by the low-speed end only if
@@ -316,12 +347,14 @@ void min_pair_dt(const PointTree<Exec>& T, const PointTree<Exec>& V, int i0, int
                 const double vlo = Kokkos::sqrt(v2lo);
                 if (!(vlo < VcB)) continue;
                 box_dist2(&vn(c2, 0), &vn(c2, 3), xi, yi, zi, r2lo, r2hi);
-                if (dt_lower_bound(r2lo, r2hi, soft2, mi + vn(c2, 13), mi + vn(c2, 12), vlo,
-                                   Kokkos::fmin(Kokkos::sqrt(v2hi), VcB), G, eff, efb) >= mn) continue;
+                double lb = dt_lower_bound(r2lo, r2hi, soft2, mi + vn(c2, 13), mi + vn(c2, 12), vlo,
+                                           Kokkos::fmin(Kokkos::sqrt(v2hi), VcB), G, eff, efb);
+                if (K) lb = Kokkos::fmin(lb, tidal_lower_bound(r2lo, soft2, ki, mi, fi, vn(c2, 14), vn(c2, 12)));
+                if (lb >= mn) continue;
                 if (c2 >= VP) {
                     const int l = c2 - VP;
-                    eval(vpx.data(), vpy.data(), vpz.data(), vvx.data(), vvy.data(), vvz.data(), vm.data(), vidx.data(),
-                         l * LEAF, Kokkos::min(Vn, (l + 1) * LEAF));
+                    eval(vpx.data(), vpy.data(), vpz.data(), vvx.data(), vvy.data(), vvz.data(), vm.data(), vk.data(),
+                         vkf.data(), vidx.data(), l * LEAF, Kokkos::min(Vn, (l + 1) * LEAF));
                     npairB += Kokkos::min(Vn, (l + 1) * LEAF) - l * LEAF;
                 } else if (sp + 2 <= STACK) {
                     stack[sp++] = 2 * c2; stack[sp++] = 2 * c2 + 1;
@@ -342,11 +375,13 @@ void min_pair_dt(const PointTree<Exec>& T, const PointTree<Exec>& V, int i0, int
                 box_dist2(&tn(c2, 6), &tn(c2, 9), ui, vi, wi, v2lo, v2hi);
                 const double vlo = Kokkos::fmax(Kokkos::sqrt(v2lo), Vc), vhi = Kokkos::sqrt(v2hi);
                 if (vlo > vhi) continue;   // all members slower than V_c: found by the velocity tree
-                if (dt_lower_bound(r2lo, r2hi, soft2, mi + tn(c2, 13), mi + tn(c2, 12), vlo, vhi, G, eff, efb) >= mn) continue;
+                double lb = dt_lower_bound(r2lo, r2hi, soft2, mi + tn(c2, 13), mi + tn(c2, 12), vlo, vhi, G, eff, efb);
+                if (K) lb = Kokkos::fmin(lb, tidal_lower_bound(r2lo, soft2, ki, mi, fi, tn(c2, 14), tn(c2, 12)));
+                if (lb >= mn) continue;
                 if (c2 >= TP) {
                     const int l = c2 - TP;
-                    eval(tpx.data(), tpy.data(), tpz.data(), tvx.data(), tvy.data(), tvz.data(), tm.data(), tidx.data(),
-                         l * LEAF, Kokkos::min(Tn, (l + 1) * LEAF));
+                    eval(tpx.data(), tpy.data(), tpz.data(), tvx.data(), tvy.data(), tvz.data(), tm.data(), tk.data(),
+                         tkf.data(), tidx.data(), l * LEAF, Kokkos::min(Tn, (l + 1) * LEAF));
                 } else if (sp + 2 <= STACK) {
                     double a2, b2, f;
                     box_dist2(&tn(2 * c2, 0), &tn(2 * c2, 3), xi, yi, zi, a2, f);

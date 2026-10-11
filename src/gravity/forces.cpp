@@ -128,9 +128,9 @@ void tree_min_dt_on(Particles& p, int i0, int ni, int j0, int nj, const PairVel&
                     double soft2, double eta_ff, double eta_fb) {
     auto& T = trees<Exec>();
     const double *X = p.x.data(), *Y = p.y.data(), *Z = p.z.data(), *M = p.mass.data();
-    T.pos.build(j0, nj, X, Y, Z, cv.x.ptr, cv.y.ptr, cv.z.ptr, M, false, true);
-    T.vel.build(j0, nj, X, Y, Z, cv.x.ptr, cv.y.ptr, cv.z.ptr, M, true);
-    dtt::DtParams prm{G, soft2, eta_ff, eta_fb, tree_dt_vc_fac};
+    T.pos.build(j0, nj, X, Y, Z, cv.x.ptr, cv.y.ptr, cv.z.ptr, M, false, true, cv.k.ptr, cv.kf.ptr);
+    T.vel.build(j0, nj, X, Y, Z, cv.x.ptr, cv.y.ptr, cv.z.ptr, M, true, false, cv.k.ptr, cv.kf.ptr);
+    dtt::DtParams prm{G, soft2, eta_ff, eta_fb, tree_dt_vc_fac, cv.k.ptr, cv.kf.ptr};
     long long np = 0;
     dtt::min_pair_dt(T.pos, T.vel, i0, ni, X, Y, Z, cv.x.ptr, cv.y.ptr, cv.z.ptr, M, sid, p.dt_adapt.data(), prm, &np);
     g_tree_stats.dt_pairs += np;
@@ -297,9 +297,8 @@ static void dt_range(Particles& p, int i0, int ni, int j0, int nj, double G, dou
             run_n2(name, i0, ni, j0, nj, k);
         }
     };
-    // The tree bounds cover the ff/fb pair steps only: with the FLYBY_CM_EPS tidal-sampling step (cv.k) the O(N^2)
-    // kernel takes the set until the tree bounds include it
-    const TreeMode mode = cv.k.ptr ? TreeMode::None : tree_mode(nj);
+    // The tree bounds cover the ff/fb pair steps and the FLYBY_CM_EPS tidal-sampling step (cv.k, dt_tree.h)
+    const TreeMode mode = tree_mode(nj);
     if (mode != TreeMode::None) {
         // minimum over the pair steps from the tree into dt_adapt; collisional mode then accumulates the partner-free
         // acceleration and jerk over all sources (O(N^2), identical sums) and applies the jerk criterion as DtK does

@@ -501,7 +501,7 @@ def sdar_pn_off(exe, label, cfg):
     return ok & check(f"{label} slowed LogH calls without PN", sdar_stats(ctrl)[2], 1, lower=True)
 
 
-def tree_exact(exe, label, cfg):
+def tree_exact(exe, label, cfg, need_dt=False):
     """Exact tree time-step and neighbour searches (gravity/dt_tree.h), forced on at every set size: with
     NBODY_CHECK_TREE_DT=1 every tree search is compared bitwise with the O(N^2) kernel (the run aborts on a
     difference), and the diagnostics must equal those of the run without the tree to the last printed digit."""
@@ -519,6 +519,8 @@ def tree_exact(exe, label, cfg):
     ref_rows = [l for l in ref.splitlines() if re.match(r"^\s+L0\s", l)]
     ok = check(f"{label} searches checked against N^2", checked, dt_calls + ngb_calls, lower=True)
     ok &= check(f"{label} searches run", dt_calls + ngb_calls, 1, lower=True)
+    if need_dt:
+        ok &= check(f"{label} time-step searches run", dt_calls, 1, lower=True)
     ok &= check(f"{label} diagnostic rows differing from the run without tree",
                 sum(a != b for a, b in zip(rows, ref_rows)) + abs(len(rows) - len(ref_rows)), 0)
     return ok
@@ -887,6 +889,14 @@ CASES = {
     "tree_dt_binaries50": lambda exe: tree_exact(exe, "tree, 50 % binaries", dict(BINARIES50, TREE_DT_MIN_N="2")),
     "tree_dt_triples": lambda exe: tree_exact(exe, "tree, dense core", dict(TRIPLES, TREE_DT_MIN_N="2")),
     "tree_dt_mergers": lambda exe: tree_exact(exe, "tree, mergers", dict(MERGERS, SERIAL_N2_CPU="0", TREE_DT_MIN_N="2")),
+    # FLYBY_CM_EPS tidal-sampling step in the tree bound (dt_tree.h tidal_lower_bound): before, the O(N^2) kernel took
+    # every time-step search with the tidal step on (no tree searches), now the tree must give the same bits
+    "tree_dt_tidal": lambda exe: tree_exact(exe, "tree, 10 % binaries, tidal-sampling step",
+                                            dict(BINARIES, FLYBY_CM_EPS="1e-11", TREE_DT_MIN_N="2"), need_dt=True),
+    "tree_dt_tidal_cm": lambda exe: tree_exact(exe, "host tree, c.o.m. fly-by velocities, tidal-sampling step",
+                                               dict(BINARIES, FLYBY_CM_VELOCITY="true", FLYBY_CM_EPS="1e-11",
+                                                    TREE_DT_CPU_MAX="1000000", TREE_DT_MIN_N="2"), need_dt=True),
+    # (the dense-core variant, TRIPLES with FLYBY_CM_EPS = 1e-11, passed with 150991 searches checked but takes ~460 s)
     "tree_dt_softened": lambda exe: tree_exact(exe, "tree, softened collisionless", dict(BINARIES, COLLISIONAL="false",
                                                SOFTENING_PC="1e-3", BINARY_FRAC="0", TREE_DT_MIN_N="2")),
     # MPI cases, run under NBODY_TEST_LAUNCHER (CTest sets 2 ranks). Spins were not broadcast: lost on every
