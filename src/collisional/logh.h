@@ -96,6 +96,10 @@ struct LogHStepStart {
 };
 void logh_step_start(const LogHState& state, double G, double c_code, int pn_order, LogHStepStart& start);
 
+// nsteps logh_leapfrog_step steps with the acceleration and T + B carried between steps (bit-identical to single
+// steps); start: the values at the first step (nullptr: computed here; unused for SDAR states, n_sd > 0)
+void logh_leapfrog_steps(LogHState& state, double ds, double G, int nsteps, const LogHStepStart* start = nullptr);
+
 // nsteps logh_leapfrog_step_pn steps with the values at the start of each step carried from the end of the
 // previous one (bit-identical to single steps); start: the values at the first step (nullptr: computed here)
 void logh_leapfrog_steps_pn(LogHState& state, double ds, double G, double c_code, int pn_order, int nsteps,

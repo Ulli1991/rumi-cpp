@@ -87,9 +87,7 @@ void GBSIntegrator::midpoint(const LogHState& in, LogHState& out,
     if (pn_order > 0 && out.use_aux_vel) {
         logh_leapfrog_steps_pn(out, h, G, c_code, pn_order, n_substeps, start);
     } else {
-        for (int s = 0; s < n_substeps; s++) {
-            logh_leapfrog_step(out, h, G);
-        }
+        logh_leapfrog_steps(out, h, G, n_substeps, start);
     }
 }
 
@@ -214,10 +212,10 @@ bool GBSIntegrator::step(LogHState& state, double ds, double G, double& ds_next,
 
     bool do_debug = (state.n_bodies == 2 && gbs_debug_counter < 5);
 
-    // Values at the start of the first substep, the same for every stage (PN chains)
+    // Values at the start of the first substep, the same for every stage (not used by the SDAR steps)
     LogHStepStart start_buf;
     const LogHStepStart* start = nullptr;
-    if (pn_order > 0 && state.use_aux_vel) {
+    if ((pn_order > 0 && state.use_aux_vel) || state.n_sd == 0) {
         logh_step_start(state, G, c_code, pn_order, start_buf);
         start = &start_buf;
     }
