@@ -103,10 +103,72 @@ KOKKOS_INLINE_FUNCTION double pair_dt_below(double cur, double r2s, double ir, d
     return pair_dt(r2s, ir, dx, dy, dz, dvx, dvy, dvz, G, msum, eta_ff, eta_fb);
 }
 
+// The neighbour criteria of NgbK (BIFROST sec. 3.5) for a pair with r2 < r_ngb_max^2 (dx = x_j - x_i, dv = v_j - v_i,
+// mu = G (m_i + m_j)): bound with a or r below r_ngb, or a fly-by reaching pericentre below r_ngb within the step
+// (Eq. 4). Shared by the O(N^2) kernel and the tree range search (dt_tree.h), so both give bit-identical pairs.
+KOKKOS_INLINE_FUNCTION bool ngb_pair_test(double dx, double dy, double dz, double r2, double dvx, double dvy, double dvz,
+                                          double mu, double r_ngb, double pivot_dt, double& a_val, double& e_val,
+                                          double& E_orb, bool& is_bound) {
+    double v_sq = dvx * dvx + dvy * dvy + dvz * dvz;
+    double r_val = Kokkos::sqrt(r2);
+    E_orb = 0.5 * v_sq - mu / (r_val + EPS);
+    is_bound = (E_orb < 0);
+    a_val = -mu / (2.0 * E_orb + EPS);
+    double Lx = dy * dvz - dz * dvy, Ly = dz * dvx - dx * dvz, Lz = dx * dvy - dy * dvx;
+    double L2 = Lx * Lx + Ly * Ly + Lz * Lz;
+    double e_arg = 1.0 + 2.0 * E_orb * L2 / (mu * mu + EPS);
+    e_val = Kokkos::sqrt(Kokkos::fmax(is_bound ? 0.0 : 1.0, e_arg));
+    bool is_neighbor = false;
+    if (is_bound) {
+        is_neighbor = (a_val < r_ngb || r_val < r_ngb);
+    } else if (r_val < r_ngb) {
+        is_neighbor = true;
+    } else if (Kokkos::fabs(a_val) * (e_val - 1.0) < r_ngb && v_sq > EPS) {   // fly-by, BIFROST Eq. 4
+        is_neighbor = 0.5 * r_val / Kokkos::sqrt(v_sq) < pivot_dt;
+    }
+    return is_neighbor;
+}
+
+// Pairs i < j of the subset that BIFROST sec. 3.5 counts as neighbours: bound with a or r below r_ngb, or a
+// fly-by reaching pericentre below r_ngb within the step (Eq. 4). Appended to the neighbour buffers through an
+// atomic counter (order is irrelevant: detect_from_pairs sorts); NS = NM = 0, so run_n2 only drives the tiling.
+struct NgbK {
+    static constexpr int NSRC = 7, NS = 0, NM = 0;
+    RawView x, y, z, m, vx, vy, vz;
+    int *pi, *pj, *pb, *cnt;
+    double *pa, *pe, *pE;
+    int max_ngb;
+    double G, r_ngb, r_ngb_max_sq, pivot_dt;
+    struct Sink { double x, y, z, m, vx, vy, vz; };
+    KOKKOS_INLINE_FUNCTION Sink sink(int i) const { return {x(i), y(i), z(i), m(i), vx(i), vy(i), vz(i)}; }
+    KOKKOS_INLINE_FUNCTION void source(int j, double* s) const {
+        s[0] = x(j); s[1] = y(j); s[2] = z(j); s[3] = m(j); s[4] = vx(j); s[5] = vy(j); s[6] = vz(j);
+    }
+    KOKKOS_INLINE_FUNCTION void pair(const Sink& a, int i, const double* s, int j, double*, double*) const {
+        if (j <= i) return;  // upper triangle
+        double dx = s[0] - a.x, dy = s[1] - a.y, dz = s[2] - a.z;
+        double r2 = dx * dx + dy * dy + dz * dz;
+        if (r2 >= r_ngb_max_sq) return;
+        double a_val, e_val, E_orb;
+        bool is_bound;
+        bool is_neighbor = ngb_pair_test(dx, dy, dz, r2, s[4] - a.vx, s[5] - a.vy, s[6] - a.vz, G * (a.m + s[3]), r_ngb,
+                                         pivot_dt, a_val, e_val, E_orb, is_bound);
+        if (is_neighbor) {
+            int k = Kokkos::atomic_fetch_add(cnt, 1);
+            if (k < max_ngb) {   // array indices; detect_from_pairs converts to particle ids
+                pi[k] = i; pj[k] = j; pa[k] = a_val; pe[k] = e_val; pE[k] = E_orb; pb[k] = is_bound ? 1 : 0;
+            }
+        }
+    }
+    KOKKOS_INLINE_FUNCTION void finish(int, const Sink&, const double*, const double*) const {}
+};
+
 // Time steps of the sinks from the sources (HHS subset). Collisional mode also accumulates the
 // partner-free acceleration and jerk: jerk criterion (BIFROST sec. 3.4.5), and ax, ay, az are overwritten
 // with that acceleration for the v/a, gradient and perturbation criteria that follow.
-template <bool COLL>
+// MN_IN (tree path, dt_tree.h): the minimum over the pair steps is already in dt (exact tree search); only the sums
+// are accumulated here, with the same per-pair expressions and order as without MN_IN, so they are bit-identical.
+template <bool COLL, bool MN_IN = false>
 struct DtK {
     static constexpr int NSRC = COLL ? 11 : 7, NS = COLL ? 6 : 0, NM = 1;
     RawView x, y, z, m, vx, vy, vz, ax, ay, az, dt;
@@ -128,9 +190,11 @@ struct DtK {
         double dvx = s[4] - a.vx, dvy = s[5] - a.vy, dvz = s[6] - a.vz;
         double r2s = w ? dx * dx + dy * dy + dz * dz + soft2 : 1.0;
         double ir = fast_rsqrt(r2s);
-        double t = COLL ? pair_dt_below(mn[0], r2s, ir, dx, dy, dz, s[8] - a.cvx, s[9] - a.cvy, s[10] - a.cvz, G, a.m + s[3], eta_ff, eta_fb)
-                        : pair_dt_below(mn[0], r2s, ir, dx, dy, dz, dvx, dvy, dvz, G, a.m + s[3], eta_ff, eta_fb);
-        mn[0] = Kokkos::fmin(mn[0], w ? t : 1e30);
+        if constexpr (!MN_IN) {
+            double t = COLL ? pair_dt_below(mn[0], r2s, ir, dx, dy, dz, s[8] - a.cvx, s[9] - a.cvy, s[10] - a.cvz, G, a.m + s[3], eta_ff, eta_fb)
+                            : pair_dt_below(mn[0], r2s, ir, dx, dy, dz, dvx, dvy, dvz, G, a.m + s[3], eta_ff, eta_fb);
+            mn[0] = Kokkos::fmin(mn[0], w ? t : 1e30);
+        }
         if (COLL) {
             double fac1 = G * (w ? s[3] : 0.0) * ir * ir * ir;
             double fac2 = 3.0 * (dx * dvx + dy * dvy + dz * dvz) * ir * ir;
@@ -139,7 +203,7 @@ struct DtK {
         }
     }
     KOKKOS_INLINE_FUNCTION void finish(int i, const Sink&, const double* sum, const double* mn) const {
-        double d = mn[0];
+        double d = MN_IN ? dt(i) : mn[0];
         if (COLL) {
             if (eta_jerk > 0.0) {
                 double a_mag = Kokkos::sqrt(sum[0] * sum[0] + sum[1] * sum[1] + sum[2] * sum[2]);

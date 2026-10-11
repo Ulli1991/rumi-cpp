@@ -73,6 +73,16 @@ if(RSQRT_NEWTON)
     target_compile_definitions(n2-bench PRIVATE RSQRT_NEWTON)
 endif()
 
+# Exact tree time-step / neighbour search against the O(N^2) kernels: bitwise check and timings (tests/dt_tree_bench.cpp)
+add_executable(dt-tree-bench ${CMAKE_CURRENT_SOURCE_DIR}/tests/dt_tree_bench.cpp)
+target_include_directories(dt-tree-bench PRIVATE ${SRC_DIR}/core ${SRC_DIR}/gravity)
+target_link_libraries(dt-tree-bench Kokkos::kokkos)
+target_compile_features(dt-tree-bench PRIVATE cxx_std_17)
+target_compile_options(dt-tree-bench PRIVATE $<$<CONFIG:Release>:-O3 -march=native>)
+if(RSQRT_NEWTON)
+    target_compile_definitions(dt-tree-bench PRIVATE RSQRT_NEWTON)
+endif()
+
 # FMM check against direct summation (tests/fmm_test.cpp)
 add_executable(fmm-test ${CMAKE_CURRENT_SOURCE_DIR}/tests/fmm_test.cpp ${SRC_DIR}/gravity/fmm.cpp)
 target_include_directories(fmm-test PRIVATE ${SRC_DIR}/core ${SRC_DIR}/gravity)
@@ -133,7 +143,8 @@ foreach(case kepler_e09 kepler_e0 frost4_e09 frost4_e099 planets_hhs planets_fsi
              binaries_timestep frost4_e09_cpu pn_logh_books
              mergers_sse binaries50_detected triples_detected
              cc_pn1_wide cc_binaries50 cc_vs_plain_binaries50 cm_cpu_vs_device cc_cm_consistent
-             dense_core_split triple_id_order secular_triples_off secular_omega0_steps spin_precession spin_j spin_j_pn1 ic_binaries_no_mergers eta_jerk0_fsi va_without_grad restart_halves_va secular_stellar_no_pn secular_bh_tight_steps logh_hierarchy_complete weak_flyby_split)
+             dense_core_split triple_id_order secular_triples_off secular_omega0_steps spin_precession spin_j spin_j_pn1 ic_binaries_no_mergers eta_jerk0_fsi va_without_grad restart_halves_va secular_stellar_no_pn secular_bh_tight_steps logh_hierarchy_complete weak_flyby_split
+             tree_dt_binaries tree_dt_binaries_cm tree_dt_binaries50 tree_dt_triples tree_dt_mergers tree_dt_softened)
     add_test(NAME ${case} COMMAND Python3::Interpreter ${CMAKE_SOURCE_DIR}/tests/run_case.py
              $<TARGET_FILE:nbody-kokkos> ${case})
     # Few-body cases: host threads only add overhead (and timeouts); every incremental pid-map update is
