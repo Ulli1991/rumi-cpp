@@ -192,8 +192,7 @@ void GBSIntegrator::compute_stages(const LogHState& state, int k0, int k1, doubl
     using Policy = Kokkos::RangePolicy<Kokkos::DefaultHostExecutionSpace, Kokkos::Schedule<Kokkos::Dynamic>>;
     Kokkos::parallel_for("gbs_stages", Policy(0, k1 - k0 + 1).set_chunk_size(1), [&](int i) {
         const int k = k1 - i;
-        LogHState result;
-        result = state;
+        LogHState result;   // midpoint copies state into it
         midpoint(state, result, STEP_SEQ[k], ds, G, c_code, pn_order, start);
         int d = 0;
         pack_state(result, table[k], d);
@@ -203,8 +202,8 @@ void GBSIntegrator::compute_stages(const LogHState& state, int k0, int k1, doubl
 bool GBSIntegrator::step(LogHState& state, double ds, double G, double& ds_next,
                           double c_code, int pn_order) {
     int dim = 0;
-    double y0[GBS_DIM_MAX];
-    pack_state(state, y0, dim);
+    pack_state(state, y_start, dim);   // the integrated fields of the state before the step (restore_step)
+    dim_start = dim;
 
     bool do_debug = (state.n_bodies == 2 && gbs_debug_counter < 5);
 
@@ -217,7 +216,7 @@ bool GBSIntegrator::step(LogHState& state, double ds, double G, double& ds_next,
     }
 
     if (do_debug) {
-        double w0 = omega_from_packed(y0, 2);
+        double w0 = omega_from_packed(y_start, 2);
         std::printf("      GBS step #%d: ds=%.6e  omega_in=%.6f\n",
                     gbs_debug_counter.load(), ds, w0);
     }
@@ -234,8 +233,7 @@ bool GBSIntegrator::step(LogHState& state, double ds, double G, double& ds_next,
                 compute_stages(state, stage, k1, ds, G, c_code, pn_order, start);
                 computed = k1;
             } else {
-                LogHState result;
-                result = state;  // copy masses, B, n_bodies, etc.
+                LogHState result;   // midpoint copies state into it (masses, B, n_bodies, etc.)
                 midpoint(state, result, STEP_SEQ[stage], ds, G, c_code, pn_order, start);
                 pack_state(result, table[stage], dim);
                 computed = stage;
@@ -505,16 +503,16 @@ int GBSIntegrator::integrate_to_time(LogHState& state, double t_target, double G
         if (std::fabs(ds_try) < ds_min_used) ds_min_used = std::fabs(ds_try);
         if (std::fabs(ds_try) > ds_max_used) ds_max_used = std::fabs(ds_try);
 
-        // Save state for bisection if we overshoot
-        LogHState saved = state;
+        // For the bisection on overshoot: step() leaves the state unchanged when it fails and keeps the fields it
+        // changes for restore_step (no full copy of the state per step)
+        const double t_saved = state.t;
         double ds_next;
 
         bool ok = step(state, ds_try, G, ds_next, c_code, pn_order);
         n_steps++;
 
         if (!ok) {
-            // Step failed — halve and retry (ds persists to next iteration)
-            state = saved;
+            // Step failed (state unchanged) — halve and retry (ds persists to next iteration)
             ds = ds_try * 0.5;
             n_failed++;
             g_gbs_stats.failed++;
@@ -527,8 +525,8 @@ int GBSIntegrator::integrate_to_time(LogHState& state, double t_target, double G
             (dt_remain < 0 && state.t < t_goal - t_over)) {
             // Overshoot: aim at the target with the secant through this attempt (t(s) is smooth over a step),
             // slightly short so that the next step lands inside the tolerance from below
-            const double dt_attempt = state.t - saved.t;
-            state = saved;
+            const double dt_attempt = state.t - t_saved;
+            restore_step(state);
             ds = (dt_attempt != 0.0) ? ds_try * (dt_remain / dt_attempt) * (1.0 - 1e-6) : ds_try * 0.5;
             n_overshoot++;
             g_gbs_stats.overshoot++;
@@ -539,7 +537,7 @@ int GBSIntegrator::integrate_to_time(LogHState& state, double t_target, double G
         ds = ds_next;
         // Jumping kappa: new slow-down factors for the next step, energy jump booked into B (Wang+2020 Eq. 24)
         if (sdar) {
-            if (sd_P_eff > 0.0) sd_orbits_done += std::fabs(state.t - saved.t) / sd_P_eff;
+            if (sd_P_eff > 0.0) sd_orbits_done += std::fabs(state.t - t_saved) / sd_P_eff;
             const double P_eff = logh_sd_update(state, G, *sdar);
             if (sd_P_eff > 0.0) sd_P_eff = P_eff;
         }

@@ -36,6 +36,10 @@ struct GBSIntegrator {
     // work[j] stores the last row T[k][j] of the Neville table (extrapolate adds row k)
     double table[MAX_STAGES][GBS_DIM_MAX];  // pos+vel+aux_vel(+spins)+t+B per stage
     double work[MAX_STAGES][GBS_DIM_MAX];
+    // Packed state at the start of the last step() call: the only fields a step changes (pos, vel, aux_vel,
+    // spins, t, B), so that restore_step undoes an accepted step without a copy of the whole LogHState
+    double y_start[GBS_DIM_MAX];
+    int dim_start = 0;
 
     // Stage-parallel steps (host threads; only outside other host-parallel regions): the midpoint integrations
     // of stages k..par_hint run concurrently, par_hint = the stage the previous step converged at. Same result
@@ -75,6 +79,8 @@ private:
     void pack_state(const LogHState& state, double* y, int& dim);
     // Unpack flat array back into LogHState
     void unpack_state(const double* y, int dim, LogHState& state);
+    // Back to the state before the last step() (overshoot of the end time)
+    void restore_step(LogHState& state) { unpack_state(y_start, dim_start, state); }
     // |chi| of spin1, spin2, aux_spin1, aux_spin2, and their restoration after extrapolation
     static void spin_norms(LogHState& state, double norm[4]);
     static void restore_spin_norms(LogHState& state, const double norm[4]);
