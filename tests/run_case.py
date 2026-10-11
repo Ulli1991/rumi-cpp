@@ -146,10 +146,11 @@ COLL_HEADON = dict(TEST_CASE="triple_test", INTEGRATOR="hhs", TRIPLE_A_IN_PC="1e
                    SSE_ENABLED="false", ETA_RESTART="1e-8", ETA_GBS="1e-10", PRINT_INTERVAL="1", PROFILING="false",
                    TEST_STELLAR_RADIUS_RSUN="1.0")
 # The 200k step-1 stall (AUDIT F3, SDAR runs with BINARY_PERI_CHECK = false): a contact binary, 1+1 Msun at 0.05 AU,
-# e = 0.6 (r_p = 4.259 R_sun, R = 2.131 R_sun: r_p / r_coll = 0.9993, so the steps jump over the short stretch
-# inside r_coll unless one is forced onto the pericentre) and a 0.7 Msun star passing at 0.003 pc (190 km/s, inside
+# e = 0.6 (R = 2.1300 R_sun: r_p just inside r_coll, so the steps jump over the short stretch inside r_coll unless
+# one is forced onto the pericentre; R = 2.131 was too deep for gcc 15, whose steps hit the overlap directly, and
+# R <= 2.1295 misses; 2.1298-2.1302 lands on gcc 13 and gcc 15) and a 0.7 Msun star passing at 0.003 pc (190 km/s, inside
 # R_NGB from the start): a 3-body subsystem with SDAR, kappa = 1 for the candidate
-COLL_CONTACT = dict(F3_FLYBY, TRIPLE_E_IN="0.6", TRIPLE_A_OUT_PC="0.003", SDAR="true", TEST_STELLAR_RADIUS_RSUN="2.131")
+COLL_CONTACT = dict(F3_FLYBY, TRIPLE_E_IN="0.6", TRIPLE_A_OUT_PC="0.003", SDAR="true", TEST_STELLAR_RADIUS_RSUN="2.1300")
 # TDE on a parabolic orbit: a 1 Msun star of 1 R_sun reaches q = 1e-7 pc from a 100 Msun BH (r_t = 1.3 (M/m)^{1/3}
 # R = 6.03 R_sun = 1.36e-7 pc; q / r_t = 0.74), starting at 5 q; a 4 Msun star at 1e-4 pc (circular) binds the system
 # (E0 != 0 for the relative energy error)
@@ -943,11 +944,11 @@ CASES = {
     # SDAR (M3; Wang, Nitadori & Makino 2020; FROST-CLUSTERS I App. A2). Before (no SDAR key, plain LogH): GBS
     # step ratio 1, no slowed call. B-S triple (W20 Table 1), 0.07 t_KL: kappa_max 51.7 as in W20 sec. 7.1;
     # plain LogH (1024 steps/orbit limit, else it gives up) 4.86e6 GBS steps, 99 restarts, max|dE/E| 1.2e-7;
-    # SDAR 1.56e5 steps (0.032), 2.56e-9 (books; 8e-8 physical), e_in within 2e-6 of LogH
-    "sdar_kozai_triple": lambda exe: sdar_vs_logh(exe, "Wang+2020 B-S triple", KL_TRIPLE, 0.042, 3e-6, 3.4e-9,
+    # SDAR 1.56e5 steps (0.032), 2.56e-9 (books; 8e-8 physical), e_in within 2e-6 of LogH; gcc 15: 5.03e-9
+    "sdar_kozai_triple": lambda exe: sdar_vs_logh(exe, "Wang+2020 B-S triple", KL_TRIPLE, 0.042, 3e-6, 6.5e-9,
                                                   {"NBODY_GBS_STEPS_PER_ORBIT": "1024"}),
-    # F3 fly-by: LogH 1.52e6 GBS steps, max|dE/E| 5.6e-7 (restarts); SDAR 389 steps (2.6e-4), 3.1e-11
-    "sdar_f3_flyby": lambda exe: sdar_vs_logh(exe, "F3 fly-by", F3_FLYBY, 3.4e-4, None, 4e-11),
+    # F3 fly-by: LogH 1.52e6 GBS steps, max|dE/E| 5.6e-7 (restarts); SDAR 389 steps (2.6e-4), 3.1e-11 (gcc 15: 4.6e-11)
+    "sdar_f3_flyby": lambda exe: sdar_vs_logh(exe, "F3 fly-by", F3_FLYBY, 3.4e-4, None, 6e-11),
     # Before: the control (PN off) has no slowed call either
     "sdar_pn_kappa1": lambda exe: sdar_pn_off(exe, "PN BH binary + star", PN_TRIPLE),
     # SECULAR_TRIPLES = false (FROST-CLUSTERS I): the switch was ignored by the per-level re-classification

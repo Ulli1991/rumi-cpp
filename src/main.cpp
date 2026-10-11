@@ -653,9 +653,11 @@ int main(int argc, char** argv) {
         // Exact tree searches on by default above the measured break-even set sizes (AUDIT F7; results are
         // bit-identical to O(N^2), so only speed changes). Host builds: ~1000-1500 for both searches (32 threads).
         // GPUs (A100): neighbours ~25k, time steps ~30k with component velocities, ~150k with FLYBY_CM_VELOCITY
-        // (fewer prunable pairs). GPU values also serve APUs until measured there.
+        // (fewer prunable pairs). GPU values also serve APUs until measured there. With FLYBY_CM_VELOCITY and the
+        // tidal-sampling step the 200k cluster ran 4.12 s/step with the tree against 3.96 s without (verify-gpuopt,
+        // 2026-10-11), so the c.o.m. threshold sits above 200k.
         constexpr bool host_build = std::is_same_v<Kokkos::DefaultExecutionSpace, Kokkos::DefaultHostExecutionSpace>;
-        const int dt_default = host_build ? 2048 : (flyby_cm_velocity ? 200000 : 65536);
+        const int dt_default = host_build ? 2048 : (flyby_cm_velocity ? 300000 : 65536);
         tree_dt_min_n = cfg.get_int("TREE_DT_MIN_N", dt_default);
         tree_ngb_min_n = cfg.get_int("TREE_NGB_MIN_N", host_build ? 2048 : 32768);
         tree_dt_cpu_max = cfg.get_int("TREE_DT_CPU_MAX", 0);
