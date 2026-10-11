@@ -195,28 +195,42 @@ struct GbsStats {
 // Midpoint results of stages k0..k1 into table[] on the host threads, the largest stage handed out first
 void GBSIntegrator::compute_stages(const LogHState& state, int k0, int k1, double ds, double G,
                                    double c_code, int pn_order) {
-    auto one = [&](int k) {
-        LogHState result;
-        result = state;
-        midpoint(state, result, STEP_SEQ[k], ds, G, c_code, pn_order);
-        int d = 0;
-        pack_state(result, table[k], d);
-    };
-#ifdef _OPENMP
-    if (par_mode == PAR_TASKS) {
-        // Child tasks of the running (tied) subsystem task: while this thread waits it runs only these
-        auto* fn = &one;
-        for (int k = k1; k > k0; k--) {
-#pragma omp task firstprivate(fn, k)
-            (*fn)(k);
-        }
-        one(k0);
-#pragma omp taskwait
+    if (par_mode == PAR_POOL) {
+        // Stages k0+1..k1 as jobs (the largest on top of the stack), k0 here; then run queued jobs (ours or other
+        // subsystems') until ours are done. Jobs never wait, so this always progresses
+        std::atomic<int> left{k1 - k0};
+        for (int k = k0 + 1; k <= k1; k++) pool->push({this, &state, k, ds, G, c_code, pn_order, &left});
+        run_stage(state, k0, ds, G, c_code, pn_order);
+        while (left.load(std::memory_order_acquire) > 0)
+            if (!pool->run_one()) cpu_relax();
         return;
     }
-#endif
     using Policy = Kokkos::RangePolicy<Kokkos::DefaultHostExecutionSpace, Kokkos::Schedule<Kokkos::Dynamic>>;
-    Kokkos::parallel_for("gbs_stages", Policy(0, k1 - k0 + 1).set_chunk_size(1), [&](int i) { one(k1 - i); });
+    Kokkos::parallel_for("gbs_stages", Policy(0, k1 - k0 + 1).set_chunk_size(1),
+                         [&](int i) { run_stage(state, k1 - i, ds, G, c_code, pn_order); });
+}
+
+void GBSIntegrator::run_stage(const LogHState& state, int k, double ds, double G, double c_code, int pn_order) {
+    LogHState result;
+    result = state;
+    midpoint(state, result, STEP_SEQ[k], ds, G, c_code, pn_order);
+    int d = 0;
+    pack_state(result, table[k], d);
+}
+
+bool StagePool::run_one() {
+    if (n_jobs.load(std::memory_order_acquire) == 0) return false;
+    Job j;
+    {
+        std::lock_guard<std::mutex> lk(m);
+        if (jobs.empty()) return false;
+        j = jobs.back();
+        jobs.pop_back();
+        n_jobs.fetch_sub(1, std::memory_order_relaxed);
+    }
+    j.g->run_stage(*j.state, j.k, j.ds, j.G, j.c_code, j.pn_order);
+    j.left->fetch_sub(1, std::memory_order_release);
+    return true;
 }
 
 bool GBSIntegrator::step(LogHState& state, double ds, double G, double& ds_next,
@@ -237,7 +251,7 @@ bool GBSIntegrator::step(LogHState& state, double ds, double G, double& ds_next,
     for (int stage = 0; stage < MAX_STAGES; stage++) {
         if (stage > computed) {
             const bool par = par_mode == PAR_HOST ||
-                             (par_mode == PAR_TASKS && pending->load(std::memory_order_relaxed) == 0);
+                             (par_mode == PAR_POOL && pool->pending.load(std::memory_order_relaxed) == 0);
             if (par && !do_debug) {
                 // Stage-parallel: the substep divisions are independent (Rantala et al. 2020, MSTAR, Sec. 4);
                 // compute stage..k1 at once, k1 = the stage the last step converged at. The extrapolation below
