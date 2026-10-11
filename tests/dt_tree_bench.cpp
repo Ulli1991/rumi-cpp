@@ -185,10 +185,10 @@ int main(int argc, char** argv) {
                 VZ{d.vz.data()}, CX{d.cvx.data()}, CY{d.cvy.data()}, CZ{d.cvz.data()}, AX{d.ax.data()}, AY{d.ay.data()},
                 AZ{d.az.data()}, DT{d.dt.data()};
             const int* sid = d.sid.data();
-            DtK<true> kc{X, Y, Z, M, VX, VY, VZ, AX, AY, AZ, DT, CX, CY, CZ, RawView{nullptr}, sid, G, 0.0, eta_ff, eta_fb, eta_jerk};
+            DtK<true> kc{X, Y, Z, M, VX, VY, VZ, AX, AY, AZ, DT, CX, CY, CZ, RawView{nullptr}, RawView{nullptr}, sid, G, 0.0, eta_ff, eta_fb, eta_jerk};
             const double t_n2c = timeit(reps, [&] { run_n2("dt_n2", 0, N, 0, N, kc); });
             auto dt_ref = to_host(d.dt), ax_ref = to_host(d.ax);
-            DtK<false> kn{X, Y, Z, M, CX, CY, CZ, AX, AY, AZ, DT, CX, CY, CZ, RawView{nullptr}, nullptr, G, 0.0, eta_ff, eta_fb, 0.0};
+            DtK<false> kn{X, Y, Z, M, CX, CY, CZ, AX, AY, AZ, DT, CX, CY, CZ, RawView{nullptr}, RawView{nullptr}, nullptr, G, 0.0, eta_ff, eta_fb, 0.0};
             const double t_n2d = timeit(reps, [&] { run_n2("dt_n2_nocoll", 0, N, 0, N, kn); });
             auto dtn_ref = to_host(d.dt);
 
@@ -240,7 +240,7 @@ int main(int argc, char** argv) {
             const double t_q = timeit(reps, [&] {
                 dtt::min_pair_dt(T, V, 0, N, X.ptr, Y.ptr, Z.ptr, CX.ptr, CY.ptr, CZ.ptr, M.ptr, sid, DT.ptr, prm);
             });
-            DtK<true, true> ks{X, Y, Z, M, VX, VY, VZ, AX, AY, AZ, DT, CX, CY, CZ, RawView{nullptr}, sid, G, 0.0, eta_ff, eta_fb, eta_jerk};
+            DtK<true, true> ks{X, Y, Z, M, VX, VY, VZ, AX, AY, AZ, DT, CX, CY, CZ, RawView{nullptr}, RawView{nullptr}, sid, G, 0.0, eta_ff, eta_fb, eta_jerk};
             const double t_s = timeit(reps, [&] {
                 dtt::min_pair_dt(T, V, 0, N, X.ptr, Y.ptr, Z.ptr, CX.ptr, CY.ptr, CZ.ptr, M.ptr, sid, DT.ptr, prm);
                 run_n2("dt_sums", 0, N, 0, N, ks);
