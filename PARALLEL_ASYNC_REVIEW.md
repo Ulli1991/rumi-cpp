@@ -1,7 +1,8 @@
 # Parallel-in-time, asynchronous and task-based methods for cpp-nbody: a literature review
 
-Date: 2026-10-11. Code state: commit 9b8dc35 (line numbers below refer to it). Research only; nothing in the code was
-changed. Papers are in `/raven/u/uli/papers/async_parallel_time/` (93 PDFs; file names are given as `[file]`).
+Date: 2026-10-11. Sections 5.8 (CUDA-aware MPI on raven) and 5.9 (paradigms beyond MPI) were added on request.
+Code state: commit 9b8dc35 (line numbers below refer to it). Research only; nothing in the code was
+changed. Papers are in `/raven/u/uli/papers/async_parallel_time/` (~110 PDFs; file names are given as `[file]`).
 Every number quoted from a paper carries its section/figure; items marked **UNVERIFIED** could not be checked against
 the source. Our own measurements come from `AUDIT_2026-10.md` §G (200k, 10 % binaries, 4x A100 on one raven node).
 
@@ -50,12 +51,13 @@ simulation run time", Schaller+2024 §2.4).
 | 1 | Cut the fixed cost per call: no syncs/allocs/scalar readbacks inside the recursion, one control-block readback per call, events instead of fences | `hhs_fsi_recursive`, `partition_by_pivot`, `forces.cpp:429`, `detect_from_pairs`, `profiling.h:108` | 1.2-2 s (10-18 %); up to ~2x at 1e5 f_bin=1 | medium | low | yes |
 | 2 | Host-resident deep subtrees: a connected component below ~64-256 particles runs its *whole* sub-recursion on CPU cores, one copy in and out, many components on many cores (zero-copy on MI300A) | `hhs_cc_step` → a fixed `hhs_fsi_recursive_cpu` | most of depths >= 8 (2.3 s → ~0.3 s); 47 % share at 1e5 f_bin=1 | high | medium | no (host vs device FP); deterministic and rank-count independent; 3-seed A/B |
 | 3 | Run S and F, and the components of F, concurrently (conservative PDES with exact lookahead): streams/`partition_space` + task-private subsystem state, or a breadth-first batched recursion | `hhs_fsi_recursive` steps 2‖3, 5‖6; `hhs_cc_step::recurse_all` | 1-3 s (overlap of replicated F work with S work; GPU fill) | high | medium (refactor) | yes, if each task keeps its own arithmetic |
-| 4 | Node-local NVLink gather via CUDA/HIP IPC instead of `MPI_Allgatherv`; meanwhile host staging; fuse paired collectives | `mpi_comm.cpp:436-466, 602-680`, `integrator.cpp:1885, 1958, 1986` | 0.5-0.9 s (MPI collective cost 0.9-1.15 s/step) | medium | low | yes |
+| 4 | Fix the gather: host staging now; A/B forced ring / hand-written Isend-Irecv; then padded `ncclAllGather`/RCCL (stream-ordered, graph-capturable) or UCC inside MPI; fuse paired collectives (§5.8) | `mpi_comm.cpp:411-680`, `integrator.cpp:1885, 1958, 1986` | 0.5-0.9 s (MPI collective cost 0.9-1.15 s/step) | low-medium | low | yes |
 | 5 | Give ranks *different* replicated work: distribute subsystems (cost-ordered) and CC components over ranks, books summed in index order; this attacks rank skew (2/3 of MPI time) and is the only route to strong scaling of the non-scaling 8 s | `advance_subsystems_in_range` (DISTRIBUTE_SUBSYSTEMS), `hhs_cc_step` | 0.4-1 s at 4 GPUs; grows with rank count | medium | low-medium | yes if each item is computed by one owner with the same code |
 | 6 | Longest-predicted-first ordering of host subsystem integrations (LPT, Graham 1969: <= 4/3 of optimal vs <= 2 unsorted) | `logh_batch.cpp:586` | tail of each subsystem phase; measure `max(gbs_per_sub)` vs mean first | low | none | yes |
 | 7 | Few-sink kernel shape: several threads per sink (Sapporo2 "2D blocks") and a higher chunk cap when `ni` is small | `n2_driver.h` `chunk_count`, `run_tiled` | mid levels (n = 300-6000, 1.7 s); measure | medium | low | no (summation split) → 3 seeds |
 | 8 | Fixed-topology graphs per "level template" (Kokkos::Graph) with device-side counts, after #1 | per-phase kernel sequence | 10-50 % of remaining launch cost | medium | medium (Kokkos Graph is experimental, no conditionals) | yes |
 | 9 | Check that the viper Kokkos is built for the APU (`Kokkos_ARCH_AMD_GFX942_APU`), else the host small-loop path is compiled out | build | unknown; possibly large on viper | trivial | none | — |
+| — | Ensembles for throughput at N <= 2e5: 4 seeds x 1 GPU instead of 1 seed x 4 GPUs (§5.9) | job scripts | 2x throughput per node (22.0 vs 11.3 s/step) | trivial | none | — |
 | 10 | Parallel GBS for stragglers: extrapolation columns in parallel (parallelism across the method), and only if a single subsystem is the critical path, Parareal with a Kepler coarse step | `logh_batch.cpp`, `gbs.cpp` | removes a straggler tail; measure first | medium-high | medium | no |
 
 **What not to do** (§7): Parareal/PFASST/MGRIT on the cluster; optimistic PDES (Time Warp); per-pair asynchronous
@@ -390,6 +392,130 @@ GPU work (idea #3); GPU-batch only binned 2-body cases, and only if CPU GBS beco
   across ranks (gather per-item values, sum in index order). Reproducible-sum alternatives cost 3-44x (Collange+2015,
   DOI 10.1016/j.parco.2015.09.001 [Collange2015_reproducible_reduction] §6) and are not needed with this pattern.
 
+### 5.8 CUDA-aware MPI on raven: why device buffers are slower than host staging
+
+**Measured facts (raven).** Open MPI 5.0.10, pml ucx, UCX 1.20 built with the cuda, gdrcopy and cuda_ipc modules.
+Collective components available: adapt, basic, cuda, han, inter, libnbc, sm, sync, tuned. There is **no coll/ucc and
+no hcoll**. `MPI_Allgatherv` of 3 doubles per particle, 4 ranks on one node, equal slices:
+
+| n | device buffers | host staging (D2H + host MPI + H2D) | host-only MPI |
+|---|---|---|---|
+| 35k | 1.63 ms | 0.42 ms | 0.22 ms |
+| 200k | 3.43 ms | 1.31 ms | 0.77 ms |
+| 1e6 | 16.8 ms | 7.3 ms | 4.2 ms |
+
+Forcing `UCX_TLS=sm,self,cuda_copy,cuda_ipc` made the device path slower still (9.4 ms at 200k) (AUDIT G.2). The
+wire time is ~12-40 µs at 200k: each rank receives 3.6 MB over NVLink3 at ~100 GB/s per direction per pair.
+
+**Why: the chain of causes, checked in the Open MPI v5.0.x source.**
+1. **`coll/cuda` does not handle allgatherv.** `ompi/mca/coll/cuda/coll_cuda_module.c` wraps only allreduce, exscan,
+   reduce, reduce_local, reduce_scatter_block and scan, by staging through host memory. It sets
+   `coll_allgather = NULL; coll_allgatherv = NULL; coll_bcast = NULL`. On main the successor `coll/accelerator` adds
+   allgather, alltoall and bcast, still not allgatherv. So our device-buffer call falls through to the CPU-tuned
+   `coll/tuned` (or han/adapt if they win on priority).
+2. **`coll/tuned` picks algorithms that build derived datatypes.** `coll_tuned_decision_fixed.c`, communicator size
+   < 8, by bytes per rank: < 256 B basic (gatherv + bcast), < 4 KB neighbour exchange, < 8 KB ring, < 16 KB neighbour
+   exchange, < 256 KB **Bruck**, >= 256 KB **neighbour exchange**. Our cases: 35k ≈ 210 KB per rank → Bruck;
+   200k ≈ 1.2 MB and 1e6 ≈ 6 MB → neighbour exchange. Both create `ompi_datatype_create_indexed` types at every step
+   (`coll_base_allgatherv.c`). Only ring sends plain contiguous blocks.
+3. **Indexed datatypes switch off the GPU fast path.** `pml_ucx_datatype.c` maps contiguous types to UCX contiguous
+   buffers. It maps non-contiguous types to a UCX *generic* datatype, whose pack/unpack callbacks go through the
+   Open MPI convertor. For device memory, the convertor copies with `cuMemcpyAsync` on its own stream **followed by
+   `cuStreamSynchronize`** (`opal/mca/accelerator/cuda/accelerator_cuda.c`). Inference: a generic datatype cannot use
+   UCX's rendezvous zero-copy over cuda_ipc, so every fragment becomes a synchronous copy to the host, a host transfer
+   and a copy back. That is host staging done badly, in many small pieces with a sync each.
+   - The Open MPI docs say so: "Non-contiguous datatypes currently carry high overhead"
+     (docs.open-mpi.org, tuning-apps/accelerators/cuda, §11.3.5.4).
+   - TEMPI (Pearson+2021, arXiv 2012.14363) documents the same weakness across CUDA-aware MPIs.
+   - Further per-message costs: memory-type checks (`cuPointerGetAttributes`; UCX's memtype cache) and
+     `CU_POINTER_ATTRIBUTE_SYNC_MEMOPS` set on registered GPU buffers.
+4. **han and adapt ignore GPU buffers.** NERSC on Perlmutter (4x A100 nodes, like raven) found HAN "does not appear
+   to take GPU buffers into account leading to poor performance". Released Open MPI collectives on GPU buffers were
+   "highly variable" until new allgather code reached main (Gayatri+, CUG 2025).
+5. **Restricting UCX_TLS** removed gdr_copy and rc. Our hypothesis is that small device fragments and the generic pack
+   path then fell back to cuda_copy (its model: 8 µs latency). This would explain the 9.4 ms.
+   - ucTrace (Gencer+2026, arXiv 2602.19084 §IV-A) observed on other A100/H100 systems that intra-node rendezvous uses
+     get_zcopy over cuda_ipc and eager uses gdr_copy.
+
+**What would make CUDA-aware MPI perform** (cheapest first):
+- **Force ring (no rebuild):** `OMPI_MCA_coll_tuned_use_dynamic_rules=1 OMPI_MCA_coll_tuned_allgatherv_algorithm=3`,
+  and try `OMPI_MCA_coll=^han,adapt`. Ring sends contiguous blocks, so cuda_ipc zero-copy can engage: 3 steps for
+  4 ranks. This is our inference, not measured.
+- **Hand-written allgatherv:** 3 `MPI_Isend` + 3 `MPI_Irecv` on contiguous slices of the persistent device buffer,
+  then `Waitall`. It avoids derived datatypes, independent of tuned's decision table. Keep the send/receive Views
+  persistent, as `mpi_comm.cpp` already does, so UCX's IPC-handle cache (`UCX_CUDA_IPC_CACHE=y`) is hit. The first
+  `cuIpcOpenMemHandle` is expensive (tens to hundreds of µs, UNVERIFIED).
+- **UCC (`coll/ucc`):** needs Open MPI built `--with-ucc` (or NVIDIA HPC-X, where it is on by default), then
+  `OMPI_MCA_coll_ucc_enable=1`. It is disabled if Open MPI was built with progress threads (Open MPI docs,
+  tuning-apps/collectives/ucc).
+  - UCC's TL/CUDA implements allgather**v** over NVLink IPC; TL/NCCL implements it with p2p or bcast variants
+    (openucx/ucc GitHub).
+  - UCC paper: Venkata+, Hot Interconnects 2024, claims up to 3.4x lower latency than coll/tuned (seen via a secondary
+    source; no arXiv version).
+  - One forum report says UCC still chose TL/UCP for CUDA allgatherv (anecdotal).
+  - AMD recommends coll_ucc built with ROCm for GPU buffers (AMD Instinct cluster-networking docs).
+- **UCX tuning:** `UCX_RNDV_THRESH` (HPC-X lists an Allgather/Bcast GPU slowdown with workaround
+  `UCX_RNDV_THRESH=auto,inter:12kb`), `UCX_RNDV_FRAG_MEM_TYPES`, `UCX_PROTO_ENABLE=y` (default in 1.20). These are
+  second-order next to point 3 above.
+- **Persistent collectives (`MPI_Allgatherv_init`):** these exist in 5.0 via coll/libnbc, which builds a linear
+  p−1-round schedule once (`nbc_iallgatherv.c`). That saves only the schedule construction. Progress still happens only
+  inside MPI calls and the device copies are the same, so there is **no real gain for the GPU path**.
+- **`MPI_Iallgatherv`:** helps only with independent work to overlap. Today there is none at the split levels; with
+  idea #3 there would be (the fast recursion).
+- **Other MPIs:** MVAPICH-Plus 4.x (CUDA-aware collectives, gdrcopy; MVAPICH2-GDR is no longer developed). Literature
+  on small GPU allgathers: MVAPICH2-GDR Bcast up to 10-14x lower latency than NCCL 1.x for <= 8 KB (Awan+2017, arXiv
+  1707.09414 §V-B). Rolinger+2018 (arXiv 1812.05964 §IV): on NVLink systems NCCL and MVAPICH-GDR allgatherv beat host
+  MPI only above 16 KB per rank, and in their application CUDA-aware MPI was 1.73-1.85x *slower* than host MPI. This is
+  our finding, published.
+
+**NCCL instead of MPI for the gather.** NCCL has no allgatherv: all collectives need equal counts (NCCL user guide,
+"Collectives"). Our slices differ by at most one particle, so **padding to the maximum slice + `ncclAllGather`** is
+trivial.
+- Calls are stream-ordered, so the host does not wait. Pass the Kokkos stream (`Kokkos::Cuda().cuda_stream()`,
+  `hip_stream()`).
+- NCCL ops can be captured in CUDA graphs (NCCL >= 2.9), which matches ideas #3 and #8. Capture must be uniform across
+  ranks, one GPU per process.
+- Latency: per-hop LL ~1 µs, LL128 ~2 µs, Simple ~6 µs (Hu+2025, "Demystifying NCCL", arXiv 2507.04786). Intra-node
+  allreduce 4.7-8.9 µs captured in graphs on H200 (arXiv 2606.05951 §VII-C).
+- Expect ~10-20 µs plus ~30-50 µs of bandwidth time for 4.8 MB at 200k on 4x A100 (our estimate; UNVERIFIED for this
+  setup), against 1.31 ms host-staged.
+- NCCL coexists with MPI (communicator created from MPI). Do not block in `cudaStreamSynchronize` while peers wait in
+  MPI, and do not mix concurrent NCCL and CUDA-aware-MPI traffic between the same devices (NCCL docs, "MPI").
+- On MI300A, RCCL has a ~20 µs floor: worse than MPI below 1 KB, 5-38x better above 4 KB (Schieffer+2025 §6). Our
+  split sets are >= 16384 sinks (>= 100 KB per message), RCCL's good regime.
+
+**Verdict for the code.** Keep host staging now (`USE_GPU_AWARE_MPI=OFF`). A/B the ring setting and the hand-written
+Isend/Irecv; both are one-day tests. Then put padded `ncclAllGather`/`rcclAllGather` behind a compile option in
+`mpi_comm.cpp` (`allgather_accelerations_subset`, `allgather_timestep_subset`, `iallgather_*`). It is portable to
+viper, stream-ordered and graph-capturable, and less work than the IPC gather of idea #4, which it replaces. Keep the
+IPC/NVSHMEM route for the case where the gather must be fused into the force kernel.
+
+### 5.9 Parallel paradigms beyond MPI, weighed for our code
+
+"Deep-level" means the replicated, latency-bound levels; "1e6-1e7" means the split levels and multi-node runs.
+Maturity is for Kokkos 5 on CUDA (A100) and HIP (MI300A).
+
+| paradigm | what it buys at deep levels | what it buys for 1e6-1e7 | maturity (Kokkos 5, CUDA / HIP) | effort | verdict |
+|---|---|---|---|---|---|
+| **MPI-3 RMA** (`MPI_Put/Get`, osc/ucx) | nothing (deep levels need no communication) | one-sided writes of sink slices; but UCX lists only *partial* GPU-memory support for RMA/atomics (UCX FAQ); no GPU-window performance data found | low on GPU buffers; fine for host buffers | low-medium | host-side only (subsystem tables, with `MPI_Win_allocate_shared`, §5.6) |
+| **NVSHMEM / rocSHMEM** (GPU-initiated put/get, put-with-signal, symmetric heap) | allows a level to run as one graph or persistent kernel with no host in the loop, *if* deep levels were distributed (they should not be, §7) | force kernel puts its sink results straight into every peer's replica; intra-node put 1.8-2.5 µs, inter-node ~9.5 µs with IBGDA on H200 (arXiv 2606.05951 §VII); GROMACS +46 % at 45k atoms on 4 H100, up to 2x multi-node (arXiv 2509.21527) | NVSHMEM mature on CUDA, not wrapped by Kokkos (Views must come from `nvshmem_malloc`); rocSHMEM moved into ROCm/rocm-systems, RO and GDA backends "as-is, limited support" | medium-high | the long-term route for split levels on raven once NCCL is in; not first |
+| **Kokkos Remote Spaces** (PGAS Views over NVSHMEM/rocSHMEM/MPI one-sided) | — | same as NVSHMEM, with Kokkos syntax | README: "experimental development stage", no releases; Kokkos 5 compatibility not stated; paper Mishler+2023, DOI 10.1109/CLUSTERWorkshops61457.2023.00028 | medium + research risk | watch, do not depend on |
+| **UPC++** (memory kinds `cuda_device`/`hip_device`) | — | RPC + one-sided with GPU memory; "reference" kinds stage through the host with a "very noticeable" penalty; native kinds use GPUDirect RDMA | mature on CPU; GPU kinds since 2022.3; known Kokkos device-mismatch pitfall (UPC++ issue 578) | high | no clear gain over NCCL/NVSHMEM for replicated data |
+| **Coarray Fortran** | — | — | not applicable to C++ | — | no |
+| **NCCL / RCCL** | — | stream-ordered, graph-capturable allgather (padded); see §5.8 | mature on both (RCCL ~20 µs floor) | low-medium | **yes, first replacement for the device gather** |
+| **UCC** (Open MPI coll/ucc; TL/CUDA, TL/NCCL) | — | GPU-aware collectives *inside* MPI, so no code change | needs an Open MPI/UCC rebuild on raven and viper; selection quirks reported | low code / medium admin | worth asking MPCDF for; an alternative to NCCL calls in our code |
+| **Task runtimes as MPI replacement** (Charm++, HPX, Legion/GASNet-EX, StarPU-MPI, PaRSEC) | none: our tasks (1-10 µs) are below every runtime's efficient granularity (~100 µs, Task Bench) | Charm++ GPU-aware channels up to 10.2x lower latency than its host path (Choi+2021, arXiv 2102.12416); HPX LCI parcelport up to 5x lower latency, Octo-Tiger 1.175x vs MPI (SC23 PAW-ATM); none beats direct NCCL/NVSHMEM for a replicated-data integrator | HPX-Kokkos exists (Daiß+2021); Charm++/Legion/StarPU have no Kokkos-native integration (UNVERIFIED) | very high (rewrite) | no; borrow techniques (§4) |
+| **One process per node, 4 GPUs** (threads + Kokkos instances on each device + CUDA P2P over NVLink) | one host copy of the replicated state; the subsystem work could use all 72 cores without MPI; GROMACS thread-MPI precedent (arXiv 2006.09167 §II) | peer copies over NVLink with no MPI inside the node; MPI only between nodes | Kokkos supports instances on several devices (`Kokkos::Cuda(cudaStream_t)` / `Kokkos::HIP(hipStream_t)`, ROCm >= 5.6; Kokkos "MultiGPUSupport" page), but every View and policy must carry the instance; NCCL advises one GPU per process for graph capture; MI300A has only 2 APUs per node | very high (every Kokkos call) | no; get the same benefits with IPC/NCCL + node windows + distributed subsystems (#4, #5) |
+| **Ensembles** (many seeds as independent runs: Slurm job arrays, `MPI_Comm_split` ensembles; Flux/RADICAL/Parsl/Merlin as workflow tools) | perfect: no communication, each run keeps its GPU busy as well as 1 GPU allows | not a substitute for one 1e7 run; science needs seeds anyway (Rizzuto+2021: ~8 runs per model; HARD_PROBLEMS §2.4) | trivial | low | **default production mode for N <= 2e5**: 4 seeds x 1 GPU beat 1 seed x 4 GPUs (1 GPU 22.0 s/step vs 4 GPUs 11.3 s/step → 2x throughput per node); multi-GPU for N >= 1e6 |
+
+**Net.** For the deep levels, no communication paradigm helps, because they should not communicate at all. The levers
+there are §6 #1-#3. For the split levels and multi-node 1e6-1e7 runs, the order is:
+1. host staging (now);
+2. padded NCCL/RCCL allgather, or UCC inside MPI if MPCDF can build it;
+3. NVSHMEM put-from-kernel later.
+
+For throughput at N <= 2e5, ensembles beat any strong-scaling work we could do.
+
 ---
 
 ## 6. The ranked ideas, mapped onto the code
@@ -460,18 +586,23 @@ Jänes+2014 §4.1 (load balance is the hard part).
 largest at f_bin = 1 where many components exist. *Risk:* medium (global state refactor). *Bit-identity:* yes.
 Route (b) combines naturally with #2 (components above N_host batched on the GPU, below it on host threads).
 
-### #4 NVLink IPC gather and collective fusion (bit-identical)
+### #4 Fix the gather; fuse collectives (bit-identical)
 
-*Literature:* Li+2019 (P2P ~9 µs latency, NVLink ~100 GB/s per direction on raven); NCCL lacks AllGatherv and has
-~18 µs latency; GROMACS NVSHMEM halo exchange +46 % at 45k atoms on 4 H100 (Doijade+2025 §6.3) but with SM stealing and
-proxy-thread pitfalls (§5-7); MI300A small-message numbers (Schieffer+2025 §6.1).
-*Code:* `mpi_comm.cpp` `allgather_accelerations_subset` / `allgather_timestep_subset` (`:411-680`): when all ranks share
-a node, exchange IPC handles of fixed-size gather buffers once (`cudaIpcGetMemHandle`/`hipIpcGetMemHandle`), write the
-local slice into each peer's buffer, signal with an IPC event or flag, unpack. Across nodes keep MPI. Meanwhile rebuild
-with `USE_GPU_AWARE_MPI=OFF` (host staging, AUDIT row 4) and fuse the paired collectives (`integrator.cpp:1885-1887`,
-`:1958-1960`, `:1986-1988`).
-*Gain:* collective cost 0.9-1.15 s/step → ~0.1-0.3 s. *Risk:* low (IPC handles cover whole allocations: allocate once at
-max size). *Bit-identity:* yes (same bytes).
+*Literature and source:* §5.8 (why the device-buffer `Allgatherv` is slow in Open MPI 5.0.10: no coll/cuda for
+allgatherv, coll/tuned's Bruck/neighbour-exchange build indexed datatypes, UCX packs those through synchronous copies);
+Rolinger+2018 (CUDA-aware MPI 1.73-1.85x slower than host MPI in an allgatherv application); NCCL docs (equal counts,
+stream-ordered, graph capture); Li+2019 (NVLink P2P ~9 µs); Schieffer+2025 (MI300A: host staging 1.9 µs, RCCL floor
+~20 µs but 5-38x better above 4 KB).
+*Code:* `mpi_comm.cpp` `allgather_accelerations_subset`, `allgather_timestep_subset`, `iallgather_*` (`:411-680`):
+1. rebuild with `USE_GPU_AWARE_MPI=OFF` (host staging, AUDIT row 4);
+2. one-day A/B: `OMPI_MCA_coll_tuned_use_dynamic_rules=1 OMPI_MCA_coll_tuned_allgatherv_algorithm=3` (ring), and a
+   hand-written 3x Isend + 3x Irecv on contiguous slices of the persistent device buffer;
+3. padded `ncclAllGather` (RCCL on viper) on the Kokkos stream behind a compile option; or UCC in Open MPI if MPCDF
+   builds it; a CUDA/HIP-IPC gather (write the slice into peers' mapped buffers, signal by IPC event) is the
+   fallback if NCCL is not wanted;
+4. fuse the paired collectives (`integrator.cpp:1885-1887`, `:1958-1960`, `:1986-1988`).
+*Gain:* collective cost 0.9-1.15 s/step → ~0.1-0.3 s. *Risk:* low. *Bit-identity:* yes (same bytes; padding
+entries are ignored).
 
 ### #5 Distribute replicated work across ranks; reduce rank skew
 
@@ -517,7 +648,7 @@ Kepler coarse step only for a near-Kepler subsystem that is still the critical p
 
 ### Order and interplay
 
-#1 (and the cheap AUDIT G.4 items) → #9, #6 (cheap checks) → #4 → #2 and #3(b) together (the deep-level redesign: small
+Ensembles for N <= 2e5 production at once (no code). Then #1 (and the cheap AUDIT G.4 items) → #9, #6 (cheap checks) → #4 → #2 and #3(b) together (the deep-level redesign: small
 components on host threads, larger ones batched on the GPU) → #5 → #7, #8 → #10. Bit-identical: #1, #3, #4, #5, #6, #8.
 Need 3-seed A/B: #2, #7, #10.
 
@@ -542,6 +673,11 @@ Need 3-seed A/B: #2, #7, #10.
 - **Per-call or per-step CUDA graph recapture** (creation ≈ launch cost; PyGraph: 25 % of graphs hurt).
 - **Managed/unified memory on A100** (page migration; 9-18 µs faults on MI300A, A100 cost UNVERIFIED). Unified memory is
   an MI300A tool only, and even there keep hot GPU arrays in `hipMalloc`.
+- **MPI-3 RMA on GPU windows** (UCX: partial GPU-memory support for RMA) and **Kokkos Remote Spaces** as a production
+  dependency (experimental, no releases).
+- **A one-process-per-node, multi-GPU rewrite**: touches every Kokkos call; IPC/NCCL + node windows + distributed
+  subsystems give the same benefits.
+- **Persistent MPI collectives as a GPU fix** (libnbc schedule only; same device copies).
 - **Timing-driven device or rank choices** that change arithmetic (GADGET-4 §6.1): make every switch count-based.
 - **Atomics on doubles** in any new parallel stage (non-reproducible sums); sum per-item values in index order.
 
@@ -625,3 +761,18 @@ Portegies Zwart 2008 (Kirin), arXiv 0707.0438 · Gaburov, Harfst & Portegies Zwa
 Bédorf, Gaburov & Portegies Zwart 2015 (Sapporo2), arXiv 1510.04068 · Nitadori & Aarseth 2012, arXiv 1205.1222 ·
 Ayguadé+2009, IEEE TPDS 20, 404 · Graham 1969, SIAM J. Appl. Math. 17, 416 · Collange+2015, Parallel Comput. 49, 83
 [Collange2015_reproducible_reduction] · Lin & Grover 2018, NVIDIA blog "Using CUDA warp-level primitives".
+
+**MPI, collectives, PGAS.** Open MPI v5.0.x source: `ompi/mca/coll/cuda/coll_cuda_module.c`,
+`ompi/mca/coll/tuned/coll_tuned_decision_fixed.c`, `ompi/mca/coll/base/coll_base_allgatherv.c`,
+`ompi/mca/pml/ucx/pml_ucx_datatype.c`, `opal/mca/accelerator/cuda/accelerator_cuda.c`, `ompi/mca/coll/libnbc/nbc_iallgatherv.c`
+(github.com/open-mpi/ompi) · Open MPI docs: tuning-apps/accelerators/cuda §11.3.5.4; tuning-apps/collectives/ucc ·
+UCX v1.20 `cuda_ipc_iface.c`; UCX FAQ (openucx.readthedocs.io) · UCC: github.com/openucx/ucc (TL/CUDA, TL/NCCL);
+Venkata+2024, Hot Interconnects (not read) · NVIDIA HPC-X known issues (networking-docs.nvidia.com/hpcxum/225) ·
+Gayatri+, CUG 2025 (Perlmutter MPI collectives) · Pearson+2021 (TEMPI), arXiv 2012.14363 · Gencer+2026 (ucTrace),
+arXiv 2602.19084 · Rolinger+2018, arXiv 1812.05964 · Awan+2017, arXiv 1707.09414 · Hu+2025 (Demystifying NCCL), arXiv
+2507.04786 · MSCCL++, arXiv 2504.09014 · Demystifying NVSHMEM, arXiv 2606.05951 · NCCL user guide (collectives, p2p,
+CUDA graphs, MPI) · Choi+2021 (Charm++ GPU-aware communication), arXiv 2102.12416 · Kokkos Remote Spaces
+(github.com/kokkos/kokkos-remote-spaces); Mishler+2023, DOI 10.1109/CLUSTERWorkshops61457.2023.00028 · Kokkos Comm
+(github.com/kokkos/kokkos-comm) · Kokkos MultiGPUSupport (kokkos.org/kokkos-core-wiki/API/core/MultiGPUSupport.html) ·
+rocSHMEM (github.com/ROCm/rocSHMEM) · UPC++ (bitbucket.org/berkeleylab/upcxx; Bachan+2019, IPDPS, not re-checked) ·
+Rizzuto+2021, MNRAS 501, 5257.
