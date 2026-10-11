@@ -840,13 +840,15 @@ Hydro analogue: subcycling a stiff chemistry network per cell on the GPU, where 
 
 - BIFROST Eq. 64: r_t = 1.3 ((m⋆+M•)/m⋆)^{1/3} R⋆ (Kochanek 1992).
 - FC-I App. B3.3 and FC-III §2.1.4: 1.3 (M•/m⋆)^{1/3} R⋆, with half of the star accreted (f_c = 0.5).
-- Ours: `tidal_disruption_radius` (`mergers.cpp:38`); the BH keeps its mass m1, so TDE accretion is 0 (`mergers.cpp:205`).
+- Ours (M5, 2026-10-11): `tidal_disruption_radius` = 1.3 (M•/m⋆)^{1/3} R⋆ as FC-I, floored at R⋆ (`collision_distance`, `mergers.cpp`); the BH keeps its mass, so TDE accretion is still 0 (FC-I f_c = 0.5 not yet an option).
 
 **Collisions.**
 
 - FC-I App. B3.1: two-stage detection. A candidate is a pair with osculating r_p < R1 + R2; it is then forced to κ = 1 and stepped to the actual pericentre before deciding (verified l.885).
 - FC-III §2.2.1: mass loss f = 0.3 q/(1+q)² from both stars (Glebbeek et al. 2013, 1307.2445, Eq. 4 by count).
-- Ours: r < R1 + R2 on the current separation, once per level, 2-body subsystems only (`mergers.cpp:188-196`). So collisions are missed between level checks.
+- NBODY6/7 (source read, `chain.f`, `derqp.f`, `tperi.f`, `ksint.f`, `ksperi.f`): KS pairs are checked at the first step after pericentre (osculating pericentre from Mikkola 1990, criterion 1.7 (M/2m)^{1/3} R of the larger star, 6 G M / c^2 with GR); KSPERI integrates back to the pericentre (Kepler time, Newton on the Stumpff series). In chains, DERQP iterates TPERI (time to pericentre from the osculating elements) into a regularised step (Stiefel & Scheifele) until |r'| ~ 0: the closest precedent of FC-I's forced steps.
+- SDAR / PeTar (source read, `symplectic_integrator.h` integrateToTime, `ar_interaction.hpp` modifyAndInterruptIter): checks after every step; without slow-down, merges when |dr| < R1 + R2 at a step end (no pericentre search); with kappa > 1, osculating peri < R1 + R2 and approaching flags a delayed merger at the predicted pericentre time, at whatever separation. Merged in the integrator (c.o.m., m2 = 0, the energy change added to the reference energy). Neither paper describes this.
+- Ours (M5, `SUBSYS_COLLISIONS`, default on): FC-I App. B3 in the GBS driver (`gbs.cpp` integrate_to_time): after every accepted step all pairs are scanned; r < r_coll merges, an osculating candidate gets the next step end aimed at its pericentre (`kepler_time_to_pericentre`, re-aimed every step, the end-time control with t_peri as goal) and is decided there on the osculating pericentre of that passage. The pair merges inside the integration (c.o.m., mass and momentum exact, exact T + U change booked; others continue), the remnant physics and the potential with outside bodies are booked after the advance (`finalize_subsystem_collision`). The per-level check of 2-body subsystems stays. Secular binaries/triples with a candidate (inner) pericentre go to LogH.
 
 **BH merger remnant.**
 
@@ -868,7 +870,7 @@ Hydro analogue: subcycling a stiff chemistry network per cell on the GPU, where 
 **Experiments.**
 
 - **K-1 BH mass spectrum** (no dynamics). Run the IC generator at Z = 2e-4, 1 Gyr with `SSE_REMNANT_MODEL = FRYER_RAPID`, `SSE_WIND_MODEL = VINK`, `SSE_PPISN_MODEL = STRONG`. Compare the BH count (target 357) and mass range (target 5.5-41.6 Msun) with BIFROST Fig. 9. A config run of minutes. If close, Fig. 9 becomes a like-for-like comparison.
-- **K-2 FC-I pericentre-forced collision detection** inside LogH/SDAR (plan M5). Count missed collisions against a reference run with forced pericentre steps.
+- **K-2 FC-I pericentre-forced collision detection** inside LogH/SDAR (plan M5). Done 2026-10-11 (`SUBSYS_COLLISIONS`); 2000 stars with 50 % contact binaries: 116 mergers vs 15 without (the rest never decided), |dE/E| 1e-15 both. 200k results in AUDIT F3.
 - **K-3 Zlochower-Lousto 2015 recoil with spins** (plan M5). Physics, not A/B.
 
 ---
