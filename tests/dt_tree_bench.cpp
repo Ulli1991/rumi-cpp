@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <random>
+#include <type_traits>
 #include <vector>
 
 using Exec = Kokkos::DefaultExecutionSpace;
@@ -279,6 +280,32 @@ int main(int argc, char** argv) {
                 ngdiff = ng[k].first != ng_ref[k].first || std::memcmp(&ng[k].second, &ng_ref[k].second, 8) != 0;
             std::printf("  %8d %9.3e %9.3e %9.3e %9.3e %9.3e %9.3e %9.3e %9.1f %9zu %7d %7d %9.1f\n", N, t_n2c, t_n2d, t_build,
                         t_q, t_s, t_n2g, t_tg, (double)np / N, ng_ref.size(), diff, ngdiff, (double)npB / N);
+            if constexpr (!std::is_same_v<Exec, HostExec>) {
+                // host-thread tree on host copies (the TREE_DT_CPU_MAX path of an APU), against the device N^2 above
+                DevArrays<Kokkos::HostSpace> h(c);
+                dtt::PointTree<HostExec> HT, HV;
+                const double* hx = h.x.data(); const double* hy = h.y.data(); const double* hz = h.z.data();
+                const double* hm = h.m.data();
+                const double* hcx = h.cvx.data(); const double* hcy = h.cvy.data(); const double* hcz = h.cvz.data();
+                const double* hvx = h.vx.data(); const double* hvy = h.vy.data(); const double* hvz = h.vz.data();
+                const double t_hd = timeit(reps, [&] {
+                    HT.build(0, N, hx, hy, hz, hcx, hcy, hcz, hm, false, true);
+                    HV.build(0, N, hx, hy, hz, hcx, hcy, hcz, hm, true);
+                    dtt::min_pair_dt(HT, HV, 0, N, hx, hy, hz, hcx, hcy, hcz, hm, nullptr, h.dt.data(), prm);
+                });
+                std::vector<double> hdt(h.dt.data(), h.dt.data() + N);
+                Kokkos::View<int*, Kokkos::HostSpace> qi("qi", maxp), qj("qj", maxp), qb("qb", maxp), qc("qc", 1);
+                Kokkos::View<double*, Kokkos::HostSpace> qa("qa", maxp), qe("qe", maxp), qE("qE", maxp);
+                dtt::NgbOut ho{qi.data(), qj.data(), qb.data(), qc.data(), qa.data(), qe.data(), qE.data(), maxp};
+                const double t_hg = timeit(reps, [&] {
+                    qc(0) = 0;
+                    HT.build(0, N, hx, hy, hz, hvx, hvy, hvz, hm, false);
+                    dtt::ngb_pairs(HT, 0, N, hx, hy, hz, hvx, hvy, hvz, hm, G, 1e-3, 0.01, 1e-3, ho);
+                });
+                std::printf("# host tree (%s, %d threads) N=%d: time step %.3e s, neighbours %.3e s (%d pairs); dt differing "
+                            "from device N^2 (rsqrt vs 1/sqrt) %d\n", HostExec::name(), HostExec().concurrency(), N, t_hd,
+                            t_hg, qc(0), ndiff(hdt, dtn_ref));
+            }
             std::fflush(stdout);
         }
     }
