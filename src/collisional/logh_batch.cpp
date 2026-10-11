@@ -13,8 +13,16 @@
 #include <limits>
 #include <cstdio>
 #include <string>
+#include <chrono>
 
 SubsystemBatch g_logh_batch;
+LoghBatchProf g_logh_prof;
+
+namespace {
+inline double wall_now() {
+    return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+}  // namespace
 
 constexpr int GBS_MAX_STEPS = 1000;
 
@@ -111,6 +119,7 @@ void SubsystemBatch::pack(const SubsystemManager& mgr, const Particles& p,
     // Upload indices to device, gather only needed particle data
     // Buffer layout per member: x,y,z,vx,vy,vz,mass,spin_x,spin_y,spin_z,stype_as_double (11 doubles)
     constexpr int PACK_STRIDE = 11;
+    double t_x0 = wall_now();
     Kokkos::View<int*> d_idx("pack_idx", n_mem);
     Kokkos::View<double*> d_buf("pack_gather", n_mem * PACK_STRIDE);
     {
@@ -131,6 +140,7 @@ void SubsystemBatch::pack(const SubsystemManager& mgr, const Particles& p,
         d_buf(base + 10) = static_cast<double>(pstype(k));
     });
     auto h_buf = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), d_buf);
+    g_logh_prof.pack_xfer += wall_now() - t_x0;
 
     // Pack on host using gathered data
     auto h_nbod = Kokkos::create_mirror_view(n_bodies);
@@ -219,12 +229,14 @@ void SubsystemBatch::pack(const SubsystemManager& mgr, const Particles& p,
     }
 
     // Copy to device
+    t_x0 = wall_now();
     Kokkos::deep_copy(n_bodies, h_nbod);
     Kokkos::deep_copy(offset, h_off);
     Kokkos::deep_copy(dt_target, h_dt);
     Kokkos::deep_copy(flat_pos, h_pos);
     Kokkos::deep_copy(flat_vel, h_vel);
     Kokkos::deep_copy(flat_mass, h_mass);
+    g_logh_prof.pack_xfer += wall_now() - t_x0;
 }
 
 // ============================================================================
@@ -238,10 +250,12 @@ void SubsystemBatch::unpack(SubsystemManager& mgr, Particles& p) {
     const auto& pid_to_idx = mgr.pid_to_idx();
 
     // D2H the small LogH output arrays (subsystem-sized, not N-sized)
+    double t_x0 = wall_now();
     auto h_pos_out = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), flat_pos_out);
     auto h_vel_out = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), flat_vel_out);
     auto h_mass_flat = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), flat_mass);
     auto h_off = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), offset);
+    g_logh_prof.unpack_xfer += wall_now() - t_x0;
 
     // Reuse cached member indices from pack() (avoids recomputation and rehashing)
     constexpr int UNPACK_STRIDE = 7;
@@ -268,6 +282,7 @@ void SubsystemBatch::unpack(SubsystemManager& mgr, Particles& p) {
     }
 
     // Upload scatter buffer + indices to device
+    t_x0 = wall_now();
     Kokkos::View<int*> d_idx("unpack_idx", n_mem);
     Kokkos::View<double*> d_buf("unpack_scatter", n_mem * UNPACK_STRIDE);
     {
@@ -292,6 +307,7 @@ void SubsystemBatch::unpack(SubsystemManager& mgr, Particles& p) {
         pcx(k) = 0.0; pcy(k) = 0.0; pcz(k) = 0.0;  // velocity replaced by the subsystem integrator
         pm(k) = d_buf(base + 6);
     });
+    g_logh_prof.unpack_xfer += wall_now() - t_x0;
 
     // Write persistent auxiliary velocities and scales back to subsystems
     for (int s = 0; s < n_sub; s++) {
@@ -364,6 +380,7 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
     if (n_sub == 0) return;
 
     // Copy to host for CPU-side GBS (GPU kernel version in future)
+    double t_x0 = wall_now();
     auto h_nbod = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), batch.n_bodies);
     auto h_off  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), batch.offset);
     auto h_dt   = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), batch.dt_target);
@@ -374,6 +391,8 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
     auto h_vel_out = Kokkos::create_mirror_view(batch.flat_vel_out);
     auto h_eerr = Kokkos::create_mirror_view(batch.energy_error);
     auto h_conv = Kokkos::create_mirror_view(batch.converged);
+    g_logh_prof.run_xfer += wall_now() - t_x0;
+    std::vector<double> t_sub(n_sub, 0.0);   // wall time per subsystem (profile)
 
     int total_gbs_steps = 0;
     std::vector<int> gbs_per_sub(n_sub, 0);   // per-depth load-balance statistics
@@ -386,6 +405,7 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
     // serial work; dynamic scheduling balances binaries against multiplets)
     using HostPolicy = Kokkos::RangePolicy<Kokkos::DefaultHostExecutionSpace, Kokkos::Schedule<Kokkos::Dynamic>>;
     auto integrate_one = [&](int s, int& gbs_sum, double& dE_max, double& dE_min, int& caps) {
+        const double t_s0 = wall_now();
         int nb = h_nbod(s);
         int off = h_off(s);
         double dt = h_dt(s);
@@ -652,7 +672,9 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
         if (dE_rel > dE_max) dE_max = dE_rel;
         if (dE_rel < dE_min) dE_min = dE_rel;
         if (!converged) caps++;
+        t_sub[s] = wall_now() - t_s0;
     };
+    const double t_i0 = wall_now();
     if (n_sub == 1) {   // most deep-level batches: no host threads to start
         max_dE = std::numeric_limits<double>::lowest();
         min_dE = std::numeric_limits<double>::max();
@@ -661,6 +683,14 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
         Kokkos::parallel_reduce("logh_batch_host", HostPolicy(0, n_sub).set_chunk_size(1), integrate_one,
                                 Kokkos::Sum<int>(total_gbs_steps), Kokkos::Max<double>(max_dE),
                                 Kokkos::Min<double>(min_dE), Kokkos::Sum<int>(cap_hit));
+    }
+    g_logh_prof.integ += wall_now() - t_i0;
+    {
+        double mx = 0.0, sum = 0.0;
+        for (double t : t_sub) { mx = std::max(mx, t); sum += t; }
+        g_logh_prof.crit += mx;
+        g_logh_prof.work += sum;
+        g_logh_prof.n_sub += n_sub;
     }
 
     // Store stats for caller (printed in step summary, not here)
@@ -674,9 +704,11 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
     batch.stat_best_dE   = min_dE;
     batch.stat_cap_hit   = cap_hit;
 
+    t_x0 = wall_now();
     Kokkos::deep_copy(batch.flat_pos_out, h_pos_out);
     Kokkos::deep_copy(batch.flat_vel_out, h_vel_out);
     Kokkos::deep_copy(batch.flat_mass, h_mass);
     Kokkos::deep_copy(batch.energy_error, h_eerr);
     Kokkos::deep_copy(batch.converged, h_conv);
+    g_logh_prof.run_xfer += wall_now() - t_x0;
 }

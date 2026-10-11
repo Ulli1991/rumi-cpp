@@ -69,6 +69,15 @@ struct SubsystemBatch {
     void unpack(SubsystemManager& mgr, Particles& p);
 };
 
+// Wall-time split of the batch calls (J-1 profile): accumulated by pack/run/unpack, read and cleared by the
+// caller after each call. *_xfer: allocations, gather/scatter kernels and host<->device copies; integ: wall time
+// of the host integration loop; crit: its longest single subsystem; work: sum over subsystems (all host threads)
+struct LoghBatchProf {
+    double pack_xfer = 0, run_xfer = 0, integ = 0, crit = 0, work = 0, unpack_xfer = 0;
+    long long n_sub = 0;
+};
+extern LoghBatchProf g_logh_prof;
+
 // Integrate all subsystems in batch on GPU
 // Each Kokkos team (warp or block) handles one subsystem
 void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs);

@@ -276,30 +276,53 @@ static void exchange_subsystem_results(Particles& p, const std::vector<int>& eli
 #endif
 
 // Wall time per phase of advance_subsystems_in_range, summed over a step (printed with the step summary)
+// Phases: mirror = host copy of the range; map+select = pid map, eligibility, classification; logh_prep = sort and
+// save; logh_pack / logh_run / logh_unpack = the batch calls (with their host<->device part *_xfer, the integration
+// loop's wall time integ, its longest subsystem crit, and the summed subsystem time work); logh_post = restarts,
+// PN bookkeeping and state propagation. Counts: calls with eligible subsystems, eligible, secular, LogH.
+// det_* split "Subsystem detect" (neighbour search, pair classification, flags + diagnostics); dt_wait is the
+// asynchronous time-step kernels finishing, dt_subsys the shared/perturbation time steps, dt_merge the merger
+// detection (the three make up "Subsystem timestep").
 struct SubsystemPhaseTimes {
-    enum { MAP, SECULAR, SEC_TRIPLE, LOGH_PREP, LOGH_RUN, LOGH_UNPACK, LOGH_RETRY, N };
+    enum { MIRROR, MAP, SECULAR, SEC_TRIPLE, LOGH_PREP, LOGH_PACK, LOGH_RUN, LOGH_UNPACK, LOGH_RETRY,
+           PACK_XFER, RUN_XFER, INTEG, CRIT, WORK, UNPACK_XFER,
+           DET_NGB, DET_PAIRS, DET_FLAGS, DT_WAIT, DT_SUBSYS, DT_MERGE, N };
+    enum { C_CALLS, C_WORK, C_ELIG, C_SEC, C_LOGH, NC };
     static constexpr int MAXD = 40;
     double t[N] = {};
     double td[MAXD][N] = {};   // the same per HHS depth
     long long calls[MAXD] = {};
+    long long cnt[MAXD][NC] = {};
+    static int depth() { return std::min(g_profiler.cur_depth, MAXD - 1); }
     void add(int phase, double dt) {
         t[phase] += dt;
-        int d = std::min(g_profiler.cur_depth, MAXD - 1);
-        td[d][phase] += dt;
+        td[depth()][phase] += dt;
+    }
+    void count(int c, long long n) { cnt[depth()][c] += n; }
+    void take_batch_prof() {   // the batch calls' split since the last take
+        add(PACK_XFER, g_logh_prof.pack_xfer); add(RUN_XFER, g_logh_prof.run_xfer);
+        add(INTEG, g_logh_prof.integ); add(CRIT, g_logh_prof.crit); add(WORK, g_logh_prof.work);
+        add(UNPACK_XFER, g_logh_prof.unpack_xfer);
+        g_logh_prof = LoghBatchProf();
     }
     bool any() const { for (double v : t) if (v > 0.0) return true; return false; }
     void report_and_reset() {
-        static const char* name[N] = {"map+select", "secular", "sec_triple", "logh_prep+pack", "logh_run",
-                                      "logh_unpack", "logh_retry"};
+        static const char* name[N] = {"mirror", "map+select", "secular", "sec_triple", "logh_prep", "logh_pack",
+                                      "logh_run", "logh_unpack", "logh_post", "pack_xfer", "run_xfer", "integ",
+                                      "crit", "work", "unpack_xfer", "det_ngb", "det_pairs", "det_flags",
+                                      "dt_wait", "dt_subsys", "dt_merge"};
+        static const char* cname[NC] = {"calls", "w/subs", "elig", "secular", "logh"};
         std::printf("  Subsystem phases [s]:");
         for (int i = 0; i < N; i++) std::printf(" %s=%.3f", name[i], t[i]);
-        std::printf("\n  %-6s %8s", "Depth", "calls");
-        for (int i = 0; i < N; i++) std::printf(" %14s", name[i]);
+        std::printf("\n  %-6s", "Depth");
+        for (int c = 0; c < NC; c++) std::printf(" %8s", cname[c]);
+        for (int i = 0; i < N; i++) std::printf(" %11s", name[i]);
         std::printf("\n");
         for (int d = 0; d < MAXD; d++) {
             if (calls[d] == 0) continue;
             std::printf("  d%-5d %8lld", d, calls[d]);
-            for (int i = 0; i < N; i++) std::printf(" %14.3f", td[d][i]);
+            for (int c = 1; c < NC; c++) std::printf(" %8lld", cnt[d][c]);
+            for (int i = 0; i < N; i++) std::printf(" %11.4f", td[d][i]);
             std::printf("\n");
         }
         *this = SubsystemPhaseTimes();
@@ -455,11 +478,18 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
         if (all_in) eligible.push_back(s);
     }
 
-    if (eligible.empty()) return;
+    if (eligible.empty()) {
+        g_subsys_phase.add(SubsystemPhaseTimes::MAP, phase_clock.lap());
+        return;
+    }
+    g_subsys_phase.count(SubsystemPhaseTimes::C_WORK, 1);
+    g_subsys_phase.count(SubsystemPhaseTimes::C_ELIG, (long long)eligible.size());
+    g_subsys_phase.add(SubsystemPhaseTimes::MAP, phase_clock.lap());
 
     // Host copy of the particle data of [start, start+count); all accessed indices are in this range,
     // access as h_x(idx - start). Changes go back with mirror.push(p).
     RangeMirror mirror(p, start, count);
+    g_subsys_phase.add(SubsystemPhaseTimes::MIRROR, phase_clock.lap());
     auto h_x = mirror.col[RangeMirror::X], h_y = mirror.col[RangeMirror::Y], h_z = mirror.col[RangeMirror::Z];
     auto h_vx = mirror.col[RangeMirror::VX], h_vy = mirror.col[RangeMirror::VY], h_vz = mirror.col[RangeMirror::VZ];
     auto h_m = mirror.col[RangeMirror::M];
@@ -606,6 +636,7 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
     }
 
     g_subsys_phase.add(SubsystemPhaseTimes::MAP, phase_clock.lap());
+    g_subsys_phase.count(SubsystemPhaseTimes::C_SEC, (long long)secular_idx.size());
 
     // --- Secular binaries: evolve on host ---
     if (!secular_idx.empty()) {
@@ -945,8 +976,11 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
         }
 
         // Initial batch integration
-        g_logh_batch.pack(logh_mgr, p, G, dt);
+        g_subsys_phase.count(SubsystemPhaseTimes::C_LOGH, n_sub);
+        g_subsys_phase.take_batch_prof();
         g_subsys_phase.add(SubsystemPhaseTimes::LOGH_PREP, phase_clock.lap());
+        g_logh_batch.pack(logh_mgr, p, G, dt);
+        g_subsys_phase.add(SubsystemPhaseTimes::LOGH_PACK, phase_clock.lap());
         logh_integrate_batch_gpu(g_logh_batch, G, g_collisional.eta_gbs);
         g_subsys_phase.add(SubsystemPhaseTimes::LOGH_RUN, phase_clock.lap());
 
@@ -964,6 +998,7 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
         // Unpack all results (passed get final state; failed get best-effort temporarily)
         g_logh_batch.unpack(logh_mgr, p);
         g_subsys_phase.add(SubsystemPhaseTimes::LOGH_UNPACK, phase_clock.lap());
+        g_subsys_phase.take_batch_prof();
 
         // Accumulate LogH stats into step-level counters
         g_subsystem_mgr.step_logh_calls += n_sub;
@@ -1123,6 +1158,7 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
             dst.scales_set = src.scales_set;
         }
         g_subsys_phase.add(SubsystemPhaseTimes::LOGH_RETRY, phase_clock.lap());
+        g_logh_prof = LoghBatchProf();   // retry batches are inside logh_post
     }
 #ifdef USE_MPI
     if (distributed_subs) exchange_subsystem_results(p, eligible, books_before);
@@ -2136,14 +2172,20 @@ static int hhs_fsi_recursive(
         static const bool detect_top_only = std::getenv("NBODY_DETECT_TOP_ONLY") != nullptr;
         if (p.collisional && !(detect_top_only && depth > 0)) {
             g_profiler.start();
+            PhaseClock det_clock;
             g_subsystem_mgr.reset_ngb_count();
             neighbor_search_subset(p, start, count, G,
                                    g_collisional.r_ngb, g_collisional.r_ngb_max, pivot_dt);
+            Kokkos::fence();
+            g_subsys_phase.add(SubsystemPhaseTimes::DET_NGB, det_clock.lap());
             g_subsystem_mgr.detect_from_pairs(p, G, pivot_dt,
                                                g_collisional.r_ngb, g_collisional.r_ngb_max,
                                                g_collisional.n_orb_secular);
+            g_subsys_phase.add(SubsystemPhaseTimes::DET_PAIRS, det_clock.lap());
             g_subsystem_mgr.update_particle_flags(p);
             g_subsystem_mgr.accumulate_diagnostics();
+            Kokkos::fence();
+            g_subsys_phase.add(SubsystemPhaseTimes::DET_FLAGS, det_clock.lap());
             if (depth < HHSCounters::MAX_DEPTH)
                 g_hhs_counters.dist_depth_ngb_pairs[depth] += g_subsystem_mgr.last_level_pairs;
             g_profiler.stop(StepProfiler::SUBSYSTEM_DETECT);
@@ -2228,7 +2270,11 @@ static int hhs_fsi_recursive(
         // Step 3: Subsystem timestep adjustments
         if (p.collisional) {
             g_profiler.start();
+            PhaseClock dt_clock;
+            Kokkos::fence();   // profile: the time-step kernels above are asynchronous
+            g_subsys_phase.add(SubsystemPhaseTimes::DT_WAIT, dt_clock.lap());
             g_subsystem_mgr.subsystem_timesteps(p, G, g_collisional.eta_pert);
+            g_subsys_phase.add(SubsystemPhaseTimes::DT_SUBSYS, dt_clock.lap());
 
             // Level-0 store: capture dt AFTER subsystem adjustments
             if (depth == 0) {
@@ -2261,6 +2307,7 @@ static int hhs_fsi_recursive(
                     g_subsystem_mgr.update_particle_flags(p);
                 }
             }
+            g_subsys_phase.add(SubsystemPhaseTimes::DT_MERGE, dt_clock.lap());
             g_profiler.stop(StepProfiler::SUBSYSTEM_DT);
         }
 #endif
