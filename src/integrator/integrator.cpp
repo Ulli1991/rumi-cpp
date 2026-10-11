@@ -261,7 +261,7 @@ static void exchange_subsystem_results(Particles& p, const std::vector<int>& eli
     // 3. Bookkeeping: every rank adds all ranks' deltas in rank order (bitwise the same everywhere)
     auto pack = [](const EnergyBookkeeping& b) {
         return std::vector<double>{b.E_escape, b.E_gw, b.E_merge, b.E_sse, b.E_pn, b.P_sink[0], b.P_sink[1],
-                                   b.P_sink[2], b.L_sink[0], b.L_sink[1], b.L_sink[2]};
+                                   b.P_sink[2], b.L_sink[0], b.L_sink[1], b.L_sink[2], b.E_sd};
     };
     std::vector<double> now = pack(g_energy_books), before = pack(books_before), delta(now.size());
     for (size_t c = 0; c < now.size(); c++) delta[c] = now[c] - before[c];
@@ -272,6 +272,7 @@ static void exchange_subsystem_results(Particles& p, const std::vector<int>& eli
     auto& b = g_energy_books;
     b.E_escape = sum[0]; b.E_gw = sum[1]; b.E_merge = sum[2]; b.E_sse = sum[3]; b.E_pn = sum[4];
     for (int c = 0; c < 3; c++) { b.P_sink[c] = sum[5 + c]; b.L_sink[c] = sum[8 + c]; }
+    b.E_sd = sum[11];
 }
 #endif
 
@@ -1002,6 +1003,19 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
         }
         const bool any_retry = !failed.empty();
 
+        // SDAR: book the physical energy change of the slow-down (sum of kappa jumps, Wang+2020 Eq. 24) of the
+        // accepted integrations; failed ones are booked from the accepted retry below. sd_J[si]: booked jump
+        std::vector<double> sd_J(n_sub, 0.0);
+        if (g_collisional.sdar) {
+            std::vector<char> is_failed(n_sub, 0);
+            for (int si : failed) is_failed[si] = 1;
+            for (int si = 0; si < n_sub; si++)
+                if (!is_failed[si]) sd_J[si] = g_logh_batch.sd_jump[si];
+            g_subsystem_mgr.step_sdar_calls += g_logh_batch.stat_sd_calls;
+            g_subsystem_mgr.step_sdar_kappa_max = std::max(g_subsystem_mgr.step_sdar_kappa_max,
+                                                           g_logh_batch.stat_sd_kappa_max);
+        }
+
         // Unpack all results (passed get final state; failed get best-effort temporarily)
         g_logh_batch.unpack(logh_mgr, p, &mirror_src);
         g_subsys_phase.add(SubsystemPhaseTimes::LOGH_UNPACK, phase_clock.lap());
@@ -1058,7 +1072,7 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
                 bool all_passed = true;
                 double worst_dE = 0;
                 const bool last_try = (subdiv == MAX_SUBDIV);
-                std::vector<double> t_sum(failed.size(), 0.0);
+                std::vector<double> t_sum(failed.size(), 0.0), j_sum(failed.size(), 0.0);
 
                 for (int step = 0; step < n_steps; step++) {
                     SubsystemBatch retry_batch;
@@ -1072,14 +1086,20 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
                     }
 
                     retry_batch.unpack(retry_mgr, p);
-                    for (size_t r = 0; r < failed.size(); r++) t_sum[r] += retry_batch.t_reached[r];
+                    for (size_t r = 0; r < failed.size(); r++) {
+                        t_sum[r] += retry_batch.t_reached[r];
+                        j_sum[r] += retry_batch.sd_jump[r];
+                    }
 
                     // No point continuing if a sub-step failed, except on the last try: there the result stands,
                     // and stopping early would leave the members short of dt (frozen for the rest of the step)
                     if (!all_passed && !last_try) break;
                 }
                 if (all_passed || last_try)
-                    for (size_t r = 0; r < failed.size(); r++) adv_check.set_time(logh_idx[failed[r]], t_sum[r]);
+                    for (size_t r = 0; r < failed.size(); r++) {
+                        adv_check.set_time(logh_idx[failed[r]], t_sum[r]);
+                        sd_J[failed[r]] = j_sum[r];
+                    }
 
                 if (all_passed) {
                     std::printf("  LogH restart: OK with %d sub-steps (worst dE=%.2e)\n",
@@ -1105,6 +1125,9 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
             if (!failed.empty())
                 std::printf("  LogH restart: GAVE UP after %d subdivisions\n", MAX_SUBDIV);
         }
+
+        // Physical energy is the conserved quantity only up to the slow-down: E_now + E_sd = E_0 + integration error
+        for (int si = 0; si < n_sub; si++) g_energy_books.E_sd -= sd_J[si];
 
         // PN-active subsystems: the global diagnostics are Newtonian, so book the change of the members'
         // Newtonian energy, momentum and angular momentum over this advance (Newtonian LogH conserves
@@ -1149,7 +1172,7 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
                 if (pn_active) {
                     g_energy_books.E_pn += E_pre - E_post;
                 } else {
-                    const double d = E_post - E_pre;
+                    const double d = E_post - E_pre - sd_J[si];   // unbooked part
                     g_eattr.logh += d; g_eattr.logh_abs += std::fabs(d); g_eattr.n_logh++;
                     if (std::fabs(d) > std::fabs(g_eattr.worst)) {
                         g_eattr.worst = d; g_eattr.worst_n = nb; g_eattr.worst_type = (int)sub.type;

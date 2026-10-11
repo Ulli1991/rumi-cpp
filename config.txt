@@ -56,6 +56,9 @@ FLYBY_CM_VELOCITY = false			# Fly-by step of subsystem members with the c.o.m. v
 FLYBY_CM_EPS = 0				# With it: tidal-sampling pair step, energy put into a subsystem by a slow particle's kicks
 						#   <= this x |E0| per step (0 = off; 1e-11: 20k Fig-9 cluster below the component-velocity error)
 ETA_GBS = 1e-10                     		# GBS extrapolation accuracy for LogH integrator
+SDAR = false					# Slow-down of weakly perturbed inner binaries in LogH subsystems (Wang+2020; FROST-CLUSTERS I App. A2)
+SDAR_KREF = 1e-6				#   k_ref of the slow-down factor (W20 Eq. 22)
+SDAR_C = 0.1					#   kappa_max coefficient c (W20 Eq. 28)
 ETA_RESTART = 1e-8				# Per-subsystem LogH restart threshold + step-level restart
 N_ORB_SECULAR = 3                   		# Orbits/timestep threshold for secular evolution
 M_PN = 5.0                          		# Minimum mass (M_sun) for PN corrections

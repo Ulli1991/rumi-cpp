@@ -101,6 +101,22 @@ HIER_LOGH = dict(TEST_CASE="triple_test", INTEGRATOR="hhs", TRIPLE_A_IN_PC="1e-7
 # orbits per half step of 5 yr
 WEAK_FLYBY = dict(HIER_LOGH, TRIPLE_A_OUT_PC="1e-4", TRIPLE_E_OUT="5.0", TOTAL_TIME_MYR="4e-5", DT_MAX_MYR="1e-5",
                   FLYBY_CM_VELOCITY="true")
+# Wang, Nitadori & Makino 2020 (SDAR) Table 1 B-S triple in physical units: inner 0.9 + 0.1 Msun at 0.02 AU,
+# e = 0.9; outer 2 Msun at 20 AU, e = 0.99; 80 deg; both at apocentre. t_KL ~ 680 yr (their Eq. 53), 2.3e5 inner
+# orbits; kappa ~ 52 at the outer apocentre (as in the paper). LogH path (SECULAR_TRIPLES = false).
+KL_TRIPLE = dict(SEC_TRIPLE, SECULAR_TRIPLES="false", TRIPLE_A_IN_PC="1e-7", TRIPLE_E_IN="0.9", TRIPLE_M1="0.9",
+                 TRIPLE_M2="0.1", TRIPLE_A_OUT_PC="1e-4", TRIPLE_E_OUT="0.99", TRIPLE_M3="2.0", TRIPLE_INCL_DEG="80.2",
+                 TOTAL_TIME_MYR="5e-5", DT_MAX_MYR="1e-5", ETA_RESTART="1e-8")
+# AUDIT F3 system (200k cluster, FLYBY_CM_VELOCITY): ~1 Msun binary at 0.05 AU and a 0.7 Msun star passing at
+# 0.01 pc with v_inf = 190 km/s (e = 31100), starting at 0.05 pc; R_NGB = 0.02 pc keeps it in the subsystem as the
+# fly-by criterion does with long steps. Plain LogH integrates ~3e4 binary orbits per 1e-4 Myr orbit by orbit.
+F3_FLYBY = dict(HIER_LOGH, TRIPLE_A_IN_PC="2.4e-7", TRIPLE_A_OUT_PC="0.01", TRIPLE_E_OUT="31100", TRIPLE_M3="0.7",
+                R_NGB="0.02", TOTAL_TIME_MYR="2e-4", DT_MAX_MYR="1e-4", FLYBY_CM_VELOCITY="true")
+# 10 + 10 Msun BH binary at 0.02 AU with a 1 Msun star at 20 AU (e_out = 0.3), all PN orders: SDAR must keep
+# kappa = 1 (FROST-CLUSTERS I App. A2); with PN off the same triple is slowed down (control)
+PN_TRIPLE = dict(HIER_LOGH, TRIPLE_M1="10.0", TRIPLE_M2="10.0", TRIPLE_A_OUT_PC="1e-4", TRIPLE_E_OUT="0.3",
+                 TRIPLE_M3="1.0", TRIPLE_INCL_DEG="40", PN_ORDER="31", M_PN="5.0", TOTAL_TIME_MYR="5e-6",
+                 DT_MAX_MYR="2.5e-6", ETA_RESTART="0", SECULAR_TRIPLES="false")
 # Wide eccentric BH binary (30 + 5.6 Msun, a = 40 AU, e = 0.97, P = 50 yr: a subsystem, LogH) and a 0.55 Msun
 # star at ~30 binary apocentres (a_out = 0.012 pc, outside r_ngb): the 20k cluster's seed-13 configuration. With
 # the c.o.m. fly-by velocity the star's pair step is ~10 binary periods, and its kicks sample the binary's orbit
@@ -131,15 +147,16 @@ def run(exe, cfg):
     return diagnostics(run_output(exe, cfg))
 
 
-def run_output(exe, cfg):
-    """stdout of one run; raises on a nonzero exit or a timeout."""
+def run_output(exe, cfg, env=None):
+    """stdout of one run (env: extra environment variables); raises on a nonzero exit or a timeout."""
     with tempfile.TemporaryDirectory() as d:
         # NBODY_TEST_EXTRA="KEY=value,KEY2=value" overrides keys of every case (A/B comparisons)
         extra = dict(kv.split("=", 1) for kv in os.environ.get("NBODY_TEST_EXTRA", "").split(",") if "=" in kv)
         Path(d, "config.txt").write_text("".join(f"{k} = {v}\n" for k, v in {**cfg, **extra}.items()))
         try:
             launcher = os.environ.get("NBODY_TEST_LAUNCHER", "").split()  # e.g. "mpirun -n 2"
-            out = subprocess.run(launcher + [exe], cwd=d, capture_output=True, text=True, timeout=TIMEOUT_S)
+            out = subprocess.run(launcher + [exe], cwd=d, capture_output=True, text=True, timeout=TIMEOUT_S,
+                                 env={**os.environ, **(env or {})})
         except subprocess.TimeoutExpired:
             raise SystemExit(f"FAIL: no result within {TIMEOUT_S} s (hung or stuck in time)")
     if out.returncode != 0:
@@ -393,6 +410,45 @@ def weak_split(exe, label, cfg, bound):
     gbs = sum(int(c) for c in re.findall(r"\(gbs=(\d+)", out))
     ok = check(f"{label} triples split", n, 1, lower=True) & check(f"{label} LogH GBS steps", gbs, 0)
     return ok & check(f"{label} max|dE/E|", max(r[0] for r in diagnostics(out)), bound)
+
+
+def sdar_stats(out):
+    """(GBS steps, LogH step-limit hits, slowed LogH calls, Triple-tracker e_in series) of one run."""
+    gbs = sum(int(c) for c in re.findall(r"\(gbs=(\d+)", out))
+    caps = sum(int(c) for c in re.findall(r"cap=(\d+)", out))
+    slowed = sum(int(c) for c in re.findall(r"sdar=(\d+)", out))
+    e_in = [float(e) for e in re.findall(r"Triple: .*? e_in=([0-9.]+)", out)]
+    return gbs, caps, slowed, e_in
+
+
+def sdar_vs_logh(exe, label, cfg, steps_ratio, de_in, dE_bound, plain_env=None):
+    """SDAR slow-down (Wang+2020) against plain LogH on the same subsystem: at most `steps_ratio` of the GBS steps,
+    no step-limit hit, |dE/E| (slowed-Hamiltonian books, Wang+2020 Eq. 25) within dE_bound and not above LogH's, the
+    inner eccentricity (secular evolution) within de_in of LogH's at every print. plain_env: environment of the
+    LogH reference run."""
+    plain, sd = run_output(exe, dict(cfg, SDAR="false"), plain_env), run_output(exe, dict(cfg, SDAR="true"))
+    (g0, _, _, e0), (g1, c1, n1, e1) = sdar_stats(plain), sdar_stats(sd)
+    dE0, dE1 = max(r[0] for r in diagnostics(plain)), max(r[0] for r in diagnostics(sd))
+    ok = check(f"{label} slowed LogH calls", n1, 1, lower=True)
+    ok &= check(f"{label} GBS steps SDAR / LogH ({g1} / {g0})", g1 / max(g0, 1), steps_ratio)
+    ok &= check(f"{label} SDAR step-limit hits", c1, 0)
+    ok &= check(f"{label} SDAR max|dE/E|", dE1, dE_bound)
+    ok &= check(f"{label} SDAR max|dE/E| / LogH max|dE/E| ({dE0:.2e})", dE1 / dE0, 1.0)
+    if de_in is not None:
+        ok &= check(f"{label} prints", min(len(e0), len(e1)), 2, lower=True)
+        ok &= check(f"{label} max|e_in(SDAR) - e_in(LogH)|", max(abs(a - b) for a, b in zip(e0, e1)), de_in)
+    return ok
+
+
+def sdar_pn_off(exe, label, cfg):
+    """SDAR keeps kappa = 1 in PN subsystems: diagnostics identical to plain LogH, no slowed call; the same triple
+    without PN is slowed (control)."""
+    plain, sd = run_output(exe, dict(cfg, SDAR="false")), run_output(exe, dict(cfg, SDAR="true"))
+    ok = check(f"{label} slowed LogH calls with PN", sdar_stats(sd)[2], 0)
+    ok &= check(f"{label} diagnostics identical to LogH (0 = yes)", float(diagnostics(sd) != diagnostics(plain)), 0)
+    ok &= check(f"{label} GBS steps identical to LogH (0 = yes)", float(sdar_stats(sd)[0] != sdar_stats(plain)[0]), 0)
+    ctrl = run_output(exe, dict(cfg, SDAR="true", PN_ORDER="0"))
+    return ok & check(f"{label} slowed LogH calls without PN", sdar_stats(ctrl)[2], 1, lower=True)
 
 
 def tree_exact(exe, label, cfg):
@@ -673,6 +729,16 @@ CASES = {
     "weak_flyby_split": lambda exe: weak_split(exe, "weak fly-by split", dict(WEAK_FLYBY, WEAK_PERTURBER_GAMMA="1e-8"),
                                                4.7e-8),
     "triple_id_order": lambda exe: triple_order(exe, "secular triple", SEC_TRIPLE, 1e-6),
+    # SDAR (M3; Wang, Nitadori & Makino 2020; FROST-CLUSTERS I App. A2). Before (no SDAR key, plain LogH): GBS
+    # step ratio 1, no slowed call. B-S triple (W20 Table 1), 0.07 t_KL: kappa_max 51.7 as in W20 sec. 7.1;
+    # plain LogH (1024 steps/orbit limit, else it gives up) 4.86e6 GBS steps, 99 restarts, max|dE/E| 1.2e-7;
+    # SDAR 1.56e5 steps (0.032), 2.56e-9 (books; 8e-8 physical), e_in within 2e-6 of LogH
+    "sdar_kozai_triple": lambda exe: sdar_vs_logh(exe, "Wang+2020 B-S triple", KL_TRIPLE, 0.042, 3e-6, 3.4e-9,
+                                                  {"NBODY_GBS_STEPS_PER_ORBIT": "1024"}),
+    # F3 fly-by: LogH 1.52e6 GBS steps, max|dE/E| 5.6e-7 (restarts); SDAR 389 steps (2.6e-4), 3.1e-11
+    "sdar_f3_flyby": lambda exe: sdar_vs_logh(exe, "F3 fly-by", F3_FLYBY, 3.4e-4, None, 4e-11),
+    # Before: the control (PN off) has no slowed call either
+    "sdar_pn_kappa1": lambda exe: sdar_pn_off(exe, "PN BH binary + star", PN_TRIPLE),
     # SECULAR_TRIPLES = false (FROST-CLUSTERS I): the switch was ignored by the per-level re-classification
     # (40 secular calls before). In LogH the triple keeps |dE/E| 2.17e-11 vs 3.4e-5 secular: bound 2.9e-11
     "secular_triples_off": lambda exe: secular_triples_off(exe, "secular triple off", SEC_TRIPLE, 2.9e-11),

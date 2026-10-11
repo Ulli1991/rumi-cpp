@@ -56,6 +56,14 @@ struct SubsystemBatch {
     std::vector<double> stored_V_scale, stored_R_scale, stored_T_scale, stored_E_scale;
     std::vector<char> stored_scales_set;
 
+    // Per-body stellar radius (R_sun) and type (host, same layout as flat_mass): SDAR collision candidates
+    std::vector<double> flat_radius;
+    std::vector<int> flat_stype;
+
+    // SDAR: energy jumps sum delta H_sd (physical units) of each subsystem's integration (Wang+2020 Eq. 24;
+    // the change of the physical energy beyond the integration error, booked as E_sd by the caller)
+    std::vector<double> sd_jump;
+
     // Member slots from pack() (unique, first-appearance order) and each body's row in that list, reused by unpack()
     std::vector<int> cached_member_indices;
     std::vector<int> body_member;       // [sum(n_bodies)]: row in cached_member_indices
@@ -65,6 +73,8 @@ struct SubsystemBatch {
     double stat_worst_dE = 0;      // worst |dE/E|
     double stat_best_dE = 1e30;    // best |dE/E|
     int stat_cap_hit = 0;          // subsystems that hit GBS step limit
+    int stat_sd_calls = 0;         // SDAR: integrations with a slowed binary at some step
+    double stat_sd_kappa_max = 0;  // SDAR: largest slow-down factor
     std::vector<double> t_reached; // physical time each subsystem's GBS integration reached (code units)
 
     // Size the host arrays

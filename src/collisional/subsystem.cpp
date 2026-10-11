@@ -1107,6 +1107,8 @@ void SubsystemManager::reset_step_diagnostics() {
     step_logh_cap_hit = 0;
     step_logh_restarts = 0;
     step_logh_restart_ok = 0;
+    step_sdar_calls = 0;
+    step_sdar_kappa_max = 0.0;
     step_secular_evolved = 0;
     step_secular_substeps = 0;
     step_secular_triples = 0;
@@ -1156,6 +1158,8 @@ void SubsystemManager::print_step_summary() const {
             std::printf(", cap=%d", step_logh_cap_hit);
         if (step_logh_restarts > 0)
             std::printf(", restart=%d/%d", step_logh_restart_ok, step_logh_restarts);
+        if (step_sdar_calls > 0)
+            std::printf(", sdar=%d kappa_max=%.2e", step_sdar_calls, step_sdar_kappa_max);
         std::printf(")");
     }
     std::printf("  Secular=%d", step_secular_evolved);

@@ -161,6 +161,8 @@ struct SubsystemManager {
     int step_logh_cap_hit = 0;         // hit GBS step limit (max_iter)
     int step_logh_restarts = 0;        // per-subsystem restarts triggered
     int step_logh_restart_ok = 0;      // restarts that succeeded
+    int step_sdar_calls = 0;           // SDAR: LogH integrations with a slowed inner binary
+    double step_sdar_kappa_max = 0.0;  // SDAR: largest slow-down factor of the step
     int step_secular_evolved = 0;      // secular binaries evolved
     long long step_secular_substeps = 0;  // internal steps of the secular binary integrator
     int step_secular_triples = 0;      // secular triples evolved
