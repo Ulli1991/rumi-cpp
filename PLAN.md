@@ -247,6 +247,34 @@ Only the items below are adopted; everything else in those documents is referenc
 6. Accuracy study for the far field (experiment I-1; statistical equivalence on ensembles) before M8 FMM.
 7. Production practice: N <= 2e5 as ensembles (4 seeds x 1 GPU = 2x throughput); --restart auto job chains.
 
+## Experiment backlog from METHODS_SURVEY (ranked table), with status
+| id | change | status / next |
+|---|---|---|
+| B-1 | FC criteria set: c.o.m. velocity, jerk off, v/a off, eta_grad 0.2 | c.o.m. part merged (off by default, decision after prod runs); jerk/v-a off ("b1") mixed at 20k -> 200k 3-seed A/B still open |
+| F-1 | secular triples off -> LogH | switch SECULAR_TRIPLES merged (default on); no triples formed at 20k; decide with SDAR on 200k |
+| C-1/C-2 | weak-perturber split; field sees c.o.m. of split binaries | C-1 alone 3.6x worse; C-2 not done (SDAR + collisions removed most stalls; revisit only if stalls return) |
+| E-1/E-3 | eta_GBS 1e-8, end-time tol 1e-2 (FC production values) | 20k: no speed gain; repeat at 200k after Kepler path (less LogH work left) |
+| D-1 | SDAR | done, default off (no gain at 200k now; keep for dense/triple-rich runs) |
+| J-1/J-2 | per-depth overhead, host path for small batches | J-1 done (F2/AUDIT G); J-2 = SCALING P2 host-resident subtrees |
+| I-1 | synthetic force-error injection | open; required before M8 FMM and for the far-field accuracy study |
+| K-1 | FRYER_RAPID + VINK + PPISN in IC SSE (BH masses 5.5-41.6) | open, config-only test |
+| A-2 | HHS_CC default with binaries | open; prerequisite for SCALING P3/P4 task volume (3 seeds) |
+| C-3 | Mardling-Aarseth with inclination / Vynatheya | branch 777b0db held; merge with a test |
+| E-2 | Deuflhard sequence, k_max 8, MSTAR end-time control | open (1.2-1.5x in GBS) |
+| B-2 | tidal-tensor time-step criterion | open (research) |
+| C-4 | r_ngb 0.5 / 0.25 mpc (FC values) | open; interacts with NGB_MASS_SCALING |
+| A-1 | Omelyan gradient | open; needed for FMM gradient |
+| G-1 | PN boost-invariance test | open (cheap test) |
+| H-1/H-2 | exact tree search | done (merged, bit-identical, now also with the tidal step) |
+| B-5 | interval 5e-3 Myr (FC production) | open; production-speed lever, energy rule per Myr |
+| B-3 | Galilean-invariant v/a | open, only if v/a kept |
+| J-3 | device-batched LogH/SDAR | rejected (subsystem audit #14, review §5.4) |
+| K-2/K-3 | pericentre collisions; ZL15 recoil with spins | K-2 done (M5); K-3 open (needed for goal A) |
+| gradmag fix 3 | fresh grad_mag per kernel (branch ab-gradmag) | better energy, 28 % slower at 200k: re-test with B-1 |
+
+Survey corrections already applied: SSE memory note fixed; F3 understood as a dragged-in fly-by (now handled by SDAR,
+collisions, FLYBY_NGB_CM); r_strong is only a BSE switch; FMM needs eps <~ 1e-8 at today's accuracy.
+
 ## Pending evaluations (agents stopped mid-work)
 - Task runtimes (HPX/Charm++/Legion): literature says tasks must be >= ~100 us; evaluate only at subtree granularity.
 - GPU idle prototypes (uncommitted in worktree agent-a80a0259e1d880784): overlap of host LogH with device forces.
