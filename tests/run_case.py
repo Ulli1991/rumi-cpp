@@ -115,8 +115,8 @@ F3_FLYBY = dict(HIER_LOGH, TRIPLE_A_IN_PC="2.4e-7", TRIPLE_A_OUT_PC="0.01", TRIP
 # 10 + 10 Msun BH binary at 0.02 AU with a 1 Msun star at 20 AU (e_out = 0.3), all PN orders: SDAR must keep
 # kappa = 1 (FROST-CLUSTERS I App. A2); with PN off the same triple is slowed down (control)
 PN_TRIPLE = dict(HIER_LOGH, TRIPLE_M1="10.0", TRIPLE_M2="10.0", TRIPLE_A_OUT_PC="1e-4", TRIPLE_E_OUT="0.3",
-                 TRIPLE_M3="1.0", TRIPLE_INCL_DEG="40", PN_ORDER="31", M_PN="5.0", TOTAL_TIME_MYR="2e-5",
-                 DT_MAX_MYR="1e-5", ETA_RESTART="0", SECULAR_TRIPLES="false")
+                 TRIPLE_M3="1.0", TRIPLE_INCL_DEG="40", PN_ORDER="31", M_PN="5.0", TOTAL_TIME_MYR="5e-6",
+                 DT_MAX_MYR="2.5e-6", ETA_RESTART="0", SECULAR_TRIPLES="false")
 # Wide eccentric BH binary (30 + 5.6 Msun, a = 40 AU, e = 0.97, P = 50 yr: a subsystem, LogH) and a 0.55 Msun
 # star at ~30 binary apocentres (a_out = 0.012 pc, outside r_ngb): the 20k cluster's seed-13 configuration. With
 # the c.o.m. fly-by velocity the star's pair step is ~10 binary periods, and its kicks sample the binary's orbit
