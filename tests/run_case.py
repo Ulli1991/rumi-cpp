@@ -704,6 +704,10 @@ def restart_identical(exe, label, cfg, n, stop="interval", snapshots=False):
             print(f"   step {s}: uninterrupted '{ra[s]}' restarted '{resumed.get(s, r1.get(s))}'")
         ok &= check(f"{label} steps after the restart", len(resumed), 2 * n - k, lower=True)
         ok &= check(f"{label} L0 rows differing from the uninterrupted run", len(diff), 0)
+        # Run constants fixed at the start (NGB_MASS_SCALING <m>) must be restored, not recomputed from the state
+        mref = lambda out: re.findall(r"NGB_MASS_SCALING: <m> = (\S+)", out)
+        if mref(ref):
+            ok &= check(f"{label} NGB_MASS_SCALING <m> restored (0 = yes)", int(mref(out2) != mref(ref)[:1]), 0)
 
         def digest(d, s):
             p = Path(d, f"dump_{s:04d}.bin")
@@ -1058,6 +1062,10 @@ CASES = {
     "restart_mergers": lambda exe: restart_identical(exe, "mergers, step restarts", dict(MERGERS, SERIAL_N2_CPU="0"), 5),
     "restart_mergers_sse": lambda exe: restart_identical(exe, "mergers + SSE", dict(MERGERS, SERIAL_N2_CPU="0",
                                                                                    SSE_ENABLED="true"), 3),
+    # NGB_MASS_SCALING: <m> of the initial particles is a run constant (043190d..: recomputed from the merged-down
+    # state on restart)
+    "restart_ngb_mergers": lambda exe: restart_identical(exe, "mergers, mass-scaled r_ngb",
+                                                         dict(MERGERS, SERIAL_N2_CPU="0", NGB_MASS_SCALING="true"), 5),
     "restart_pn_logh": lambda exe: restart_identical(exe, "PN LogH binary (aux. velocities)", PN_LOGH, 5),
     "restart_spin": lambda exe: restart_identical(exe, "spinning BH binary", SPIN_J_PN1, 5),
     "restart_secular": lambda exe: restart_identical(exe, "secular PN binary", SEC_BINARY, 5),

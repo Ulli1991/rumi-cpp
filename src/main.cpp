@@ -1042,13 +1042,16 @@ int main(int argc, char** argv) {
         if (!resuming && g_collisional.enabled && g_collisional.flyby_cm_eps > 0.0)   // restarts restore it
             g_collisional.e_ref = std::fabs(compute_diagnostics(work_p, G, soft2).E_total);
         // NGB_MASS_SCALING: <m> of the initial particles (fixed for the run)
+        // (restarts restore it: recomputing it from the evolved particles would change the neighbour radius)
         if (g_collisional.enabled && ngb_mass_scaling && work_p.N > 0) {
-            double m_sum = 0.0;
-            auto pm = work_p.mass;
-            Kokkos::parallel_reduce("ngb_mref", work_p.N, KOKKOS_LAMBDA(int i, double& s) { s += pm(i); }, m_sum);
-            g_collisional.ngb_inv_mref = work_p.N / m_sum;
-            if (ngb_mref > 0.0) { g_collisional.ngb_inv_mref = 1.0 / ngb_mref; m_sum = ngb_mref * work_p.N; }
-            if (my_rank == 0) std::printf("NGB_MASS_SCALING: <m> = %.4f Msun\n", m_sum / work_p.N);
+            if (!resuming) {
+                double m_sum = 0.0;
+                auto pm = work_p.mass;
+                Kokkos::parallel_reduce("ngb_mref", work_p.N, KOKKOS_LAMBDA(int i, double& s) { s += pm(i); }, m_sum);
+                g_collisional.ngb_inv_mref = work_p.N / m_sum;
+                if (ngb_mref > 0.0) g_collisional.ngb_inv_mref = 1.0 / ngb_mref;
+            }
+            if (my_rank == 0) std::printf("NGB_MASS_SCALING: <m> = %.4f Msun\n", 1.0 / g_collisional.ngb_inv_mref);
         }
 #endif
         // Initial forces, subsystems and levels (a restart continues from the saved ones instead)

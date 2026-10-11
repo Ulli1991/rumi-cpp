@@ -179,7 +179,7 @@ void visit_config(CollisionalConfig& c, F&& f) {
     f("sse_enabled", c.sse_enabled); f("sse_metallicity", c.sse_metallicity); f("sse_wind", c.sse_wind);
     f("sse_remnant", c.sse_remnant); f("sse_ppisn", c.sse_ppisn); f("sse_ecsn", c.sse_ecsn);
     f("sse_mxns", c.sse_mxns); f("sse_flbv", c.sse_flbv); f("r_ngb_sq", c.r_ngb_sq);
-    f("r_ngb_max_sq", c.r_ngb_max_sq); f("c_code", c.c_code);
+    f("r_ngb_max_sq", c.r_ngb_max_sq); f("c_code", c.c_code); f("ngb_inv_mref", c.ngb_inv_mref);
 }
 
 void write_config(hid_t parent) {
@@ -198,6 +198,8 @@ void write_config(hid_t parent) {
 void read_config(hid_t parent) {
     auto g = h5::open_group(parent, "config");
     g_collisional.e_ref = h5::get_double(g, "e_ref");
+    // NGB_MASS_SCALING <m>: a run constant like e_ref (from the initial particles), restored
+    if (h5::has_attr(g, "ngb_inv_mref")) g_collisional.ngb_inv_mref = h5::get_double(g, "ngb_inv_mref");
     int n_diff = 0;
     visit_config(g_collisional, [&](const char* name, auto& v) {
         using T = std::decay_t<decltype(v)>;
