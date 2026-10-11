@@ -561,7 +561,7 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
                         if (stable) {
                             double P_in = 2.0 * M_PI * std::sqrt(oe_in.a*oe_in.a*oe_in.a / mu_in);
                             sub.n_orb_per_dt = (int)(dt / P_in);
-                            sub.is_secular = (sub.n_orb_per_dt >= n_orb_secular);
+                            sub.is_secular = g_collisional.secular_triples && sub.n_orb_per_dt >= n_orb_secular;
                         } else {
                             sub.is_secular = false;
                         }

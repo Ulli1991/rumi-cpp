@@ -24,6 +24,8 @@ struct CollisionalConfig {
     double eta_va = 0.2;               // velocity-per-acceleration timestep parameter (ETA; BIFROST Eq. 24)
     double eta_gbs = 1e-10;            // GBS accuracy for LogH
     double eta_pert = 0.02;            // perturbation timestep for subsystems
+    bool secular_triples = true;        // SECULAR_TRIPLES: stable triples with >= N_ORB_SECULAR inner orbits per step use the
+                                        // double-averaged secular path; false sends them to LogH (FROST-CLUSTERS I dropped it for SDAR)
     double weak_perturber_gamma = 0.0;  // WEAK_PERTURBER_GAMMA (experimental, off): a non-secular triple whose third body perturbs the inner
                                         // binary below this tidal ratio is split (binary subsystem + field star); 0: off
     double tidal_gamma = 0.0;          // TIDAL_GAMMA: binaries with |tidal accel| / |internal accel| above this resolve

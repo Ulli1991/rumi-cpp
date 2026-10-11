@@ -343,6 +343,15 @@ def secular_steps(exe, label, cfg, per_call):
     return ok & check(f"{label} internal steps per evolution", n_sub / max(n_ev, 1), per_call)
 
 
+def secular_triples_off(exe, label, cfg, bound):
+    """SECULAR_TRIPLES = false: a stable triple in the secular regime goes to LogH (FROST-CLUSTERS I dropped the
+    double-averaged path); with the default it takes the secular path."""
+    on, off = run_output(exe, cfg), run_output(exe, dict(cfg, SECULAR_TRIPLES="false"))
+    ok = check(f"{label} secular-triple calls, default", on.count("[SEC_TRI]"), 1, lower=True)
+    ok &= check(f"{label} secular-triple calls, SECULAR_TRIPLES = false", off.count("[SEC_TRI]"), 0)
+    return ok & check(f"{label} |dE/E| in LogH", diagnostics(off)[-1][0], bound)
+
+
 def logh_complete(exe, label, cfg, bound):
     """Every LogH call must reach its end time: no GBS step-limit hits, no retries, energy within bound."""
     out = run_output(exe, cfg)
@@ -546,6 +555,9 @@ CASES = {
     "weak_flyby_split": lambda exe: weak_split(exe, "weak fly-by split", dict(WEAK_FLYBY, WEAK_PERTURBER_GAMMA="1e-8"),
                                                4.7e-8),
     "triple_id_order": lambda exe: triple_order(exe, "secular triple", SEC_TRIPLE, 1e-6),
+    # SECULAR_TRIPLES = false (FROST-CLUSTERS I): the switch was ignored by the per-level re-classification
+    # (40 secular calls before). In LogH the triple keeps |dE/E| 2.17e-11 vs 3.4e-5 secular: bound 2.9e-11
+    "secular_triples_off": lambda exe: secular_triples_off(exe, "secular triple off", SEC_TRIPLE, 2.9e-11),
     # Measured 9.8e-9 (dense core, at the restart threshold); 2.35e-8 before the pericentre check, 2.68e-8 with
     # it (seed 5): bound 3.5e-8
     "triples_detected": lambda exe: triples(exe, "dense core", TRIPLES, 3.5e-8),

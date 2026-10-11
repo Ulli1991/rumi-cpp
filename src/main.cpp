@@ -627,6 +627,7 @@ int main(int argc, char** argv) {
             g_collisional.eta_pert        = cfg.get_double("ETA_PERT", 0.02);
             g_collisional.tidal_gamma     = cfg.get_double("TIDAL_GAMMA", 0.0);
             g_collisional.weak_perturber_gamma = cfg.get_double("WEAK_PERTURBER_GAMMA", 0.0);
+            g_collisional.secular_triples = cfg.get_bool("SECULAR_TRIPLES", true);
             g_collisional.tidal_res       = cfg.get_double("TIDAL_RES", 0.05);
             g_collisional.eta_restart     = cfg.get_double("ETA_RESTART", 0.0);
             g_collisional.n_orb_secular   = cfg.get_int("N_ORB_SECULAR", 3);
