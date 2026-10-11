@@ -32,7 +32,7 @@ struct StagePool {
         jobs.push_back(j);
         n_jobs.fetch_add(1, std::memory_order_release);
     }
-    bool run_one();                // run a queued job if there is one
+    bool run_one(const std::atomic<int>* own = nullptr);   // run a queued job (only those of step *own if given)
 };
 
 struct GBSIntegrator {

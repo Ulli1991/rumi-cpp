@@ -201,8 +201,9 @@ void GBSIntegrator::compute_stages(const LogHState& state, int k0, int k1, doubl
         std::atomic<int> left{k1 - k0};
         for (int k = k0 + 1; k <= k1; k++) pool->push({this, &state, k, ds, G, c_code, pn_order, &left});
         run_stage(state, k0, ds, G, c_code, pn_order);
+        // Only our own jobs while waiting: another subsystem's stage would delay this one's critical path
         while (left.load(std::memory_order_acquire) > 0)
-            if (!pool->run_one()) cpu_relax();
+            if (!pool->run_one(&left)) cpu_relax();
         return;
     }
     using Policy = Kokkos::RangePolicy<Kokkos::DefaultHostExecutionSpace, Kokkos::Schedule<Kokkos::Dynamic>>;
@@ -218,14 +219,21 @@ void GBSIntegrator::run_stage(const LogHState& state, int k, double ds, double G
     pack_state(result, table[k], d);
 }
 
-bool StagePool::run_one() {
+bool StagePool::run_one(const std::atomic<int>* own) {
     if (n_jobs.load(std::memory_order_acquire) == 0) return false;
     Job j;
     {
         std::lock_guard<std::mutex> lk(m);
-        if (jobs.empty()) return false;
-        j = jobs.back();
-        jobs.pop_back();
+        // Helpers take the newest job (largest stage of the latest step), an owner its own smallest stage
+        int pick = (int)jobs.size() - 1;
+        if (own) {
+            pick = 0;
+            while (pick < (int)jobs.size() && jobs[pick].left != own) pick++;
+            if (pick == (int)jobs.size()) return false;
+        }
+        if (pick < 0) return false;
+        j = jobs[pick];
+        jobs.erase(jobs.begin() + pick);
         n_jobs.fetch_sub(1, std::memory_order_relaxed);
     }
     j.g->run_stage(*j.state, j.k, j.ds, j.G, j.c_code, j.pn_order);
