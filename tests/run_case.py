@@ -173,6 +173,21 @@ SEC_DRIFT = dict(TEST_CASE="binary_test", INTEGRATOR="hhs", BINARY_A_PC="1e-5", 
                  DT_MIN_MYR="1e-14", SOFTENING_PC="0", COLLISIONAL="true", R_NGB="1e-3", R_NGB_MAX="0.1",
                  N_ORB_SECULAR="3", PN_ORDER="0", SSE_ENABLED="false", ETA_RESTART="0", PRINT_INTERVAL="1",
                  PROFILING="false")
+# KEPLER_2BODY: the same binary at e = 0.7 with 0.5 or 2 orbits per step (below N_ORB_SECULAR: LogH without the
+# switch), and a hyperbolic encounter (q = 1e-5 pc, e = 1.5, from 5 q inbound) over 20 pericentre crossing times
+KEP_2B = dict(SEC_DRIFT, BINARY_E="0.7", TOTAL_TIME_MYR=f"{2.0 * P_SEC_MYR:.15e}", DT_MAX_MYR=f"{0.5 * P_SEC_MYR:.15e}",
+              ETA_GBS="1e-10")
+T_CROSS_MYR = math.sqrt(1e-15 / (G_CODE * 2.0)) * TU_MYR
+KEP_2B_HYP = dict(KEP_2B, BINARY_E="1.5", TOTAL_TIME_MYR=f"{20.0 * T_CROSS_MYR:.15e}",
+                  DT_MAX_MYR=f"{5.0 * T_CROSS_MYR:.15e}")
+# Contact binary through the Kepler path: 1 + 1 Msun, a = 0.05 AU, e = 0.6, R = 2.152 R_sun (r_p = 4.3018 R_sun, r_p /
+# r_coll = 0.9995: the steps would jump over the short stretch inside r_coll unless one lands on the pericentre),
+# steps of 0.3 P from the apocentre: the first drift ends before the pericentre (Kepler drift), the next contains it
+# (candidate: LogH decides the collision at the pericentre, FROST-CLUSTERS I App. B3)
+P_CONTACT_MYR = 2.0 * math.pi * math.sqrt((0.05 * 4.84814e-6) ** 3 / (G_CODE * 2.0)) * TU_MYR
+KEP_2B_CONTACT = dict(KEP_2B, BINARY_A_PC=f"{0.05 * 4.84814e-6:.10e}", BINARY_E="0.6", TEST_STELLAR_RADIUS_RSUN="2.152",
+                      TOTAL_TIME_MYR=f"{1.5 * P_CONTACT_MYR:.15e}", DT_MAX_MYR=f"{0.3 * P_CONTACT_MYR:.15e}",
+                      ETA_RESTART="1e-8", KEPLER_2BODY="true")
 
 # 16 stars inside r_ngb: one 15-body neighbour group, more than LogH's fixed storage (LOGH_MAX_BODIES = 8)
 # Collisional FSI run of a field binary (r_ngb below a, so no subsystem): the start-of-step kernel's criteria set the step
@@ -636,10 +651,11 @@ def restarts(exe, label, cfg, bound):
         check(f"{label} max|dE/E|", max(r[0] for r in rows), bound)
 
 
-def subsys_collision(exe, label, cfg, kind, bound, min_landings=0):
+def subsys_collision(exe, label, cfg, kind, bound, min_landings=0, min_kepler2=0):
     """A collision inside a subsystem integration (FROST-CLUSTERS I App. B3): exactly one event of the given kind,
     one body less at the end (no duplicated or lost particle), no LogH step-limit hit or give-up, and the energy
-    with the merger sink conserved to the integration error."""
+    with the merger sink conserved to the integration error. min_kepler2: drifts of the pair on the Kepler path
+    (KEPLER_2BODY) before it was handed to LogH."""
     out = run_output(exe, cfg)
     rows = diagnostics(out)
     n0 = {"triple_test": 3, "binary_test": 2}[cfg["TEST_CASE"]]
@@ -651,6 +667,9 @@ def subsys_collision(exe, label, cfg, kind, bound, min_landings=0):
     ok &= check(f"{label} |N_final - (N0 - 1)|", abs(n_final - (n0 - 1)), 0)
     ok &= check(f"{label} LogH step-limit hits and give-ups", out.count("step limit") + out.count("GAVE UP"), 0)
     ok &= check(f"{label} pericentre landings", landings, min_landings, lower=True)
+    if min_kepler2:
+        ok &= check(f"{label} Kepler2 drifts", sum(int(m) for m in re.findall(r"Kepler2=(\d+)", out)), min_kepler2,
+                    lower=True)
     return ok & check(f"{label} max|dE/E| with merger sink", max(r[0] for r in rows), bound)
 
 
@@ -674,6 +693,47 @@ def binary_test_reference(cfg, t_myr):
 
 def dist3(a, b):
     return math.sqrt(sum((x - y) ** 2 for x, y in zip(a, b)))
+
+
+def binary_test_reference_hyp(cfg, t_myr):
+    """Analytic relative position of the hyperbolic (e > 1) binary_test encounter at t: BINARY_A_PC
+    is the pericentre distance q, the start is inbound at r0 = 5 q, pericentre along +x; r = (A (e - cosh F),
+    A sqrt(e^2 - 1) sinh F, 0) with e sinh F - F = M0 + n t, A = q / (e - 1), n = sqrt(mu / A^3)."""
+    q, e = float(cfg["BINARY_A_PC"]), float(cfg["BINARY_E"])
+    mu = G_CODE * (float(cfg["BINARY_M1"]) + float(cfg["BINARY_M2"]))
+    p, r0, A = q * (1.0 + e), 5.0 * q, q / (e - 1.0)
+    f0 = -math.acos(max(-1.0, min(1.0, (p / r0 - 1.0) / e)))
+    F0 = 2.0 * math.atanh(math.sqrt((e - 1.0) / (e + 1.0)) * math.tan(0.5 * f0))
+    M = e * math.sinh(F0) - F0 + math.sqrt(mu / A ** 3) * t_myr / TU_MYR
+    F = math.asinh(M / e)
+    for _ in range(100):
+        F -= (e * math.sinh(F) - F - M) / (e * math.cosh(F) - 1.0)
+    return [A * (e - math.cosh(F)), A * math.sqrt(e * e - 1.0) * math.sinh(F), 0.0]
+
+
+def kepler_vs_logh(exe, label, cfg, bounds):
+    """KEPLER_2BODY: an isolated 2-body subsystem on the analytic Kepler drift against LogH + GBS on the same run and
+    against the analytic orbit. bounds: (Kepler vs analytic, LogH vs analytic, Kepler vs LogH, Kepler max |dE/E|)."""
+    total = float(cfg["TOTAL_TIME_MYR"])
+    run_cfg = dict(cfg, TOTAL_TIME_MYR=f"{total * (1 - 1e-9):.15e}")   # stop after exactly n DT_MAX
+    # LogH lands on the end time to NBODY_GBS_TTOL (default 1e-4 of dt: up to ~1e-5 of r here); 1e-12 compares the
+    # integrations themselves
+    runs = {k: run_output(exe, dict(run_cfg, KEPLER_2BODY=k), env={"NBODY_GBS_TTOL": "1e-12"}, dump=True)
+            for k in ("true", "false")}
+    hyp = float(cfg["BINARY_E"]) > 1.0
+    ref = binary_test_reference_hyp(cfg, total) if hyp else binary_test_reference(cfg, total)
+    scale = math.sqrt(sum(x * x for x in ref))
+    r = {k: binary_rel(rows)[0] for k, (_, rows) in runs.items()}
+    out_k, out_l = runs["true"][0], runs["false"][0]
+    n_kep = sum(int(m) for m in re.findall(r"Kepler2=(\d+)", out_k))
+    ok = check(f"{label} Kepler run: Kepler2 drifts", n_kep, 1, lower=True)
+    ok &= check(f"{label} Kepler run: LogH calls", sum(int(m) for m in re.findall(r"Integration: LogH=(\d+)", out_k)), 0)
+    ok &= check(f"{label} LogH run: LogH calls", sum(int(m) for m in re.findall(r"Integration: LogH=(\d+)", out_l)), 1,
+                lower=True)
+    ok &= check(f"{label} |r_Kepler - r_analytic| / r", dist3(r["true"], ref) / scale, bounds[0])
+    ok &= check(f"{label} |r_LogH - r_analytic| / r", dist3(r["false"], ref) / scale, bounds[1])
+    ok &= check(f"{label} |r_Kepler - r_LogH| / r", dist3(r["true"], r["false"]) / scale, bounds[2])
+    return ok & check(f"{label} Kepler run max|dE/E|", max(x[0] for x in diagnostics(out_k)), bounds[3])
 
 
 def secular_drift(exe, label, cfg, bounds):
@@ -974,6 +1034,21 @@ CASES = {
     # Secular (Kepler-drift) binary at e = 0 and 1e-8, 100.37 orbits as 1 or 16 steps. Measured: 1 vs 16 3.7e-13 /
     # 1.2e-12, vs analytic 2.2e-13 / 1.5e-12, |dE/E| 5.3e-16 / 4.0e-16, |dL/L| 0. 043190d: 1 vs 16 = 2.0 / 0.55,
     # vs analytic up to 2.0 / 1.3 (elements route)
+    # KEPLER_2BODY (subsystem audit #1): the Kepler drift is exact (vs the analytic orbit at round-off) and agrees with
+    # LogH + GBS to its accuracy (LogH landing on the end time to 1e-12; with the default NBODY_GBS_TTOL = 1e-4 LogH
+    # is off by 2.8e-6 / 1.6e-6 / 1.2e-5 of r here). Measured (raven host, 2026-10-11): Kepler vs analytic 6.7e-14 /
+    # 5.1e-17 / 5.3e-16, LogH vs analytic 5.4e-13 / 7.2e-11 / 1.1e-13, Kepler max |dE/E| 2.4e-14 / 0 / 3.0e-15; bounds
+    # 1.3x (1e-15 floor). 043190d ignores the key: no Kepler2 drift, LogH calls in the Kepler run
+    "kepler2_norb05": lambda exe: kepler_vs_logh(exe, "0.5 orbits per step", KEP_2B, (8.7e-14, 7.1e-13, 6.3e-13, 3.1e-14)),
+    "kepler2_norb2": lambda exe: kepler_vs_logh(exe, "2 orbits per step",
+                                                dict(KEP_2B, TOTAL_TIME_MYR=f"{4.0 * P_SEC_MYR:.15e}",
+                                                     DT_MAX_MYR=f"{2.0 * P_SEC_MYR:.15e}"), (1e-15, 9.3e-11, 9.3e-11, 1e-15)),
+    "kepler2_hyperbolic": lambda exe: kepler_vs_logh(exe, "hyperbolic encounter", KEP_2B_HYP,
+                                                     (1e-15, 1.4e-13, 1.4e-13, 4e-15)),
+    # Grazing contact binary: two Kepler drifts, then the drift containing the pericentre goes to LogH, whose step is
+    # aimed at the pericentre and merges there (r_sep / r_coll = 0.9997); measured |dE/E| 1.2e-14 with the merger sink
+    "kepler2_contact": lambda exe: subsys_collision(exe, "contact binary via the Kepler path", KEP_2B_CONTACT, "STELLAR",
+                                                    1.6e-14, min_kepler2=1),
     "secular_drift_e0": lambda exe: secular_drift(exe, "e = 0", SEC_DRIFT, (5e-13, 3e-13, 7e-16, 1e-15)),
     "secular_drift_e1e-8": lambda exe: secular_drift(exe, "e = 1e-8", dict(SEC_DRIFT, BINARY_E="1e-8"),
                                                      (1.6e-12, 2e-12, 7e-16, 1e-15)),
