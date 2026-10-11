@@ -141,3 +141,9 @@ IMBH_SPIN = 0.0                    		# Dimensionless spin (both BHs)
 # =============================================================================
 PRINT_INTERVAL = 1
 PROFILING = true                    		# Print performance breakdown at each print interval
+RESTART_INTERVAL = 0                    	# Restart file every this many steps and at the end (0: off; needs USE_HDF5)
+WALLTIME_LIMIT = 0                      	# Hours: restart file and clean stop before this wall-clock time (0: off)
+RESTART_DIR = .                         	# Directory of restart_<step>.h5 (the newest RESTART_KEEP = 2 are kept)
+RESTART_FILE =                          	# Continue from this file; latest: newest in RESTART_DIR; auto: that or a fresh start
+SNAPSHOT_INTERVAL = 0                   	# LUNA-layout snapshot every this many steps, at step 0 and at the end (0: off)
+SNAPSHOT_DIR = .                        	# snapdir_NNN/snapshot_NNN.0.hdf5 go here

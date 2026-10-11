@@ -1,0 +1,13 @@
+# Writes OUT (git_version.h) with the git description of SRC; rewritten only when it changes (no rebuild otherwise)
+execute_process(COMMAND git describe --always --dirty --abbrev=12
+                WORKING_DIRECTORY ${SRC} OUTPUT_VARIABLE v OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+if(NOT v)
+    set(v "unknown")
+endif()
+set(content "#pragma once\n#define NBODY_GIT_VERSION \"${v}\"\n")
+if(EXISTS ${OUT})
+    file(READ ${OUT} old)
+endif()
+if(NOT "${old}" STREQUAL "${content}")
+    file(WRITE ${OUT} "${content}")
+endif()

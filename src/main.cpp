@@ -8,6 +8,10 @@
 #include "constants.h"
 #include "mpi_comm.h"
 #include "profiling.h"
+#ifdef USE_HDF5
+#include "restart.h"
+#include "snapshot.h"
+#endif
 #ifdef ENABLE_COLLISIONAL
 #include "collisional_config.h"
 #include "subsystem.h"
@@ -387,6 +391,7 @@ struct TripleTracker {
 struct Config {
     std::map<std::string, std::string> params;
     mutable std::set<std::string> consumed_keys;
+    std::string text;   // the file as read (echoed into restart files)
 
     void load(const std::string& filename) {
         std::ifstream f(filename);
@@ -396,6 +401,7 @@ struct Config {
         }
         std::string line;
         while (std::getline(f, line)) {
+            text += line + "\n";
             auto pos = line.find('#');
             if (pos != std::string::npos) line.erase(pos);
             pos = line.find('=');
@@ -506,6 +512,7 @@ static void print_usage(const char* prog) {
     std::printf("Usage: %s [--config <file>] [--test <case>]\n", prog);
     std::printf("  --config <file>   Config file (default: config.txt)\n");
     std::printf("  --test <case>     Override TEST_CASE from config\n");
+    std::printf("  --restart <file>  Continue from a restart file (\"latest\": newest in RESTART_DIR, \"auto\": that or a fresh start)\n");
     std::printf("  -h, --help        Show this help\n");
 }
 
@@ -516,6 +523,7 @@ int main(int argc, char** argv) {
     MPIComm::init(&argc, &argv);
 
     Kokkos::initialize(argc, argv);
+    const auto prog_start = std::chrono::steady_clock::now();   // WALLTIME_LIMIT counts from here
     int exit_code = 0;
     {
         int my_rank = MPIComm::rank();
@@ -538,12 +546,15 @@ int main(int argc, char** argv) {
 
         std::string config_file = "config.txt";
         std::string test_override;
+        std::string restart_arg;
 
         for (int i = 1; i < argc; i++) {
             if ((!std::strcmp(argv[i], "--config") || !std::strcmp(argv[i], "-c")) && i+1 < argc)
                 config_file = argv[++i];
             else if (!std::strcmp(argv[i], "--test") && i+1 < argc)
                 test_override = argv[++i];
+            else if (!std::strcmp(argv[i], "--restart") && i+1 < argc)
+                restart_arg = argv[++i];
             else if (!std::strcmp(argv[i], "--help") || !std::strcmp(argv[i], "-h")) {
                 print_usage(argv[0]); Kokkos::finalize(); MPIComm::finalize(); return 0;
             }
@@ -711,6 +722,44 @@ int main(int argc, char** argv) {
         }
 #endif
 
+        // Restart files and snapshots (io/restart.h, io/snapshot.h). RESTART_INTERVAL / SNAPSHOT_INTERVAL in steps
+        // (0: off); a restart file is also written at the end of the run and before WALLTIME_LIMIT (hours) or on
+        // SIGUSR1 (both stop the run after the step). RESTART_FILE (or --restart): continue from that file.
+        const int restart_interval = cfg.get_int("RESTART_INTERVAL", 0);
+        const double walltime_limit_s = cfg.get_double("WALLTIME_LIMIT", 0.0) * 3600.0;
+        const int snapshot_interval = cfg.get_int("SNAPSHOT_INTERVAL", 0);
+        if (restart_arg.empty()) restart_arg = cfg.get_str("RESTART_FILE", "");
+#ifdef USE_HDF5
+        RestartOptions restart_opt;
+        restart_opt.dir = cfg.get_str("RESTART_DIR", ".");
+        restart_opt.keep = cfg.get_int("RESTART_KEEP", 2);
+        SnapshotOptions snap_opt;
+        snap_opt.dir = cfg.get_str("SNAPSHOT_DIR", ".");
+        snap_opt.base = cfg.get_str("SNAPSHOT_BASE", "snapshot");
+        snap_opt.potential = cfg.get_bool("SNAPSHOT_POTENTIAL", true);
+        // "latest": the newest restart file in RESTART_DIR (must exist); "auto": the same, or a fresh start from
+        // the initial conditions if there is none (one job script for every job of a chain)
+        if (restart_arg == "latest" || restart_arg == "auto") {
+            const bool must = restart_arg == "latest";
+            restart_arg = latest_restart(restart_opt.dir);
+            if (restart_arg.empty() && must) {
+                if (my_rank == 0) std::fprintf(stderr, "ERROR: no restart file in %s\n", restart_opt.dir.c_str());
+                Kokkos::finalize(); MPIComm::finalize(); return 1;
+            }
+        }
+        const bool restart_output = restart_interval > 0 || walltime_limit_s > 0.0;
+        if (restart_output) install_stop_signals();
+#else
+        for (const char* k : {"RESTART_DIR", "RESTART_KEEP", "SNAPSHOT_DIR", "SNAPSHOT_BASE", "SNAPSHOT_POTENTIAL"})
+            cfg.get_str(k, "");   // known keys, unused without HDF5
+        if (restart_interval > 0 || walltime_limit_s > 0.0 || snapshot_interval > 0 || !restart_arg.empty()) {
+            if (my_rank == 0)
+                std::fprintf(stderr, "ERROR: restart files and snapshots need a build with HDF5 (USE_HDF5)\n");
+            Kokkos::finalize(); MPIComm::finalize(); return 1;
+        }
+#endif
+        const bool resuming = !restart_arg.empty();
+
         // Warn about unknown config keys (typos, deprecated options)
         if (my_rank == 0) cfg.warn_unknown_keys();
 
@@ -758,7 +807,27 @@ int main(int argc, char** argv) {
         bool triple_outer_first = cfg.get_bool("TRIPLE_OUTER_FIRST", false);
         double triple_in_rot = cfg.get_double("TRIPLE_IN_ROT_DEG", 0.0);
 
-        if (my_rank == 0 || !use_distributed) {
+#ifdef USE_HDF5
+        RunState rs;   // run-loop state of a restart (written and read by io/restart.cpp)
+        if (resuming) {
+            // Every rank reads the file: particles, subsystems, books, merger tree, escaper log, run state
+            try {
+                read_restart(restart_arg, p, rs, true);
+            } catch (const std::exception& e) {
+                std::fprintf(stderr, "ERROR: restart from %s: %s\n", restart_arg.c_str(), e.what());
+                Kokkos::finalize(); MPIComm::finalize(); return 1;
+            }
+            if (rs.integrator != integrator || rs.test != test)
+                std::fprintf(stderr, "WARNING: restart file was written by INTEGRATOR=%s TEST_CASE=%s\n",
+                             rs.integrator.c_str(), rs.test.c_str());
+            if (my_rank == 0)
+                std::printf("Restart: %s, step %d, t = %.10e Myr, N = %d\n", restart_arg.c_str(), rs.step,
+                            rs.t * TIME_UNIT_MYR, p.N);
+        }
+#endif
+        if (resuming) {
+            if (test == "outer_planets") names = outer_planet_names;
+        } else if (my_rank == 0 || !use_distributed) {
             if (test == "outer_planets") {
                 init_outer_planets(p);
                 names = outer_planet_names;
@@ -790,7 +859,7 @@ int main(int argc, char** argv) {
         // Test cases (binary_test, triple_test): stellar radius of every non-BH body (collision tests; 0: none)
         {
             const double r_test = cfg.get_double("TEST_STELLAR_RADIUS_RSUN", 0.0);
-            if (r_test > 0.0 && test != "plummer" && p.collisional && (my_rank == 0 || !use_distributed)) {
+            if (!resuming && r_test > 0.0 && test != "plummer" && p.collisional && (my_rank == 0 || !use_distributed)) {
                 auto h_st = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.stellar_type);
                 auto h_sr = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.stellar_radius);
                 for (int i = 0; i < p.N; i++) h_sr(i) = h_st(i) < 10 ? r_test : 0.0;
@@ -800,7 +869,7 @@ int main(int argc, char** argv) {
 #endif
 
         // Convert initial positions to integer representation (before MPI distribution)
-        if (use_integer_positions && (my_rank == 0 || !use_distributed)) {
+        if (!resuming && use_integer_positions && (my_rank == 0 || !use_distributed)) {
             auto h_x = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.x);
             auto h_y = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.y);
             auto h_z = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.z);
@@ -826,6 +895,17 @@ int main(int argc, char** argv) {
         // Distribute particles across ranks if using MPI
         if (use_distributed) {
             dp.distribute_initial(p);
+#ifdef USE_HDF5
+            // The broadcast carries only some fields: every rank overwrites its replica with the whole saved state
+            if (resuming) {
+                try {
+                    read_restart(restart_arg, dp.local, rs, false);
+                } catch (const std::exception& e) {
+                    std::fprintf(stderr, "ERROR: restart from %s: %s\n", restart_arg.c_str(), e.what());
+                    MPIComm::finalize(); return 1;
+                }
+            }
+#endif
             // After distribution, each rank works with dp.local
             // Rank 0's 'p' is no longer valid - use dp for all operations
         }
@@ -954,7 +1034,7 @@ int main(int argc, char** argv) {
 
 #ifdef ENABLE_COLLISIONAL
         // FLYBY_CM_EPS scale: |E0| (the energy the run's |dE/E| refers to)
-        if (g_collisional.enabled && g_collisional.flyby_cm_eps > 0.0)
+        if (!resuming && g_collisional.enabled && g_collisional.flyby_cm_eps > 0.0)   // restarts restore it
             g_collisional.e_ref = std::fabs(compute_diagnostics(work_p, G, soft2).E_total);
         // NGB_MASS_SCALING: <m> of the initial particles (fixed for the run)
         if (g_collisional.enabled && ngb_mass_scaling && work_p.N > 0) {
@@ -966,42 +1046,48 @@ int main(int argc, char** argv) {
             if (my_rank == 0) std::printf("NGB_MASS_SCALING: <m> = %.4f Msun\n", m_sum / work_p.N);
         }
 #endif
-        // Initial force computation + adaptive timestep
-        if (my_rank == 0) {
-            std::printf("Computing initial forces...\n"); std::fflush(stdout);
-        }
-        auto t0 = std::chrono::high_resolution_clock::now();
+        // Initial forces, subsystems and levels (a restart continues from the saved ones instead)
+        if (!resuming) {
+            // Initial force computation + adaptive timestep
+            if (my_rank == 0) {
+                std::printf("Computing initial forces...\n"); std::fflush(stdout);
+            }
+            auto t0 = std::chrono::high_resolution_clock::now();
 
-        if (use_distributed) {
-            compute_acceleration_and_timestep_distributed(dp, G, soft2, eta);
-        } else {
-            compute_acceleration_and_timestep(work_p, G, soft2, eta);
-        }
+            if (use_distributed) {
+                compute_acceleration_and_timestep_distributed(dp, G, soft2, eta);
+            } else {
+                compute_acceleration_and_timestep(work_p, G, soft2, eta);
+            }
 
-        auto t1 = std::chrono::high_resolution_clock::now();
-        if (my_rank == 0) {
-            std::printf("Initial forces: %.3f s\n", std::chrono::duration<double>(t1-t0).count());
-            std::fflush(stdout);
-        }
+            auto t1 = std::chrono::high_resolution_clock::now();
+            if (my_rank == 0) {
+                std::printf("Initial forces: %.3f s\n", std::chrono::duration<double>(t1-t0).count());
+                std::fflush(stdout);
+            }
 
 #ifdef ENABLE_COLLISIONAL
-        // Initial subsystem detection using standalone neighbor search
-        if (g_collisional.enabled) {
-            g_subsystem_mgr.reset_ngb_count();
-            neighbor_search_subset(work_p, 0, work_p.N, G,
-                                   g_collisional.r_ngb, g_collisional.r_ngb_max, dt_max);
-            g_subsystem_mgr.detect_from_pairs(work_p, G, dt_max,
-                                               g_collisional.r_ngb, g_collisional.r_ngb_max,
-                                               g_collisional.n_orb_secular);
-            g_subsystem_mgr.update_particle_flags(work_p);
-            g_subsystem_mgr.reset_step_diagnostics();
-            g_subsystem_mgr.accumulate_diagnostics();
-            if (my_rank == 0) g_subsystem_mgr.print_step_summary();
-        }
+            // Initial subsystem detection using standalone neighbor search
+            if (g_collisional.enabled) {
+                g_subsystem_mgr.reset_ngb_count();
+                neighbor_search_subset(work_p, 0, work_p.N, G,
+                                       g_collisional.r_ngb, g_collisional.r_ngb_max, dt_max);
+                g_subsystem_mgr.detect_from_pairs(work_p, G, dt_max,
+                                                   g_collisional.r_ngb, g_collisional.r_ngb_max,
+                                                   g_collisional.n_orb_secular);
+                g_subsystem_mgr.update_particle_flags(work_p);
+                g_subsystem_mgr.reset_step_diagnostics();
+                g_subsystem_mgr.accumulate_diagnostics();
+                if (my_rank == 0) g_subsystem_mgr.print_step_summary();
+            }
 #endif
 
-        assign_levels(work_p, levels);
-        work_p.partition_by_level();
+            assign_levels(work_p, levels);
+            work_p.partition_by_level();
+        }
+#ifdef ENABLE_COLLISIONAL
+        if (resuming && work_p.collisional) g_subsystem_mgr.rebuild_pid_to_idx(work_p);
+#endif
 
         if (my_rank == 0) {
             print_timebin_table(work_p, levels, -1.0, 0.0, 0.0, 0.0, 0, is_cluster);
@@ -1030,9 +1116,29 @@ int main(int argc, char** argv) {
             triple_tracker.init(work_p, G);
         }
 #endif
+#ifdef USE_HDF5
+        // Trackers continue from their saved state (tracker output of a restarted run equals the uninterrupted one)
+        auto save_run_state = [&](double t_now, int step_now) {
+            rs.t = t_now; rs.step = step_now; rs.integrator = integrator; rs.test = test;
+#ifdef ENABLE_COLLISIONAL
+            rs.put("bin_tracker", bin_tracker); rs.put("spin_tracker", spin_tracker);
+            rs.put("triple_tracker", triple_tracker);
+#endif
+        };
+        if (resuming) {
+#ifdef ENABLE_COLLISIONAL
+            rs.get("bin_tracker", bin_tracker); rs.get("spin_tracker", spin_tracker);
+            rs.get("triple_tracker", triple_tracker);
+#endif
+        }
+#endif
 
-        auto diag0 = compute_diagnostics(work_p, G, soft2);
-        if (my_rank == 0) dump_particles(work_p, 0);
+        auto diag0 = compute_diagnostics(work_p, G, soft2);   // collective under MPI: every rank, also on a restart
+#ifdef USE_HDF5
+        if (resuming) diag0 = rs.diag0;
+        else rs.diag0 = diag0;
+#endif
+        if (my_rank == 0 && !resuming) dump_particles(work_p, 0);
 
         if (my_rank == 0) {
             std::printf("Running...\n"); std::fflush(stdout);
@@ -1042,6 +1148,65 @@ int main(int argc, char** argv) {
 
         double t = 0;
         int step = 0;
+#ifdef USE_HDF5
+        if (resuming) { t = rs.t; step = rs.step; }
+        int last_restart_step = resuming ? step : -1, last_snapshot_step = -1;
+        int last_restart_snap = resuming ? rs.snapshot_index : -1;   // a later snapshot changes the restart state
+        double max_step_wall = 0.0;
+        bool stop_run = false;
+        // Snapshot (all ranks enter: the diagnostics are collective) and restart file of the state after step_now
+        auto write_snapshot_now = [&](double t_now, int step_now) {
+            if (snapshot_interval <= 0 || last_snapshot_step == step_now) return;
+            SnapshotMeta sm;
+            sm.t = t_now; sm.step = step_now; sm.index = rs.snapshot_index; sm.G = G; sm.soft2 = soft2;
+            sm.diag = compute_diagnostics(work_p, G, soft2);
+            sm.diag0 = diag0;
+            sm.config_json = config_json(cfg.params);
+            if (my_rank == 0) {
+                std::string path = write_snapshot(snap_opt, work_p, sm);
+                std::printf("Snapshot %d written: %s\n", rs.snapshot_index, path.c_str());
+                std::fflush(stdout);
+            }
+            rs.snapshot_index++;
+            last_snapshot_step = step_now;
+        };
+        auto write_restart_now = [&](double t_now, int step_now) {
+            if (last_restart_step == step_now && last_restart_snap == rs.snapshot_index) return;
+            save_run_state(t_now, step_now);
+            // Replicated MPI state: every rank must hold the same state, rank 0 writes it
+            bool agree = !use_distributed || dp.replicas_agree(step_now);
+            agree = ranks_agree_on_run_state(rs) && agree;
+            if (!agree) { exit_code = 3; stop_run = true; return; }
+            if (my_rank == 0) {
+                std::string path = write_restart(restart_opt, work_p, rs, cfg.text, cfg.params);
+                std::printf("Restart file written: %s (step %d, t = %.10e Myr)\n", path.c_str(), step_now,
+                            t_now * TIME_UNIT_MYR);
+                std::fflush(stdout);
+            }
+            MPIComm::barrier();
+            last_restart_step = step_now;
+            last_restart_snap = rs.snapshot_index;
+        };
+        // After every step: snapshots, periodic restart files, and the wall-clock / SIGUSR1 stop
+        auto after_step_io = [&](double t_now, int step_now, double step_wall) {
+            if (snapshot_interval > 0 && step_now % snapshot_interval == 0) write_snapshot_now(t_now, step_now);
+            if (!restart_output) return;
+            max_step_wall = std::max(max_step_wall, step_wall);
+            double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - prog_start).count();
+            // Stop when the next step (taken as 1.5 x the slowest so far) plus a minute for the file may not fit
+            bool stop = stop_requested() ||
+                        (walltime_limit_s > 0.0 && elapsed + 1.5 * max_step_wall + 60.0 > walltime_limit_s);
+            stop = any_rank(stop);
+            if (stop || (restart_interval > 0 && step_now % restart_interval == 0)) write_restart_now(t_now, step_now);
+            if (stop) {
+                if (my_rank == 0)
+                    std::printf("STOP: %s, restart file written at step %d\n",
+                                stop_requested() ? "SIGUSR1" : "WALLTIME_LIMIT reached", step_now);
+                stop_run = true;
+            }
+        };
+        if (!resuming && snapshot_interval > 0) write_snapshot_now(t, step);
+#endif
 
         auto print_progress = [&](double t_now, int step_now) {
             auto diag = compute_diagnostics(work_p, G, soft2);
@@ -1103,6 +1268,10 @@ int main(int argc, char** argv) {
             for (double lv : levels) {
                 if (lv <= dt_min_particle) { dt_global = lv; break; }
             }
+#ifdef USE_HDF5
+            if (resuming) dt_global = rs.dt_global;   // fixed at the start of the run
+            rs.dt_global = dt_global;
+#endif
             if (my_rank == 0) std::printf("FSI global step: %.4e Myr\n", dt_global * TIME_UNIT_MYR);
             while (t < t_final) {
                 auto step_t0 = std::chrono::high_resolution_clock::now();
@@ -1134,6 +1303,10 @@ int main(int argc, char** argv) {
                     g_profiler.reset();
                     g_subset_hist.reset();
                 }
+#ifdef USE_HDF5
+                after_step_io(t, step, step_wall);
+                if (stop_run) break;
+#endif
             }
         } else {
             // HHS-FSI (per paper's Algorithm 4)
@@ -1335,8 +1508,21 @@ int main(int argc, char** argv) {
                     g_profiler.reset();
                     g_subset_hist.reset();
                 }
+#ifdef USE_HDF5
+                after_step_io(t, step, step_wall);
+                if (stop_run) break;
+#endif
             }
         }
+#ifdef USE_HDF5
+        // End of the run: a restart file (continue with a larger TOTAL_TIME_MYR) and the last snapshot, of the
+        // state the loop ended with (before the final diagnostics re-sort the particles)
+        // (no extra snapshot after a wall-clock stop: a chain of jobs writes the snapshots of one long run)
+        if (exit_code == 0) {
+            if (snapshot_interval > 0 && !stop_run) write_snapshot_now(t, step);
+            if (restart_output) write_restart_now(t, step);
+        }
+#endif
 
         auto wall_end = std::chrono::high_resolution_clock::now();
         double wall_sec = std::chrono::duration<double>(wall_end - wall_start).count();
