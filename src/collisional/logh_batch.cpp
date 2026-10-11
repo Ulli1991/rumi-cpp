@@ -680,20 +680,20 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
                     const double mu = state.mass[i] + state.mass[j];   // G_norm = 1
                     const double eps = 0.5 * v2 - mu / std::sqrt(r2);
                     const double a = -mu / (2.0 * eps);
-                    if (sd_on && eps < 0.0) {   // SDAR: pericentre over the collision distance (< 1: kappa = 1)
-                        const double hx = dx[1]*dv[2] - dx[2]*dv[1], hy = dx[2]*dv[0] - dx[0]*dv[2];
-                        const double hz = dx[0]*dv[1] - dx[1]*dv[0];
-                        const double e = std::sqrt(std::max(0.0, 1.0 + 2.0 * eps * (hx*hx + hy*hy + hz*hz) / (mu * mu)));
-                        const double rc = sd_par.coll_radius[i] + sd_par.coll_radius[j];
-                        std::snprintf(buf, sizeof(buf), " e=%.4f r_p/r_coll=%.3g", e, rc > 0.0 ? a * (1.0 - e) / rc : -1.0);
-                        msg += buf;
-                    }
                     std::snprintf(buf, sizeof(buf), " | %d-%d r=%.3g a=%.3g pc%s", i, j, std::sqrt(r2) * R_scale,
                                   a * R_scale, eps < 0.0 ? "" : " (unbound)");
                     msg += buf;
                     if (eps < 0.0) {
                         std::snprintf(buf, sizeof(buf), " orbits/interval=%.3g",
                                       dt_norm / (2.0 * M_PI * std::sqrt(a * a * a / mu)));
+                        msg += buf;
+                    }
+                    if (sd_on && eps < 0.0) {   // SDAR: pericentre over the collision distance (< 1: kappa = 1)
+                        const double hx = dx[1]*dv[2] - dx[2]*dv[1], hy = dx[2]*dv[0] - dx[0]*dv[2];
+                        const double hz = dx[0]*dv[1] - dx[1]*dv[0];
+                        const double e = std::sqrt(std::max(0.0, 1.0 + 2.0 * eps * (hx*hx + hy*hy + hz*hz) / (mu * mu)));
+                        const double rc = sd_par.coll_radius[i] + sd_par.coll_radius[j];
+                        std::snprintf(buf, sizeof(buf), " e=%.4f r_p/r_coll=%.3g", e, rc > 0.0 ? a * (1.0 - e) / rc : -1.0);
                         msg += buf;
                     }
                 }
