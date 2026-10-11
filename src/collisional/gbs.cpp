@@ -153,31 +153,15 @@ double GBSIntegrator::extrapolate(int stage, int dim) {
 // Full GBS step with adaptive order
 // ============================================================================
 
-// DEBUG: compute omega from packed state for 2-body
-static double omega_from_packed(const double* y, int nb) {
-    if (nb != 2) return 0.0;
-    double rx = y[3] - y[0];   // pos[1] - pos[0]  (x)
-    double ry = y[4] - y[1];   // pos[1] - pos[0]  (y)
-    double rz = y[5] - y[2];
-    double vx = y[9] - y[6];   // vel[1] - vel[0]  (x)
-    double vy = y[10] - y[7];  // vel[1] - vel[0]  (y)
-    double rmag = std::sqrt(rx*rx + ry*ry + rz*rz);
-    double Lz = rx*vy - ry*vx;
-    // mu = G*(m0+m1) = 1.0 in normalized units
-    double ex = vy*Lz - rx/rmag;
-    double ey = -vx*Lz - ry/rmag;
-    return std::atan2(ey, ex);
-}
-
-static std::atomic<int> gbs_debug_counter{0};  // host batch integrates subsystems in parallel
-
 // NBODY_GBS_STATS=1: totals over the run, printed at exit (calls, GBS steps, failed and overshooting steps, the
-// stage at which converged steps stopped)
+// stage at which converged steps stopped). Counted only then: the host batch integrates subsystems on all
+// threads, and atomic updates of shared counters on every step cost cache-line traffic
 namespace {
+const bool gbs_stats_on = std::getenv("NBODY_GBS_STATS") != nullptr;
 struct GbsStats {
     std::atomic<long long> calls{0}, steps{0}, failed{0}, overshoot{0}, stage[GBSIntegrator::MAX_STAGES] = {};
     ~GbsStats() {
-        if (!std::getenv("NBODY_GBS_STATS") || calls == 0) return;
+        if (!gbs_stats_on || calls == 0) return;
         std::printf("GBS stats: %lld calls, %lld steps (%.1f / call), failed %lld, overshoot %lld; converged at stage:",
                     calls.load(), steps.load(), (double)steps / calls, failed.load(), overshoot.load());
         for (int k = 0; k < GBSIntegrator::MAX_STAGES; k++) std::printf(" %lld", stage[k].load());
@@ -205,8 +189,6 @@ bool GBSIntegrator::step(LogHState& state, double ds, double G, double& ds_next,
     pack_state(state, y_start, dim);   // the integrated fields of the state before the step (restore_step)
     dim_start = dim;
 
-    bool do_debug = (state.n_bodies == 2 && gbs_debug_counter < 5);
-
     // Values at the start of the first substep, the same for every stage (not used by the SDAR steps)
     LogHStepStart start_buf;
     const LogHStepStart* start = nullptr;
@@ -215,16 +197,10 @@ bool GBSIntegrator::step(LogHState& state, double ds, double G, double& ds_next,
         start = &start_buf;
     }
 
-    if (do_debug) {
-        double w0 = omega_from_packed(y_start, 2);
-        std::printf("      GBS step #%d: ds=%.6e  omega_in=%.6f\n",
-                    gbs_debug_counter.load(), ds, w0);
-    }
-
     int computed = -1;   // table[0..computed] holds the raw midpoint results
     for (int stage = 0; stage < MAX_STAGES; stage++) {
         if (stage > computed) {
-            if (par_stages && !do_debug) {
+            if (par_stages) {
                 // Stage-parallel: the substep divisions are independent (Rantala et al. 2020, MSTAR, Sec. 4);
                 // compute stage..k1 at once, k1 = the stage the last step converged at. The extrapolation below
                 // runs in the same order on the same table, so the result is the serial one; unused stages
@@ -240,26 +216,14 @@ bool GBSIntegrator::step(LogHState& state, double ds, double G, double& ds_next,
             }
         }
 
-        if (do_debug) {
-            double w_raw = omega_from_packed(table[stage], 2);
-            std::printf("        stage %d (n=%d): omega_raw=%.10f  t=%.6f\n",
-                        stage, STEP_SEQ[stage], w_raw, table[stage][dim-2]);
-        }
-
         // Always call extrapolate, in stage order — stage 0 starts the Neville table (returns 1.0).
         // Without this, the table row is uninitialized garbage and stage 1 can
         // falsely report convergence.
         double err = extrapolate(stage, dim);
 
         if (stage > 0) {
-            if (do_debug) {
-                double w_ext = omega_from_packed(work[stage], 2);
-                std::printf("        extrap[%d]: omega_ext=%.10f  err=%.2e\n",
-                            stage, w_ext, err);
-            }
-
             if (err < eta_gbs) {
-                g_gbs_stats.stage[stage]++;
+                if (gbs_stats_on) g_gbs_stats.stage[stage]++;
                 par_hint = stage;
                 // Converged: unpack best estimate from work[stage]
                 double chi_norm[4];
@@ -268,13 +232,6 @@ bool GBSIntegrator::step(LogHState& state, double ds, double G, double& ds_next,
                 // |chi| is an exact invariant of dS/dt = Omega × S (the leapfrog rotations keep it); the
                 // polynomial extrapolation does not, to within eta_gbs: restore the norms
                 if (state.has_spins) restore_spin_norms(state, chi_norm);
-
-                if (do_debug) {
-                    double w_final = omega_from_packed(work[stage], 2);
-                    std::printf("        CONVERGED at stage %d: omega_final=%.10f  err=%.2e\n",
-                                stage, w_final, err);
-                    gbs_debug_counter++;
-                }
 
                 // Suggest next step size
                 double safety = 0.8;
@@ -289,7 +246,6 @@ bool GBSIntegrator::step(LogHState& state, double ds, double G, double& ds_next,
             // early to save computing higher stages with no hope.
             if (stage >= 3 && err > 1.0) {
                 ds_next = 0.5 * ds;
-                if (do_debug) gbs_debug_counter++;
                 return false;
             }
         }
@@ -297,7 +253,6 @@ bool GBSIntegrator::step(LogHState& state, double ds, double G, double& ds_next,
 
     // Did not converge — halve step size and try again
     ds_next = 0.5 * ds;
-    if (do_debug) gbs_debug_counter++;
     return false;
 }
 
@@ -515,7 +470,7 @@ int GBSIntegrator::integrate_to_time(LogHState& state, double t_target, double G
             // Step failed (state unchanged) — halve and retry (ds persists to next iteration)
             ds = ds_try * 0.5;
             n_failed++;
-            g_gbs_stats.failed++;
+            if (gbs_stats_on) g_gbs_stats.failed++;
             continue;
         }
 
@@ -529,7 +484,7 @@ int GBSIntegrator::integrate_to_time(LogHState& state, double t_target, double G
             restore_step(state);
             ds = (dt_attempt != 0.0) ? ds_try * (dt_remain / dt_attempt) * (1.0 - 1e-6) : ds_try * 0.5;
             n_overshoot++;
-            g_gbs_stats.overshoot++;
+            if (gbs_stats_on) g_gbs_stats.overshoot++;
             continue;
         }
 
@@ -552,8 +507,10 @@ int GBSIntegrator::integrate_to_time(LogHState& state, double t_target, double G
         }
     }
 
-    g_gbs_stats.calls++;
-    g_gbs_stats.steps += n_steps;
+    if (gbs_stats_on) {
+        g_gbs_stats.calls++;
+        g_gbs_stats.steps += n_steps;
+    }
     double dt_remain = t_target - state.t;
     reached = std::fabs(dt_remain) < time_tol * std::fabs(t_target);
     if (!reached && coll_i < 0) {
