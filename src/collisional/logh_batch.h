@@ -3,6 +3,7 @@
 #include "particles.h"
 #include "subsystem.h"
 #include "logh.h"
+#include "mergers.h"
 #include <Kokkos_Core.hpp>
 #include <vector>
 #include <unordered_map>
@@ -15,7 +16,7 @@
 struct HostSource {
     int start = 0, count = 0;
     double *x = nullptr, *y = nullptr, *z = nullptr, *vx = nullptr, *vy = nullptr, *vz = nullptr;
-    const double* m = nullptr;
+    double* m = nullptr;   // unpack writes masses back too (collisions change them)
 };
 
 struct SubsystemBatch {
@@ -59,6 +60,13 @@ struct SubsystemBatch {
     // Per-body stellar radius (R_sun) and type (host, same layout as flat_mass): SDAR collision candidates
     std::vector<double> flat_radius;
     std::vector<int> flat_stype;
+    std::vector<int> flat_pid;          // particle id per body (same layout)
+
+    // Collisions decided inside each subsystem's integration (FROST-CLUSTERS I App. B3), completed by the caller
+    // with finalize_subsystem_collision; the merged-away member is written back massless (a "ghost")
+    std::vector<std::vector<SubsystemCollision>> collisions;
+    // Internal energy change of each subsystem's collisions (physical, sum of SubsystemCollision::dE_int)
+    std::vector<double> coll_dE;
 
     // SDAR: energy jumps sum delta H_sd (physical units) of each subsystem's integration (Wang+2020 Eq. 24;
     // the change of the physical energy beyond the integration error, booked as E_sd by the caller)
@@ -76,6 +84,9 @@ struct SubsystemBatch {
     int stat_sd_calls = 0;         // SDAR: integrations with a slowed binary at some step
     double stat_sd_kappa_max = 0;  // SDAR: largest slow-down factor
     std::vector<double> t_reached; // physical time each subsystem's GBS integration reached (code units)
+    int stat_collisions = 0;       // collisions decided inside the integrations
+    int stat_peri_landings = 0;    // candidate pericentres a step was forced onto
+    int stat_peri_misses = 0;      // ... whose actual pericentre cleared the collision distance
 
     // Size the host arrays
     void allocate(int n_sub, int total_bodies);

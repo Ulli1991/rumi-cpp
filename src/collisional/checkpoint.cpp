@@ -204,6 +204,7 @@ void Checkpoint::restore(Particles& p, SubsystemManager& mgr,
     mgr.next_id = next_subsystem_id;
     mgr.step_mergers = step_mergers;
     mgr.removed_pids = removed_pids;
+    mgr.ghost_pids.clear();   // checkpoints are taken between steps, where no placeholder is left
     if (p.collisional) mgr.rebuild_pid_to_idx(p);
     books = energy_books;
     g_merger_tree = merger_tree;

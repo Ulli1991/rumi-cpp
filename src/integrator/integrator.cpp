@@ -18,6 +18,8 @@
 #include "merger_tree.h"
 #include "checkpoint.h"
 #include "diagnostics.h"
+#include "kepler.h"
+#include "device_staging.h"
 #endif
 #include <Kokkos_Core.hpp>
 #include <vector>
@@ -273,6 +275,24 @@ static void exchange_subsystem_results(Particles& p, const std::vector<int>& eli
     b.E_escape = sum[0]; b.E_gw = sum[1]; b.E_merge = sum[2]; b.E_sse = sum[3]; b.E_pn = sum[4];
     for (int c = 0; c < 3; c++) { b.P_sink[c] = sum[5 + c]; b.L_sink[c] = sum[8 + c]; }
     b.E_sd = sum[11];
+}
+#endif
+
+// Collisions decided inside the LogH integrations of the current advance_subsystems_in_range call
+static std::vector<SubsystemCollision> g_pending_collisions;
+
+#ifdef USE_MPI
+// Every rank's collision records, in rank order (trivially copyable)
+static std::vector<SubsystemCollision> allgather_collisions(const std::vector<SubsystemCollision>& mine) {
+    const int nr = MPIComm::size();
+    const int bytes = (int)(mine.size() * sizeof(SubsystemCollision));
+    std::vector<int> counts(nr), displs(nr, 0);
+    MPI_Allgather(&bytes, 1, MPI_INT, counts.data(), 1, MPI_INT, MPI_COMM_WORLD);
+    for (int r = 1; r < nr; r++) displs[r] = displs[r - 1] + counts[r - 1];
+    const int total = displs[nr - 1] + counts[nr - 1];
+    std::vector<SubsystemCollision> all(total / sizeof(SubsystemCollision));
+    MPI_Allgatherv(mine.data(), bytes, MPI_BYTE, all.data(), counts.data(), displs.data(), MPI_BYTE, MPI_COMM_WORLD);
+    return all;
 }
 #endif
 
@@ -620,6 +640,65 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
     std::vector<int> secular_idx, secular_triple_idx, logh_idx;
     SubsysAdvanceCheck adv_check;
     adv_check.begin((int)g_subsystem_mgr.active.size(), dt);
+    // Orbit-averaged paths cannot resolve a collision: a secular binary (or a secular triple's inner binary) whose
+    // osculating pericentre lies inside its collision distance (FROST-CLUSTERS I App. B3 candidate), or a subsystem
+    // with a massless placeholder member, goes to the regularised integration, which decides it at the pericentre
+    std::vector<char> to_logh(g_subsystem_mgr.active.size(), 0);
+    if (g_collisional.subsys_collisions && g_collisional.c_code > 0.0) {
+        std::vector<int> sec_rows;   // member indices of secular candidates, two per subsystem
+        std::vector<int> sec_subs;
+        for (int s : eligible) {
+            const auto& sub = g_subsystem_mgr.active[s];
+            for (int pid : sub.particle_ids) {
+                const int i = g_subsystem_mgr.safe_pid_to_idx(pid);
+                if (i >= 0 && h_m(i - start) <= 0.0) to_logh[s] = 1;
+            }
+            if (to_logh[s] || !sub.is_secular) continue;
+            int pa = -1, pb = -1;
+            if (sub.n_bodies == 2) { pa = sub.particle_ids[0]; pb = sub.particle_ids[1]; }
+            else if (sub.n_bodies == 3 && sub.inner_binary_id >= 0 && sub.outer_companion_pid >= 0) {
+                pa = sub.inner_binary_id;
+                for (int pid : sub.particle_ids)
+                    if (pid != sub.inner_binary_id && pid != sub.outer_companion_pid) pb = pid;
+            }
+            const int ia = pa >= 0 ? g_subsystem_mgr.safe_pid_to_idx(pa) : -1;
+            const int ib = pb >= 0 ? g_subsystem_mgr.safe_pid_to_idx(pb) : -1;
+            if (ia < 0 || ib < 0) continue;
+            sec_subs.push_back(s);
+            sec_rows.push_back(ia);
+            sec_rows.push_back(ib);
+        }
+        if (!sec_subs.empty()) {   // stellar types and radii of those members: one small gather
+            DeviceStaging& st = DeviceStaging::get<4>();
+            const int nr = (int)sec_rows.size();
+            st.reserve(nr, 2);
+            std::copy(sec_rows.begin(), sec_rows.end(), st.h_idx.data());
+            st.upload_idx(nr);
+            auto d_idx = st.d_idx;
+            auto d_buf = st.d_buf;
+            auto pst = p.stellar_type;
+            auto psr = p.stellar_radius;
+            small_for("coll_props_gather", nr, KOKKOS_LAMBDA(int k) {
+                const int i = d_idx(k);
+                d_buf(2 * k) = (double)pst(i);
+                d_buf(2 * k + 1) = psr(i);
+            });
+            st.download_buf((size_t)nr * 2);
+            constexpr double R_sun_to_pc = 2.254e-8;   // as mergers.cpp
+            for (size_t q = 0; q < sec_subs.size(); q++) {
+                const int ia = sec_rows[2 * q] - start, ib = sec_rows[2 * q + 1] - start;
+                double r[3] = {h_x(ib) - h_x(ia), h_y(ib) - h_y(ia), h_z(ib) - h_z(ia)};
+                double v[3] = {h_vx(ib) - h_vx(ia), h_vy(ib) - h_vy(ia), h_vz(ib) - h_vz(ia)};
+                double rp = 0.0;
+                kepler_time_to_pericentre(r, v, G * (h_m(ia) + h_m(ib)), &rp);
+                MergerType ct;
+                const double rc = collision_distance((int)st.h_buf(4 * q), h_m(ia), st.h_buf(4 * q + 1) * R_sun_to_pc,
+                                                     (int)st.h_buf(4 * q + 2), h_m(ib),
+                                                     st.h_buf(4 * q + 3) * R_sun_to_pc, G, g_collisional.c_code, ct);
+                if (rp < rc) to_logh[sec_subs[q]] = 1;
+            }
+        }
+    }
     for (int k = 0; k < (int)eligible.size(); k++) {
         const int s = eligible[k];
 #ifdef USE_MPI
@@ -627,7 +706,9 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
 #endif
         adv_check.own(s);
         const auto& sub = g_subsystem_mgr.active[s];
-        if (sub.is_secular && sub.n_bodies == 2) {
+        if (to_logh[s]) {
+            logh_idx.push_back(s);
+        } else if (sub.is_secular && sub.n_bodies == 2) {
             secular_idx.push_back(s);
         } else if (sub.is_secular && sub.type == SubsystemType::TRIPLE_STABLE) {
             secular_triple_idx.push_back(s);
@@ -962,7 +1043,7 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
 
         // Save pre-integration state for subsystem members (needed for restart)
         // Reuse host mirrors from top of function (already up-to-date after secular evolution)
-        struct SavedBody { double x, y, z, vx, vy, vz; };
+        struct SavedBody { double x, y, z, vx, vy, vz, m; };
         std::vector<std::vector<SavedBody>> saved_bodies(n_sub);
         std::vector<Subsystem> saved_subs(logh_mgr.active.begin(), logh_mgr.active.end());
         for (int si = 0; si < n_sub; si++) {
@@ -972,7 +1053,7 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
                 int idx = g_subsystem_mgr.safe_pid_to_idx(sub.particle_ids[b]);
                 if (idx < 0) continue;
                 saved_bodies[si][b] = {h_x(idx - start), h_y(idx - start), h_z(idx - start),
-                                       h_vx(idx - start), h_vy(idx - start), h_vz(idx - start)};
+                                       h_vx(idx - start), h_vy(idx - start), h_vz(idx - start), h_m(idx - start)};
             }
         }
 
@@ -1016,6 +1097,19 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
                                                            g_logh_batch.stat_sd_kappa_max);
         }
 
+        // Collisions decided inside the accepted integrations (FROST-CLUSTERS I App. B3); failed ones are taken from
+        // the accepted retry below. coll_J[si]: their internal energy change (sum of dE_int)
+        std::vector<std::vector<SubsystemCollision>> sub_colls(n_sub);
+        std::vector<double> coll_J(n_sub, 0.0);
+        {
+            std::vector<char> is_failed(n_sub, 0);
+            for (int si : failed) is_failed[si] = 1;
+            for (int si = 0; si < n_sub; si++)
+                if (!is_failed[si]) { sub_colls[si] = g_logh_batch.collisions[si]; coll_J[si] = g_logh_batch.coll_dE[si]; }
+            g_subsystem_mgr.step_peri_landings += g_logh_batch.stat_peri_landings;
+            g_subsystem_mgr.step_peri_misses += g_logh_batch.stat_peri_misses;
+        }
+
         // Unpack all results (passed get final state; failed get best-effort temporarily)
         g_logh_batch.unpack(logh_mgr, p, &mirror_src);
         g_subsys_phase.add(SubsystemPhaseTimes::LOGH_UNPACK, phase_clock.lap());
@@ -1037,6 +1131,31 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
             std::printf("  LogH restart: %d/%d subs exceeded eta_restart=%.1e\n",
                         (int)failed.size(), n_sub, eta_restart);
 
+            // A failed attempt with a collision changed its members' masses: those go back to the device too
+            // (mirror.push moves x and v only). Without a collision the masses stay as the attempt left them, as
+            // before (bitwise the same runs)
+            std::vector<char> mass_dirty(n_sub, 0);
+            for (int si : failed) mass_dirty[si] = !g_logh_batch.collisions[si].empty();
+            auto push_masses = [&]() {
+                std::vector<int> idx;
+                std::vector<double> m;
+                for (int si : failed)
+                    for (int b = 0; b < saved_subs[si].n_bodies && mass_dirty[si]; b++) {
+                        const int i = g_subsystem_mgr.safe_pid_to_idx(saved_subs[si].particle_ids[b]);
+                        if (i >= 0) { idx.push_back(i); m.push_back(saved_bodies[si][b].m); }
+                    }
+                if (idx.empty()) return;
+                DeviceStaging& st = DeviceStaging::get<5>();
+                st.reserve((int)idx.size(), 1);
+                std::copy(idx.begin(), idx.end(), st.h_idx.data());
+                std::copy(m.begin(), m.end(), st.h_buf.data());
+                st.upload_idx((int)idx.size());
+                st.upload_buf(idx.size());
+                auto d_idx = st.d_idx;
+                auto d_buf = st.d_buf;
+                auto pm = p.mass;
+                small_for("restore_masses", (int)idx.size(), KOKKOS_LAMBDA(int k) { pm(d_idx(k)) = d_buf(k); });
+            };
             // Helper: restore failed subsystems' particle state from saved copy
             // Refresh host mirrors from device (LogH modified positions), then overwrite failed members
             auto restore_failed = [&]() {
@@ -1052,10 +1171,13 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
                         h_vx(idx - start) = saved_bodies[si][b].vx;
                         h_vy(idx - start) = saved_bodies[si][b].vy;
                         h_vz(idx - start) = saved_bodies[si][b].vz;
+                        if (mass_dirty[si]) h_m(idx - start) = saved_bodies[si][b].m;
                     }
                     logh_mgr.active[si] = saved_subs[si];
                 }
                 mirror.push(p);
+                push_masses();
+                for (int si : failed) mass_dirty[si] = 0;
             };
 
             restore_failed();
@@ -1072,7 +1194,8 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
                 bool all_passed = true;
                 double worst_dE = 0;
                 const bool last_try = (subdiv == MAX_SUBDIV);
-                std::vector<double> t_sum(failed.size(), 0.0), j_sum(failed.size(), 0.0);
+                std::vector<double> t_sum(failed.size(), 0.0), j_sum(failed.size(), 0.0), c_sum(failed.size(), 0.0);
+                std::vector<std::vector<SubsystemCollision>> c_list(failed.size());
 
                 for (int step = 0; step < n_steps; step++) {
                     SubsystemBatch retry_batch;
@@ -1089,7 +1212,12 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
                     for (size_t r = 0; r < failed.size(); r++) {
                         t_sum[r] += retry_batch.t_reached[r];
                         j_sum[r] += retry_batch.sd_jump[r];
+                        c_sum[r] += retry_batch.coll_dE[r];
+                        for (const auto& c : retry_batch.collisions[r]) c_list[r].push_back(c);
+                        if (!retry_batch.collisions[r].empty()) mass_dirty[failed[r]] = 1;
                     }
+                    g_subsystem_mgr.step_peri_landings += retry_batch.stat_peri_landings;
+                    g_subsystem_mgr.step_peri_misses += retry_batch.stat_peri_misses;
 
                     // No point continuing if a sub-step failed, except on the last try: there the result stands,
                     // and stopping early would leave the members short of dt (frozen for the rest of the step)
@@ -1099,6 +1227,8 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
                     for (size_t r = 0; r < failed.size(); r++) {
                         adv_check.set_time(logh_idx[failed[r]], t_sum[r]);
                         sd_J[failed[r]] = j_sum[r];
+                        coll_J[failed[r]] = c_sum[r];
+                        sub_colls[failed[r]] = c_list[r];
                     }
 
                 if (all_passed) {
@@ -1134,7 +1264,7 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
         // them; what changed is the PN dynamics, plus GBS error at its tolerance)
         const bool pn_on = g_collisional.pn_order > 0 && g_collisional.c_code > 0.0;
         if (pn_on || g_eattr.on) {
-            if (any_retry) mirror.pull(p, 6);   // otherwise the unpack wrote the results into the mirror
+            if (any_retry) mirror.pull(p, 7);   // otherwise the unpack wrote the results (and masses) into the mirror
             for (int si = 0; si < n_sub; si++) {
                 const auto& sub = saved_subs[si];
                 int nb = sub.n_bodies;
@@ -1143,7 +1273,7 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
                 for (int b = 0; b < nb; b++) {
                     idx[b] = g_subsystem_mgr.safe_pid_to_idx(sub.particle_ids[b]);
                     if (idx[b] < 0) { ok = false; break; }
-                    if (h_m(idx[b] - start) >= g_collisional.m_pn) pn_active = true;
+                    if (saved_bodies[si][b].m >= g_collisional.m_pn) pn_active = true;
                 }
                 pn_active = pn_active && pn_on;
                 if (!ok || (!pn_active && !g_eattr.on)) continue;
@@ -1151,28 +1281,31 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
                 for (int b = 0; b < nb; b++) {
                     const auto& s0 = saved_bodies[si][b];
                     int i = idx[b] - start;
-                    double m = h_m(i);
+                    const double m0 = s0.m, m = h_m(i);   // before / after (a collision in the call changes them)
                     double r0[3] = {s0.x, s0.y, s0.z}, v0[3] = {s0.vx, s0.vy, s0.vz};
                     double r1[3] = {h_x(i), h_y(i), h_z(i)}, v1[3] = {h_vx(i), h_vy(i), h_vz(i)};
-                    E_pre  += 0.5 * m * (v0[0]*v0[0] + v0[1]*v0[1] + v0[2]*v0[2]);
+                    E_pre  += 0.5 * m0 * (v0[0]*v0[0] + v0[1]*v0[1] + v0[2]*v0[2]);
                     E_post += 0.5 * m * (v1[0]*v1[0] + v1[1]*v1[1] + v1[2]*v1[2]);
                     if (pn_active) {
-                        g_energy_books.sink_PL(m, r0, v0);
+                        g_energy_books.sink_PL(m0, r0, v0);
                         g_energy_books.sink_PL(m, r1, v1, -1.0);
                     }
                     for (int c = b + 1; c < nb; c++) {
                         const auto& s1 = saved_bodies[si][c];
                         int j = idx[c] - start;
-                        double Gmm = G * m * h_m(j);
-                        E_pre  -= Gmm / std::sqrt((s0.x-s1.x)*(s0.x-s1.x) + (s0.y-s1.y)*(s0.y-s1.y) + (s0.z-s1.z)*(s0.z-s1.z));
-                        E_post -= Gmm / std::sqrt((h_x(i)-h_x(j))*(h_x(i)-h_x(j)) + (h_y(i)-h_y(j))*(h_y(i)-h_y(j)) +
-                                                  (h_z(i)-h_z(j))*(h_z(i)-h_z(j)));
+                        E_pre  -= G * m0 * s1.m / std::sqrt((s0.x-s1.x)*(s0.x-s1.x) + (s0.y-s1.y)*(s0.y-s1.y) + (s0.z-s1.z)*(s0.z-s1.z));
+                        if (m > 0.0 && h_m(j) > 0.0)
+                            E_post -= G * m * h_m(j) / std::sqrt((h_x(i)-h_x(j))*(h_x(i)-h_x(j)) + (h_y(i)-h_y(j))*(h_y(i)-h_y(j)) +
+                                                                 (h_z(i)-h_z(j))*(h_z(i)-h_z(j)));
                     }
                 }
+                // Collisions in the call: their energy change coll_J goes to E_merge (finalize_subsystem_collision),
+                // their P and L to the P / L books just made here (PN), so the collision books leave them out
                 if (pn_active) {
-                    g_energy_books.E_pn += E_pre - E_post;
+                    g_energy_books.E_pn += E_pre - E_post + coll_J[si];
+                    for (auto& c : sub_colls[si]) c.pl_booked = true;
                 } else {
-                    const double d = E_post - E_pre - sd_J[si];   // unbooked part
+                    const double d = E_post - E_pre - sd_J[si] - coll_J[si];   // unbooked part
                     g_eattr.logh += d; g_eattr.logh_abs += std::fabs(d); g_eattr.n_logh++;
                     if (std::fabs(d) > std::fabs(g_eattr.worst)) {
                         g_eattr.worst = d; g_eattr.worst_n = nb; g_eattr.worst_type = (int)sub.type;
@@ -1182,6 +1315,9 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
                 }
             }
         }
+
+        for (int si = 0; si < n_sub; si++)
+            for (const auto& c : sub_colls[si]) g_pending_collisions.push_back(c);
 
         // Propagate persistent state back from logh_mgr to g_subsystem_mgr
         // (B is always recomputed fresh — only aux_vel and scales need persistence)
@@ -1208,6 +1344,21 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
     (void)distributed_subs;
 #endif
     adv_check.verify(start, count);
+
+    // Collisions decided inside the subsystem integrations: books, remnant physics, placeholders (the ranks of a
+    // distributed advance gather every owner's records first and complete them alike, in rank order)
+    std::vector<SubsystemCollision> colls = std::move(g_pending_collisions);
+    g_pending_collisions.clear();
+#ifdef USE_MPI
+    if (distributed_subs) colls = allgather_collisions(colls);
+#endif
+    if (!colls.empty()) {
+        g_subsystem_mgr.rebuild_pid_to_idx(p);
+        for (const auto& c : colls)
+            finalize_subsystem_collision(c, p, g_subsystem_mgr, g_energy_books, G, g_collisional.c_code);
+        g_subsystem_mgr.step_subsys_collisions += (int)colls.size();
+        g_subsystem_mgr.update_particle_flags(p);
+    }
 }
 #endif
 
@@ -1410,6 +1561,33 @@ static void sync_after_removal(Particles& p, DistributedParticles* dp) {
     if (dp) dp->sync_count();
 }
 
+#ifdef ENABLE_COLLISIONAL
+int compact_zero_mass_range(Particles& p, int start, int count) {
+    const size_t log_from = p.removed_pid_log.size();
+    const int k = p.compact_remove_zero_mass(start, start + count);
+    if (k == 0) return 0;
+    // Placeholders of bodies merged inside subsystem integrations become removed ids; their subsystems keep the
+    // remaining members (strip_removed)
+    for (size_t q = log_from; q < p.removed_pid_log.size(); q++) {
+        const int pid = p.removed_pid_log[q];
+        g_subsystem_mgr.ghost_pids.erase(pid);
+        g_subsystem_mgr.removed_pids.insert(pid);
+    }
+    g_subsystem_mgr.strip_removed();
+    return k;
+}
+
+// Massless particles in [start, start + count)? (one reduction; only while placeholders exist)
+static bool range_has_ghost(const Particles& p, int start, int count) {
+    if (g_subsystem_mgr.ghost_pids.empty() || count <= 0) return false;
+    auto m = p.mass;
+    int n = 0;
+    Kokkos::parallel_reduce("ghost_count", Kokkos::RangePolicy<>(start, start + count),
+                            KOKKOS_LAMBDA(int i, int& c) { if (m(i) <= 0.0) c++; }, n);
+    return n > 0;
+}
+#endif
+
 void hhs_fsi_step_dynamic(Particles& p, int start, int count, double pivot_dt,
                           double G, double soft2, double dt_min,
                           double eta) {
@@ -1422,6 +1600,13 @@ void hhs_fsi_step_dynamic(Particles& p, int start, int count, double pivot_dt,
 #endif
     if (hhs_cc) g_hhs_counters.reset();
     int n_removed = hhs_fsi_recursive(p, nullptr, start, count, pivot_dt, G, soft2, dt_min, eta, false);
+#ifdef ENABLE_COLLISIONAL
+    // Placeholders still left (merged in a range not entered again this step) go before the diagnostics
+    if (p.collisional && range_has_ghost(p, start, count - n_removed)) {
+        const int k = compact_zero_mass_range(p, start, count - n_removed);
+        if (k > 0) { sync_after_removal(p, nullptr); g_subsystem_mgr.update_particle_flags(p); n_removed += k; }
+    }
+#endif
     if (hhs_cc) {   // component statistics per depth
         std::printf("  HHS_CC components:");
         for (int d = 0; d < HHSCounters::MAX_DEPTH; d++)
@@ -2149,6 +2334,21 @@ static int hhs_fsi_recursive(
 
     if (count == 0) return 0;
     int n_removed = 0;  // merged-away particles; [start, start+count) is always a suffix of [0, N)
+#ifdef ENABLE_COLLISIONAL
+    // Placeholders of bodies merged inside subsystem integrations (finalize_subsystem_collision) leave before this
+    // range computes time steps or detects subsystems. Only [start, start + count) is compacted, the tail shifts
+    // down: what the callers expect of a merger in this range (HHS_CC components included)
+    if (p.collisional && range_has_ghost(p, start, count)) {
+        const int k = compact_zero_mass_range(p, start, count);
+        if (k > 0) {
+            sync_after_removal(p, dp);
+            g_subsystem_mgr.update_particle_flags(p);
+            n_removed += k;
+            count -= k;
+            if (count <= 0) return n_removed;
+        }
+    }
+#endif
     struct DepthScope {   // profiler charges work to this depth until the call returns
         int saved;
         explicit DepthScope(int d) : saved(g_profiler.cur_depth) { g_profiler.cur_depth = d; }
@@ -2340,8 +2540,8 @@ static int hhs_fsi_recursive(
                 }
                 g_subsystem_mgr.step_mergers += (int)mergers.size();
                 if (!mergers.empty()) {
-                    // Compaction shifts only the tail [idx, N), which callers see as a shorter suffix
-                    int k = p.compact_remove_zero_mass(start);
+                    // Compaction of this range only; the tail shifts down, which callers see as a shorter range
+                    int k = compact_zero_mass_range(p, start, count);
                     sync_after_removal(p, dp);
                     n_removed += k;
                     count -= k;
@@ -2656,6 +2856,15 @@ void hhs_fsi_step_distributed(DistributedParticles& dp, double pivot_dt,
     // Single-rank mode: MPI allgather is a no-op, all forces use local GPU
     hhs_fsi_recursive(dp.local, is_distributed ? &dp : nullptr,
                       0, dp.N_total, pivot_dt, G, soft2, dt_min, eta, false);
+#ifdef ENABLE_COLLISIONAL
+    // Placeholders still left (merged in a range not entered again this step) go before the diagnostics
+    if (dp.local.collisional && range_has_ghost(dp.local, 0, dp.local.N)) {
+        if (compact_zero_mass_range(dp.local, 0, dp.local.N) > 0) {
+            sync_after_removal(dp.local, &dp);
+            g_subsystem_mgr.update_particle_flags(dp.local);
+        }
+    }
+#endif
 
     // Global PN1.0 half-kick after FSI (BIFROST Section 3.7)
 #ifdef ENABLE_COLLISIONAL

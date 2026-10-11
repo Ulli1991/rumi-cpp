@@ -18,6 +18,19 @@ struct GBSIntegrator {
     const SdarParams* sdar = nullptr;
     bool reached = false;   // integrate_to_time reached t_target (within its tolerance)
 
+    // Collisions inside the integration (FROST-CLUSTERS I, Rantala et al. 2024, App. B3; nullptr: off): pair
+    // collision distances coll[i * LOGH_MAX_BODIES + j] (i < j, normalised units, 0: none). After every accepted
+    // step each pair is checked: separation < r_coll is a collision; osculating pericentre < r_coll makes the
+    // pair a candidate, and the step size is forced so that a step ends on its pericentre (time from the
+    // osculating elements, re-aimed after every step: the end-time control with t_peri in place of t_target).
+    // There the collision is decided on the osculating pericentre of that passage. integrate_to_time stops at a
+    // collision with coll_i < coll_j set (the caller merges the pair and continues).
+    const double* coll = nullptr;
+    int coll_i = -1, coll_j = -1;
+    double coll_rsep = 0.0;     // separation at the decision (pericentre: the osculating pericentre distance)
+    int peri_landings = 0;      // statistics: pericentres a step was forced onto
+    int peri_misses = 0;        // statistics: candidates whose actual pericentre stayed outside r_coll
+
     // Extrapolation table (Neville-Aitken)
     // table[i] stores RAW midpoint result M(n_i) — never modified by extrapolation
     // work[i] stores the Neville table entries during extrapolation

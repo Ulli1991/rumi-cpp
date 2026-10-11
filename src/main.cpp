@@ -676,6 +676,7 @@ int main(int argc, char** argv) {
             if (const char* e = std::getenv("NBODY_SDAR")) g_collisional.sdar = std::atoi(e) != 0;
             g_collisional.sdar_kref       = cfg.get_double("SDAR_KREF", 1e-6);
             g_collisional.sdar_c          = cfg.get_double("SDAR_C", 0.1);
+            g_collisional.subsys_collisions = cfg.get_bool("SUBSYS_COLLISIONS", true);
             g_collisional.tidal_res       = cfg.get_double("TIDAL_RES", 0.05);
             g_collisional.flyby_cm_eps    = cfg.get_double("FLYBY_CM_EPS", 0.0);
             g_collisional.eta_restart     = cfg.get_double("ETA_RESTART", 0.0);
@@ -775,6 +776,19 @@ int main(int argc, char** argv) {
                 return 1;
             }
         }
+
+#ifdef ENABLE_COLLISIONAL
+        // Test cases (binary_test, triple_test): stellar radius of every non-BH body (collision tests; 0: none)
+        {
+            const double r_test = cfg.get_double("TEST_STELLAR_RADIUS_RSUN", 0.0);
+            if (r_test > 0.0 && test != "plummer" && p.collisional && (my_rank == 0 || !use_distributed)) {
+                auto h_st = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.stellar_type);
+                auto h_sr = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.stellar_radius);
+                for (int i = 0; i < p.N; i++) h_sr(i) = h_st(i) < 10 ? r_test : 0.0;
+                Kokkos::deep_copy(p.stellar_radius, h_sr);
+            }
+        }
+#endif
 
         // Convert initial positions to integer representation (before MPI distribution)
         if (use_integer_positions && (my_rank == 0 || !use_distributed)) {
@@ -1076,6 +1090,15 @@ int main(int argc, char** argv) {
                 auto step_t0 = std::chrono::high_resolution_clock::now();
                 // In replicated mode, work_p contains all particles on all ranks
                 fsi_step(work_p, 0, work_p.N, G, soft2, dt_global);
+#ifdef ENABLE_COLLISIONAL
+                // Placeholders of bodies merged inside subsystem integrations
+                if (work_p.collisional && !g_subsystem_mgr.ghost_pids.empty() &&
+                    compact_zero_mass_range(work_p, 0, work_p.N) > 0) {
+                    if (use_distributed) dp.sync_count();
+                    g_subsystem_mgr.rebuild_pid_to_idx(work_p);
+                    g_subsystem_mgr.update_particle_flags(work_p);
+                }
+#endif
                 t += dt_global;
                 step++;
                 auto step_t1 = std::chrono::high_resolution_clock::now();
@@ -1119,7 +1142,7 @@ int main(int argc, char** argv) {
                     // remove particles from the current HHS range
                     if (work_p.compact_remove_zero_mass() > 0) {
                         if (use_distributed) dp.sync_count();
-                        for (int pid : work_p.removed_pid_log) g_subsystem_mgr.removed_pids.insert(pid);
+                        for (int pid : work_p.removed_pid_log) { g_subsystem_mgr.removed_pids.insert(pid); g_subsystem_mgr.ghost_pids.erase(pid); }
                         g_subsystem_mgr.rebuild_pid_to_idx(work_p);
                     }
                 }
@@ -1279,7 +1302,7 @@ int main(int argc, char** argv) {
                             g_subsystem_mgr.step_escapers += n_esc;
                             work_p.compact_remove_zero_mass();
                             if (use_distributed) dp.sync_count();
-                            for (int pid : work_p.removed_pid_log) g_subsystem_mgr.removed_pids.insert(pid);
+                            for (int pid : work_p.removed_pid_log) { g_subsystem_mgr.removed_pids.insert(pid); g_subsystem_mgr.ghost_pids.erase(pid); }
                         }
                     }
                     // Write event logs at snapshot intervals

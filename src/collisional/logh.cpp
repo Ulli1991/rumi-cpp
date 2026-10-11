@@ -312,7 +312,8 @@ double logh_sd_update(LogHState& state, double G, const SdarParams& par, bool cl
             if (used[i] || used[j]) continue;
             used[i] = used[j] = true;   // the tightest pair of a body is its inner orbit, slowed or not
             const double r_apo = a * (1.0 + e);
-            const double r_coll = par.coll_radius[i] + par.coll_radius[j];
+            const double r_coll = par.coll_pair ? par.coll_pair[i * LOGH_MAX_BODIES + j]
+                                                : par.coll_radius[i] + par.coll_radius[j];
             if (r_coll > 0.0 && a * (1.0 - e) < par.coll_factor * r_coll) continue;
             double xcm[3], vcm[3];
             for (int c = 0; c < 3; c++) {

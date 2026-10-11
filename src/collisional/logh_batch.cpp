@@ -158,7 +158,8 @@ void SubsystemBatch::pack(const SubsystemManager& mgr, const Particles& p,
     // Buffer layout per member: x,y,z,vx,vy,vz,mass,spin_x,spin_y,spin_z,stype_as_double,radius (12 doubles)
     constexpr int PACK_STRIDE = 12;
     const bool want_spins = (g_collisional.pn_order & PN_SPIN) != 0;
-    const bool gather = !src || want_spins || g_collisional.sdar;   // SDAR: radii and types of all members
+    // SDAR and in-integration collisions need the radii and types of all members
+    const bool gather = !src || want_spins || g_collisional.sdar || g_collisional.subsys_collisions;
     has_stored_spins.assign(n_sub, 0);
     stored_spins.resize(n_sub * 6, 0.0);
     stored_stellar_type.assign(n_sub * 2, 0);
@@ -245,6 +246,12 @@ void SubsystemBatch::pack(const SubsystemManager& mgr, const Particles& p,
     // Stellar radii and types of all members (SDAR collision candidates)
     flat_radius.assign(total, 0.0);
     flat_stype.assign(total, 0);
+    flat_pid.assign(total, -1);
+    {
+        int k = 0;
+        for (const auto& sub : mgr.active)
+            for (int b = 0; b < sub.n_bodies; b++) flat_pid[k++] = sub.particle_ids[b];
+    }
     if (gather)
         for (int k = 0; k < total; k++) {
             flat_stype[k] = static_cast<int>(h_buf(body_member[k] * PACK_STRIDE + 10));
@@ -321,6 +328,7 @@ void SubsystemBatch::unpack(SubsystemManager& mgr, Particles& p, const HostSourc
                 dst->vx[i] = flat_vel_out[k * 3 + 0];
                 dst->vy[i] = flat_vel_out[k * 3 + 1];
                 dst->vz[i] = flat_vel_out[k * 3 + 2];
+                if (dst->m) dst->m[i] = flat_mass[k];
             }
         }
     }
@@ -437,6 +445,9 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
     int cap_hit = 0;
     batch.sd_jump.assign(n_sub, 0.0);
     std::vector<double> sd_kappa_sub(n_sub, 0.0);
+    batch.collisions.assign(n_sub, {});
+    batch.coll_dE.assign(n_sub, 0.0);
+    std::vector<int> peri_land(n_sub, 0), peri_miss(n_sub, 0);
 
     // Subsystems are independent: integrate them on all host threads (one GBS integration is long
     // serial work; dynamic scheduling balances binaries against multiplets)
@@ -511,24 +522,30 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
         // Step 2: Build LogHState in normalized units (CM-centered)
         // ==================================================================
         LogHState state{};
-        state.n_bodies = nb;
         state.t = 0.0;
 
         double c_code = g_collisional.c_code;
         int pn_order = g_collisional.pn_order;
         bool any_compact = false;
 
-        for (int b = 0; b < nb; b++) {
+        // Bodies in the integration: live[k] is the member of state body k. A massless member is the placeholder of
+        // a body merged inside an earlier integration (finalize_subsystem_collision); it only co-moves
+        int live[LOGH_MAX_BODIES], n_live = 0;
+        for (int b = 0; b < nb; b++)
+            if (h_mass(off + b) > 0.0) live[n_live++] = b;
+        state.n_bodies = n_live;
+        for (int k = 0; k < n_live; k++) {
+            const int b = live[k];
             // Positions: subtract CM, normalize by R_scale
-            state.pos[b*3+0] = (h_pos((off+b)*3+0) - cm_x) / R_scale;
-            state.pos[b*3+1] = (h_pos((off+b)*3+1) - cm_y) / R_scale;
-            state.pos[b*3+2] = (h_pos((off+b)*3+2) - cm_z) / R_scale;
+            state.pos[k*3+0] = (h_pos((off+b)*3+0) - cm_x) / R_scale;
+            state.pos[k*3+1] = (h_pos((off+b)*3+1) - cm_y) / R_scale;
+            state.pos[k*3+2] = (h_pos((off+b)*3+2) - cm_z) / R_scale;
             // Velocities: subtract CM, normalize by V_scale
-            state.vel[b*3+0] = (h_vel((off+b)*3+0) - cm_vx) / V_scale;
-            state.vel[b*3+1] = (h_vel((off+b)*3+1) - cm_vy) / V_scale;
-            state.vel[b*3+2] = (h_vel((off+b)*3+2) - cm_vz) / V_scale;
+            state.vel[k*3+0] = (h_vel((off+b)*3+0) - cm_vx) / V_scale;
+            state.vel[k*3+1] = (h_vel((off+b)*3+1) - cm_vy) / V_scale;
+            state.vel[k*3+2] = (h_vel((off+b)*3+2) - cm_vz) / V_scale;
             // Masses: normalize to sum = 1
-            state.mass[b] = h_mass(off+b) / M_total;
+            state.mass[k] = h_mass(off+b) / M_total;
             if (h_mass(off+b) >= g_collisional.m_pn) any_compact = true;
         }
 
@@ -546,14 +563,15 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
             if (batch.has_stored_aux_vel[s]) {
                 // Restore from previous call: same normalization as vel
                 int av_off = batch.stored_aux_vel_offsets[s] * 3;
-                for (int b = 0; b < nb; b++) {
-                    state.aux_vel[b*3+0] = (batch.stored_aux_vel[av_off + b*3+0] - cm_vx) / V_scale;
-                    state.aux_vel[b*3+1] = (batch.stored_aux_vel[av_off + b*3+1] - cm_vy) / V_scale;
-                    state.aux_vel[b*3+2] = (batch.stored_aux_vel[av_off + b*3+2] - cm_vz) / V_scale;
+                for (int k = 0; k < n_live; k++) {
+                    const int b = live[k];
+                    state.aux_vel[k*3+0] = (batch.stored_aux_vel[av_off + b*3+0] - cm_vx) / V_scale;
+                    state.aux_vel[k*3+1] = (batch.stored_aux_vel[av_off + b*3+1] - cm_vy) / V_scale;
+                    state.aux_vel[k*3+2] = (batch.stored_aux_vel[av_off + b*3+2] - cm_vz) / V_scale;
                 }
             } else {
                 // First call: initialize w = v
-                std::memcpy(state.aux_vel, state.vel, nb * 3 * sizeof(double));
+                std::memcpy(state.aux_vel, state.vel, n_live * 3 * sizeof(double));
             }
         } else {
             state.use_aux_vel = false;
@@ -564,7 +582,7 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
         // PN path (state.use_aux_vel), otherwise the spins are carried unchanged
         state.has_spins = false;
         state.c_code = c_norm;
-        if (nb == 2 && batch.has_stored_spins[s] && state.use_aux_vel && (pn_order & PN_SPIN)) {
+        if (nb == 2 && n_live == 2 && batch.has_stored_spins[s] && state.use_aux_vel && (pn_order & PN_SPIN)) {
             // Spins are dimensionless chi vectors — no normalization needed
             state.has_spins = true;
             state.spin1[0] = batch.stored_spins[s*6+0];
@@ -589,11 +607,14 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
 
         double E0_norm = T_norm + U_norm;
 
-        // Save initial state for PN energy comparison after integration
+        // Save initial state for PN energy comparison after integration and for the diagnostics
         double state_init_pos[LOGH_MAX_BODIES * 3];
         double state_init_vel[LOGH_MAX_BODIES * 3];
-        std::memcpy(state_init_pos, state.pos, nb * 3 * sizeof(double));
-        std::memcpy(state_init_vel, state.vel, nb * 3 * sizeof(double));
+        std::memcpy(state_init_pos, state.pos, n_live * 3 * sizeof(double));
+        std::memcpy(state_init_vel, state.vel, n_live * 3 * sizeof(double));
+        double mass_init[LOGH_MAX_BODIES];
+        std::memcpy(mass_init, state.mass, n_live * sizeof(double));
+        const int n0 = n_live;
 
         // Normalized time target
         double dt_norm = dt / T_scale;
@@ -601,39 +622,153 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
         // ==================================================================
         // Step 3: Integrate in normalized units via GBS
         // ==================================================================
+        // Collision distances of the live pairs (FROST-CLUSTERS I App. B3; collision_distance: R1 + R2, the tidal
+        // radius 1.3 (M / m)^{1/3} R, ISCO), normalised, and the event each gives; kw / radius per state body (a
+        // remnant of a collision in this call keeps the compact type and the larger radius)
+        constexpr double R_sun_to_pc = 2.254e-8;   // as mergers.cpp
+        const bool coll_on = g_collisional.subsys_collisions && g_collisional.c_code > 0.0;
+        int kw[LOGH_MAX_BODIES];
+        double rad_pc[LOGH_MAX_BODIES];
+        for (int k = 0; k < n_live; k++) {
+            kw[k] = batch.flat_stype[off + live[k]];
+            rad_pc[k] = batch.flat_radius[off + live[k]] * R_sun_to_pc;
+        }
+        double coll[LOGH_MAX_BODIES * LOGH_MAX_BODIES] = {};
+        MergerType ctype[LOGH_MAX_BODIES * LOGH_MAX_BODIES];
+        auto build_coll = [&]() {
+            for (int i = 0; i < state.n_bodies; i++)
+                for (int j = i + 1; j < state.n_bodies; j++) {
+                    const double r = collision_distance(kw[i], state.mass[i] * M_total, rad_pc[i], kw[j],
+                                                        state.mass[j] * M_total, rad_pc[j], G, c_code,
+                                                        ctype[i * LOGH_MAX_BODIES + j]);
+                    coll[i * LOGH_MAX_BODIES + j] = r / R_scale;
+                }
+        };
+        build_coll();
+        double coll0[LOGH_MAX_BODIES * LOGH_MAX_BODIES];
+        std::memcpy(coll0, coll, sizeof(coll));
+
         // SDAR (FROST-CLUSTERS I App. A2): slow-down of weakly perturbed inner binaries; kappa = 1 throughout
         // for PN subsystems (any member above M_PN with PN on; FC-I sec. A2) and for 2-body subsystems (no
-        // perturber inside the subsystem: the external tide comes from the FSI kicks, which need the true phase)
-        const bool sd_on = g_collisional.sdar && !state.use_aux_vel && nb >= 3;
+        // perturber inside the subsystem: the external tide comes from the FSI kicks, which need the true phase);
+        // collision candidates (osculating pericentre inside the collision distance) are not slowed (FC-I App. B3)
+        const bool sd_on = g_collisional.sdar && !state.use_aux_vel && n_live >= 3;
         SdarParams sd_par;
         if (sd_on) {
             sd_par.k_ref = g_collisional.sdar_kref;
             sd_par.c = g_collisional.sdar_c;
             sd_par.steps_per_orbit = gbs_steps_per_orbit();   // the limit follows kappa during the call
-            constexpr double R_sun_to_pc = 2.254e-8;   // as mergers.cpp
-            for (int b = 0; b < nb; b++) {
-                // Collision distance r_a + r_b (FC-I App. B3): the stellar radius; a BH its ISCO 6 G m / c^2
-                // (BH-BH: sum of the ISCOs, >= FC-I's larger ISCO)
-                const double r_pc = batch.flat_stype[off + b] == 14
-                                        ? 6.0 * G * h_mass(off + b) / (c_code * c_code)
-                                        : batch.flat_radius[off + b] * R_sun_to_pc;
-                sd_par.coll_radius[b] = r_pc / R_scale;
-            }
+            sd_par.coll_pair = coll;
             logh_sd_update(state, G_norm, sd_par);   // initial kappa: B = -H_sd
         }
 
-        int n_gbs_steps = 0;
-        const int max_steps = gbs_step_limit(state, dt_norm, G_norm);
-        bool reached = false;
-        {
+        // Integrate; a collision stops the integration (GBSIntegrator::coll): the pair merges into one body of mass
+        // m1 + m2 at its centre of mass with its velocity (momentum exact, SDAR / PeTar merge the same way inside
+        // the integrator: Wang et al. 2020), the change of T + U is booked (dE_int, into B so that the integration
+        // error stays T + U + B, and into the reference energy of the check) and the others continue
+        int n_gbs_steps = 0, max_steps = 0;
+        bool reached = false, limit_hit = false;
+        double E_ref = E0_norm;              // E0 plus the collisions' internal energy changes
+        int ghost_of[LOGH_MAX_BODIES];       // member merged in this call -> member that kept the remnant (-1: none)
+        double ghost_d[LOGH_MAX_BODIES * 3]; // its offset from the remnant at the collision (normalised)
+        for (int b = 0; b < nb; b++) ghost_of[b] = -1;
+        auto& colls = batch.collisions[s];
+        const double t_stop = dt_norm;
+        if (n_live <= 1) {   // one body left after a collision in an earlier call: a free drift
+            for (int c = 0; c < 3 * n_live; c++) state.pos[c] += state.vel[c] * t_stop;
+            state.t = t_stop;
+            reached = true;
+        }
+        while (n_live > 1) {
+            const int seg_limit = gbs_step_limit(state, t_stop - state.t, G_norm);
+            if (max_steps == 0) max_steps = seg_limit;
             GBSIntegrator gbs(eta_gbs);
             gbs.par_stages = serial_subs && stage_par_max > 0 && host_threads > 1;
             if (sd_on) gbs.sdar = &sd_par;
+            if (coll_on) gbs.coll = coll;
             double Omega_cur = logh_omega(state);
-            double ds_est = (Omega_cur > 1e-30) ? dt_norm * Omega_cur : dt_norm;
-            n_gbs_steps = gbs.integrate_to_time(state, dt_norm, G_norm, ds_est,
-                                                 c_norm, pn_order, max_steps);
-            reached = gbs.reached;
+            double ds_est = (Omega_cur > 1e-30) ? (t_stop - state.t) * Omega_cur : (t_stop - state.t);
+            const int n_seg = gbs.integrate_to_time(state, t_stop, G_norm, ds_est, c_norm, pn_order, seg_limit);
+            n_gbs_steps += n_seg;
+            peri_land[s] += gbs.peri_landings;
+            peri_miss[s] += gbs.peri_misses;
+            if (gbs.coll_i < 0) {
+                reached = gbs.reached;
+                limit_hit = n_seg >= seg_limit;
+                break;
+            }
+            // --- Collision of state bodies ci < cj
+            const int ci = gbs.coll_i, cj = gbs.coll_j;
+            if (sd_on) logh_sd_update(state, G_norm, sd_par, true);   // physical H at the collision (jump booked)
+            if (state.has_spins) {   // keep what the spins evolved to
+                std::memcpy(&batch.stored_spins[s*6+0], state.spin1, 3 * sizeof(double));
+                std::memcpy(&batch.stored_spins[s*6+3], state.spin2, 3 * sizeof(double));
+                state.has_spins = false;
+            }
+            // The remnant keeps the compact member (BH: the TDE / ISCO convention of execute_merger), else the heavier
+            const bool ci_keeps = (kw[ci] >= 10) != (kw[cj] >= 10) ? kw[ci] >= 10 : state.mass[ci] >= state.mass[cj];
+            const int kk = ci_keeps ? ci : cj, kg = ci_keeps ? cj : ci;
+            const double mk = state.mass[kk], mg = state.mass[kg], mm = mk + mg;
+            double xc[3], vc[3], wc[3];
+            for (int c = 0; c < 3; c++) {
+                xc[c] = (mk * state.pos[kk*3+c] + mg * state.pos[kg*3+c]) / mm;
+                vc[c] = (mk * state.vel[kk*3+c] + mg * state.vel[kg*3+c]) / mm;
+                wc[c] = (mk * state.aux_vel[kk*3+c] + mg * state.aux_vel[kg*3+c]) / mm;
+            }
+            SubsystemCollision rec;
+            rec.type = ctype[ci * LOGH_MAX_BODIES + cj];
+            rec.pid_keep = batch.flat_pid[off + live[kk]];
+            rec.pid_gone = batch.flat_pid[off + live[kg]];
+            rec.kw_keep = kw[kk]; rec.kw_gone = kw[kg];
+            rec.m_keep = mk * M_total; rec.m_gone = mg * M_total;
+            for (int c = 0; c < 3; c++) {
+                rec.d_keep[c] = (state.pos[kk*3+c] - xc[c]) * R_scale;
+                rec.d_gone[c] = (state.pos[kg*3+c] - xc[c]) * R_scale;
+                rec.u_keep[c] = (state.vel[kk*3+c] - vc[c]) * V_scale;
+                rec.u_gone[c] = (state.vel[kg*3+c] - vc[c]) * V_scale;
+            }
+            rec.r_sep = gbs.coll_rsep * R_scale;
+            rec.r_coll = coll[ci * LOGH_MAX_BODIES + cj] * R_scale;
+            rec.t_rel = state.t * T_scale;
+            rec.n_members = nb;
+            for (int b = 0; b < nb; b++) rec.member_pids[b] = batch.flat_pid[off + b];
+            const double E_before = logh_total_energy(state, G_norm);
+            ghost_of[live[kg]] = live[kk];
+            for (int c = 0; c < 3; c++) ghost_d[live[kg]*3+c] = state.pos[kg*3+c] - xc[c];
+            for (int c = 0; c < 3; c++) {
+                state.pos[kk*3+c] = xc[c]; state.vel[kk*3+c] = vc[c]; state.aux_vel[kk*3+c] = wc[c];
+            }
+            state.mass[kk] = mm;
+            if (kw[kg] >= 10 || kw[kk] >= 10) kw[kk] = std::max(kw[kk], kw[kg]);
+            rad_pc[kk] = (kw[kk] == 14) ? 0.0 : std::max(rad_pc[kk], rad_pc[kg]);
+            for (int k = kg; k + 1 < state.n_bodies; k++) {   // remove kg from the state
+                for (int c = 0; c < 3; c++) {
+                    state.pos[k*3+c] = state.pos[(k+1)*3+c];
+                    state.vel[k*3+c] = state.vel[(k+1)*3+c];
+                    state.aux_vel[k*3+c] = state.aux_vel[(k+1)*3+c];
+                    state.ext_accel[k*3+c] = state.ext_accel[(k+1)*3+c];
+                }
+                state.mass[k] = state.mass[k+1];
+                kw[k] = kw[k+1];
+                rad_pc[k] = rad_pc[k+1];
+                live[k] = live[k+1];
+            }
+            state.n_bodies--;
+            n_live = state.n_bodies;
+            const double dE = logh_total_energy(state, G_norm) - E_before;
+            rec.dE_int = dE * E_scale;
+            batch.coll_dE[s] += rec.dE_int;
+            colls.push_back(rec);
+            state.B -= dE;
+            E_ref += dE;
+            if (state.n_bodies == 1) {   // nothing left to integrate: free drift to the end time
+                for (int c = 0; c < 3; c++) state.pos[c] += state.vel[c] * (t_stop - state.t);
+                state.t = t_stop;
+                reached = true;
+                break;
+            }
+            build_coll();
+            if (sd_on && state.n_bodies >= 3) logh_sd_update(state, G_norm, sd_par);
         }
         // Remove the slow-down: the last jump back to H (W20 Eq. 24); then T + U + B is the integration error of
         // the slowed Hamiltonian over the call (W20 Eq. 25), and sd_jump the booked physical energy change
@@ -652,14 +787,35 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
         double cm_y_final = cm_y + cm_vy * dt_actual;
         double cm_z_final = cm_z + cm_vz * dt_actual;
 
+        int slot[LOGH_MAX_BODIES];   // member -> state body (-1: massless)
+        for (int b = 0; b < nb; b++) slot[b] = -1;
+        for (int k = 0; k < n_live; k++) slot[live[k]] = k;
         for (int b = 0; b < nb; b++) {
-            h_pos_out((off+b)*3+0) = state.pos[b*3+0] * R_scale + cm_x_final;
-            h_pos_out((off+b)*3+1) = state.pos[b*3+1] * R_scale + cm_y_final;
-            h_pos_out((off+b)*3+2) = state.pos[b*3+2] * R_scale + cm_z_final;
-            h_vel_out((off+b)*3+0) = state.vel[b*3+0] * V_scale + cm_vx;
-            h_vel_out((off+b)*3+1) = state.vel[b*3+1] * V_scale + cm_vy;
-            h_vel_out((off+b)*3+2) = state.vel[b*3+2] * V_scale + cm_vz;
-            h_mass(off + b) = state.mass[b] * M_total;
+            if (slot[b] >= 0) {
+                const int k = slot[b];
+                h_pos_out((off+b)*3+0) = state.pos[k*3+0] * R_scale + cm_x_final;
+                h_pos_out((off+b)*3+1) = state.pos[k*3+1] * R_scale + cm_y_final;
+                h_pos_out((off+b)*3+2) = state.pos[k*3+2] * R_scale + cm_z_final;
+                h_vel_out((off+b)*3+0) = state.vel[k*3+0] * V_scale + cm_vx;
+                h_vel_out((off+b)*3+1) = state.vel[k*3+1] * V_scale + cm_vy;
+                h_vel_out((off+b)*3+2) = state.vel[k*3+2] * V_scale + cm_vz;
+                h_mass(off + b) = state.mass[k] * M_total;
+            } else if (ghost_of[b] >= 0) {   // merged in this call: at its collision offset from the remnant
+                int r = ghost_of[b];
+                while (slot[r] < 0 && ghost_of[r] >= 0) r = ghost_of[r];   // the remnant merged again
+                const int k = slot[r];
+                for (int c = 0; c < 3; c++) {
+                    h_pos_out((off+b)*3+c) = (state.pos[k*3+c] + ghost_d[b*3+c]) * R_scale + (c == 0 ? cm_x_final : c == 1 ? cm_y_final : cm_z_final);
+                    h_vel_out((off+b)*3+c) = state.vel[k*3+c] * V_scale + (c == 0 ? cm_vx : c == 1 ? cm_vy : cm_vz);
+                }
+                h_mass(off + b) = 0.0;
+            } else {   // massless placeholder from an earlier call: co-moves at its velocity
+                for (int c = 0; c < 3; c++) {
+                    h_pos_out((off+b)*3+c) = h_pos((off+b)*3+c) + h_vel((off+b)*3+c) * dt_actual;
+                    h_vel_out((off+b)*3+c) = h_vel((off+b)*3+c);
+                }
+                h_mass(off + b) = 0.0;
+            }
         }
 
         // Store auxiliary velocities and scales for persistence across calls.
@@ -668,9 +824,10 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
             batch.has_stored_aux_vel[s] = true;
             int av_off = batch.stored_aux_vel_offsets[s] * 3;
             for (int b = 0; b < nb; b++) {
-                batch.stored_aux_vel[av_off + b*3+0] = state.aux_vel[b*3+0] * V_scale + cm_vx;
-                batch.stored_aux_vel[av_off + b*3+1] = state.aux_vel[b*3+1] * V_scale + cm_vy;
-                batch.stored_aux_vel[av_off + b*3+2] = state.aux_vel[b*3+2] * V_scale + cm_vz;
+                const int k = slot[b];
+                for (int c = 0; c < 3; c++)   // massless members: their velocity
+                    batch.stored_aux_vel[av_off + b*3+c] = k >= 0 ? state.aux_vel[k*3+c] * V_scale + (c == 0 ? cm_vx : c == 1 ? cm_vy : cm_vz)
+                                                                  : h_vel_out((off+b)*3+c);
             }
         }
 
@@ -687,7 +844,7 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
         // Energy error in normalized units (dimensionless)
         double Ef_norm = logh_total_energy(state, G_norm);
         double dE_rel;
-        if (any_compact && pn_order > 0 && c_norm > 0.0 && (pn_order & 1)) {
+        if (any_compact && pn_order > 0 && c_norm > 0.0 && (pn_order & 1) && colls.empty()) {
             double E_pn_0 = pn1_energy(state_init_pos, state_init_vel, state.mass,
                                         nb, G_norm, c_norm);
             double E_pn_f = pn1_energy(state.pos, state.vel, state.mass,
@@ -698,14 +855,14 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
         } else if (sd_on) {
             dE_rel = std::fabs((Ef_norm + state.B) / (std::fabs(E0_norm) + 1e-30));
         } else {
-            dE_rel = std::fabs((Ef_norm - E0_norm) / (std::fabs(E0_norm) + 1e-30));
+            dE_rel = std::fabs((Ef_norm - E_ref) / (std::fabs(E0_norm) + 1e-30));
         }
         // With PN terms there is no energy this check can hold to eta_restart: E_N + E_1PN is conserved
         // only to O(v^4/c^4), and 2PN/3PN/radiation reaction change it further. PN subsystems restart on
         // GBS non-convergence instead; their Newtonian energy change is booked as E_pn by the caller.
         // A step-limited integration stopped short of the end time: never accept it on its energy (the
         // Newtonian check passed it and the members silently lagged behind the rest of the system)
-        bool converged = sd_on ? reached : n_gbs_steps < max_steps;
+        bool converged = (sd_on || !colls.empty()) ? reached : !limit_hit;
         if (any_compact && pn_order > 0 && c_norm > 0.0) dE_rel = 0.0;
         if (!converged) {
             dE_rel = 1e30;
@@ -717,8 +874,8 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
                 std::snprintf(buf, sizeof(buf), "%s%.3g", b ? "," : "", h_mass(off + b));
                 msg += buf;
             }
-            for (int i = 0; i < nb; i++)
-                for (int j = i + 1; j < nb; j++) {
+            for (int i = 0; i < n0; i++)
+                for (int j = i + 1; j < n0; j++) {
                     double r2 = 0.0, v2 = 0.0, dx[3], dv[3];
                     for (int k = 0; k < 3; k++) {
                         dx[k] = state_init_pos[j*3+k] - state_init_pos[i*3+k];
@@ -726,7 +883,7 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
                         r2 += dx[k] * dx[k];
                         v2 += dv[k] * dv[k];
                     }
-                    const double mu = state.mass[i] + state.mass[j];   // G_norm = 1
+                    const double mu = mass_init[i] + mass_init[j];   // G_norm = 1
                     const double eps = 0.5 * v2 - mu / std::sqrt(r2);
                     const double a = -mu / (2.0 * eps);
                     std::snprintf(buf, sizeof(buf), " | %d-%d r=%.3g a=%.3g pc%s", i, j, std::sqrt(r2) * R_scale,
@@ -737,11 +894,11 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
                                       dt_norm / (2.0 * M_PI * std::sqrt(a * a * a / mu)));
                         msg += buf;
                     }
-                    if (sd_on && eps < 0.0) {   // SDAR: pericentre over the collision distance (< 1: kappa = 1)
+                    if (eps < 0.0) {   // pericentre over the collision distance (< 1: candidate, kappa = 1)
                         const double hx = dx[1]*dv[2] - dx[2]*dv[1], hy = dx[2]*dv[0] - dx[0]*dv[2];
                         const double hz = dx[0]*dv[1] - dx[1]*dv[0];
                         const double e = std::sqrt(std::max(0.0, 1.0 + 2.0 * eps * (hx*hx + hy*hy + hz*hz) / (mu * mu)));
-                        const double rc = sd_par.coll_radius[i] + sd_par.coll_radius[j];
+                        const double rc = coll0[i * LOGH_MAX_BODIES + j];
                         std::snprintf(buf, sizeof(buf), " e=%.4f r_p/r_coll=%.3g", e, rc > 0.0 ? a * (1.0 - e) / rc : -1.0);
                         msg += buf;
                     }
@@ -760,8 +917,8 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
             }
             // Bound pairs at the start: a, e, pericentre over the collision distance (< 1: collision candidate,
             // kept at kappa = 1)
-            for (int i = 0; i < nb; i++)
-                for (int j = i + 1; j < nb; j++) {
+            for (int i = 0; i < n0; i++)
+                for (int j = i + 1; j < n0; j++) {
                     double r[3], v[3], r2 = 0.0, v2 = 0.0;
                     for (int k = 0; k < 3; k++) {
                         r[k] = state_init_pos[j*3+k] - state_init_pos[i*3+k];
@@ -769,13 +926,13 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
                         r2 += r[k] * r[k];
                         v2 += v[k] * v[k];
                     }
-                    const double mu = state.mass[i] + state.mass[j];
+                    const double mu = mass_init[i] + mass_init[j];
                     const double eps = 0.5 * v2 - mu / std::sqrt(r2);
                     if (eps >= 0.0) continue;
                     const double hx = r[1]*v[2] - r[2]*v[1], hy = r[2]*v[0] - r[0]*v[2], hz = r[0]*v[1] - r[1]*v[0];
                     const double a = -mu / (2.0 * eps);
                     const double e = std::sqrt(std::max(0.0, 1.0 + 2.0 * eps * (hx*hx + hy*hy + hz*hz) / (mu * mu)));
-                    const double rc = sd_par.coll_radius[i] + sd_par.coll_radius[j];
+                    const double rc = coll0[i * LOGH_MAX_BODIES + j];
                     std::snprintf(buf, sizeof(buf), " | %d-%d a=%.3g pc e=%.4f r_p/r_coll=%.3g", i, j, a * R_scale, e,
                                   rc > 0.0 ? a * (1.0 - e) / rc : -1.0);
                     msg += buf;
@@ -824,6 +981,14 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
     batch.stat_cap_hit   = cap_hit;
     batch.stat_sd_calls = 0;
     batch.stat_sd_kappa_max = 0.0;
+    batch.stat_collisions = 0;
+    batch.stat_peri_landings = 0;
+    batch.stat_peri_misses = 0;
+    for (int s2 = 0; s2 < n_sub; s2++) {
+        batch.stat_collisions += (int)batch.collisions[s2].size();
+        batch.stat_peri_landings += peri_land[s2];
+        batch.stat_peri_misses += peri_miss[s2];
+    }
     for (double k : sd_kappa_sub) {
         if (k > 1.0) batch.stat_sd_calls++;
         batch.stat_sd_kappa_max = std::max(batch.stat_sd_kappa_max, k);

@@ -125,6 +125,33 @@ CM_TIDE = dict(TEST_CASE="triple_test", INTEGRATOR="hhs", TRIPLE_A_IN_PC="2e-4",
                TOTAL_TIME_MYR="1e-2", DT_MAX_MYR="1e-3", DT_MIN_MYR="1e-14", SOFTENING_PC="0", COLLISIONAL="true",
                R_NGB="1e-3", R_NGB_MAX="0.1", N_ORB_SECULAR="3", PN_ORDER="0", SSE_ENABLED="false", ETA_RESTART="0",
                PRINT_INTERVAL="1", PROFILING="false", FLYBY_CM_VELOCITY="true")
+# Collisions inside the regularised subsystem integration (FROST-CLUSTERS I App. B3). Stellar radii of the test
+# bodies from TEST_STELLAR_RADIUS_RSUN (BHs: none). Head-on: 1+1 Msun stars of 1 R_sun on a radial inner orbit
+# (a = 0.2 AU, e = 0.99999, r_p = 2e-6 R_sun) with a 1 Msun star at 2 AU: a 3-body subsystem, which the per-level
+# check (2-body subsystems only) never merges.
+COLL_HEADON = dict(TEST_CASE="triple_test", INTEGRATOR="hhs", TRIPLE_A_IN_PC="1e-6", TRIPLE_E_IN="0.99999",
+                   TRIPLE_M1="1.0", TRIPLE_M2="1.0", TRIPLE_A_OUT_PC="1e-5", TRIPLE_E_OUT="0.2", TRIPLE_M3="1.0",
+                   TRIPLE_INCL_DEG="30", TOTAL_TIME_MYR="4e-7", DT_MAX_MYR="1e-7", DT_MIN_MYR="1e-16", SOFTENING_PC="0",
+                   COLLISIONAL="true", R_NGB="1e-3", R_NGB_MAX="0.1", N_ORB_SECULAR="3", PN_ORDER="0",
+                   SSE_ENABLED="false", ETA_RESTART="1e-8", ETA_GBS="1e-10", PRINT_INTERVAL="1", PROFILING="false",
+                   TEST_STELLAR_RADIUS_RSUN="1.0")
+# The 200k step-1 stall (AUDIT F3, SDAR runs with BINARY_PERI_CHECK = false): a contact binary, 1+1 Msun at 0.05 AU,
+# e = 0.6 (r_p = 4.259 R_sun, R = 2.131 R_sun: r_p / r_coll = 0.9993, so the steps jump over the short stretch
+# inside r_coll unless one is forced onto the pericentre) and a 0.7 Msun star passing at 0.003 pc (190 km/s, inside
+# R_NGB from the start): a 3-body subsystem with SDAR, kappa = 1 for the candidate
+COLL_CONTACT = dict(F3_FLYBY, TRIPLE_E_IN="0.6", TRIPLE_A_OUT_PC="0.003", SDAR="true", TEST_STELLAR_RADIUS_RSUN="2.131")
+# TDE on a parabolic orbit: a 1 Msun star of 1 R_sun reaches q = 1e-7 pc from a 100 Msun BH (r_t = 1.3 (M/m)^{1/3}
+# R = 6.03 R_sun = 1.36e-7 pc; q / r_t = 0.74), starting at 5 q; a 4 Msun star at 1e-4 pc (circular) binds the system
+# (E0 != 0 for the relative energy error)
+COLL_TDE = dict(COLL_HEADON, TRIPLE_A_IN_PC="1e-7", TRIPLE_E_IN="1.0", TRIPLE_M1="100.0", TRIPLE_M2="1.0",
+                TRIPLE_A_OUT_PC="1e-4", TRIPLE_E_OUT="0.0", TRIPLE_M3="4.0", TOTAL_TIME_MYR="4e-9", DT_MAX_MYR="1e-9",
+                DT_MIN_MYR="1e-18", M_PN="5.0")
+# BH binary reaching the ISCO: 10+10 Msun at a = 1.5 r_ISCO (6 G M / c^2 = 5.74e-12 pc), circular, all PN orders: the
+# 2.5PN / 3.5PN inspiral reaches r_ISCO within the first step; a 1 Msun star at 100 a makes it a 3-body subsystem
+COLL_ISCO = dict(COLL_HEADON, TRIPLE_A_IN_PC="8.6e-12", TRIPLE_E_IN="0.0", TRIPLE_M1="10.0", TRIPLE_M2="10.0",
+                 TRIPLE_A_OUT_PC="8.6e-10", TRIPLE_E_OUT="0.0", TRIPLE_M3="1.0", TOTAL_TIME_MYR="2e-14",
+                 DT_MAX_MYR="1e-15", DT_MIN_MYR="1e-24", PN_ORDER="31", M_PN="5.0", TEST_STELLAR_RADIUS_RSUN="0")
+
 # 16 stars inside r_ngb: one 15-body neighbour group, more than LogH's fixed storage (LOGH_MAX_BODIES = 8)
 # Collisional FSI run of a field binary (r_ngb below a, so no subsystem): the start-of-step kernel's criteria set the step
 FSI_BINARY = dict(TEST_CASE="binary_test", INTEGRATOR="fsi", TOTAL_TIME_MYR="1e-5", DT_MAX_MYR="1e-5", DT_MIN_MYR="1e-14",
@@ -562,6 +589,24 @@ def restarts(exe, label, cfg, bound):
         check(f"{label} max|dE/E|", max(r[0] for r in rows), bound)
 
 
+def subsys_collision(exe, label, cfg, kind, bound, min_landings=0):
+    """A collision inside a subsystem integration (FROST-CLUSTERS I App. B3): exactly one event of the given kind,
+    one body less at the end (no duplicated or lost particle), no LogH step-limit hit or give-up, and the energy
+    with the merger sink conserved to the integration error."""
+    out = run_output(exe, cfg)
+    rows = diagnostics(out)
+    n0 = {"triple_test": 3, "binary_test": 2}[cfg["TEST_CASE"]]
+    last_table = out[out.rfind("Level        dt"):]
+    n_final = sum(int(m) for m in re.findall(r"^\s+L\d+\s+\S+\s+(\d+)", last_table, re.M))
+    landings = sum(int(m) for m in re.findall(r"pericentre landings (\d+)", out))
+    ok = check(f"{label} [SUBSYS COLLISION] {kind} events", out.count(f"[SUBSYS COLLISION] {kind} "), 1, lower=True)
+    ok &= check(f"{label} collision events", out.count("[SUBSYS COLLISION]"), 1)
+    ok &= check(f"{label} |N_final - (N0 - 1)|", abs(n_final - (n0 - 1)), 0)
+    ok &= check(f"{label} LogH step-limit hits and give-ups", out.count("step limit") + out.count("GAVE UP"), 0)
+    ok &= check(f"{label} pericentre landings", landings, min_landings, lower=True)
+    return ok & check(f"{label} max|dE/E| with merger sink", max(r[0] for r in rows), bound)
+
+
 def check(name, value, bound, lower=False):
     ok = value >= bound if lower else value <= bound
     print(f"{'ok  ' if ok else 'FAIL'} {name} = {value:.3e} ({'>=' if lower else '<='} {bound:.3e})")
@@ -779,6 +824,20 @@ CASES = {
     "ic_r_break": lambda exe: ic_r_break(exe, "artificial binaries", dict(IC_ONLY, PLUMMER_R_HALF="0.05",
                                          BINARY_FRAC="0.5", BINARY_A_MIN_AU="1", BINARY_A_MAX_AU="20",
                                          IC_R_BREAK="10"), 2.7e-4),
+    # Collisions inside the subsystem integration (FROST-CLUSTERS I App. B3; host gcc/x86-64 measurements). Before
+    # (1890208; and with SUBSYS_COLLISIONS = false): head-on no merger, 9 x 8 LogH give-ups, max|dE/E| 5.3e-5;
+    # contact (SUBSYS_COLLISIONS = false) no merger, 4.2e5-4.8e5 GBS steps per step, LogH retries and a step restart,
+    # 6.3 s/step, 9.5e-9; TDE: the star passes the BH at 0.74 r_t; ISCO: the binary goes on inside the ISCO (3-body
+    # subsystem). After: one merger each; max|dE/E| 1.38e-12 (head-on), 4.72e-11 (contact; the GBS error of the call,
+    # the books are exact), 1.16e-12 (TDE), 6.1e-16 (ISCO, PN: all booked; round-off, bound 1e-14)
+    "coll_headon_triple": lambda exe: subsys_collision(exe, "head-on in triple", COLL_HEADON, "STELLAR", 1.8e-12),
+    "coll_contact_flyby": lambda exe: subsys_collision(exe, "contact binary + fly-by, SDAR", COLL_CONTACT, "STELLAR",
+                                                       6.1e-11, min_landings=1),
+    "coll_contact_flyby_logh": lambda exe: subsys_collision(exe, "contact binary + fly-by, LogH",
+                                                            dict(COLL_CONTACT, SDAR="false"), "STELLAR", 6.1e-11,
+                                                            min_landings=1),
+    "coll_tde_parabolic": lambda exe: subsys_collision(exe, "TDE, parabolic", COLL_TDE, "TDE", 1.5e-12),
+    "coll_bh_isco": lambda exe: subsys_collision(exe, "BH binary to ISCO, PN", COLL_ISCO, "ISCO", 1e-14),
     "logh_big_group": lambda exe: big_group(exe, "big group", BIG_GROUP, (1.2e-5, 1e-12)),
     # Exact tree searches (M7.4), forced at every set size, each search checked bitwise against O(N^2)
     # Tree searches on by default above the break-even set size (host builds 2048): 5000 stars use them at the top

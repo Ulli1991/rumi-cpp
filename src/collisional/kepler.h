@@ -34,3 +34,9 @@ double solve_kepler(double M, double e, double tol = 1e-14);
 
 // Advance a 2-body orbit by dt using the Kepler drift (analytical)
 void kepler_advance(double r[3], double v[3], double mu, double dt);
+
+// Time to the next pericentre passage of a two-body orbit from its osculating elements (FROST-CLUSTERS I,
+// Rantala et al. 2024, App. B3; the same use as TPERI in NBODY6's chain, Aarseth 2003). Bound orbits: the next
+// pericentre, 0 <= tau < P; unbound orbits: the only pericentre, +inf once it has passed. r_peri (optional):
+// osculating pericentre distance h^2 / (mu (1 + e)), well conditioned for e -> 1.
+double kepler_time_to_pericentre(const double r[3], const double v[3], double mu, double* r_peri = nullptr);

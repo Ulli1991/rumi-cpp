@@ -50,6 +50,8 @@ struct SdarParams {
     double coll_factor = 1.0;               // collision candidate: osculating pericentre < coll_factor x collision
                                             // distance -> kappa = 1 (FC-I App. B3: r_p < r_coll)
     double coll_radius[LOGH_MAX_BODIES] = {};   // collision radius per body (normalized units, 0: none)
+    const double* coll_pair = nullptr;          // pair collision distances [i * LOGH_MAX_BODIES + j] (normalised;
+                                                // replaces the per-body sum when set: TDE radii are not additive)
     double steps_per_orbit = 0.0;           // GBS step limit per slowed orbit (0: only the caller's max_iter)
 };
 

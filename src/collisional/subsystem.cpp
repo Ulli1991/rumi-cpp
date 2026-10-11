@@ -653,12 +653,42 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
 
 void SubsystemManager::restore_active(const std::vector<Subsystem>& saved) {
     active = saved;
+    strip_removed();
+}
+
+void SubsystemManager::strip_removed() {
     if (removed_pids.empty()) return;
-    active.erase(std::remove_if(active.begin(), active.end(), [&](const Subsystem& sub) {
-        for (int pid : sub.particle_ids)
-            if (removed_pids.count(pid)) return true;
-        return false;
-    }), active.end());
+    for (auto& sub : active) {
+        int k = 0;
+        for (int b = 0; b < (int)sub.particle_ids.size(); b++)
+            if (!removed_pids.count(sub.particle_ids[b])) sub.particle_ids[k++] = sub.particle_ids[b];
+        if (k == (int)sub.particle_ids.size()) continue;
+        // A member merged away (inside a subsystem integration, finalize_subsystem_collision): the remnant and
+        // the other members stay one subsystem; per-body PN auxiliary velocities and the normalisation scales
+        // (total mass) start afresh, the hierarchy is re-derived by the next detection
+        sub.particle_ids.resize(k);
+        sub.n_bodies = k;
+        sub.has_aux_vel = false;
+        sub.scales_set = false;
+        sub.inner_binary_id = -1;
+        sub.outer_companion_pid = -1;
+        sub.is_secular = false;
+        if (k == 2) sub.type = SubsystemType::BINARY;   // re-classified (BINARY / FLYBY) by the advance
+        else if (k == 3) sub.type = SubsystemType::TRIPLE_UNSTABLE;
+    }
+    active.erase(std::remove_if(active.begin(), active.end(), [](const Subsystem& sub) { return sub.n_bodies < 2; }),
+                 active.end());
+}
+
+void SubsystemManager::ghosts_compacted(Particles& p, size_t log_from) {
+    for (size_t k = log_from; k < p.removed_pid_log.size(); k++) {
+        const int pid = p.removed_pid_log[k];
+        ghost_pids.erase(pid);
+        removed_pids.insert(pid);
+    }
+    strip_removed();
+    rebuild_pid_to_idx(p);
+    update_particle_flags(p);
 }
 
 void SubsystemManager::update_particle_flags(Particles& p) {
@@ -1113,6 +1143,9 @@ void SubsystemManager::reset_step_diagnostics() {
     step_secular_substeps = 0;
     step_secular_triples = 0;
     step_mergers = 0;
+    step_subsys_collisions = 0;
+    step_peri_landings = 0;
+    step_peri_misses = 0;
     step_escapers = 0;
 }
 
@@ -1167,7 +1200,11 @@ void SubsystemManager::print_step_summary() const {
     std::printf("  SecTriple=%d\n", step_secular_triples);
 
     // Events
-    std::printf("    Events: mergers=%d  escapers=%d\n", step_mergers, step_escapers);
+    std::printf("    Events: mergers=%d  escapers=%d", step_mergers, step_escapers);
+    if (step_subsys_collisions > 0 || step_peri_landings > 0)   // FROST-CLUSTERS I App. B3, inside the integrations
+        std::printf("  subsys_collisions=%d (pericentre landings %d, %d outside r_coll)", step_subsys_collisions,
+                    step_peri_landings, step_peri_misses);
+    std::printf("\n");
 }
 
 void SubsystemManager::clear() {
