@@ -108,6 +108,10 @@ FSI_BINARY = dict(TEST_CASE="binary_test", INTEGRATOR="fsi", TOTAL_TIME_MYR="1e-
                   SSE_ENABLED="false", BINARY_E="0.5", PRINT_INTERVAL="1", PROFILING="false")
 # The same binary through the HHS with ETA_FF/FB = 10 and no jerk step: the v/a criterion (ETA) sets the step
 VA_BINARY = dict(FSI_BINARY, INTEGRATOR="hhs", TOTAL_TIME_MYR="1e-4", ETA_FF="10", ETA_FB="10", ETA_JERK="0")
+# IC generator only (one 1e-7 Myr step): 2000 Kroupa stars without binaries, M = 1000 M_sun
+IC_ONLY = dict(BINARIES, BINARY_FRAC="0", PLUMMER_M_TOTAL="1000", TOTAL_TIME_MYR="1e-7", DT_MAX_MYR="1e-7")
+# Equal masses for the r_h check: the mass-weighted median radius of 2000 Kroupa stars scatters by ~4 % over seeds
+IC_EQUAL = dict(IC_ONLY, PLUMMER_MASS_DIST="equal")
 BIG_GROUP = dict(TEST_CASE="plummer", INTEGRATOR="hhs", TOTAL_TIME_MYR="1e-5", DT_MAX_MYR="1e-6", DT_MIN_MYR="1e-16",
                  SOFTENING_PC="0", COLLISIONAL="true", R_NGB="1e-3", R_NGB_MAX="0.1", PN_ORDER="0", SSE_ENABLED="false",
                  PLUMMER_N="16", PLUMMER_M_TOTAL="16", PLUMMER_R_HALF="2e-4", PLUMMER_SEED="3", PLUMMER_MASS_DIST="equal",
@@ -408,6 +412,62 @@ def no_ic_mergers(exe, label, cfg, bound):
     return check(f"{label} mergers in step 1", out.count("[MERGER #"), 0) & \
         check(f"{label} max|dE/E|", max(r[0] for r in rows), bound)
 
+def ic_check(out):
+    """(N_obj, measured r_h [pc], Q = T/|W| of singles and binary centres of mass, E_bin/|E_obj|) printed by the IC
+    generator."""
+    m = re.search(r"IC check: N_obj=(\d+) r_h\(measured\)=(\S+) pc Q_obj=(\S+) E_bin/\|E_obj\|=(\S+)", out)
+    if not m:
+        raise SystemExit("FAIL: no IC check line printed")
+    return int(m.group(1)), float(m.group(2)), float(m.group(3)), float(m.group(4))
+
+
+def ic_r_half(out):
+    m = re.search(r"IC r_h = (\S+) pc", out)
+    if not m:
+        raise SystemExit("FAIL: no IC r_h line printed")
+    return float(m.group(1))
+
+
+def ic_mass_size(exe, label, cfg, bound):
+    """BIFROST App. A (SCIC) eq. A2: without a user-given r_h, r_h / pc = 2.55 (M / 1e4 M_sun)^0.24 (Brown & Gnedin
+    2021); the same with PLUMMER_R_HALF absent and = mass_size, and the sampled cluster must have it."""
+    m_tot = float(cfg["PLUMMER_M_TOTAL"])
+    want = 2.55 * (m_tot / 1e4) ** 0.24
+    ok = True
+    for name, c in (("PLUMMER_R_HALF = mass_size", dict(cfg, PLUMMER_R_HALF="mass_size")),
+                    ("PLUMMER_R_HALF absent", {k: v for k, v in cfg.items() if k != "PLUMMER_R_HALF"})):
+        out = run_output(exe, c)
+        ok &= check(f"{label}, {name}: |r_h / eq. A2 - 1|", abs(ic_r_half(out) / want - 1), 1e-5)  # printed to 6 significant figures
+        ok &= check(f"{label}, {name}: |measured r_h / eq. A2 - 1|", abs(ic_check(out)[1] / want - 1), bound)
+    return ok
+
+
+def ic_com_virial(exe, label, cfg, bound):
+    """Binary centres of mass are sampled from the Plummer f(E) as single objects (BIFROST App. A, mcluster): the
+    virial ratio of singles and centres of mass must be 1/2 within sampling noise. BINARY_COM_V = average (the old
+    mass-weighted mean of the two members' independent draws) must fail the same check (kinematically cold)."""
+    q = ic_check(run_output(exe, cfg))[2]
+    q_avg = ic_check(run_output(exe, dict(cfg, BINARY_COM_V="average")))[2]
+    print(f"   Q_obj sampled {q:.4f}, average {q_avg:.4f}")
+    return check(f"{label} |Q_obj - 1/2|", abs(q - 0.5), bound) & \
+        check(f"{label} |Q_obj - 1/2| with BINARY_COM_V = average", abs(q_avg - 0.5), bound, lower=True)
+
+
+def ic_r_break(exe, label, cfg, bound):
+    """SCIC artificial-binary avoidance (BIFROST App. A): no two objects (singles, binary centres of mass) closer
+    than r_break or bound with a < r_break after the re-sampling; angular re-sampling keeps the radial profile."""
+    out = run_output(exe, cfg)
+    m = re.search(r"IC_R_BREAK: r_break=(\S+) pc, close pairs before=(\d+) after=(\d+)", out)
+    if not m:
+        raise SystemExit("FAIL: no IC_R_BREAK line printed")
+    before, after = int(m.group(2)), int(m.group(3))
+    rh = ic_check(out)[1]
+    rh0 = ic_check(run_output(exe, dict(cfg, IC_R_BREAK="0")))[1]
+    ok = check(f"{label} close pairs before re-sampling", before, 1, lower=True)
+    ok &= check(f"{label} close pairs after re-sampling", after, 0)
+    return ok & check(f"{label} |r_h / r_h(IC_R_BREAK = 0) - 1|", abs(rh / rh0 - 1), bound)
+
+
 def fsi_step(exe, label, cfg, bound):
     """The FSI integrator's global step (the smallest particle time step at the start) must stay at a sane level."""
     m = re.search(r"FSI global step: (\S+) Myr", run_output(exe, cfg))
@@ -605,6 +665,19 @@ CASES = {
     # after 13 restarts, 0 give-ups, 2.87e-7
     "restart_halves_va": lambda exe: restarts(exe, "v/a restarts", dict(VA_BINARY, ETA_GRAD="1000", ETA="0.2",
                                                                        ETA_RESTART="1e-7"), 3.7e-7),
+    # SCIC initial conditions (BIFROST App. A). r_h from the mass-size relation when not given (before: 3.5 pc
+    # default, PLUMMER_R_HALF = mass_size not understood): 2000 stars, 1000 M_sun -> 1.463 pc. Measured r_h 1.86 %
+    # off (seed 5; seeds 1-8 scatter -6 ... +3 %, rms 2.5 %, the median of 2000 draws)
+    "ic_mass_size_rh": lambda exe: ic_mass_size(exe, "mass-size r_h", IC_EQUAL, 0.025),
+    # 100 % binaries: Q of the centres of mass was 0.336 (members' independent velocities averaged); measured
+    # 0.5073 with one draw per binary
+    "ic_binary_com_virial": lambda exe: ic_com_virial(exe, "binary c.o.m. virial ratio",
+                                                      dict(IC_ONLY, BINARY_FRAC="1.0"), 9.5e-3),
+    # Dense core (r_h = 0.05 pc), 50 % binaries of 1-20 AU, r_break = 10 a_max = 200 AU: 4 close object pairs,
+    # 0 after one angular round; r_h changes by 2.1e-4 (re-centring only)
+    "ic_r_break": lambda exe: ic_r_break(exe, "artificial binaries", dict(IC_ONLY, PLUMMER_R_HALF="0.05",
+                                         BINARY_FRAC="0.5", BINARY_A_MIN_AU="1", BINARY_A_MAX_AU="20",
+                                         IC_R_BREAK="10"), 2.7e-4),
     "logh_big_group": lambda exe: big_group(exe, "big group", BIG_GROUP, (1.2e-5, 1e-12)),
     # Exact tree searches (M7.4), forced at every set size, each search checked bitwise against O(N^2)
     # Tree searches on by default above the break-even set size (host builds 2048): 5000 stars use them at the top

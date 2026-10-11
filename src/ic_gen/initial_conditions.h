@@ -6,6 +6,8 @@
 
 void init_outer_planets(Particles& p);
 
+// r_half_pc <= 0: r_h from scic_mass_size_r_half(M) of the generated masses. r_break_au > 0: SCIC artificial-binary
+// avoidance (BIFROST App. A) on singles and binary centres of mass.
 void init_plummer(Particles& p, int N, double M_total_msun, double r_half_pc, int seed,
                   const std::string& mass_distribution = "equal",
                   double age_gyr = 1.0, double metallicity = 0.02,
@@ -18,7 +20,15 @@ void init_plummer(Particles& p, int N, double M_total_msun, double r_half_pc, in
                   // Primordial binary population: "bifrost" (BIFROST App. A: flat q above 5 M_sun, random
                   // pairing below) or "mass_rank" (heaviest with next heaviest); pericentre condition
                   // r_p = a(1-e) > contact distance (FROST-CLUSTERS II Sec. 2.3)
-                  const std::string& binary_pop = "bifrost", bool binary_peri_check = true);
+                  const std::string& binary_pop = "bifrost", bool binary_peri_check = true,
+                  // Binary centre-of-mass velocity: true = the primary's own Plummer f(E) draw (SCIC/mcluster: a
+                  // binary is one point particle until its members are placed); false = the old mass-weighted
+                  // mean of both members' independent draws (kinematically cold, BINARY_COM_V = average)
+                  bool binary_com_sampled = true);
+
+// Half-mass radius [pc] of a star cluster of mass M [M_sun] from the SCIC mass-size relations
+// (BIFROST, Rantala et al. 2023, App. A, eqs. A2-A3)
+double scic_mass_size_r_half(double M_msun);
 
 // Isolated binary test case (2 particles): configurable orbital elements
 // a_pc: semi-major axis in parsecs, e: eccentricity, m1/m2: masses in M_sun
