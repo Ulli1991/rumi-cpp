@@ -18,6 +18,7 @@
 #include "merger_tree.h"
 #include "runtime_sse.h"
 #include "post_newtonian.h"
+#include "stellar_cache.h"
 CollisionalConfig g_collisional;
 
 // Binary orbit tracker for PN precession validation
@@ -791,6 +792,7 @@ int main(int argc, char** argv) {
                 auto h_sr = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.stellar_radius);
                 for (int i = 0; i < p.N; i++) h_sr(i) = h_st(i) < 10 ? r_test : 0.0;
                 Kokkos::deep_copy(p.stellar_radius, h_sr);
+                StellarPropsCache::get().invalidate();
             }
         }
 #endif

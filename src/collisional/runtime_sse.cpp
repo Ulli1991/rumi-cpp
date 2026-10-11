@@ -1,4 +1,5 @@
 #include "runtime_sse.h"
+#include "stellar_cache.h"
 #include "constants.h"
 #include "diagnostics.h"
 #include <cmath>
@@ -119,6 +120,7 @@ void advance_stellar_evolution(Particles& p, SSEContext& sse, double dt_myr,
     Kokkos::deep_copy(p.core_mass, h_cmass);
     Kokkos::deep_copy(p.stellar_radius, h_srad);
     Kokkos::deep_copy(p.luminosity, h_lum);
+    StellarPropsCache::get().invalidate();   // types and radii changed
 
     if (total_dm > 0 || n_type_change > 0) {
         std::printf("SSE: dm_total=%.4e M_sun, %d type changes, E_sse=%.4e\n",

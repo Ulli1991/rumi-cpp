@@ -1,4 +1,5 @@
 #include "mergers.h"
+#include "stellar_cache.h"
 #include "merger_tree.h"
 #include "kepler.h"
 #include "constants.h"
@@ -367,6 +368,7 @@ void execute_merger(const MergerEvent& event, Particles& p,
     p.zero_kick_compensation();   // merger remnant velocity is new
     Kokkos::deep_copy(p.mass, h_m);
     Kokkos::deep_copy(p.stellar_type, h_stype);
+    StellarPropsCache::get().invalidate();   // remnant type (and radius below)
     Kokkos::deep_copy(p.spin_vec, h_spin);
 
     // A star made by a merger must evolve as that star: runtime SSE recomputes the mass from m_zams and the
@@ -495,6 +497,7 @@ void finalize_subsystem_collision(const SubsystemCollision& c, Particles& p, Sub
     p.zero_kick_compensation();
     Kokkos::deep_copy(p.mass, h_m);
     Kokkos::deep_copy(p.stellar_type, h_stype);
+    StellarPropsCache::get().invalidate();   // remnant type (and radius below)
     Kokkos::deep_copy(p.spin_vec, h_spin);
     if (h_stype(ik) < 10) {   // a merged star restarts as a zero-age star of its mass (as execute_merger)
         auto h_mzams = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.m_zams);

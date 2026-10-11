@@ -19,6 +19,7 @@
 #include "checkpoint.h"
 #include "diagnostics.h"
 #include "kepler.h"
+#include "stellar_cache.h"
 #include "device_staging.h"
 #endif
 #include <Kokkos_Core.hpp>
@@ -649,6 +650,7 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
     if (g_collisional.subsys_collisions && g_collisional.c_code > 0.0) {
         std::vector<int> sec_rows;   // member indices of secular candidates, two per subsystem
         std::vector<int> sec_subs;
+        std::vector<int> sec_pids;   // their particle ids
         for (int s : eligible) {
             const auto& sub = g_subsystem_mgr.active[s];
             for (int pid : sub.particle_ids) {
@@ -669,23 +671,43 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
             sec_subs.push_back(s);
             sec_rows.push_back(ia);
             sec_rows.push_back(ib);
+            sec_pids.push_back(pa);
+            sec_pids.push_back(pb);
         }
-        if (!sec_subs.empty()) {   // stellar types and radii of those members: one small gather
-            DeviceStaging& st = DeviceStaging::get<4>();
-            const int nr = (int)sec_rows.size();
-            st.reserve(nr, 2);
-            std::copy(sec_rows.begin(), sec_rows.end(), st.h_idx.data());
-            st.upload_idx(nr);
-            auto d_idx = st.d_idx;
-            auto d_buf = st.d_buf;
-            auto pst = p.stellar_type;
-            auto psr = p.stellar_radius;
-            small_for("coll_props_gather", nr, KOKKOS_LAMBDA(int k) {
-                const int i = d_idx(k);
-                d_buf(2 * k) = (double)pst(i);
-                d_buf(2 * k + 1) = psr(i);
-            });
-            st.download_buf((size_t)nr * 2);
+        if (!sec_subs.empty()) {
+            // Stellar types and radii of those members from the host cache by particle id (stellar_cache.h): the
+            // device gather it replaced cost ~40 us + 0.25 us per binary per call (0.4-0.6 s per step at 200k)
+            StellarPropsCache& props = StellarPropsCache::get();
+            const bool use_cache = StellarPropsCache::enabled();
+            std::vector<int> kw_g;          // NBODY_STELLAR_CACHE=0: the device gather (two values per member)
+            std::vector<double> rad_g;
+            if (use_cache) {
+                props.ensure(p);
+                bool all = true;
+                for (int pid : sec_pids) all = all && props.has(pid);
+                if (!all) { props.invalidate(); props.ensure(p); }
+                if (StellarPropsCache::check_enabled()) props.verify(p, sec_rows, sec_pids, "secular candidates");
+            } else {
+                DeviceStaging& st = DeviceStaging::get<4>();
+                const int nr = (int)sec_rows.size();
+                st.reserve(nr, 2);
+                std::copy(sec_rows.begin(), sec_rows.end(), st.h_idx.data());
+                st.upload_idx(nr);
+                auto d_idx = st.d_idx;
+                auto d_buf = st.d_buf;
+                auto pst = p.stellar_type;
+                auto psr = p.stellar_radius;
+                small_for("coll_props_gather", nr, KOKKOS_LAMBDA(int k) {
+                    const int i = d_idx(k);
+                    d_buf(2 * k) = (double)pst(i);
+                    d_buf(2 * k + 1) = psr(i);
+                });
+                st.download_buf((size_t)nr * 2);
+                kw_g.resize(nr); rad_g.resize(nr);
+                for (int k = 0; k < nr; k++) { kw_g[k] = (int)st.h_buf(2 * k); rad_g[k] = st.h_buf(2 * k + 1); }
+            }
+            auto kw_of = [&](int row) { return use_cache ? props.type_of(sec_pids[row]) : kw_g[row]; };
+            auto rad_of = [&](int row) { return use_cache ? props.radius_of(sec_pids[row]) : rad_g[row]; };
             constexpr double R_sun_to_pc = 2.254e-8;   // as mergers.cpp
             for (size_t q = 0; q < sec_subs.size(); q++) {
                 const int ia = sec_rows[2 * q] - start, ib = sec_rows[2 * q + 1] - start;
@@ -695,9 +717,9 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
                 const double tau = kepler_time_to_pericentre(r, v, G * (h_m(ia) + h_m(ib)), &rp);
                 const double r_now = std::sqrt(r[0] * r[0] + r[1] * r[1] + r[2] * r[2]);
                 MergerType ct;
-                const double rc = collision_distance((int)st.h_buf(4 * q), h_m(ia), st.h_buf(4 * q + 1) * R_sun_to_pc,
-                                                     (int)st.h_buf(4 * q + 2), h_m(ib),
-                                                     st.h_buf(4 * q + 3) * R_sun_to_pc, G, g_collisional.c_code, ct);
+                const int qa = 2 * (int)q, qb = qa + 1;
+                const double rc = collision_distance(kw_of(qa), h_m(ia), rad_of(qa) * R_sun_to_pc, kw_of(qb), h_m(ib),
+                                                     rad_of(qb) * R_sun_to_pc, G, g_collisional.c_code, ct);
                 // A candidate goes to LogH when its pericentre falls in this interval (or it is inside r_coll now);
                 // otherwise the exact drift cannot reach the collision distance before the interval ends (a pair
                 // with >= 1 orbit per step always has its pericentre inside: unchanged for the secular binaries).
