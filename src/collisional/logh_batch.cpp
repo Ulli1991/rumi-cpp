@@ -420,6 +420,13 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
     // Subsystems are independent: integrate them on all host threads (one GBS integration is long
     // serial work; dynamic scheduling balances binaries against multiplets)
     using HostPolicy = Kokkos::RangePolicy<Kokkos::DefaultHostExecutionSpace, Kokkos::Schedule<Kokkos::Dynamic>>;
+    // Up to NBODY_GBS_STAGE_PAR subsystems (default 2; 0: never) are integrated one after the other with the GBS
+    // stages of each step on the host threads instead (Rantala et al. 2020, Sec. 4): at deep levels a batch is
+    // one or two subsystems and the other threads would idle. Results are the same either way
+    static const int stage_par_max = std::getenv("NBODY_GBS_STAGE_PAR") ? std::atoi(std::getenv("NBODY_GBS_STAGE_PAR"))
+                                                                         : 2;
+    const int host_threads = Kokkos::DefaultHostExecutionSpace().concurrency();
+    const bool serial_subs = n_sub == 1 || n_sub <= stage_par_max;
     auto integrate_one = [&](int s, int& gbs_sum, double& dE_max, double& dE_min, int& caps) {
         const double t_s0 = wall_now();
         int nb = h_nbod(s);
@@ -578,6 +585,7 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
         const int max_steps = gbs_step_limit(state, dt_norm, G_norm);
         {
             GBSIntegrator gbs(eta_gbs);
+            gbs.par_stages = serial_subs && stage_par_max > 0 && host_threads > 1;
             double Omega_cur = logh_kinetic_energy(state) + state.B;
             double ds_est = (Omega_cur > 1e-30) ? dt_norm * Omega_cur : dt_norm;
             n_gbs_steps = gbs.integrate_to_time(state, dt_norm, G_norm, ds_est,
@@ -691,10 +699,10 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
         t_sub[s] = wall_now() - t_s0;
     };
     const double t_i0 = wall_now();
-    if (n_sub == 1) {   // most deep-level batches: no host threads to start
+    if (serial_subs) {   // most deep-level batches: one subsystem after the other, GBS stages in parallel
         max_dE = std::numeric_limits<double>::lowest();
         min_dE = std::numeric_limits<double>::max();
-        integrate_one(0, total_gbs_steps, max_dE, min_dE, cap_hit);
+        for (int s = 0; s < n_sub; s++) integrate_one(s, total_gbs_steps, max_dE, min_dE, cap_hit);
     } else {
         Kokkos::parallel_reduce("logh_batch_host", HostPolicy(0, n_sub).set_chunk_size(1), integrate_one,
                                 Kokkos::Sum<int>(total_gbs_steps), Kokkos::Max<double>(max_dE),
