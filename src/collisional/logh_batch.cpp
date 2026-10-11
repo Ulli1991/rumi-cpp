@@ -1,4 +1,5 @@
 #include "small_for.h"
+#include "device_staging.h"
 #include "logh_batch.h"
 #include "logh.h"
 #include "gbs.h"
@@ -70,37 +71,9 @@ struct VecAcc {
 template <class T>
 VecAcc<T> acc(std::vector<T>& v) { return VecAcc<T>{v.data()}; }
 
-// Persistent device buffers and their host mirrors for the member gather and scatter: a View allocation per
-// call (with its zero-fill kernel) and a host allocation per transfer cost more than the data at deep levels
-struct Staging {
-    Kokkos::View<int*> d_idx;
-    Kokkos::View<double*> d_buf;
-    Kokkos::View<int*>::host_mirror_type h_idx;
-    Kokkos::View<double*>::host_mirror_type h_buf;
-    void reserve(int n, int stride) {
-        if ((int)d_idx.extent(0) < n) {
-            d_idx = Kokkos::View<int*>(Kokkos::view_alloc(Kokkos::WithoutInitializing, "batch_stage_idx"), n);
-            h_idx = Kokkos::create_mirror_view(d_idx);
-        }
-        if (d_buf.extent(0) < (size_t)n * stride) {
-            d_buf = Kokkos::View<double*>(Kokkos::view_alloc(Kokkos::WithoutInitializing, "batch_stage_buf"),
-                                          (size_t)n * stride);
-            h_buf = Kokkos::create_mirror_view(d_buf);
-        }
-    }
-    void upload(int n, int stride) {
-        Kokkos::deep_copy(Kokkos::subview(d_idx, Kokkos::make_pair(0, n)),
-                          Kokkos::subview(h_idx, Kokkos::make_pair(0, n)));
-        Kokkos::deep_copy(Kokkos::subview(d_buf, Kokkos::make_pair((size_t)0, (size_t)n * stride)),
-                          Kokkos::subview(h_buf, Kokkos::make_pair((size_t)0, (size_t)n * stride)));
-    }
-};
-Staging& staging() {
-    static Staging s;
-    static bool hook = (Kokkos::push_finalize_hook([] { s = Staging(); }), true);
-    (void)hook;
-    return s;
-}
+// Persistent device buffers for the member gather and scatter (no View or host allocation per call)
+using Staging = DeviceStaging;
+Staging& staging() { return DeviceStaging::get<0>(); }
 }  // namespace
 
 void SubsystemBatch::allocate(int n_sub, int total_bodies) {
@@ -335,7 +308,8 @@ void SubsystemBatch::unpack(SubsystemManager& mgr, Particles& p, const HostSourc
 
     // Upload and scatter: write only modified particles back to device arrays
     t_x0 = wall_now();
-    st.upload(n_mem, UNPACK_STRIDE);
+    st.upload_idx(n_mem);
+    st.upload_buf((size_t)n_mem * UNPACK_STRIDE);
     auto d_idx = st.d_idx;
     auto d_buf = st.d_buf;
     auto px = p.x; auto py = p.y; auto pz = p.z;
@@ -386,7 +360,8 @@ void SubsystemBatch::unpack(SubsystemManager& mgr, Particles& p, const HostSourc
         st.reserve(n_spin, 3);
         for (int i = 0; i < n_spin; i++) st.h_idx(i) = spin_indices[i];
         std::memcpy(st.h_buf.data(), spin_values.data(), n_spin * 3 * sizeof(double));
-        st.upload(n_spin, 3);
+        st.upload_idx(n_spin);
+        st.upload_buf((size_t)n_spin * 3);
         auto d_si = st.d_idx;
         auto d_sv = st.d_buf;
         auto pspin = p.spin_vec;
