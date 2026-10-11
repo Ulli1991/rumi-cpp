@@ -825,3 +825,21 @@ Our assessment from the literature above.
 - DRAGON ran on Hydra (MPCDF, 16 K20m per run), not Laohu.
 - Rodriguez+2016 compared CMC with the NB6++ million-body model that later became known as DRAGON.
 - The single-mass "15.7 t_rh" could not be found. The sources give 15–17: PZM02 15.2 ± 0.1; CMC 16.8.
+
+---
+
+## Update (2026-10-11): talks and recent papers on 1e7-star runs
+
+Search of talks, slides and 2024–2026 papers. **No completed 1e7 direct or hybrid production run exists.**
+
+| Source | What it says (verified) |
+|---|---|
+| Spurzem, IAUS 398 / MODEST-25 slides (June 2025), wwwstaff.ari.uni-heidelberg.de/spurzem/talks/spurzem-modest25.pdf | "NBODY6++GPU with up to 16M particles (Benchmarks on raven at MPCDF)"; "The Future – DRAGON III 1m – 8m (16m?)"; PeTar and BIFROST named as "New competition" |
+| Li & Spurzem, NbodyCP, arXiv:2511.06181 | short test runs up to 16M stars on 16 Raven nodes (64 A100), "near ideal" speed-up; "simulations of several Gyrs will take months" |
+| Wu et al., DRAGON-III, arXiv:2510.03933 (MODEST-25) | 1M/4M/10M GC models for 1–10 Gyr "ongoing and planned"; HIP port for LUMI; results so far reach ~0.1 Gyr |
+| Bianchini et al., ROLLIN' I, arXiv:2603.26195 | 1.5M stars to 12 Gyr with NBODY6++GPU, ~400 days on 12–48 V100: the largest full-lifetime direct run |
+| Mai, Kremer & Kıroğlu, arXiv:2510.21916 | CMC Monte Carlo 1e7 to ~12 Gyr |
+| Rantala talks (KICC 2024, LISA AWG 2024, MODEST-25, Stockholm 2026) | up to 2.35M stars, binaries + triples, Nvidia/AMD; no 1e7 or FMM plan mentioned |
+
+Consequence for Flagship C: the competition for a 1e7 direct run is DRAGON-III (NBODY6++GPU, neighbour scheme, ~8–16M planned).
+A BIFROST-accurate 1e7 run with in-equation PN and high multiplicity remains open.
