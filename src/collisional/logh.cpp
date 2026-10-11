@@ -130,7 +130,15 @@ static double solve_kick_omega(double Omega0, double C, double D) {
         double f = O2 * Omega - Omega0 * O2 - C * Omega - D;
         double fp = 3.0 * O2 - 2.0 * Omega0 * Omega - C;
         if (std::fabs(fp) < 1e-30) break;
+#ifdef LOGH_OMEGA_EARLY_EXIT
+        // Stop at a fixed point of the iteration: the following iterations would repeat the same operations on
+        // the same Omega, so the result is the one of the 5 iterations (period-2 round-off cycles run on)
+        const double Onew = Omega - f / fp;
+        if (Onew == Omega) break;
+        Omega = Onew;
+#else
         Omega -= f / fp;
+#endif
     }
     return Omega;
 }
