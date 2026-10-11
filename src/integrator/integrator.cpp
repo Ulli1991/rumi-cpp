@@ -92,8 +92,7 @@ void compute_acceleration_and_timestep_distributed(DistributedParticles& dp,
     const int my_count = dp.my_count;
 
     if (my_count == 0) {
-        dp.allgather_accelerations();
-        dp.allgather_timestep();
+        dp.allgather_dt_acc_subset(0, N);
         return;
     }
 
@@ -103,9 +102,8 @@ void compute_acceleration_and_timestep_distributed(DistributedParticles& dp,
     acceleration_and_timestep_range(dp.local, my_start, my_count, 0, N, G, soft2, eta);
     Kokkos::fence();
 
-    // Allgather accelerations and timesteps
-    dp.allgather_accelerations();
-    dp.allgather_timestep();
+    // Accelerations and time steps in one collective
+    dp.allgather_dt_acc_subset(0, N);
 #else
     compute_acceleration_and_timestep(dp.local, G, soft2, eta);
 #endif
@@ -2060,16 +2058,14 @@ static void cross_acceleration_distributed(DistributedParticles& dp,
     acceleration_range(dp.local, slice_start_f, slice_count_f, slow_start, slow_count, G, soft2);
     Kokkos::fence();
 
-    // Must use separate allgathers: each rank computed its slice of slow and
-    // its slice of fast independently, so the distributions don't match a combined range
+    // Each rank computed its slice of slow and its slice of fast: one gather of both slices (AUDIT G row 5)
     if (use_nonblocking_mpi) {
         dp.iallgather_accelerations_subset(slow_start, slow_count, 0);
         dp.iallgather_accelerations_subset(fast_start, fast_count, 1);
         dp.wait_and_unpack_accelerations(slow_start, slow_count, 0);
         dp.wait_and_unpack_accelerations(fast_start, fast_count, 1);
     } else {
-        dp.allgather_accelerations_subset(slow_start, slow_count);
-        dp.allgather_accelerations_subset(fast_start, fast_count);
+        dp.allgather_accelerations_two(slow_start, slow_count, fast_start, fast_count);   // one collective
     }
 }
 
@@ -2134,15 +2130,14 @@ static void cross_acceleration_and_gradient_distributed(DistributedParticles& dp
                               G, soft2, dt, false);
     Kokkos::fence();
 
-    // Must use separate allgathers: force slices were computed independently
+    // Slices of slow and fast computed independently: one gather of both (AUDIT G row 5)
     if (use_nonblocking_mpi) {
         dp.iallgather_accelerations_subset(slow_start, slow_count, 0);
         dp.iallgather_accelerations_subset(fast_start, fast_count, 1);
         dp.wait_and_unpack_accelerations(slow_start, slow_count, 0);
         dp.wait_and_unpack_accelerations(fast_start, fast_count, 1);
     } else {
-        dp.allgather_accelerations_subset(slow_start, slow_count);
-        dp.allgather_accelerations_subset(fast_start, fast_count);
+        dp.allgather_accelerations_two(slow_start, slow_count, fast_start, fast_count);   // one collective
     }
 }
 
@@ -2156,22 +2151,19 @@ static void compute_timestep_distributed(DistributedParticles& dp, int start, in
     int slice_start, slice_count;
     dp.get_force_slice(start, count, slice_start, slice_count);
 
-    if (slice_count == 0) {
-        dp.allgather_timestep_subset(start, count);
-        return;
+    if (slice_count > 0) {
+        timestep_range(dp.local, slice_start, slice_count, start, count, G, soft2, eta);
+        Kokkos::fence();
     }
 
-    timestep_range(dp.local, slice_start, slice_count, start, count, G, soft2, eta);
+    // dt_adapt, and in collisional mode the partner-free accelerations, in one collective (AUDIT G row 5)
 #ifdef ENABLE_COLLISIONAL
-    bool coll = dp.local.collisional;
+    if (dp.local.collisional) {
+        dp.allgather_dt_acc_subset(start, count);
+        return;
+    }
 #endif
-    Kokkos::fence();
-
-    // Allgather dt_adapt values (uses GPU-aware MPI when available)
     dp.allgather_timestep_subset(start, count);
-#ifdef ENABLE_COLLISIONAL
-    if (coll) dp.allgather_accelerations_subset(start, count);
-#endif
 }
 
 // CPU serial path: CpuSubset + all cpu_* functions in integrator_cpu.cpp
