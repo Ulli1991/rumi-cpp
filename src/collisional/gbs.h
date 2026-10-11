@@ -33,10 +33,9 @@ struct GBSIntegrator {
 
     // Extrapolation table (Neville-Aitken)
     // table[i] stores RAW midpoint result M(n_i) — never modified by extrapolation
-    // work[i] stores the Neville table entries during extrapolation
+    // work[j] stores the last row T[k][j] of the Neville table (extrapolate adds row k)
     double table[MAX_STAGES][GBS_DIM_MAX];  // pos+vel+aux_vel(+spins)+t+B per stage
     double work[MAX_STAGES][GBS_DIM_MAX];
-    double diag_prev[GBS_DIM_MAX];  // T[k-1][k-1] saved between extrapolate() calls
 
     // Stage-parallel steps (host threads; only outside other host-parallel regions): the midpoint integrations
     // of stages k..par_hint run concurrently, par_hint = the stage the previous step converged at. Same result

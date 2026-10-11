@@ -101,6 +101,11 @@ void GBSIntegrator::midpoint(const LogHState& in, LogHState& out,
 // Best estimate: T[stage][stage] stored in work[stage].
 // Error: |T[stage][stage] - T[stage-1][stage-1]|.
 //
+// Incremental: row i of the table depends only on M(n_0..n_i), so each call adds one row. On entry work[j] holds
+// T[stage-1][j] (j < stage), on exit T[stage][j] (j <= stage): O(stage) row operations per call instead of
+// rebuilding the table from table[0..stage] (O(stage^2)). Each T[i][j] is computed with the same operation as in
+// the full rebuild, so the result is bit-identical. Calls must come in stage order 0, 1, 2, ... (GBS step).
+//
 // IMPORTANT: The old algorithm overwrote table[] in-place, which corrupted
 // intermediate values (table[j] = T[k,k] after stage k, not M(n_j)).
 // Stages > 1 then used T[k-1,k-1] instead of the raw midpoint, producing
@@ -108,48 +113,39 @@ void GBSIntegrator::midpoint(const LogHState& in, LogHState& out,
 // ============================================================================
 
 double GBSIntegrator::extrapolate(int stage, int dim) {
-    if (stage == 0) {
-        // Save T[0][0] = raw midpoint as the "previous best" for stage 1
-        std::memcpy(work[0], table[0], dim * sizeof(double));
-        std::memcpy(diag_prev, table[0], dim * sizeof(double));
-        return 1.0;  // need at least 2 stages
-    }
+    double* cur = work[stage];   // T[stage][j-1] before column j, T[stage][j] after
+    std::memcpy(cur, table[stage], dim * sizeof(double));   // T[stage][0] = raw midpoint result
+    if (stage == 0) return 1.0;  // need at least 2 stages
 
-    // Initialize work[i] = table[i] = raw midpoint result T[i][0]
-    for (int i = 0; i <= stage; i++) {
-        std::memcpy(work[i], table[i], dim * sizeof(double));
-    }
-
-    // Build Neville table column by column (j = extrapolation order)
-    // CRITICAL: process i in REVERSE order (stage down to j) so that
-    // work[i-1] still holds T[i-1][j-1] when computing T[i][j].
-    // Forward order overwrites work[i-1] to T[i-1][j] before it's needed.
+    double max_err = 0.0;
     for (int j = 1; j <= stage; j++) {
-        for (int i = stage; i >= j; i--) {
-            // T[i][j] = T[i][j-1] + (T[i][j-1] - T[i-1][j-1]) / ((n_i/n_{i-j})^2 - 1)
-            double ratio = (double)(STEP_SEQ[i] * STEP_SEQ[i]) /
-                           (double)(STEP_SEQ[i-j] * STEP_SEQ[i-j]);
-            double factor = 1.0 / (ratio - 1.0);
+        // T[i][j] = T[i][j-1] + (T[i][j-1] - T[i-1][j-1]) / ((n_i/n_{i-j})^2 - 1),  i = stage
+        const int i = stage;
+        double ratio = (double)(STEP_SEQ[i] * STEP_SEQ[i]) /
+                       (double)(STEP_SEQ[i-j] * STEP_SEQ[i-j]);
+        double factor = 1.0 / (ratio - 1.0);
 
+        double* prev = work[j-1];   // T[stage-1][j-1], replaced by T[stage][j-1] for the next call
+        if (j < stage) {
             for (int d = 0; d < dim; d++) {
-                double delta = work[i][d] - work[i-1][d];
-                work[i][d] += factor * delta;
+                double delta = cur[d] - prev[d];
+                double t = cur[d] + factor * delta;
+                prev[d] = cur[d];
+                cur[d] = t;
+            }
+        } else {
+            // Last column: also the error |T[stage][stage] - T[stage-1][stage-1]| (prev = T[stage-1][stage-1])
+            for (int d = 0; d < dim; d++) {
+                double delta = cur[d] - prev[d];
+                double t = cur[d] + factor * delta;
+                double scale = std::max(1.0, std::fabs(t));
+                double err = std::fabs(t - prev[d]) / scale;
+                if (err > max_err) max_err = err;
+                prev[d] = cur[d];
+                cur[d] = t;
             }
         }
     }
-
-    // Error: |T[stage][stage] - T[stage-1][stage-1]|
-    // diag_prev was saved from the previous call to extrapolate()
-    double max_err = 0.0;
-    for (int d = 0; d < dim; d++) {
-        double scale = std::max(1.0, std::fabs(work[stage][d]));
-        double err = std::fabs(work[stage][d] - diag_prev[d]) / scale;
-        if (err > max_err) max_err = err;
-    }
-
-    // Save T[stage][stage] as "previous best" for the next stage
-    std::memcpy(diag_prev, work[stage], dim * sizeof(double));
-
     return max_err;
 }
 
@@ -252,8 +248,8 @@ bool GBSIntegrator::step(LogHState& state, double ds, double G, double& ds_next,
                         stage, STEP_SEQ[stage], w_raw, table[stage][dim-2]);
         }
 
-        // Always call extrapolate — stage 0 initializes diag_prev (returns 1.0).
-        // Without this, diag_prev is uninitialized garbage and stage 1 can
+        // Always call extrapolate, in stage order — stage 0 starts the Neville table (returns 1.0).
+        // Without this, the table row is uninitialized garbage and stage 1 can
         // falsely report convergence.
         double err = extrapolate(stage, dim);
 
