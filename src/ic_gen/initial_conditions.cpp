@@ -700,10 +700,10 @@ void init_plummer(Particles& p, int N, double M_total_msun, double r_half_pc, in
         if (binary_peri_check)
             std::printf("    pericentre check (r_p > contact distance): e redrawn for %d, a redrawn for %d, "
                         "%d pairs left single (a_max too small)\n", n_e_redrawn, n_a_redrawn, n_unpaired);
-        if (n_unpaired > 0 && r_break_au > 0.0)
-            std::printf("    WARNING: the %d secondaries left single were not in the IC_R_BREAK pass\n", n_unpaired);
         else
             std::printf("    BINARY_PERI_CHECK=false: no pericentre condition (contact binaries allowed)\n");
+        if (n_unpaired > 0 && r_break_au > 0.0)
+            std::printf("    WARNING: the %d secondaries left single were not in the IC_R_BREAK pass\n", n_unpaired);
         // Distribution summary (deciles of q, log10 a [AU], e)
         auto deciles = [](std::vector<double> v, const char* name, double scale, bool log10v) {
             if (v.empty()) return;
