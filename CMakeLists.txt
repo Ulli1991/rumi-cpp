@@ -162,6 +162,11 @@ if(RSQRT_NEWTON)
     target_compile_definitions(nbody-kokkos PRIVATE RSQRT_NEWTON)
 endif()
 
+option(DT_FP32_PREREJECT "Device time-step kernel: single-precision conservative pre-reject of distant pairs (bit-identical)" ON)
+if(DT_FP32_PREREJECT)
+    target_compile_definitions(nbody-kokkos PRIVATE DT_FP32_PREREJECT)
+endif()
+
 option(DISABLE_PROFILING_FENCES "Remove Kokkos::fence() around profiler regions" OFF)
 if(DISABLE_PROFILING_FENCES)
     target_compile_definitions(nbody-kokkos PRIVATE DISABLE_PROFILING_FENCES)
