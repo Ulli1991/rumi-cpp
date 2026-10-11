@@ -2,12 +2,18 @@
 #include "constants.h"
 #include "integrator.h"
 #include "n2_kernels.h"
+#include "dt_tree.h"
 #ifdef ENABLE_COLLISIONAL
 #include "collisional_config.h"
 #include "subsystem.h"
 #endif
 #include <Kokkos_Core.hpp>
 #include <cfloat>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <vector>
+#include <algorithm>
 
 // All pairwise kernels run through run_n2 (n2_driver.h) with the interactions of n2_kernels.h.
 
@@ -45,6 +51,109 @@ PairVel pair_velocities(Particles& p, bool coll) {
 }  // namespace
 
 bool flyby_cm_velocity = false;
+int tree_dt_min_n = 0;
+int tree_dt_cpu_max = 0;
+double tree_dt_vc_fac = 30.0;
+
+// ==========================================================================
+// Exact tree searches for time steps and neighbours (dt_tree.h). TREE_DT_MIN_N: device tree for source sets of at
+// least this many particles; TREE_DT_CPU_MAX: host-thread tree for source sets up to this size, where the host can
+// read device memory (host builds, APUs). 0 = off (default). NBODY_CHECK_TREE_DT=1 runs the O(N^2) kernel after
+// every tree search and aborts on any bitwise difference in dt, the partner-free accelerations or the neighbour pairs.
+// ==========================================================================
+namespace {
+using DevExec = Kokkos::DefaultExecutionSpace;
+using HostExec = Kokkos::DefaultHostExecutionSpace;
+enum class TreeMode { None, Device, Host };
+
+TreeMode tree_mode(int nj) {
+    if (nj < 2) return TreeMode::None;
+    if constexpr (kHostAccessibleDevice) {
+        if (tree_dt_cpu_max > 0 && nj <= tree_dt_cpu_max) return TreeMode::Host;
+    }
+    if (tree_dt_min_n > 0 && nj >= tree_dt_min_n) return TreeMode::Device;
+    return TreeMode::None;
+}
+
+bool check_tree() {
+    static const bool v = std::getenv("NBODY_CHECK_TREE_DT") && std::atoi(std::getenv("NBODY_CHECK_TREE_DT")) != 0;
+    return v;
+}
+
+struct TreeStats {
+    long long dt_calls = 0, dt_sinks = 0, dt_pairs = 0, dt_n2_pairs = 0, ngb_calls = 0, ngb_pairs = 0, checked = 0;
+    ~TreeStats() {
+        if (dt_calls + ngb_calls == 0) return;
+        std::printf("TREE_DT: dt calls=%lld sinks=%lld pairs=%lld (N^2 %lld) ngb calls=%lld pairs=%lld checked=%lld\n",
+                    dt_calls, dt_sinks, dt_pairs, dt_n2_pairs, ngb_calls, ngb_pairs, checked);
+        std::fflush(stdout);
+    }
+} g_tree_stats;
+
+template <class Exec>
+struct TreePair {
+    dtt::PointTree<Exec> pos, vel;
+};
+template <class Exec>
+TreePair<Exec>& trees() {
+    static TreePair<Exec>* t = nullptr;
+    if (!t) {
+        t = new TreePair<Exec>();
+        Kokkos::push_finalize_hook([] { delete t; t = nullptr; });
+    }
+    return *t;
+}
+
+// Minimum pair step of the sinks over the sources into dt_adapt (sink i), on Exec
+template <class Exec>
+void tree_min_dt_on(Particles& p, int i0, int ni, int j0, int nj, const PairVel& cv, const int* sid, double G,
+                    double soft2, double eta_ff, double eta_fb) {
+    auto& T = trees<Exec>();
+    const double *X = p.x.data(), *Y = p.y.data(), *Z = p.z.data(), *M = p.mass.data();
+    T.pos.build(j0, nj, X, Y, Z, cv.x.ptr, cv.y.ptr, cv.z.ptr, M, false, true);
+    T.vel.build(j0, nj, X, Y, Z, cv.x.ptr, cv.y.ptr, cv.z.ptr, M, true);
+    dtt::DtParams prm{G, soft2, eta_ff, eta_fb, tree_dt_vc_fac};
+    long long np = 0;
+    dtt::min_pair_dt(T.pos, T.vel, i0, ni, X, Y, Z, cv.x.ptr, cv.y.ptr, cv.z.ptr, M, sid, p.dt_adapt.data(), prm, &np);
+    g_tree_stats.dt_pairs += np;
+}
+
+void tree_min_dt(TreeMode mode, Particles& p, int i0, int ni, int j0, int nj, const PairVel& cv, const int* sid,
+                 double G, double soft2, double eta_ff, double eta_fb) {
+    g_tree_stats.dt_calls++;
+    g_tree_stats.dt_sinks += ni;
+    g_tree_stats.dt_n2_pairs += (long long)ni * nj;
+    if (mode == TreeMode::Host) {
+        Kokkos::fence();
+        tree_min_dt_on<HostExec>(p, i0, ni, j0, nj, cv, sid, G, soft2, eta_ff, eta_fb);
+    } else {
+        tree_min_dt_on<DevExec>(p, i0, ni, j0, nj, cv, sid, G, soft2, eta_ff, eta_fb);
+    }
+}
+
+std::vector<double> host_range(const Kokkos::View<double*>& v, int i0, int n) {
+    std::vector<double> out(n);
+    auto h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Kokkos::subview(v, Kokkos::make_pair(i0, i0 + n)));
+    std::memcpy(out.data(), h.data(), n * sizeof(double));
+    return out;
+}
+
+void compare_or_abort(const char* what, const std::vector<double>& a, const std::vector<double>& b, int i0) {
+    int bad = 0;
+    for (size_t k = 0; k < a.size(); k++) {
+        if (std::memcmp(&a[k], &b[k], sizeof(double)) != 0) {
+            if (bad < 10) std::fprintf(stderr, "TREE_DT CHECK: %s differs at particle %d: tree %.17g N^2 %.17g\n", what,
+                                       i0 + (int)k, a[k], b[k]);
+            bad++;
+        }
+    }
+    if (bad) {
+        std::fprintf(stderr, "TREE_DT CHECK FAILED: %d of %zu values of %s differ\n", bad, a.size(), what);
+        std::fflush(stderr);
+        std::abort();
+    }
+}
+}  // namespace
 
 // ==========================================================================
 // Accelerations and adaptive time steps of all particles
@@ -156,6 +265,35 @@ template <bool COLL>
 static void dt_range(Particles& p, int i0, int ni, int j0, int nj, double G, double soft2, double eta) {
     Etas e = etas(eta);
     PairVel cv = pair_velocities(p, COLL);
+    const TreeMode mode = tree_mode(nj);
+    if (mode != TreeMode::None) {
+        // minimum over the pair steps from the tree into dt_adapt; collisional mode then accumulates the partner-free
+        // acceleration and jerk over all sources (O(N^2), identical sums) and applies the jerk criterion as DtK does
+        tree_min_dt(mode, p, i0, ni, j0, nj, cv, sid_ptr(p, COLL), G, soft2, e.ff, e.fb);
+        if (COLL) {
+            DtK<COLL, true> ks{{p.x.data()}, {p.y.data()}, {p.z.data()}, {p.mass.data()}, {p.vx.data()}, {p.vy.data()},
+                               {p.vz.data()}, {p.ax.data()}, {p.ay.data()}, {p.az.data()}, {p.dt_adapt.data()},
+                               cv.x, cv.y, cv.z, sid_ptr(p, COLL), G, soft2, e.ff, e.fb, COLL ? e.jerk : 0.0};
+            run_n2("dt_sums", i0, ni, j0, nj, ks);
+        }
+        if (!check_tree()) return;
+        Kokkos::fence();
+        std::vector<double> tdt = host_range(p.dt_adapt, i0, ni), tax, tay, taz;
+        if (COLL) { tax = host_range(p.ax, i0, ni); tay = host_range(p.ay, i0, ni); taz = host_range(p.az, i0, ni); }
+        DtK<COLL> k{{p.x.data()}, {p.y.data()}, {p.z.data()}, {p.mass.data()}, {p.vx.data()}, {p.vy.data()},
+                    {p.vz.data()}, {p.ax.data()}, {p.ay.data()}, {p.az.data()}, {p.dt_adapt.data()},
+                    cv.x, cv.y, cv.z, sid_ptr(p, COLL), G, soft2, e.ff, e.fb, COLL ? e.jerk : 0.0};
+        run_n2("dt_subset", i0, ni, j0, nj, k);
+        Kokkos::fence();
+        compare_or_abort("dt", tdt, host_range(p.dt_adapt, i0, ni), i0);
+        if (COLL) {
+            compare_or_abort("ax", tax, host_range(p.ax, i0, ni), i0);
+            compare_or_abort("ay", tay, host_range(p.ay, i0, ni), i0);
+            compare_or_abort("az", taz, host_range(p.az, i0, ni), i0);
+        }
+        g_tree_stats.checked++;
+        return;
+    }
     DtK<COLL> k{{p.x.data()}, {p.y.data()}, {p.z.data()}, {p.mass.data()}, {p.vx.data()}, {p.vy.data()},
                 {p.vz.data()}, {p.ax.data()}, {p.ay.data()}, {p.az.data()}, {p.dt_adapt.data()},
                 cv.x, cv.y, cv.z, sid_ptr(p, COLL), G, soft2, e.ff, e.fb, COLL ? e.jerk : 0.0};
@@ -182,58 +320,28 @@ void compute_timestep_subset(Particles& p, int start, int count, double G, doubl
 // No subsystem exclusion — every pair is checked fresh.
 // ==========================================================================
 #ifdef ENABLE_COLLISIONAL
-// Pairs i < j of the subset that BIFROST sec. 3.5 counts as neighbours: bound with a or r below r_ngb, or a
-// fly-by reaching pericentre below r_ngb within the step (Eq. 4). Appended to the neighbour buffers through an
-// atomic counter (order is irrelevant: detect_from_pairs sorts); NS = NM = 0, so run_n2 only drives the tiling.
-struct NgbK {
-    static constexpr int NSRC = 7, NS = 0, NM = 0;
-    RawView x, y, z, m, vx, vy, vz;
-    int *pi, *pj, *pb, *cnt;
-    double *pa, *pe, *pE;
-    int max_ngb;
-    double G, r_ngb, r_ngb_max_sq, pivot_dt;
-    struct Sink { double x, y, z, m, vx, vy, vz; };
-    KOKKOS_INLINE_FUNCTION Sink sink(int i) const { return {x(i), y(i), z(i), m(i), vx(i), vy(i), vz(i)}; }
-    KOKKOS_INLINE_FUNCTION void source(int j, double* s) const {
-        s[0] = x(j); s[1] = y(j); s[2] = z(j); s[3] = m(j); s[4] = vx(j); s[5] = vy(j); s[6] = vz(j);
-    }
-    KOKKOS_INLINE_FUNCTION void pair(const Sink& a, int i, const double* s, int j, double*, double*) const {
-        if (j <= i) return;  // upper triangle
-        double dx = s[0] - a.x, dy = s[1] - a.y, dz = s[2] - a.z;
-        double r2 = dx * dx + dy * dy + dz * dz;
-        if (r2 >= r_ngb_max_sq) return;
-        double dvx = s[4] - a.vx, dvy = s[5] - a.vy, dvz = s[6] - a.vz;
-        double v_sq = dvx * dvx + dvy * dvy + dvz * dvz;
-        double mu = G * (a.m + s[3]);
-        double r_val = Kokkos::sqrt(r2);
-        double E_orb = 0.5 * v_sq - mu / (r_val + EPS);
-        bool is_bound = (E_orb < 0);
-        double a_val = -mu / (2.0 * E_orb + EPS);
-        double Lx = dy * dvz - dz * dvy, Ly = dz * dvx - dx * dvz, Lz = dx * dvy - dy * dvx;
-        double L2 = Lx * Lx + Ly * Ly + Lz * Lz;
-        double e_arg = 1.0 + 2.0 * E_orb * L2 / (mu * mu + EPS);
-        double e_val = Kokkos::sqrt(Kokkos::fmax(is_bound ? 0.0 : 1.0, e_arg));
-        bool is_neighbor = false;
-        if (is_bound) {
-            is_neighbor = (a_val < r_ngb || r_val < r_ngb);
-        } else if (r_val < r_ngb) {
-            is_neighbor = true;
-        } else if (Kokkos::fabs(a_val) * (e_val - 1.0) < r_ngb && v_sq > EPS) {   // fly-by, BIFROST Eq. 4
-            is_neighbor = 0.5 * r_val / Kokkos::sqrt(v_sq) < pivot_dt;
-        }
-        if (is_neighbor) {
-            int k = Kokkos::atomic_fetch_add(cnt, 1);
-            if (k < max_ngb) {   // array indices; detect_from_pairs converts to particle ids
-                pi[k] = i; pj[k] = j; pa[k] = a_val; pe[k] = e_val; pE[k] = E_orb; pb[k] = is_bound ? 1 : 0;
-            }
-        }
-    }
-    KOKKOS_INLINE_FUNCTION void finish(int, const Sink&, const double*, const double*) const {}
-};
-
 static void neighbor_search_kernel(Particles& p, int start, int count, double G, double r_ngb, double r_ngb_max,
-                                   double pivot_dt) {
+                                   double pivot_dt, bool allow_tree = true) {
     auto& mgr = g_subsystem_mgr;
+    const TreeMode mode = allow_tree ? tree_mode(count) : TreeMode::None;
+    if (mode != TreeMode::None) {
+        dtt::NgbOut o{mgr.ngb_pair_i.data(), mgr.ngb_pair_j.data(), mgr.ngb_pair_bound.data(), mgr.ngb_count.data(),
+                      mgr.ngb_pair_a.data(), mgr.ngb_pair_e.data(), mgr.ngb_pair_E.data(), mgr.max_ngb_pairs};
+        const double *X = p.x.data(), *Y = p.y.data(), *Z = p.z.data(), *VX = p.vx.data(), *VY = p.vy.data(),
+                     *VZ = p.vz.data(), *M = p.mass.data();
+        if (mode == TreeMode::Host) {
+            Kokkos::fence();
+            auto& T = trees<HostExec>();
+            T.pos.build(start, count, X, Y, Z, VX, VY, VZ, M, false);
+            dtt::ngb_pairs(T.pos, start, count, X, Y, Z, VX, VY, VZ, M, G, r_ngb, r_ngb_max * r_ngb_max, pivot_dt, o);
+        } else {
+            auto& T = trees<DevExec>();
+            T.pos.build(start, count, X, Y, Z, VX, VY, VZ, M, false);
+            dtt::ngb_pairs(T.pos, start, count, X, Y, Z, VX, VY, VZ, M, G, r_ngb, r_ngb_max * r_ngb_max, pivot_dt, o);
+        }
+        Kokkos::fence();
+        return;
+    }
     NgbK k{{p.x.data()}, {p.y.data()}, {p.z.data()}, {p.mass.data()}, {p.vx.data()}, {p.vy.data()}, {p.vz.data()},
            mgr.ngb_pair_i.data(), mgr.ngb_pair_j.data(), mgr.ngb_pair_bound.data(), mgr.ngb_count.data(),
            mgr.ngb_pair_a.data(), mgr.ngb_pair_e.data(), mgr.ngb_pair_E.data(), mgr.max_ngb_pairs,
@@ -242,10 +350,58 @@ static void neighbor_search_kernel(Particles& p, int start, int count, double G,
     Kokkos::fence();
 }
 
+// NBODY_CHECK_TREE_DT: the pairs found by the tree (sorted, with their a, e, E and bound flag) must equal the O(N^2)
+// kernel's bitwise; the N^2 result stays in the buffers
+static void check_ngb_against_n2(Particles& p, int start, int count, double G, double r_ngb, double r_ngb_max,
+                                 double pivot_dt) {
+    auto& mgr = g_subsystem_mgr;
+    struct Row { int i, j, b; double a, e, E; };
+    auto rows = [&]() {
+        int n = 0;
+        Kokkos::deep_copy(n, Kokkos::subview(mgr.ngb_count, 0));
+        n = std::min(n, mgr.max_ngb_pairs);
+        auto cp = [&](auto v) {
+            return Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Kokkos::subview(v, Kokkos::make_pair(0, n)));
+        };
+        auto hi = cp(mgr.ngb_pair_i), hj = cp(mgr.ngb_pair_j), hb = cp(mgr.ngb_pair_bound);
+        auto ha = cp(mgr.ngb_pair_a), he = cp(mgr.ngb_pair_e), hE = cp(mgr.ngb_pair_E);
+        std::vector<Row> r(n);
+        for (int k = 0; k < n; k++) r[k] = {hi(k), hj(k), hb(k), ha(k), he(k), hE(k)};
+        std::sort(r.begin(), r.end(), [](const Row& x, const Row& y) { return x.i != y.i ? x.i < y.i : x.j < y.j; });
+        return r;
+    };
+    int n_before = 0;
+    Kokkos::deep_copy(n_before, Kokkos::subview(mgr.ngb_count, 0));
+    std::vector<Row> tree_rows = rows();
+    // the HHS call sites reset the counter before the search, so the buffer holds this search's pairs only
+    mgr.reset_ngb_count();
+    neighbor_search_kernel(p, start, count, G, r_ngb, r_ngb_max, pivot_dt, false);
+    int n_after = 0;
+    Kokkos::deep_copy(n_after, Kokkos::subview(mgr.ngb_count, 0));
+    std::vector<Row> n2_rows = rows();
+    bool ok = n_before == n_after && tree_rows.size() == n2_rows.size();
+    for (size_t k = 0; ok && k < tree_rows.size(); k++) {
+        const Row &a = tree_rows[k], &b = n2_rows[k];
+        ok = a.i == b.i && a.j == b.j && a.b == b.b && std::memcmp(&a.a, &b.a, sizeof(double)) == 0 &&
+             std::memcmp(&a.e, &b.e, sizeof(double)) == 0 && std::memcmp(&a.E, &b.E, sizeof(double)) == 0;
+        if (!ok) std::fprintf(stderr, "TREE_DT CHECK: neighbour pair %zu differs: tree (%d,%d) N^2 (%d,%d)\n", k, a.i, a.j,
+                              b.i, b.j);
+    }
+    if (!ok) {
+        std::fprintf(stderr, "TREE_DT CHECK FAILED: neighbour pairs tree %d (%zu stored) vs N^2 %d (%zu stored)\n",
+                     n_before, tree_rows.size(), n_after, n2_rows.size());
+        std::fflush(stderr);
+        std::abort();
+    }
+    g_tree_stats.ngb_pairs += n_after;
+    g_tree_stats.checked++;
+}
+
 void neighbor_search_subset(Particles& p, int start, int count,
                             double G, double r_ngb, double r_ngb_max,
                             double pivot_dt) {
     if (count <= 1) return;
+    if (tree_mode(count) != TreeMode::None) g_tree_stats.ngb_calls++;   // once per search (a buffer overflow repeats it)
     neighbor_search_kernel(p, start, count, G, r_ngb, r_ngb_max, pivot_dt);
     // The kernel counts every pair but stores only max_ngb_pairs: an overflow would silently drop pairs
     // (binaries left undetected are then integrated orbit by orbit by the FSI). Grow and search again.
@@ -256,6 +412,7 @@ void neighbor_search_subset(Particles& p, int start, int count,
         g_subsystem_mgr.reset_ngb_count();
         neighbor_search_kernel(p, start, count, G, r_ngb, r_ngb_max, pivot_dt);
     }
+    if (check_tree() && tree_mode(count) != TreeMode::None) check_ngb_against_n2(p, start, count, G, r_ngb, r_ngb_max, pivot_dt);
 }
 #else
 void neighbor_search_subset(Particles&, int, int, double, double, double, double) {}

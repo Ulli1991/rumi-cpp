@@ -283,6 +283,28 @@ def secular_steps(exe, label, cfg, per_call):
     return ok & check(f"{label} internal steps per evolution", n_sub / max(n_ev, 1), per_call)
 
 
+def tree_exact(exe, label, cfg):
+    """Exact tree time-step and neighbour searches (gravity/dt_tree.h), forced on at every set size: with
+    NBODY_CHECK_TREE_DT=1 every tree search is compared bitwise with the O(N^2) kernel (the run aborts on a
+    difference), and the diagnostics must equal those of the run without the tree to the last printed digit."""
+    os.environ["NBODY_CHECK_TREE_DT"] = "1"
+    out = run_output(exe, cfg)
+    del os.environ["NBODY_CHECK_TREE_DT"]
+    m = re.search(r"TREE_DT: dt calls=(\d+) sinks=\d+ pairs=(\d+) \(N\^2 (\d+)\) ngb calls=(\d+) pairs=\d+ checked=(\d+)", out)
+    if not m:
+        raise SystemExit("FAIL: no tree searches ran")
+    dt_calls, pairs, n2_pairs, ngb_calls, checked = (int(g) for g in m.groups())
+    print(f"   {dt_calls} time-step and {ngb_calls} neighbour searches, pair evaluations {pairs} of {n2_pairs} (N^2)")
+    ref = run_output(exe, {k: v for k, v in cfg.items() if not k.startswith("TREE_DT")})
+    rows = [l for l in out.splitlines() if re.match(r"^\s+L0\s", l)]
+    ref_rows = [l for l in ref.splitlines() if re.match(r"^\s+L0\s", l)]
+    ok = check(f"{label} searches checked against N^2", checked, dt_calls + ngb_calls, lower=True)
+    ok &= check(f"{label} searches run", dt_calls + ngb_calls, 1, lower=True)
+    ok &= check(f"{label} diagnostic rows differing from the run without tree",
+                sum(a != b for a, b in zip(rows, ref_rows)) + abs(len(rows) - len(ref_rows)), 0)
+    return ok
+
+
 def no_fsi_groups(exe, label, cfg, bound):
     """Neighbour chains in a dense core must be split along bound pairs, not left whole to the FSI."""
     out = run_output(exe, cfg)
@@ -426,6 +448,15 @@ CASES = {
     "dense_core_split": lambda exe: no_fsi_groups(exe, "dense core", dict(TRIPLES, PLUMMER_R_HALF="0.03",
                                                                             TOTAL_TIME_MYR="1e-4"), 1e-7),
     "logh_big_group": lambda exe: big_group(exe, "big group", BIG_GROUP, (1.2e-5, 1e-12)),
+    # Exact tree searches (M7.4), forced at every set size, each search checked bitwise against O(N^2)
+    "tree_dt_binaries": lambda exe: tree_exact(exe, "tree, 10 % binaries", dict(BINARIES, TREE_DT_MIN_N="2")),
+    "tree_dt_binaries_cm": lambda exe: tree_exact(exe, "host tree, 10 % binaries, c.o.m. fly-by velocities",
+                                                  dict(BINARIES, FLYBY_CM_VELOCITY="true", TREE_DT_CPU_MAX="1000000")),
+    "tree_dt_binaries50": lambda exe: tree_exact(exe, "tree, 50 % binaries", dict(BINARIES50, TREE_DT_MIN_N="2")),
+    "tree_dt_triples": lambda exe: tree_exact(exe, "tree, dense core", dict(TRIPLES, TREE_DT_MIN_N="2")),
+    "tree_dt_mergers": lambda exe: tree_exact(exe, "tree, mergers", dict(MERGERS, SERIAL_N2_CPU="0", TREE_DT_MIN_N="2")),
+    "tree_dt_softened": lambda exe: tree_exact(exe, "tree, softened collisionless", dict(BINARIES, COLLISIONAL="false",
+                                               SOFTENING_PC="1e-3", BINARY_FRAC="0", TREE_DT_MIN_N="2")),
     # MPI cases, run under NBODY_TEST_LAUNCHER (CTest sets 2 ranks). Spins were not broadcast: lost on every
     # rank of a GPU run (host backends alias the mirror, so the host build cannot fail this one).
     "spin_mpi2": lambda exe: spins(exe, "IMBH spin, 2 ranks", SPIN_IMBH, 0.9),

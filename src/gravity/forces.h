@@ -4,6 +4,11 @@
 
 // FLYBY_CM_VELOCITY: pair time steps use the subsystem centre-of-mass velocity of members (FROST-CLUSTERS II)
 extern bool flyby_cm_velocity;
+// Exact tree time-step / neighbour searches (dt_tree.h): device tree for source sets >= tree_dt_min_n, host tree for
+// sets <= tree_dt_cpu_max (host-accessible memory only); 0 = off. tree_dt_vc_fac: low-speed split (multiplier of V_c, default 30)
+extern int tree_dt_min_n;
+extern int tree_dt_cpu_max;
+extern double tree_dt_vc_fac;
 
 // Full N-body
 void compute_acceleration_and_timestep(Particles& p, double G, double soft2, double eta);
