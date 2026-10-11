@@ -5,6 +5,7 @@
 #include "collisional_config.h"
 #include "subsystem.h"
 #include "merger_tree.h"
+#include "stellar_cache.h"
 #endif
 #ifdef USE_MPI
 #include <mpi.h>
@@ -556,6 +557,9 @@ void read_restart(const std::string& path, Particles& p, RunState& rs, bool allo
     if (ver != code_version())
         std::fprintf(stderr, "WARNING: restart: %s was written by %s, this is %s\n", path.c_str(), ver.c_str(),
                      code_version());
+#ifdef ENABLE_COLLISIONAL
+    StellarPropsCache::get().invalidate();   // stellar types and radii of the restored particles
+#endif
 }
 
 std::string latest_restart(const std::string& dir) {

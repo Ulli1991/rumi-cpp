@@ -4,6 +4,8 @@
 #include <cmath>
 #include <algorithm>
 #include <cstdlib>
+#include <cstdio>
+#include <initializer_list>
 
 // ============================================================================
 // Peters (1964) orbit-averaged GW dissipation
@@ -417,84 +419,196 @@ void secular_to_cartesian(const SecularBinary& bin, double G,
 }
 
 // ============================================================================
-// Full secular binary integration: Cartesian -> elements -> secular -> Cartesian
-// Works in absolute coordinates (handles CM frame internally)
+// Secular binary integration in absolute coordinates (handles the c.o.m. internally): the exact Kepler drift of the
+// relative orbit (kepler_drift, universal variables), then the orbit-averaged PN changes of (a, e, omega) applied to
+// the drifted state as a rotation about L and a change of shape at fixed orientation and mean anomaly. No orbital
+// elements or angles are formed, so it holds at every e. The elements route it replaced (r, v -> a, e, omega, M ->
+// r, v) lost the phase at small e: one drift vs sixteen disagreed by 4e-8 at e = 1e-4, 1.6e-4 at e = 1e-6 and by
+// order 1 at e <= 1e-8 (the pericentre direction and the true anomaly are separately undefined there), and it froze
+// unbound pairs. Without PN this is the analytic Kepler solution, to which BIFROST's secular integrator reduces
+// (Rantala et al. 2023, sec. 3.10).
 // ============================================================================
+
+namespace {
+double dot3(const double* a, const double* b) { return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]; }
+void cross3(const double* a, const double* b, double* c) {
+    c[0] = a[1]*b[2] - a[2]*b[1]; c[1] = a[2]*b[0] - a[0]*b[2]; c[2] = a[0]*b[1] - a[1]*b[0];
+}
+
+// Rotate r and v by the angle dw about the unit vector n (Rodrigues): the pericentre advance of the orbit
+void rotate_about(double r[3], double v[3], const double n[3], double dw) {
+    const double c = std::cos(dw), s = std::sin(dw);
+    for (double* x : {r, v}) {
+        double nx[3];
+        cross3(n, x, nx);
+        const double nd = dot3(n, x) * (1.0 - c);
+        for (int k = 0; k < 3; k++) x[k] = x[k] * c + nx[k] * s + n[k] * nd;
+    }
+}
+
+// Bound relative state r, v (mu) -> the orbit with semi-major axis a1, eccentricity vector k e_vec (same pericentre
+// direction and plane) and mean anomaly M + dM. In the orbit plane r = a (cos E - e) P + a sqrt(1 - e^2) sin E Q and
+// v = sqrt(mu / a) (-sin E P + sqrt(1 - e^2) cos E Q) / (1 - e cos E); with u = cos E P + sin E Q, w = -sin E P +
+// cos E Q, the eccentricity vector e_vec = e P, q = L_hat x e_vec = e Q, C = e cos E = 1 - r / a and S = e sin E =
+// r.v / sqrt(mu a) this is r = a (u - e_vec - S q / (1 + sqrt(1 - e^2))), v = sqrt(mu / a) (w - C q / (1 +
+// sqrt(1 - e^2))) / (1 - C): every term stays defined as e -> 0, where P and E separately do not.
+void reshape_orbit(double r[3], double v[3], double mu, double a1, double k, double dM) {
+    const double rr = std::sqrt(dot3(r, r));
+    const double beta = 2.0 * mu / rr - dot3(v, v);
+    if (!(beta > 0.0) || !(a1 > 0.0)) return;
+    const double a = mu / beta;
+    double h[3], vh[3], ev[3], q[3], hh[3];
+    cross3(r, v, h);
+    const double hn = std::sqrt(dot3(h, h));
+    if (!(hn > 0.0)) return;   // radial orbit: no plane
+    cross3(v, h, vh);
+    for (int c = 0; c < 3; c++) { ev[c] = vh[c] / mu - r[c] / rr; hh[c] = h[c] / hn; }
+    cross3(hh, ev, q);
+    const double e2 = std::min(dot3(ev, ev), 1.0 - 1e-15);
+    const double be = std::sqrt(1.0 - e2);
+    const double omc = rr / a;                       // 1 - C, exact (no cancellation near the pericentre of e -> 1)
+    const double C = 1.0 - omc, S = dot3(r, v) / std::sqrt(mu * a);
+    const double sv = std::sqrt(mu / a);
+    double u[3], w[3];
+    for (int c = 0; c < 3; c++) {
+        u[c] = r[c] / a + ev[c] + S * q[c] / (1.0 + be);
+        w[c] = v[c] * omc / sv + C * q[c] / (1.0 + be);
+    }
+    // Eccentric-anomaly change d at the new mean anomaly: (E + d) - k e sin(E + d) = E - e sin E + dM, i.e.
+    // f(d) = d - k (S cos d + C sin d) + S - dM = 0; f' = 1 - k e cos(E + d) > 0 and |k (S cos d + C sin d)| <= k e
+    // bracket the root in dM - S -+ k e. Newton, bisection where it leaves the bracket (high e near the pericentre)
+    const double ke = k * std::sqrt(e2);
+    double lo = dM - S - ke, hi = dM - S + ke, d = dM;
+    if (!(d > lo && d < hi)) d = 0.5 * (lo + hi);
+    for (int it = 0; it < 100; it++) {
+        const double cd = std::cos(d), sd = std::sin(d);
+        const double f = d - k * (S * cd + C * sd) + S - dM;
+        if (f == 0.0) break;
+        if (f < 0.0) lo = std::max(lo, d); else hi = std::min(hi, d);
+        double dn = d - f / (1.0 - k * (C * cd - S * sd));
+        if (!(dn > lo && dn < hi)) dn = 0.5 * (lo + hi);
+        if (dn == d || !(hi > lo)) break;
+        const double step = std::fabs(dn - d);
+        d = dn;
+        if (step <= 1e-16 * std::max(1.0, std::fabs(d))) break;
+    }
+    const double cd = std::cos(d), sd = std::sin(d);
+    const double C1 = k * (C * cd - S * sd), S1 = k * (S * cd + C * sd);
+    // 1 - C1 = (1 - k) + k (1 - C + 2 C sin^2(d / 2) + S sin d), without cancellation
+    const double sh = std::sin(0.5 * d);
+    const double omc1 = (1.0 - k) + k * (omc + 2.0 * C * sh * sh + S * sd);
+    const double be1 = std::sqrt(std::max(0.0, 1.0 - k * k * e2));
+    const double sv1 = std::sqrt(mu / a1);
+    for (int c = 0; c < 3; c++) {
+        const double u1 = cd * u[c] + sd * w[c], w1 = -sd * u[c] + cd * w[c];
+        r[c] = a1 * (u1 - k * ev[c] - S1 * k * q[c] / (1.0 + be1));
+        v[c] = sv1 * (w1 - C1 * k * q[c] / (1.0 + be1)) / omc1;
+    }
+}
+}  // namespace
 
 int integrate_secular_binary(
     double pos1[3], double vel1[3], double m1,
     double pos2[3], double vel2[3], double m2,
     double G, double c_code, int pn_order, double dt) {
 
-    double M_tot = m1 + m2;
+    const double M_tot = m1 + m2;
+    const double mu = G * M_tot;
 
-    // 1. Compute center of mass
-    double cm_pos[3], cm_vel[3];
+    double cm_pos[3], cm_vel[3], r[3], v[3];
     for (int k = 0; k < 3; k++) {
         cm_pos[k] = (m1 * pos1[k] + m2 * pos2[k]) / M_tot;
         cm_vel[k] = (m1 * vel1[k] + m2 * vel2[k]) / M_tot;
-    }
-
-    // 2. Relative coordinates: r = pos1 - pos2, v = vel1 - vel2
-    double r[3], v[3];
-    for (int k = 0; k < 3; k++) {
         r[k] = pos1[k] - pos2[k];
         v[k] = vel1[k] - vel2[k];
     }
+    const double r_in[3] = {r[0], r[1], r[2]}, v_in[3] = {v[0], v[1], v[2]};
 
-    // 3. Cartesian -> orbital elements
-    double mu = G * M_tot;
-    OrbitalElements oe = cartesian_to_elements(r, v, mu);
+    int n_sub = 1;
+    double a1 = 0.0, k_e = 1.0, dw = 0.0, dM = 0.0;
+    double hhat[3] = {0.0, 0.0, 1.0};
+    bool reshape = false;
+    if (pn_order != 0) {
+        // Orbit-averaged PN evolution of (a, e, omega) from the state's a (energy) and e (|e_vec|, accurate to
+        // round-off at small e, unlike sqrt(1 - p / a)); only the increments are used
+        const double rr = std::sqrt(dot3(r, r));
+        const double beta = 2.0 * mu / rr - dot3(v, v);
+        double h[3], vh[3];
+        cross3(r, v, h);
+        cross3(v, h, vh);
+        double e2 = 0.0;
+        for (int c = 0; c < 3; c++) { const double ec = vh[c] / mu - r[c] / rr; e2 += ec * ec; }
+        const double e0 = std::sqrt(e2);
+        const double hn = std::sqrt(dot3(h, h));
+        if (!(beta > 0.0) || e0 >= 1.0 || !(hn > 0.0)) return 0;   // unbound or radial: not a secular binary
+        for (int c = 0; c < 3; c++) hhat[c] = h[c] / hn;
+        SecularBinary bin;
+        bin.a = mu / beta;
+        bin.e = e0;
+        bin.omega = 0.0;
+        bin.inc = 0.0;
+        bin.Omega = 0.0;
+        bin.m1 = m1;
+        bin.m2 = m2;
+        const double a0 = bin.a;
+        const double e_ref = std::min(e0, 0.9999);   // secular_evolve_binary clamps e to 0.9999: a change, not the clamp
+        n_sub = secular_evolve_binary(bin, dt, G, c_code, pn_order);
 
-    // Safety: skip if unbound or degenerate
-    if (oe.a <= 0.0 || oe.e >= 1.0) return 0;
-
-    // 4. Populate SecularBinary and evolve (a, e, omega)
-    SecularBinary bin;
-    bin.a = oe.a;
-    bin.e = oe.e;
-    bin.omega = oe.omega;
-    bin.inc = oe.inc;
-    bin.Omega = oe.Omega;
-    bin.m1 = m1;
-    bin.m2 = m2;
-    const int n_sub = secular_evolve_binary(bin, dt, G, c_code, pn_order);
-
-    // 5. Check for merger (secular_evolve_binary sets a=0 on coalescence)
-    if (bin.a <= 0.0) {
-        printf("  [SEC] WARNING: binary merged during secular evolution "
-               "(pericenter < ISCO)\n");
-        return n_sub;  // leave particles at their original positions
+        // Merger (secular_evolve_binary sets a = 0 at coalescence) or unbound after the evolution: leave the
+        // particles as they are (as before)
+        if (bin.a <= 0.0) {
+            printf("  [SEC] WARNING: binary merged during secular evolution "
+                   "(pericenter < ISCO)\n");
+            return n_sub;
+        }
+        if (bin.e >= 1.0) {
+            printf("  [SEC] WARNING: binary became unbound during secular evolution "
+                   "(e=%.6f)\n", bin.e);
+            return n_sub;
+        }
+        a1 = bin.a;
+        k_e = e_ref > 0.0 ? bin.e / e_ref : 1.0;
+        dw = bin.omega;
+        // Mean motion: the drift advances M by n(a0) dt; the trapezoid of n(a) over the interval adds the rest. (The
+        // elements route used n(a1) dt, first order: for the 10 + 10 Msun BH binary at 0.01 AU, 4.5e4 orbits and
+        // da/a = 2.5e-6 per 1e-5 Myr, that is 0.5 rad of phase per step)
+        if (a1 != a0) dM = 0.5 * (std::sqrt(mu / (a1 * a1 * a1)) - std::sqrt(mu / (a0 * a0 * a0))) * dt;
+        reshape = (a1 != a0 || k_e != 1.0 || dM != 0.0);
     }
 
-    // Check for unbound after evolution
-    if (bin.e >= 1.0) {
-        printf("  [SEC] WARNING: binary became unbound during secular evolution "
-               "(e=%.6f)\n", bin.e);
-        return n_sub;
-    }
+    kepler_drift(r, v, mu, dt);
+    if (dw != 0.0) rotate_about(r, v, hhat, dw);
+    if (reshape) reshape_orbit(r, v, mu, a1, k_e, dM);
 
-    // 6. Advance mean anomaly: M_new = M_old + n * dt
-    double n_mean = std::sqrt(mu / (bin.a * bin.a * bin.a));
-    double M_new = oe.mean_anom + n_mean * dt;
-
-    // 7. Elements -> Cartesian (relative coords)
-    double r_new[3], v_new[3];
-    secular_to_cartesian(bin, G, M_new, r_new, v_new);
-
-    // 8. CM drift (linear, no forces on CM — internal forces only)
-    double cm_pos_new[3];
+    // c.o.m. moves on a straight line (internal forces only); pos1 = cm + (m2 / M) r, pos2 = cm - (m1 / M) r
     for (int k = 0; k < 3; k++) {
-        cm_pos_new[k] = cm_pos[k] + cm_vel[k] * dt;
+        const double cm_new = cm_pos[k] + cm_vel[k] * dt;
+        pos1[k] = cm_new + (m2 / M_tot) * r[k];
+        vel1[k] = cm_vel[k] + (m2 / M_tot) * v[k];
+        pos2[k] = cm_new - (m1 / M_tot) * r[k];
+        vel2[k] = cm_vel[k] - (m1 / M_tot) * v[k];
     }
-
-    // 9. Reconstruct absolute positions:
-    //    pos1 = cm + (m2/M)*r_rel, pos2 = cm - (m1/M)*r_rel
-    for (int k = 0; k < 3; k++) {
-        pos1[k] = cm_pos_new[k] + (m2 / M_tot) * r_new[k];
-        vel1[k] = cm_vel[k]     + (m2 / M_tot) * v_new[k];
-        pos2[k] = cm_pos_new[k] - (m1 / M_tot) * r_new[k];
-        vel2[k] = cm_vel[k]     - (m1 / M_tot) * v_new[k];
+    // Without PN the two-body energy is exactly conserved, but the members are stored in absolute coordinates: at
+    // |x| / |r| ~ 1e7 (a 0.02 AU binary 1 pc from the centre) rounding the new positions changes E_orb by ~1e-9 of
+    // itself, which the energy check sees (043190d booked that change as E_gw, which hid it). Scaling the relative
+    // velocity, stored to ~eps of itself, restores the orbit's energy (manifold correction for Kepler energy
+    // consistency, Fukushima 2003, AJ 126, 1097); two passes for the rounding of the velocities themselves
+    if (pn_order == 0 && !reshape) {
+        const double E_target = 0.5 * dot3(v_in, v_in) - mu / std::sqrt(dot3(r_in, r_in));
+        for (int pass = 0; pass < 2; pass++) {
+            double ro[3], vo[3];
+            for (int k = 0; k < 3; k++) { ro[k] = pos1[k] - pos2[k]; vo[k] = vel1[k] - vel2[k]; }
+            const double vo2 = dot3(vo, vo);
+            const double arg = 2.0 * (E_target + mu / std::sqrt(dot3(ro, ro)));
+            if (!(arg > 0.0) || !(vo2 > 0.0)) break;
+            const double sm1 = std::sqrt(arg / vo2) - 1.0;
+            if (sm1 == 0.0) break;
+            for (int k = 0; k < 3; k++) {
+                const double dv = sm1 * vo[k];
+                vel1[k] += (m2 / M_tot) * dv;
+                vel2[k] -= (m1 / M_tot) * dv;
+            }
+        }
     }
     return n_sub;
 }

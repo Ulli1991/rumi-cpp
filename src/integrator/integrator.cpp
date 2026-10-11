@@ -19,6 +19,7 @@
 #include "checkpoint.h"
 #include "diagnostics.h"
 #include "kepler.h"
+#include "stellar_cache.h"
 #include "device_staging.h"
 #endif
 #include <Kokkos_Core.hpp>
@@ -543,6 +544,8 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
                 double r_mag = std::sqrt(r2);
                 double mu = G * (h_m(idx_i - start) + h_m(idx_j - start));
                 double E_orb = 0.5 * v2 - mu / r_mag;
+                // KEPLER_2BODY: without PN the pair is a Kepler problem at any orbit count (collisional_config.h)
+                const bool kep2 = g_collisional.kepler_2body_pair(h_m(idx_i - start), h_m(idx_j - start));
 
                 // Update orbital elements
                 sub.orb.E_orb = E_orb;
@@ -556,13 +559,13 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
                     sub.orb.e = (e2 > 0.0) ? std::sqrt(e2) : 0.0;
                     sub.orb.period = 2.0 * M_PI * std::sqrt(a * a * a / mu);
                     sub.n_orb_per_dt = (int)(dt / sub.orb.period);
-                    sub.is_secular = (sub.n_orb_per_dt >= n_orb_secular);
+                    sub.is_secular = (sub.n_orb_per_dt >= n_orb_secular) || kep2;
 
                     // Transition: was FLYBY but now bound → BINARY
                     if (sub.type == SubsystemType::FLYBY) sub.type = SubsystemType::BINARY;
                 } else {
                     sub.orb.a = -mu / (2.0 * E_orb);  // hyperbolic
-                    sub.is_secular = false;
+                    sub.is_secular = kep2;            // the universal-variable drift covers unbound orbits
 
                     // Transition: was BINARY but now unbound → FLYBY
                     if (sub.type == SubsystemType::BINARY) sub.type = SubsystemType::FLYBY;
@@ -651,6 +654,7 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
     if (g_collisional.subsys_collisions && g_collisional.c_code > 0.0) {
         std::vector<int> sec_rows;   // member indices of secular candidates, two per subsystem
         std::vector<int> sec_subs;
+        std::vector<int> sec_pids;   // their particle ids
         for (int s : eligible) {
             const auto& sub = g_subsystem_mgr.active[s];
             for (int pid : sub.particle_ids) {
@@ -671,35 +675,60 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
             sec_subs.push_back(s);
             sec_rows.push_back(ia);
             sec_rows.push_back(ib);
+            sec_pids.push_back(pa);
+            sec_pids.push_back(pb);
         }
-        if (!sec_subs.empty()) {   // stellar types and radii of those members: one small gather
-            DeviceStaging& st = DeviceStaging::get<4>();
-            const int nr = (int)sec_rows.size();
-            st.reserve(nr, 2);
-            std::copy(sec_rows.begin(), sec_rows.end(), st.h_idx.data());
-            st.upload_idx(nr);
-            auto d_idx = st.d_idx;
-            auto d_buf = st.d_buf;
-            auto pst = p.stellar_type;
-            auto psr = p.stellar_radius;
-            small_for("coll_props_gather", nr, KOKKOS_LAMBDA(int k) {
-                const int i = d_idx(k);
-                d_buf(2 * k) = (double)pst(i);
-                d_buf(2 * k + 1) = psr(i);
-            });
-            st.download_buf((size_t)nr * 2);
+        if (!sec_subs.empty()) {
+            // Stellar types and radii of those members from the host cache by particle id (stellar_cache.h): the
+            // device gather it replaced cost ~40 us + 0.25 us per binary per call (0.4-0.6 s per step at 200k)
+            StellarPropsCache& props = StellarPropsCache::get();
+            const bool use_cache = StellarPropsCache::enabled();
+            std::vector<int> kw_g;          // NBODY_STELLAR_CACHE=0: the device gather (two values per member)
+            std::vector<double> rad_g;
+            if (use_cache) {
+                props.ensure(p);
+                bool all = true;
+                for (int pid : sec_pids) all = all && props.has(pid);
+                if (!all) { props.invalidate(); props.ensure(p); }
+                if (StellarPropsCache::check_enabled()) props.verify(p, sec_rows, sec_pids, "secular candidates");
+            } else {
+                DeviceStaging& st = DeviceStaging::get<4>();
+                const int nr = (int)sec_rows.size();
+                st.reserve(nr, 2);
+                std::copy(sec_rows.begin(), sec_rows.end(), st.h_idx.data());
+                st.upload_idx(nr);
+                auto d_idx = st.d_idx;
+                auto d_buf = st.d_buf;
+                auto pst = p.stellar_type;
+                auto psr = p.stellar_radius;
+                small_for("coll_props_gather", nr, KOKKOS_LAMBDA(int k) {
+                    const int i = d_idx(k);
+                    d_buf(2 * k) = (double)pst(i);
+                    d_buf(2 * k + 1) = psr(i);
+                });
+                st.download_buf((size_t)nr * 2);
+                kw_g.resize(nr); rad_g.resize(nr);
+                for (int k = 0; k < nr; k++) { kw_g[k] = (int)st.h_buf(2 * k); rad_g[k] = st.h_buf(2 * k + 1); }
+            }
+            auto kw_of = [&](int row) { return use_cache ? props.type_of(sec_pids[row]) : kw_g[row]; };
+            auto rad_of = [&](int row) { return use_cache ? props.radius_of(sec_pids[row]) : rad_g[row]; };
             constexpr double R_sun_to_pc = 2.254e-8;   // as mergers.cpp
             for (size_t q = 0; q < sec_subs.size(); q++) {
                 const int ia = sec_rows[2 * q] - start, ib = sec_rows[2 * q + 1] - start;
                 double r[3] = {h_x(ib) - h_x(ia), h_y(ib) - h_y(ia), h_z(ib) - h_z(ia)};
                 double v[3] = {h_vx(ib) - h_vx(ia), h_vy(ib) - h_vy(ia), h_vz(ib) - h_vz(ia)};
                 double rp = 0.0;
-                kepler_time_to_pericentre(r, v, G * (h_m(ia) + h_m(ib)), &rp);
+                const double tau = kepler_time_to_pericentre(r, v, G * (h_m(ia) + h_m(ib)), &rp);
+                const double r_now = std::sqrt(r[0] * r[0] + r[1] * r[1] + r[2] * r[2]);
                 MergerType ct;
-                const double rc = collision_distance((int)st.h_buf(4 * q), h_m(ia), st.h_buf(4 * q + 1) * R_sun_to_pc,
-                                                     (int)st.h_buf(4 * q + 2), h_m(ib),
-                                                     st.h_buf(4 * q + 3) * R_sun_to_pc, G, g_collisional.c_code, ct);
-                if (rp < rc) to_logh[sec_subs[q]] = 1;
+                const int qa = 2 * (int)q, qb = qa + 1;
+                const double rc = collision_distance(kw_of(qa), h_m(ia), rad_of(qa) * R_sun_to_pc, kw_of(qb), h_m(ib),
+                                                     rad_of(qb) * R_sun_to_pc, G, g_collisional.c_code, ct);
+                // A candidate goes to LogH when its pericentre falls in this interval (or it is inside r_coll now);
+                // otherwise the exact drift cannot reach the collision distance before the interval ends (a pair
+                // with >= 1 orbit per step always has its pericentre inside: unchanged for the secular binaries).
+                // The margin covers the O(|1 - e|) of the near-parabolic pericentre time
+                if (rp < rc && (tau <= dt * (1.0 + 1e-5) || r_now < rc)) to_logh[sec_subs[q]] = 1;
             }
         }
     }
@@ -747,29 +776,30 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
 
             evolved[k] = 1;
 
-            // Compute orbital energy before secular evolution for GW bookkeeping
-            double m1_sec = h_m(idx0 - start), m2_sec = h_m(idx1 - start);
-            double mu_sec = G * (m1_sec + m2_sec);
-            double r_rel_pre[3] = {p2[0]-p1[0], p2[1]-p1[1], p2[2]-p1[2]};
-            double v_rel_pre[3] = {v2[0]-v1[0], v2[1]-v1[1], v2[2]-v1[2]};
-            auto oe_pre = cartesian_to_elements(r_rel_pre, v_rel_pre, mu_sec);
-            double E_orb_pre = -G * m1_sec * m2_sec / (2.0 * oe_pre.a);
-
             // PN terms only for compact binaries (a member above m_pn), as in LogH and BIFROST: stellar binaries
             // are a Kepler drift. With PN on, a tight stellar binary took thousands of 1PN-precession sub-steps
             // per evolution (5-7 ms secular calls at depths 3-6 of the 200k cluster)
+            double m1_sec = h_m(idx0 - start), m2_sec = h_m(idx1 - start);
+            double mu_sec = G * (m1_sec + m2_sec);
             const bool pn_binary = std::max(m1_sec, m2_sec) >= g_collisional.m_pn;
             sec_pn[k] = pn_binary;
-            substeps[k] = integrate_secular_binary(p1, v1, m1_sec, p2, v2, m2_sec, G, g_collisional.c_code,
-                                                   pn_binary ? g_collisional.pn_order : 0, dt);
+            const int pn_b = pn_binary ? g_collisional.pn_order : 0;
 
-            // GW energy bookkeeping: energy radiated = E_orb_before - E_orb_after
-            double r_rel_post[3] = {p2[0]-p1[0], p2[1]-p1[1], p2[2]-p1[2]};
-            double v_rel_post[3] = {v2[0]-v1[0], v2[1]-v1[1], v2[2]-v1[2]};
-            auto oe_post = cartesian_to_elements(r_rel_post, v_rel_post, mu_sec);
-            if (oe_post.a > 0.0 && oe_pre.a > 0.0) {
-                double E_orb_post = -G * m1_sec * m2_sec / (2.0 * oe_post.a);
-                dE_gw[k] = E_orb_pre - E_orb_post;
+            // GW energy bookkeeping (PN evolution only): energy radiated = E_orb_before - E_orb_after. Without PN
+            // the drift conserves E_orb exactly; booking its round-off as "GW" energy hid the drift's error from
+            // the energy check (and cost two element conversions per binary)
+            double r_rel_pre[3] = {p2[0]-p1[0], p2[1]-p1[1], p2[2]-p1[2]};
+            double v_rel_pre[3] = {v2[0]-v1[0], v2[1]-v1[1], v2[2]-v1[2]};
+            const double a_pre = pn_b ? cartesian_to_elements(r_rel_pre, v_rel_pre, mu_sec).a : 0.0;
+
+            substeps[k] = integrate_secular_binary(p1, v1, m1_sec, p2, v2, m2_sec, G, g_collisional.c_code, pn_b, dt);
+
+            if (pn_b) {
+                double r_rel_post[3] = {p2[0]-p1[0], p2[1]-p1[1], p2[2]-p1[2]};
+                double v_rel_post[3] = {v2[0]-v1[0], v2[1]-v1[1], v2[2]-v1[2]};
+                const double a_post = cartesian_to_elements(r_rel_post, v_rel_post, mu_sec).a;
+                if (a_post > 0.0 && a_pre > 0.0)
+                    dE_gw[k] = -G * m1_sec * m2_sec / (2.0 * a_pre) + G * m1_sec * m2_sec / (2.0 * a_post);
             }
 
             // P and L moved by the evolution (Kepler motion and the CoM drift conserve both)
@@ -808,6 +838,10 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
             g_subsystem_mgr.step_secular_evolved += evolved[k];
             if (evolved[k]) adv_check.advanced(secular_idx[k], dt, "secular binary");
             g_subsystem_mgr.step_secular_substeps += substeps[k];
+            const auto& sk = g_subsystem_mgr.active[secular_idx[k]];
+            if (evolved[k] && g_collisional.kepler_2body &&
+                (sk.orb.E_orb >= 0.0 || sk.n_orb_per_dt < g_collisional.n_orb_secular))
+                g_subsystem_mgr.step_kepler2++;
         }
 
         // Copy modified host subviews back to device

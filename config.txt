@@ -70,6 +70,7 @@ SDAR_KREF = 1e-6				#   k_ref of the slow-down factor (W20 Eq. 22)
 SDAR_C = 0.1					#   kappa_max coefficient c (W20 Eq. 28)
 ETA_RESTART = 1e-8				# Per-subsystem LogH restart threshold + step-level restart
 N_ORB_SECULAR = 3                   		# Orbits/timestep threshold for secular evolution
+KEPLER_2BODY = false                		# Isolated 2-body subsystems without PN: analytic Kepler drift at any orbit count (else LogH below N_ORB_SECULAR)
 M_PN = 5.0                          		# Minimum mass (M_sun) for PN corrections
 PN_ORDER = 31                        		# PN bitmask: 1=PN1, 2=PN2, 4=PN2.5, 8=PN3, 16=PN3.5, 32=BH spin couplings (63=all) — DISABLED for energy test
 R_ESCAPE_RH = 100.0                 		# Escape radius in half-mass radii

@@ -643,6 +643,10 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
                 sub.n_orb_per_dt = (int)(dt_step / sub.orb.period);
                 sub.is_secular = (sub.n_orb_per_dt >= n_orb_secular);
             }
+            // KEPLER_2BODY: without PN any isolated pair takes the Kepler drift (advance_subsystems_in_range
+            // re-decides it from the current state every call)
+            if (idx_i >= 0 && idx_j >= 0 && g_collisional.kepler_2body_pair(h_mass(idx_i), h_mass(idx_j)))
+                sub.is_secular = true;
 
             sub.type = pair_bound ? SubsystemType::BINARY : SubsystemType::FLYBY;
             sub.dt_sub = min_dt_members(sub);
@@ -1296,6 +1300,7 @@ void SubsystemManager::reset_step_diagnostics() {
     step_sdar_kappa_max = 0.0;
     step_secular_evolved = 0;
     step_secular_substeps = 0;
+    step_kepler2 = 0;
     step_secular_triples = 0;
     step_mergers = 0;
     step_subsys_collisions = 0;
@@ -1356,6 +1361,7 @@ void SubsystemManager::print_step_summary() const {
     }
     std::printf("  Secular=%d", step_secular_evolved);
     if (step_secular_evolved > 0) std::printf(" (substeps=%lld)", step_secular_substeps);
+    if (step_kepler2 > 0) std::printf("  Kepler2=%d", step_kepler2);
     std::printf("  SecTriple=%d\n", step_secular_triples);
 
     // Events

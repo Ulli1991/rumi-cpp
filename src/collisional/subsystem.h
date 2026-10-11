@@ -185,6 +185,7 @@ struct SubsystemManager {
     double step_sdar_kappa_max = 0.0;  // SDAR: largest slow-down factor of the step
     int step_secular_evolved = 0;      // secular binaries evolved
     long long step_secular_substeps = 0;  // internal steps of the secular binary integrator
+    int step_kepler2 = 0;              // ... of them on the Kepler drift only by KEPLER_2BODY (unbound, or < N_ORB_SECULAR orbits)
     int step_secular_triples = 0;      // secular triples evolved
 
     // Step-level merger and escaper counters

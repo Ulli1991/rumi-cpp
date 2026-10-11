@@ -1,6 +1,7 @@
 #include "small_for.h"
 #include "device_staging.h"
 #include "logh_batch.h"
+#include "stellar_cache.h"
 #include "logh.h"
 #include "gbs.h"
 #include "collisional_config.h"
@@ -158,8 +159,18 @@ void SubsystemBatch::pack(const SubsystemManager& mgr, const Particles& p,
     // Buffer layout per member: x,y,z,vx,vy,vz,mass,spin_x,spin_y,spin_z,stype_as_double,radius (12 doubles)
     constexpr int PACK_STRIDE = 12;
     const bool want_spins = (g_collisional.pn_order & PN_SPIN) != 0;
-    // SDAR and in-integration collisions need the radii and types of all members
-    const bool gather = !src || want_spins || g_collisional.sdar || g_collisional.subsys_collisions;
+    // SDAR and in-integration collisions need the radii and types of all members: from the host cache by particle
+    // id (stellar_cache.h; a device gather per call cost ~40 us), from the gathered buffer when there is one
+    const bool need_props = g_collisional.sdar || g_collisional.subsys_collisions;
+    const bool gather = !src || want_spins || (need_props && !StellarPropsCache::enabled());
+    StellarPropsCache& props = StellarPropsCache::get();
+    if (need_props && !gather) {
+        props.ensure(p);
+        bool all = true;
+        for (const auto& sub : mgr.active)
+            for (int b = 0; b < sub.n_bodies; b++) all = all && props.has(sub.particle_ids[b]);
+        if (!all) { props.invalidate(); props.ensure(p); }
+    }
     has_stored_spins.assign(n_sub, 0);
     stored_spins.resize(n_sub * 6, 0.0);
     stored_stellar_type.assign(n_sub * 2, 0);
@@ -226,7 +237,10 @@ void SubsystemBatch::pack(const SubsystemManager& mgr, const Particles& p,
     int off = 0;
     for (int s = 0; s < n_sub; s++) {
         const auto& sub = mgr.active[s];
-        if (gather && sub.n_bodies == 2) {
+        if (!gather && need_props && sub.n_bodies == 2) {
+            stored_stellar_type[s*2+0] = props.type_of(sub.particle_ids[0]);
+            stored_stellar_type[s*2+1] = props.type_of(sub.particle_ids[1]);
+        } else if (gather && sub.n_bodies == 2) {
             int li0 = body_member[off], li1 = body_member[off + 1];
             stored_stellar_type[s*2+0] = static_cast<int>(h_buf(li0 * PACK_STRIDE + 10));
             stored_stellar_type[s*2+1] = static_cast<int>(h_buf(li1 * PACK_STRIDE + 10));
@@ -252,11 +266,22 @@ void SubsystemBatch::pack(const SubsystemManager& mgr, const Particles& p,
         for (const auto& sub : mgr.active)
             for (int b = 0; b < sub.n_bodies; b++) flat_pid[k++] = sub.particle_ids[b];
     }
-    if (gather)
+    if (gather) {
         for (int k = 0; k < total; k++) {
             flat_stype[k] = static_cast<int>(h_buf(body_member[k] * PACK_STRIDE + 10));
             flat_radius[k] = h_buf(body_member[k] * PACK_STRIDE + 11);
         }
+    } else if (need_props) {
+        for (int k = 0; k < total; k++) {
+            flat_stype[k] = props.type_of(flat_pid[k]);
+            flat_radius[k] = props.radius_of(flat_pid[k]);
+        }
+        if (StellarPropsCache::check_enabled()) {
+            std::vector<int> idx(total);
+            for (int k = 0; k < total; k++) idx[k] = member_indices[body_member[k]];
+            props.verify(p, idx, flat_pid, "LogH pack");
+        }
+    }
 
     off = 0;
     for (int s = 0; s < n_sub; s++) {

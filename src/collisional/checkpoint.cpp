@@ -1,4 +1,5 @@
 #include "checkpoint.h"
+#include "stellar_cache.h"
 #include "collisional_config.h"
 #include "diagnostics.h"
 #include "merger_tree.h"
@@ -197,6 +198,7 @@ void Checkpoint::restore(Particles& p, SubsystemManager& mgr,
         Kokkos::deep_copy(p.luminosity, h_lum);
         Kokkos::deep_copy(p.core_mass, h_cmass);
         Kokkos::deep_copy(p.spin_vec, h_spin);
+        StellarPropsCache::get().invalidate();   // types and radii of the saved state
         Kokkos::deep_copy(p.spin_mag, h_smag);
         Kokkos::deep_copy(p.dt_level0, h_dtl0);
         Kokkos::deep_copy(p.grad_mag, h_gmag);

@@ -22,6 +22,7 @@
 #include "merger_tree.h"
 #include "runtime_sse.h"
 #include "post_newtonian.h"
+#include "stellar_cache.h"
 CollisionalConfig g_collisional;
 
 // Binary orbit tracker for PN precession validation
@@ -705,6 +706,7 @@ int main(int argc, char** argv) {
             g_collisional.flyby_cm_eps    = cfg.get_double("FLYBY_CM_EPS", 0.0);
             g_collisional.eta_restart     = cfg.get_double("ETA_RESTART", 0.0);
             g_collisional.n_orb_secular   = cfg.get_int("N_ORB_SECULAR", 3);
+            g_collisional.kepler_2body    = cfg.get_bool("KEPLER_2BODY", g_collisional.kepler_2body);
             g_collisional.m_pn            = cfg.get_double("M_PN", 5.0);
             g_collisional.pn_order        = cfg.get_int("PN_ORDER", 7);
             g_collisional.r_escape_rh     = cfg.get_double("R_ESCAPE_RH", 100.0);
@@ -870,6 +872,7 @@ int main(int argc, char** argv) {
                 auto h_sr = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.stellar_radius);
                 for (int i = 0; i < p.N; i++) h_sr(i) = h_st(i) < 10 ? r_test : 0.0;
                 Kokkos::deep_copy(p.stellar_radius, h_sr);
+                StellarPropsCache::get().invalidate();
             }
         }
 #endif
