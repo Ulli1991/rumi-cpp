@@ -1131,6 +1131,10 @@ int main(int argc, char** argv) {
             // full O(N^2) pass per step.
 #ifdef ENABLE_COLLISIONAL
             Checkpoint checkpoint;
+            // KE + PE of the state accepted at the end of the last step: the next step's E_step_start (AUDIT G row 3).
+            // Recomputed when the particles changed in between (SSE here; escaper removal changes N)
+            double E_carry = 0;
+            int E_carry_N = -1;
 #endif
             while (t < t_final) {
                 auto step_t0 = std::chrono::high_resolution_clock::now();
@@ -1141,6 +1145,7 @@ int main(int argc, char** argv) {
 #ifdef ENABLE_COLLISIONAL
                 // Runtime stellar evolution before each step
                 if (g_collisional.enabled && g_collisional.sse_enabled && g_sse_ctx) {
+                    E_carry_N = -1;
                     double dt_sse_myr = dt_max * TIME_UNIT_MYR;
                     advance_stellar_evolution(work_p, *g_sse_ctx, dt_sse_myr,
                                               g_energy_books, G);
@@ -1165,7 +1170,8 @@ int main(int argc, char** argv) {
                     //   numerator: per-step change (E_after - E_step_start)
                     //   denominator: initial energy E(t₀) = diag0.E_total
                     g_profiler.start();
-                    double E_step_start = compute_total_energy(work_p, g_energy_books, G, soft2);
+                    double E_step_start = E_carry_N == work_p.N ? E_carry + g_energy_books.total_sink()
+                                                                : compute_total_energy(work_p, g_energy_books, G, soft2);
                     g_profiler.stop(StepProfiler::ENERGY_CHECK);
 
                     // Save originals ONCE before the loop
@@ -1182,6 +1188,7 @@ int main(int argc, char** argv) {
                     double prev_dE = 1e30;
                     Checkpoint best;  // post-step state of the attempt with the smallest error
                     double best_dE = 1e30;
+                    double best_Epart = 0;
 
                     for (int restart = 0; restart <= max_restarts; restart++) {
                         // Save checkpoint
@@ -1196,12 +1203,15 @@ int main(int argc, char** argv) {
 
                         // Per-step error: |E(t) - E(t-τ)| / |E(t₀)|  (BIFROST §3.19)
                         g_profiler.start();
-                        double E_after = compute_total_energy(work_p, g_energy_books, G, soft2);
+                        double E_part = compute_particle_energy(work_p, G, soft2);
+                        double E_after = E_part + g_energy_books.total_sink();
                         g_profiler.stop(StepProfiler::ENERGY_CHECK);
                         double dE = std::fabs((E_after - E_step_start) / (std::fabs(diag0.E_total) + 1e-30));
 
                         if (dE < g_collisional.eta_restart) {
                             // Accepted
+                            E_carry = E_part;
+                            E_carry_N = work_p.N;
                             break;
                         }
 
@@ -1216,12 +1226,15 @@ int main(int argc, char** argv) {
                             std::printf("RESTART: %s, accepting |dE/E|=%.2e\n",
                                         restart == max_restarts ? "max retries reached" : "dE not decreasing",
                                         std::min(dE, best_dE));
+                            E_carry = dE > best_dE ? best_Epart : E_part;
+                            E_carry_N = work_p.N;
                             break;
                         }
 
                         prev_dE = dE;
                         if (dE < best_dE) {
                             best_dE = dE;
+                            best_Epart = E_part;
                             best.save(work_p, g_subsystem_mgr, g_energy_books);
                         }
 

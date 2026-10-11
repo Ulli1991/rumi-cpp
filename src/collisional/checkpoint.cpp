@@ -216,6 +216,11 @@ void Checkpoint::restore(Particles& p, SubsystemManager& mgr,
 
 double compute_total_energy(const Particles& p, const EnergyBookkeeping& books,
                             double G, double soft2) {
+    return compute_particle_energy(p, G, soft2) + books.total_sink();
+}
+
+// KE + PE (PE split over the MPI ranks, compute_potential_energy_split)
+double compute_particle_energy(const Particles& p, double G, double soft2) {
     double KE = 0;
     auto pvx = p.vx; auto pvy = p.vy; auto pvz = p.vz;
     auto pm = p.mass;
@@ -227,8 +232,8 @@ double compute_total_energy(const Particles& p, const EnergyBookkeeping& books,
             lKE += 0.5 * pm(i) * v2;
         }, KE);
 
-    double PE = compute_potential_energy_tiled(p, G, soft2, 0, N);
-    return KE + PE + books.total_sink();
+    double PE = compute_potential_energy_split(p, G, soft2);
+    return KE + PE;
 }
 
 // ============================================================================
