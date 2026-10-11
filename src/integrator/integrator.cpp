@@ -979,24 +979,31 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
         g_subsys_phase.count(SubsystemPhaseTimes::C_LOGH, n_sub);
         g_subsys_phase.take_batch_prof();
         g_subsys_phase.add(SubsystemPhaseTimes::LOGH_PREP, phase_clock.lap());
-        g_logh_batch.pack(logh_mgr, p, G, dt);
+        // The members are in the host mirror (up to date after the secular paths): pack from it, and write the
+        // results into it as well as to the device, so no further copy of the range is needed
+        HostSource mirror_src;
+        mirror_src.start = start;
+        mirror_src.count = count;
+        mirror_src.x = h_x.data(); mirror_src.y = h_y.data(); mirror_src.z = h_z.data();
+        mirror_src.vx = h_vx.data(); mirror_src.vy = h_vy.data(); mirror_src.vz = h_vz.data();
+        mirror_src.m = h_m.data();
+        g_logh_batch.pack(logh_mgr, p, G, dt, &mirror_src);
         g_subsys_phase.add(SubsystemPhaseTimes::LOGH_PACK, phase_clock.lap());
         logh_integrate_batch_gpu(g_logh_batch, G, g_collisional.eta_gbs);
         g_subsys_phase.add(SubsystemPhaseTimes::LOGH_RUN, phase_clock.lap());
 
         // Check per-subsystem energy errors
-        auto h_eerr = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
-                                                           g_logh_batch.energy_error);
         std::vector<int> failed;
         for (int si = 0; si < n_sub; si++) {
-            double dE = h_eerr(si);
+            double dE = g_logh_batch.energy_error[si];
             if (eta_restart > 0 && (dE > eta_restart || std::isnan(dE))) {
                 failed.push_back(si);
             }
         }
+        const bool any_retry = !failed.empty();
 
         // Unpack all results (passed get final state; failed get best-effort temporarily)
-        g_logh_batch.unpack(logh_mgr, p);
+        g_logh_batch.unpack(logh_mgr, p, &mirror_src);
         g_subsys_phase.add(SubsystemPhaseTimes::LOGH_UNPACK, phase_clock.lap());
         g_subsys_phase.take_batch_prof();
 
@@ -1058,10 +1065,8 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
                     retry_batch.pack(retry_mgr, p, G, dt_sub);
                     logh_integrate_batch_gpu(retry_batch, G, g_collisional.eta_gbs);
 
-                    auto h_e = Kokkos::create_mirror_view_and_copy(
-                        Kokkos::HostSpace(), retry_batch.energy_error);
                     for (int r = 0; r < (int)retry_mgr.active.size(); r++) {
-                        double dE = h_e(r);
+                        double dE = retry_batch.energy_error[r];
                         if (dE > eta_restart || std::isnan(dE)) all_passed = false;
                         worst_dE = std::max(worst_dE, std::isnan(dE) ? 1e30 : dE);
                     }
@@ -1105,7 +1110,7 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
         // Newtonian energy, momentum and angular momentum over this advance (Newtonian LogH conserves
         // them; what changed is the PN dynamics, plus GBS error at its tolerance)
         if (g_collisional.pn_order > 0 && g_collisional.c_code > 0.0) {
-            mirror.pull(p, 6);
+            if (any_retry) mirror.pull(p, 6);   // otherwise the unpack wrote the results into the mirror
             for (int si = 0; si < n_sub; si++) {
                 const auto& sub = saved_subs[si];
                 int nb = sub.n_bodies;
