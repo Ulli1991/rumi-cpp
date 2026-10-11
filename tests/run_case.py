@@ -630,6 +630,120 @@ def subsys_collision(exe, label, cfg, kind, bound, min_landings=0):
     return ok & check(f"{label} max|dE/E| with merger sink", max(r[0] for r in rows), bound)
 
 
+def run_in(exe, cfg, d, args=(), env=None):
+    """stdout of one run in directory d (kept, unlike run_output); raises on a nonzero exit or a timeout."""
+    extra = dict(kv.split("=", 1) for kv in os.environ.get("NBODY_TEST_EXTRA", "").split(",") if "=" in kv)
+    Path(d, "config.txt").write_text("".join(f"{k} = {v}\n" for k, v in {**cfg, **extra}.items()))
+    launcher = os.environ.get("NBODY_TEST_LAUNCHER", "").split()
+    try:
+        out = subprocess.run(launcher + [exe, *args], cwd=d, capture_output=True, text=True, timeout=TIMEOUT_S,
+                             env={**os.environ, **(env or {})})
+    except subprocess.TimeoutExpired:
+        raise SystemExit(f"FAIL: no result within {TIMEOUT_S} s (hung or stuck in time)")
+    if out.returncode != 0:
+        raise SystemExit(f"FAIL: exit {out.returncode}\n{out.stdout[-3000:]}{out.stderr[-3000:]}")
+    return out.stdout
+
+
+def l0_by_step(stdout):
+    """L0 diagnostic rows as printed (|dE/E| |dP| |dL/L| t step), keyed by step (the last printed row wins)."""
+    rows = {}
+    for line in stdout.splitlines():
+        f = line.split()
+        if re.match(r"^\s+L0\s", line) and len(f) >= 8:
+            rows[int(f[-1])] = " ".join(f[3:])
+    return rows
+
+
+def restart_identical(exe, label, cfg, n, stop="interval", snapshots=False):
+    """A run of 2n steps against n steps + restart file + n steps (stop = "walltime": the first run stops
+    after one step at WALLTIME_LIMIT and the second continues from there): every L0 row and every NBODY_DUMP
+    particle dump (the full state in storage order) after the restart point must be identical, bit for bit."""
+    import hashlib
+    dt = float(cfg["DT_MAX_MYR"])
+    base = dict(cfg, PRINT_INTERVAL="1")
+    full = dict(base, TOTAL_TIME_MYR=f"{(2 * n - 0.5) * dt:.17g}")
+    env = {"NBODY_DUMP": "1"}
+    if snapshots:
+        full["SNAPSHOT_INTERVAL"] = "1"
+    with tempfile.TemporaryDirectory() as da, tempfile.TemporaryDirectory() as db:
+        ref = run_in(exe, full, da, env=env)
+        if stop == "walltime":
+            first = dict(full, WALLTIME_LIMIT="1e-9")      # stops after step 1, writes restart_00000001.h5
+            k = 1
+        else:
+            first = dict(full, TOTAL_TIME_MYR=f"{(n - 0.5) * dt:.17g}", RESTART_INTERVAL=str(n))
+            k = n
+        out1 = run_in(exe, first, db, env=env)
+        files = sorted(Path(db).glob("restart_*.h5"))
+        ok = check(f"{label} restart file at step {k} written", int(Path(db, f"restart_{k:08d}.h5").exists()), 1,
+                   lower=True)
+        if not ok:
+            print(out1[-2000:])
+            return False
+        out2 = run_in(exe, full, db, args=("--restart", f"restart_{k:08d}.h5"), env=env)
+        ra, r1, r2 = l0_by_step(ref), l0_by_step(out1), l0_by_step(out2)
+        steps = sorted(ra)
+        resumed = {s: r for s, r in r2.items() if s > k}
+        diff = [s for s in steps if s > k and resumed.get(s) != ra[s]] + [s for s in steps if s <= k and r1.get(s) != ra[s]]
+        print(f"   restart at step {k} of {max(steps)}; {len(resumed)} rows after the restart, restart files kept: "
+              f"{[f.name for f in files]}")
+        for s in diff[:3]:
+            print(f"   step {s}: uninterrupted '{ra[s]}' restarted '{resumed.get(s, r1.get(s))}'")
+        ok &= check(f"{label} steps after the restart", len(resumed), 2 * n - k, lower=True)
+        ok &= check(f"{label} L0 rows differing from the uninterrupted run", len(diff), 0)
+
+        def digest(d, s):
+            p = Path(d, f"dump_{s:04d}.bin")
+            return hashlib.sha256(p.read_bytes()).hexdigest() if p.exists() else None
+        dumps = [s for s in steps if s > k]
+        bad = [s for s in dumps if digest(da, s) is None or digest(da, s) != digest(db, s)]
+        ok &= check(f"{label} particle dumps (steps {k + 1}-{max(steps)}) differing", len(bad), 0)
+        if snapshots:
+            # snapshots of the restarted run: same numbering and identical particle data as the uninterrupted one
+            sa = sorted(Path(da).glob("snapdir_*/*.hdf5"))
+            sb = sorted(Path(db).glob("snapdir_*/*.hdf5"))
+            ok &= check(f"{label} snapshot files (uninterrupted vs restarted)", abs(len(sa) - len(sb)), 0)
+        return ok
+
+
+def snapshot_roundtrip(exe, label, cfg):
+    """Snapshot and restart file of the same state (the end of the run), read back by h5-roundtrip
+    (tests/h5_roundtrip.cpp): positions, velocities, masses, ids, stellar types, radii and spins in the snapshot
+    equal the restart file's bit for bit, every particle is in its PartType group, the LUNA groups are complete."""
+    with tempfile.TemporaryDirectory() as d:
+        run_in(exe, dict(cfg, SNAPSHOT_INTERVAL="1000000", RESTART_INTERVAL="1000000"), d)
+        snaps = sorted(Path(d).glob("snapdir_*/snapshot_*.0.hdf5"))
+        rsts = sorted(Path(d).glob("restart_*.h5"))
+        ok = check(f"{label} snapshots written (start and end)", len(snaps), 2, lower=True)
+        ok &= check(f"{label} restart files written", len(rsts), 1, lower=True)
+        if not ok:
+            return False
+        tool = Path(exe).with_name("h5-roundtrip")
+        res = subprocess.run([str(tool), str(snaps[-1]), str(rsts[-1])], capture_output=True, text=True)
+        print("   " + res.stdout.rstrip().replace("\n", "\n   "))
+        if res.returncode != 0:
+            print(res.stderr[-2000:])
+        return ok & check(f"{label} snapshot vs restart file (h5-roundtrip exit code)", res.returncode, 0)
+
+
+def luna_reader(exe, label, cfg):
+    """A cpp-nbody snapshot read through LUNA's own read_snapshot (src/luna/file_io/read_snapshot.py) and its
+    Gadget-style particle access. Needs LUNA_PYTHON (a Python with h5py where `import luna` works) or skips."""
+    py = os.environ.get("LUNA_PYTHON", "")
+    if not py or not Path(py).exists():
+        print(f"skip {label}: set LUNA_PYTHON to a Python in which LUNA imports (e.g. /u/uli/jax-env/bin/python)")
+        return "skip"
+    with tempfile.TemporaryDirectory() as d:
+        run_in(exe, {"SNAPSHOT_INTERVAL": "1000000", **cfg}, d)
+        res = subprocess.run([py, str(Path(__file__).with_name("luna_read_check.py")), d], capture_output=True,
+                             text=True, env={**os.environ, "JAX_PLATFORMS": "cpu"})
+        print(res.stdout.rstrip())
+        if res.returncode != 0:
+            print(res.stderr[-3000:])
+        return check(f"{label} LUNA reader failures", res.returncode, 0)
+
+
 def check(name, value, bound, lower=False):
     ok = value >= bound if lower else value <= bound
     print(f"{'ok  ' if ok else 'FAIL'} {name} = {value:.3e} ({'>=' if lower else '<='} {bound:.3e})")
@@ -911,8 +1025,39 @@ CASES = {
                                             DISTRIBUTE_MIN_SUBSYSTEMS="1"), 1e-13),
     "mergers_cpu_path": lambda exe: mergers(exe, "mergers cpu path", dict(MERGERS, SERIAL_N2_CPU="64", ETA_RESTART="0"),
                                             (1e-8, 1e-11)),
+    # Restart files (HARD_PROBLEMS.md G1): 2n steps against n steps + restart + n steps, L0 rows and particle dumps
+    # bit-identical. Before (bc1cbc3): no restart files, --restart is an unknown option (exit 1).
+    "restart_binaries": lambda exe: restart_identical(exe, "10 % binaries", BINARIES, 2, snapshots=True),
+    "restart_walltime": lambda exe: restart_identical(exe, "10 % binaries, WALLTIME_LIMIT stop", BINARIES, 2,
+                                                      stop="walltime"),
+    "restart_triples": lambda exe: restart_identical(exe, "dense core, triples", TRIPLES, 1),
+    "restart_mergers": lambda exe: restart_identical(exe, "mergers, step restarts", dict(MERGERS, SERIAL_N2_CPU="0"), 5),
+    "restart_mergers_sse": lambda exe: restart_identical(exe, "mergers + SSE", dict(MERGERS, SERIAL_N2_CPU="0",
+                                                                                   SSE_ENABLED="true"), 3),
+    "restart_pn_logh": lambda exe: restart_identical(exe, "PN LogH binary (aux. velocities)", PN_LOGH, 5),
+    "restart_spin": lambda exe: restart_identical(exe, "spinning BH binary", SPIN_J_PN1, 5),
+    "restart_secular": lambda exe: restart_identical(exe, "secular PN binary", SEC_BINARY, 5),
+    "restart_secular_triple": lambda exe: restart_identical(exe, "secular triple", SEC_TRIPLE, 5),
+    "restart_sdar": lambda exe: restart_identical(exe, "SDAR triple", dict(KL_TRIPLE, SDAR="true"), 2),
+    "restart_cm_velocity": lambda exe: restart_identical(exe, "c.o.m. fly-by velocity, tidal sampling",
+                                                         dict(CM_TIDE, FLYBY_CM_EPS="1e-5"), 5),
+    "restart_spin_imbh": lambda exe: restart_identical(exe, "cluster + spinning IMBH binary, all PN", SPIN_IMBH, 5),
+    # FSI: the global step is the fastest occupied level, not DT_MAX: the first run stops after step 1
+    "restart_fsi": lambda exe: restart_identical(exe, "FSI integrator", dict(FSI_BINARY, DT_MAX_MYR="1e-6"), 5,
+                                                 stop="walltime"),
+    "snapshot_roundtrip": lambda exe: snapshot_roundtrip(exe, "IMBH cluster", dict(SPIN_IMBH, TOTAL_TIME_MYR="3e-4")),
+    "luna_reader": lambda exe: luna_reader(exe, "IMBH cluster", dict(SPIN_IMBH, TOTAL_TIME_MYR="3e-4",
+                                                                     SNAPSHOT_INTERVAL="1")),
+    # MPI (2 ranks under NBODY_TEST_LAUNCHER): rank 0 writes, every rank reads; replicas checked before the write
+    "restart_mpi2": lambda exe: restart_identical(exe, "10 % binaries, 2 ranks", dict(BINARIES, REPLICA_CHECK_INTERVAL="1"), 2),
+    "restart_mpi2_mergers": lambda exe: restart_identical(exe, "mergers, 2 ranks", dict(MERGERS, SERIAL_N2_CPU="0",
+                                                          REPLICA_CHECK_INTERVAL="1"), 5),
+    "restart_mpi2_dist": lambda exe: restart_identical(exe, "10 % binaries, 2 ranks, distributed subsystems",
+                                                       dict(BINARIES, REPLICA_CHECK_INTERVAL="1", DISTRIBUTE_SUBSYSTEMS="true",
+                                                            DISTRIBUTE_MIN_SUBSYSTEMS="1"), 2),
 }
 
 if __name__ == "__main__":
     exe, case = sys.argv[1], sys.argv[2]
-    sys.exit(0 if CASES[case](exe) else 1)
+    result = CASES[case](exe)
+    sys.exit(77 if result == "skip" else 0 if result else 1)   # 77: CTest SKIP_RETURN_CODE

@@ -5,6 +5,8 @@ project(nbody-kokkos LANGUAGES CXX)
 option(USE_MPI "Enable MPI for multi-node support" OFF)
 option(USE_GPU_AWARE_MPI "Enable GPU-aware MPI (CUDA-aware/ROCm-aware)" OFF)
 option(ENABLE_COLLISIONAL "Compile collisional (unsoftened) support" OFF)
+# HDF5 restart files and LUNA-compatible snapshots (src/io/restart.*, src/io/snapshot.*): on when HDF5 is found
+option(USE_HDF5 "HDF5 restart files and snapshots (needs the HDF5 C library, e.g. module hdf5-serial)" ON)
 
 # Find Kokkos (set Kokkos_ROOT or CMAKE_PREFIX_PATH)
 find_package(Kokkos REQUIRED)
@@ -50,7 +52,27 @@ if(ENABLE_COLLISIONAL)
     )
 endif()
 
+if(USE_HDF5)
+    find_package(HDF5 COMPONENTS C)
+    if(HDF5_FOUND)
+        target_sources(nbody-kokkos PRIVATE ${SRC_DIR}/io/h5_util.cpp ${SRC_DIR}/io/restart.cpp ${SRC_DIR}/io/snapshot.cpp)
+        target_include_directories(nbody-kokkos PRIVATE ${HDF5_INCLUDE_DIRS})
+        target_link_libraries(nbody-kokkos ${HDF5_C_LIBRARIES})
+        target_compile_definitions(nbody-kokkos PRIVATE USE_HDF5 ${HDF5_DEFINITIONS})
+        message(STATUS "HDF5 ${HDF5_VERSION}: restart files and snapshots enabled")
+    else()
+        message(WARNING "HDF5 not found: no restart files or snapshots (set HDF5_ROOT, or USE_HDF5=OFF)")
+    endif()
+endif()
+# git description of the source tree, stored in restart files and snapshots (refreshed at every build)
+add_custom_target(nbody_git_version
+    COMMAND ${CMAKE_COMMAND} -DSRC=${CMAKE_CURRENT_SOURCE_DIR} -DOUT=${CMAKE_BINARY_DIR}/generated/git_version.h
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/git_version.cmake
+    BYPRODUCTS ${CMAKE_BINARY_DIR}/generated/git_version.h)
+add_dependencies(nbody-kokkos nbody_git_version)
+
 target_include_directories(nbody-kokkos PRIVATE
+    ${CMAKE_BINARY_DIR}/generated
     ${SRC_DIR}/core
     ${SRC_DIR}/gravity
     ${SRC_DIR}/integrator
@@ -163,4 +185,31 @@ if(USE_MPI)
         set_tests_properties(${case} PROPERTIES
                              ENVIRONMENT "NBODY_TEST_LAUNCHER=${MPIEXEC_EXECUTABLE} -n 2 --oversubscribe;OMP_NUM_THREADS=1;NBODY_CHECK_PIDMAP=1;NBODY_CHECK_SUBSYS=1")
     endforeach()
+endif()
+
+# Restart files and snapshots (src/io): bit-identical continuation, snapshot round trip, LUNA's reader
+if(USE_HDF5 AND HDF5_FOUND)
+    add_executable(h5-roundtrip ${CMAKE_CURRENT_SOURCE_DIR}/tests/h5_roundtrip.cpp ${SRC_DIR}/io/h5_util.cpp)
+    target_include_directories(h5-roundtrip PRIVATE ${SRC_DIR}/io ${HDF5_INCLUDE_DIRS})
+    target_link_libraries(h5-roundtrip ${HDF5_C_LIBRARIES})
+    target_compile_features(h5-roundtrip PRIVATE cxx_std_17)
+    add_dependencies(nbody-kokkos h5-roundtrip)
+    # LUNA_PYTHON: a Python in which LUNA (/raven/u/uli/LUNA) imports, for the luna_reader case (skipped if empty)
+    set(LUNA_PYTHON "" CACHE FILEPATH "Python with LUNA importable (luna_reader test)")
+    foreach(case restart_binaries restart_walltime restart_triples restart_mergers restart_mergers_sse restart_pn_logh
+                 restart_spin restart_secular restart_secular_triple restart_sdar restart_cm_velocity restart_spin_imbh
+                 restart_fsi snapshot_roundtrip luna_reader)
+        add_test(NAME ${case} COMMAND Python3::Interpreter ${CMAKE_SOURCE_DIR}/tests/run_case.py
+                 $<TARGET_FILE:nbody-kokkos> ${case})
+        set_tests_properties(${case} PROPERTIES SKIP_RETURN_CODE 77 ENVIRONMENT
+            "OMP_NUM_THREADS=1;NBODY_CHECK_PIDMAP=1;NBODY_CHECK_SUBSYS=1;NBODY_CHECK_EIH=1;LUNA_PYTHON=${LUNA_PYTHON}")
+    endforeach()
+    if(USE_MPI)
+        foreach(case restart_mpi2 restart_mpi2_mergers restart_mpi2_dist)
+            add_test(NAME ${case} COMMAND Python3::Interpreter ${CMAKE_SOURCE_DIR}/tests/run_case.py
+                     $<TARGET_FILE:nbody-kokkos> ${case})
+            set_tests_properties(${case} PROPERTIES ENVIRONMENT
+                "NBODY_TEST_LAUNCHER=${MPIEXEC_EXECUTABLE} -n 2 --oversubscribe;OMP_NUM_THREADS=1;NBODY_CHECK_PIDMAP=1;NBODY_CHECK_SUBSYS=1")
+        endforeach()
+    endif()
 endif()
