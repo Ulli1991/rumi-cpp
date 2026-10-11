@@ -37,9 +37,11 @@ TREE_N_GROUP = 64                         	# Particles per traversal group
 
 # Exact tree searches for HHS time steps and neighbours (gravity/dt_tree.h; results bit-identical to O(N^2),
 # forces stay direct; works with COLLISIONAL). 0 = off. NBODY_CHECK_TREE_DT=1 checks every search against O(N^2).
-TREE_DT_MIN_N = 0                          	# Device tree for HHS sets of at least this many particles
+# Defaults (unset): host builds 2048 / 2048; GPU builds TREE_DT_MIN_N 65536 (200000 with FLYBY_CM_VELOCITY),
+# TREE_NGB_MIN_N 32768 (measured break-even, AUDIT F7)
+# TREE_DT_MIN_N = 65536                    	# Device tree for HHS sets of at least this many particles
 TREE_DT_CPU_MAX = 0                        	# Host-thread tree for sets up to this size (host builds / APUs only)
-# TREE_NGB_MIN_N = 32768                   	# Neighbour search threshold if different (default TREE_DT_MIN_N)
+# TREE_NGB_MIN_N = 32768                   	# Neighbour search threshold
 
 # =============================================================================
 # Collisional dynamics

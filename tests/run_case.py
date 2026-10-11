@@ -382,7 +382,8 @@ def tree_exact(exe, label, cfg):
         raise SystemExit("FAIL: no tree searches ran")
     dt_calls, pairs, n2_pairs, ngb_calls, checked = (int(g) for g in m.groups())
     print(f"   {dt_calls} time-step and {ngb_calls} neighbour searches, pair evaluations {pairs} of {n2_pairs} (N^2)")
-    ref = run_output(exe, {k: v for k, v in cfg.items() if not k.startswith("TREE_DT")})
+    ref = run_output(exe, dict({k: v for k, v in cfg.items() if not k.startswith("TREE_")}, TREE_DT_MIN_N="0",
+                                TREE_NGB_MIN_N="0", TREE_DT_CPU_MAX="0"))
     rows = [l for l in out.splitlines() if re.match(r"^\s+L0\s", l)]
     ref_rows = [l for l in ref.splitlines() if re.match(r"^\s+L0\s", l)]
     ok = check(f"{label} searches checked against N^2", checked, dt_calls + ngb_calls, lower=True)
@@ -606,6 +607,9 @@ CASES = {
                                                                        ETA_RESTART="1e-7"), 3.7e-7),
     "logh_big_group": lambda exe: big_group(exe, "big group", BIG_GROUP, (1.2e-5, 1e-12)),
     # Exact tree searches (M7.4), forced at every set size, each search checked bitwise against O(N^2)
+    # Tree searches on by default above the break-even set size (host builds 2048): 5000 stars use them at the top
+    # levels without any TREE_* key (no tree search ran before), bit-identical to the O(N^2) run
+    "tree_default_on": lambda exe: tree_exact(exe, "tree default, 50 % binaries", BINARIES50),
     "tree_dt_binaries": lambda exe: tree_exact(exe, "tree, 10 % binaries", dict(BINARIES, TREE_DT_MIN_N="2")),
     "tree_dt_binaries_cm": lambda exe: tree_exact(exe, "host tree, 10 % binaries, c.o.m. fly-by velocities",
                                                   dict(BINARIES, FLYBY_CM_VELOCITY="true", TREE_DT_CPU_MAX="1000000",

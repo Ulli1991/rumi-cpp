@@ -368,6 +368,7 @@ struct TripleTracker {
 #endif
 
 #include <Kokkos_Core.hpp>
+#include <type_traits>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -601,8 +602,14 @@ int main(int argc, char** argv) {
         tree_n_leaf = cfg.get_int("TREE_N_LEAF", 32);
         tree_n_group = cfg.get_int("TREE_N_GROUP", 64);
         // Exact tree searches for the HHS time steps and neighbours (gravity/dt_tree.h); forces stay direct
-        tree_dt_min_n = cfg.get_int("TREE_DT_MIN_N", 0);
-        tree_ngb_min_n = cfg.get_int("TREE_NGB_MIN_N", tree_dt_min_n);
+        // Exact tree searches on by default above the measured break-even set sizes (AUDIT F7; results are
+        // bit-identical to O(N^2), so only speed changes). Host builds: ~1000-1500 for both searches (32 threads).
+        // GPUs (A100): neighbours ~25k, time steps ~30k with component velocities, ~150k with FLYBY_CM_VELOCITY
+        // (fewer prunable pairs). GPU values also serve APUs until measured there.
+        constexpr bool host_build = std::is_same_v<Kokkos::DefaultExecutionSpace, Kokkos::DefaultHostExecutionSpace>;
+        const int dt_default = host_build ? 2048 : (flyby_cm_velocity ? 200000 : 65536);
+        tree_dt_min_n = cfg.get_int("TREE_DT_MIN_N", dt_default);
+        tree_ngb_min_n = cfg.get_int("TREE_NGB_MIN_N", host_build ? 2048 : 32768);
         tree_dt_cpu_max = cfg.get_int("TREE_DT_CPU_MAX", 0);
         tree_dt_vc_fac = cfg.get_double("TREE_DT_VC_FAC", 30.0);
 
