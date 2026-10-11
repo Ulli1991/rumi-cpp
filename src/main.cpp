@@ -1241,6 +1241,8 @@ int main(int argc, char** argv) {
                                 step_now, g_eattr.tid_max / E0, g_eattr.tid_pid0, g_eattr.tid_pid1, g_eattr.tid_m1,
                                 g_eattr.tid_m2, g_eattr.tid_a, g_eattr.tid_e, g_eattr.tid_gamma,
                                 g_eattr.tid_P * TIME_UNIT_MYR, g_eattr.tid_dt * TIME_UNIT_MYR);
+                    { extern double g_sec_nonpn_gw;
+                      std::printf("EATTR_SEC step %d nonpn_gw_booked %.6e\n", step_now, g_sec_nonpn_gw / E0); }
                     g_eattr.reset();
                 }
 #endif

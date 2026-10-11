@@ -70,6 +70,9 @@ int tree_n_group = 64;
 // Global tree instance (rebuilt each top-level step)
 static Octree g_octree;
 
+// Energy booked as E_gw by the secular path for binaries without PN terms (round-off of the Kepler drift; diagnostic)
+double g_sec_nonpn_gw = 0.0;
+
 void release_integrator_globals() { g_octree = Octree(); }  // before Kokkos::finalize
 
 // TILE_SIZE defined in constants.h
@@ -726,6 +729,7 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
         // summed afterwards in a fixed order, so every MPI rank books the same value.
         const int n_sec = (int)secular_idx.size();
         std::vector<double> dE_gw(n_sec, 0.0);
+        std::vector<char> sec_pn(n_sec, 0);
         std::vector<char> evolved(n_sec, 0);
         std::vector<int> substeps(n_sec, 0);
         std::vector<EnergyBookkeeping> sec_books(n_sec);  // P/L the secular evolution moves (PN, GW)
@@ -754,6 +758,7 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
             // are a Kepler drift. With PN on, a tight stellar binary took thousands of 1PN-precession sub-steps
             // per evolution (5-7 ms secular calls at depths 3-6 of the 200k cluster)
             const bool pn_binary = std::max(m1_sec, m2_sec) >= g_collisional.m_pn;
+            sec_pn[k] = pn_binary;
             substeps[k] = integrate_secular_binary(p1, v1, m1_sec, p2, v2, m2_sec, G, g_collisional.c_code,
                                                    pn_binary ? g_collisional.pn_order : 0, dt);
 
@@ -794,6 +799,7 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
         }
         for (int k = 0; k < n_sec; k++) {
             g_energy_books.E_gw += dE_gw[k];
+            if (!sec_pn[k]) g_sec_nonpn_gw += dE_gw[k];   // NBODY_EATTR: the part booked for non-PN binaries
             for (int c = 0; c < 3; c++) {
                 g_energy_books.P_sink[c] += sec_books[k].P_sink[c];
                 g_energy_books.L_sink[c] += sec_books[k].L_sink[c];
