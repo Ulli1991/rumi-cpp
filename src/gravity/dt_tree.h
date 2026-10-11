@@ -106,7 +106,7 @@ KOKKOS_INLINE_FUNCTION double dt_lower_bound(double r2lo, double r2hi, double so
 template <class Exec>
 struct PointTree {
     using Mem = typename Exec::memory_space;
-    int n = 0, P = 1, nlev = 0;
+    int n = 0, P = 1, nlev = 0, j0 = 0;   // j0: first particle index of the source range
     double vmean[3] = {0, 0, 0}, vsig = 0;   // mean and rms deviation of the velocities (vx, vy, vz)
     Kokkos::View<double*, Mem> px, py, pz, vx, vy, vz, m;
     Kokkos::View<int*, Mem> idx;          // sorted position -> particle index
@@ -134,7 +134,7 @@ struct PointTree {
     // spatial resolution: the sink falls inside the boxes of many sparse leaves, where no bound can prune).
     void build(int j0, int nj, const double* X, const double* Y, const double* Z, const double* VX, const double* VY,
                const double* VZ, const double* M, bool by_velocity, bool vclass = false) {
-        n = nj;
+        n = nj; this->j0 = j0;
         const int nleaf = (n + LEAF - 1) / LEAF;
         P = 1; nlev = 0;
         while (P < nleaf) { P *= 2; nlev++; }
@@ -252,12 +252,13 @@ void min_pair_dt(const PointTree<Exec>& T, const PointTree<Exec>& V, int i0, int
     auto vn = V.node; auto vpx = V.px, vpy = V.py, vpz = V.pz, vvx = V.vx, vvy = V.vy, vvz = V.vz, vm = V.m;
     auto vidx = V.idx;
     const int TP = T.P, VP = V.P, Tn = T.n, Vn = V.n;
+    const bool same = i0 == T.j0 && ni == T.n;
     const double G = prm.G, soft2 = prm.soft2, eff = prm.eta_ff, efb = prm.eta_fb, vcf = prm.vc_fac;
     const double vmx = T.vmean[0], vmy = T.vmean[1], vmz = T.vmean[2], vsig = T.vsig;
     long long cnt = 0, cntB = 0;
     Kokkos::parallel_reduce("dtt_min_dt", Kokkos::RangePolicy<Exec, Kokkos::Schedule<Kokkos::Dynamic>>(0, ni),
         KOKKOS_LAMBDA(int ii, long long& npair, long long& npairB) {
-        const int i = i0 + ii;
+        const int i = same ? tidx(ii) : i0 + ii;   // sinks in Morton order when they are the sources (coherent walks)
         const double xi = X[i], yi = Y[i], zi = Z[i], ui = CVX[i], vi = CVY[i], wi = CVZ[i], mi = M[i];
         const int si = sid ? sid[i] : -1;
         double mn = 1e30;
@@ -378,10 +379,11 @@ void ngb_pairs(const PointTree<Exec>& T, int i0, int ni, const double* X, const 
     auto tn = T.node; auto tpx = T.px, tpy = T.py, tpz = T.pz, tvx = T.vx, tvy = T.vy, tvz = T.vz, tm = T.m;
     auto tidx = T.idx;
     const int TP = T.P, Tn = T.n;
+    const bool same = i0 == T.j0 && ni == T.n;
     const double prune2 = r_ngb_max_sq * (1.0 + 1e-12);
     Kokkos::parallel_for("dtt_ngb", Kokkos::RangePolicy<Exec, Kokkos::Schedule<Kokkos::Dynamic>>(0, ni),
         KOKKOS_LAMBDA(int ii) {
-        const int i = i0 + ii;
+        const int i = same ? tidx(ii) : i0 + ii;
         const double xi = X[i], yi = Y[i], zi = Z[i], ui = VX[i], vi = VY[i], wi = VZ[i], mi = M[i];
         int stack[STACK];
         int sp = 0;
