@@ -57,7 +57,7 @@ double collision_distance(int kw1, double m1, double R1, int kw2, double m2, dou
                           MergerType& type);
 
 // Remnant mass of a collision of the given type (m1, m2 with kinds kw1, kw2) before GW losses: a TDE leaves the BH
-// (the star is removed, accretion fraction 0), everything else keeps m1 + m2
+// plus TDE_ACCRETION_FRACTION of the star (default 0.5), everything else keeps m1 + m2
 double collision_remnant_mass(MergerType type, int kw1, double m1, int kw2, double m2);
 
 // A collision decided inside a regularised subsystem integration (logh_batch.cpp, FROST-CLUSTERS I App. B3). The

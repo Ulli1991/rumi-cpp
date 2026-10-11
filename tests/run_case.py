@@ -624,6 +624,21 @@ def restarts(exe, label, cfg, bound):
         check(f"{label} max|dE/E|", max(r[0] for r in rows), bound)
 
 
+def tde_accretion(exe, label, cfg):
+    """TDE remnant mass: m_BH + TDE_ACCRETION_FRACTION x m_star (FROST-CLUSTERS I, DRAGON-II: 0.5) for f = 0, 0.5, 1."""
+    ok = True
+    for f in ("0", "0.5", "1"):
+        out = run_output(exe, dict(cfg, TDE_ACCRETION_FRACTION=f))
+        m = re.findall(r"\[SUBSYS COLLISION\] TDE pids \d+ \+ \d+, m (\S+) \+ (\S+) -> (\S+) Msun", out)
+        if not m:
+            ok &= check(f"{label} f = {f}: TDE event", 0, 1, lower=True)
+            continue
+        m_bh, m_st, m_rem = (float(x) for x in m[0])
+        ok &= check(f"{label} f = {f}: |m_rem - (m_BH + f m_star)|", abs(m_rem - (max(m_bh, m_st) + float(f) * min(m_bh, m_st))),
+                    1e-3)
+    return ok
+
+
 def subsys_collision(exe, label, cfg, kind, bound, min_landings=0):
     """A collision inside a subsystem integration (FROST-CLUSTERS I App. B3): exactly one event of the given kind,
     one body less at the end (no duplicated or lost particle), no LogH step-limit hit or give-up, and the energy
@@ -1007,6 +1022,7 @@ CASES = {
     "coll_contact_flyby_logh": lambda exe: subsys_collision(exe, "contact binary + fly-by, LogH",
                                                             dict(COLL_CONTACT, SDAR="false"), "STELLAR", 6.1e-11,
                                                             min_landings=1),
+    "coll_tde_accretion": lambda exe: tde_accretion(exe, "TDE accretion fraction", COLL_TDE),
     "coll_tde_parabolic": lambda exe: subsys_collision(exe, "TDE, parabolic", COLL_TDE, "TDE", 1.5e-12),
     "coll_bh_isco": lambda exe: subsys_collision(exe, "BH binary to ISCO, PN", COLL_ISCO, "ISCO", 1e-14),
     "logh_big_group": lambda exe: big_group(exe, "big group", BIG_GROUP, (1.2e-5, 1e-12)),

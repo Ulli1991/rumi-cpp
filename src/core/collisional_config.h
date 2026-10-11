@@ -49,6 +49,7 @@ struct CollisionalConfig {
     // pairs closer than their collision distance merge there; candidates (osculating pericentre inside it) get a
     // step forced onto their pericentre and are decided there. Off: only the per-level check of 2-body subsystems
     bool subsys_collisions = true;
+    double tde_accretion = 0.5;        // TDE_ACCRETION_FRACTION: fraction of a disrupted star the BH accretes (FROST-CLUSTERS I, DRAGON-II: 0.5)
 
     // Secular evolution
     int n_orb_secular = 3;             // orbits/timestep threshold for secular

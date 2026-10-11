@@ -2,6 +2,7 @@
 #include "merger_tree.h"
 #include "kepler.h"
 #include "constants.h"
+#include "collisional_config.h"
 #include "integrator.h"
 #include "small_for.h"
 #include "device_staging.h"
@@ -62,7 +63,10 @@ double collision_distance(int kw1, double m1, double R1, int kw2, double m2, dou
 }
 
 double collision_remnant_mass(MergerType type, int kw1, double m1, int kw2, double m2) {
-    if (type == MergerType::TIDAL_DISRUPTION) return kw1 == 14 ? m1 : m2;
+    // TDE: the BH keeps TDE_ACCRETION_FRACTION of the star (FROST-CLUSTERS I App. B; Rizzuto+2021 0.1-1, DRAGON-II and
+    // FROST-CLUSTERS 0.5); the rest leaves the cluster, booked as mass loss by the callers
+    if (type == MergerType::TIDAL_DISRUPTION)
+        return kw1 == 14 ? m1 + g_collisional.tde_accretion * m2 : m2 + g_collisional.tde_accretion * m1;
     (void)kw1; (void)kw2;
     return m1 + m2;
 }
