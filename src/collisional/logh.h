@@ -47,7 +47,8 @@ struct LogHState {
 struct SdarParams {
     double k_ref = 1e-6;                    // W20 Eq. 22, FC-I Eq. A8
     double c = 0.1;                         // kappa_max coefficient, W20 Eq. 28, FC-I Eq. A9
-    double coll_factor = 3.0;               // collision candidate: pericentre < coll_factor (R_a + R_b) -> kappa = 1
+    double coll_factor = 1.0;               // collision candidate: osculating pericentre < coll_factor x collision
+                                            // distance -> kappa = 1 (FC-I App. B3: r_p < r_coll)
     double coll_radius[LOGH_MAX_BODIES] = {};   // collision radius per body (normalized units, 0: none)
     double steps_per_orbit = 0.0;           // GBS step limit per slowed orbit (0: only the caller's max_iter)
 };

@@ -564,7 +564,8 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
             sd_par.steps_per_orbit = gbs_steps_per_orbit();   // the limit follows kappa during the call
             constexpr double R_sun_to_pc = 2.254e-8;   // as mergers.cpp
             for (int b = 0; b < nb; b++) {
-                // Collision radius: the star's radius; a BH contributes its ISCO share 6 G m / c^2
+                // Collision distance r_a + r_b (FC-I App. B3): the stellar radius; a BH its ISCO 6 G m / c^2
+                // (BH-BH: sum of the ISCOs, >= FC-I's larger ISCO)
                 const double r_pc = batch.flat_stype[off + b] == 14
                                         ? 6.0 * G * h_mass(off + b) / (c_code * c_code)
                                         : batch.flat_radius[off + b] * R_sun_to_pc;
