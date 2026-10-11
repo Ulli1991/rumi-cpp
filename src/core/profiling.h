@@ -72,6 +72,13 @@ struct StepProfiler {
     }
     int step_count;
 
+    // Runtime switches (main.cpp): enabled = PROFILING; fence = PROFILING_FENCES (default true). stop() fences the
+    // device so that each component is charged its own asynchronous kernels; ~50k fences per 200k step cost 4 % of
+    // the step (AUDIT G row 6). Without the fence the timers measure host wall time between start and stop, and
+    // queued device work is charged to whichever component next synchronises; the step total is unaffected.
+    bool enabled = true;
+    bool fence = true;
+
     Timer active_component;  // which component is currently being timed
     std::chrono::high_resolution_clock::time_point t_start;
     std::chrono::high_resolution_clock::time_point t_mpi;
@@ -98,6 +105,7 @@ struct StepProfiler {
 
     void start(Timer ctx = NUM_TIMERS) {
 #ifndef DISABLE_PROFILING_FENCES
+        if (!enabled) return;
         t_start = std::chrono::high_resolution_clock::now();
         active_component = ctx;
 #else
@@ -107,7 +115,8 @@ struct StepProfiler {
 
     void stop(Timer t, long long n_pairs = 0) {
 #ifndef DISABLE_PROFILING_FENCES
-        Kokkos::fence();  // ensure GPU work is complete before timing
+        if (!enabled) return;
+        if (fence) Kokkos::fence();  // ensure GPU work is complete before timing
         auto t_end = std::chrono::high_resolution_clock::now();
         double dt = std::chrono::duration<double>(t_end - t_start).count();
         elapsed[t] += dt;

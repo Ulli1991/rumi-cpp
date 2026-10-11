@@ -2513,7 +2513,7 @@ static int hhs_fsi_recursive(
         if (p.collisional) {
             g_profiler.start();
             PhaseClock dt_clock;
-            Kokkos::fence();   // profile: the time-step kernels above are asynchronous
+            if (g_profiler.fence) Kokkos::fence();   // profile: the time-step kernels above are asynchronous
             g_subsys_phase.add(SubsystemPhaseTimes::DT_WAIT, dt_clock.lap());
             g_subsystem_mgr.subsystem_timesteps(p, G, g_collisional.eta_pert);
             g_subsys_phase.add(SubsystemPhaseTimes::DT_SUBSYS, dt_clock.lap());

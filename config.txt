@@ -138,3 +138,5 @@ IMBH_SPIN = 0.0                    		# Dimensionless spin (both BHs)
 # =============================================================================
 PRINT_INTERVAL = 1
 PROFILING = true                    		# Print performance breakdown at each print interval
+PROFILING_FENCES = true            		# Fence the device at each timer stop (exact per-component times; ~4 % of a 200k step). false: host
+                                    		# wall times only, queued GPU work charged to the next synchronising component

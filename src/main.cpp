@@ -614,6 +614,8 @@ int main(int argc, char** argv) {
                                                 sse_mxns_val, sse_flbv_val);
 
         bool profiling_enabled = cfg.get_bool("PROFILING", true);
+        g_profiler.enabled = profiling_enabled;   // PROFILING = false: no timers and no device fences
+        g_profiler.fence = profiling_enabled && cfg.get_bool("PROFILING_FENCES", true);
         serial_n2_gpu = cfg.get_int("SERIAL_N2_GPU", 0);
         serial_n2_cpu = cfg.get_int("SERIAL_N2_CPU", 0);
         all_slow_split = cfg.get_bool("ALL_SLOW_SPLIT", true);
