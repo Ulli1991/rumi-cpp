@@ -244,6 +244,214 @@ void eih_pn_acceleration(const double x_A[3], const double v_A[3], double m_A,
 }
 
 // ============================================================================
+// eih_pn_acceleration of both bodies of a pair at once, bit-identical to the two calls (A = i, B = j) and
+// (A = j, B = i), with what both share computed once: 1/r (|x_j - x_i| = |x_i - x_j| exactly: IEEE subtraction
+// is sign-symmetric) and the coefficients A, B and prefactors of PN2.5 / 3.0 / 3.5 (functions of 1/r, |dv|^2,
+// r.dv, M and eta, all exactly symmetric in i, j). The per-body part (eih_body) repeats the operations of
+// eih_pn_acceleration in its own, not inlined function, so that no expression is shared between the two bodies
+// and every floating-point contraction (FMA, -march=native) comes out as there. Checked bitwise on 5e6 random
+// pairs over all 31 orders, host and nvcc_wrapper builds; NBODY_CHECK_EIH=1 checks every pair of a run.
+// ============================================================================
+
+namespace {
+struct EihPairCoeffs {   // the pair-symmetric prefactors and coefficients of PN2.5, PN3.0, PN3.5
+    double M, p25, A25, B25, p3, A3, B3, p35, A35, B35;
+};
+}  // namespace
+
+// PN terms of body A from B (eih_pn_acceleration) with 1/r and the pair coefficients h given
+[[gnu::noinline]] static void eih_body(const double x_A[3], const double v_A[3], double m_A,
+                                       const double x_B[3], const double v_B[3], double m_B,
+                                       double G, double inv_c2, double inv_r, const EihPairCoeffs& h,
+                                       int pn_order, double a_pn_A[3]) {
+    a_pn_A[0] = a_pn_A[1] = a_pn_A[2] = 0.0;
+
+    double r_AB[3] = { x_A[0]-x_B[0], x_A[1]-x_B[1], x_A[2]-x_B[2] };
+    double inv_r2 = inv_r * inv_r;
+    double n[3] = { r_AB[0]*inv_r, r_AB[1]*inv_r, r_AB[2]*inv_r };
+    double dv[3] = { v_A[0]-v_B[0], v_A[1]-v_B[1], v_A[2]-v_B[2] };
+    double vA2 = v_A[0]*v_A[0] + v_A[1]*v_A[1] + v_A[2]*v_A[2];
+    double vB2 = v_B[0]*v_B[0] + v_B[1]*v_B[1] + v_B[2]*v_B[2];
+    double vA_dot_vB = v_A[0]*v_B[0] + v_A[1]*v_B[1] + v_A[2]*v_B[2];
+    double n_dot_vA = n[0]*v_A[0] + n[1]*v_A[1] + n[2]*v_A[2];
+    double n_dot_vB = n[0]*v_B[0] + n[1]*v_B[1] + n[2]*v_B[2];
+    double Gm_A = G * m_A;
+    double Gm_B = G * m_B;
+
+    if (pn_order & 1) {
+        double coeff_n = -vA2 - 2.0*vB2 + 4.0*vA_dot_vB
+                         + 1.5 * n_dot_vB * n_dot_vB
+                         + 5.0 * Gm_A * inv_r + 4.0 * Gm_B * inv_r;
+        double coeff_v = 4.0 * n_dot_vA - 3.0 * n_dot_vB;
+        double prefactor = Gm_B * inv_r2 * inv_c2;
+        for (int k = 0; k < 3; k++) {
+            a_pn_A[k] += prefactor * (coeff_n * n[k] + coeff_v * dv[k]);
+        }
+    }
+
+    if (pn_order & 2) {
+        double inv_c4 = inv_c2 * inv_c2;
+        double Gm_A_r = Gm_A * inv_r;
+        double Gm_B_r = Gm_B * inv_r;
+
+        double coeff_n =
+            -2.0 * vB2 * vB2
+            + 4.0 * vB2 * vA_dot_vB - 2.0 * vA_dot_vB * vA_dot_vB
+            + 1.5 * vA2 * n_dot_vB * n_dot_vB
+            + 4.5 * vB2 * n_dot_vB * n_dot_vB
+            - 6.0 * vA_dot_vB * n_dot_vB * n_dot_vB
+            - (15.0/8.0) * n_dot_vB * n_dot_vB * n_dot_vB * n_dot_vB
+            + Gm_A_r * (-15.0/4.0 * vA2 + 5.0/4.0 * vB2 - 2.5 * vA_dot_vB
+                         + 39.0/2.0 * n_dot_vA * n_dot_vA
+                         - 39.0 * n_dot_vA * n_dot_vB
+                         + 17.0/2.0 * n_dot_vB * n_dot_vB)
+            + Gm_B_r * (4.0 * vB2 - 8.0 * vA_dot_vB
+                         + 2.0 * n_dot_vA * n_dot_vA
+                         - 4.0 * n_dot_vA * n_dot_vB
+                         - 6.0 * n_dot_vB * n_dot_vB)
+            + Gm_A_r * Gm_A_r * inv_r * (-57.0/4.0)
+            + Gm_B_r * Gm_B_r * inv_r * (-9.0)
+            + Gm_A_r * Gm_B_r * inv_r * (-69.0/2.0);
+
+        double coeff_v =
+            vA2 * n_dot_vB + 4.0 * vA2 * n_dot_vA
+            - 5.0 * vB2 * n_dot_vA - 4.0 * vA_dot_vB * n_dot_vA
+            + 4.0 * vA_dot_vB * n_dot_vB
+            - 6.0 * n_dot_vA * n_dot_vB * n_dot_vB
+            + (9.0/2.0) * n_dot_vB * n_dot_vB * n_dot_vB
+            + Gm_A_r * (-63.0/4.0 * n_dot_vA + 55.0/4.0 * n_dot_vB)
+            + Gm_B_r * (-2.0 * n_dot_vA - 2.0 * n_dot_vB);
+
+        double prefactor = Gm_B * inv_r2 * inv_c4;
+        for (int k = 0; k < 3; k++) {
+            a_pn_A[k] += prefactor * (coeff_n * n[k] + coeff_v * dv[k]);
+        }
+    }
+
+    const double fA = m_B / h.M;
+    if (pn_order & 4) {
+        for (int k = 0; k < 3; k++) {
+            a_pn_A[k] += h.p25 * (-h.A25 * n[k] * fA + h.B25 * (-dv[k]) * fA);
+        }
+    }
+    if (pn_order & 8) {
+        for (int k = 0; k < 3; k++) {
+            a_pn_A[k] += h.p3 * (h.A3 * n[k] + h.B3 * dv[k]) * fA;
+        }
+    }
+    if (pn_order & 16) {
+        for (int k = 0; k < 3; k++) {
+            a_pn_A[k] += h.p35 * (h.A35 * n[k] + h.B35 * dv[k]) * fA;
+        }
+    }
+}
+
+void eih_pn_acceleration_pair(const double x_i[3], const double v_i[3], double m_i,
+                              const double x_j[3], const double v_j[3], double m_j,
+                              double G, double c_code, double a_i[3], double a_j[3], int pn_order) {
+    // Geometry seen from i (A = i, B = j), as in eih_pn_acceleration
+    double r_AB[3] = { x_i[0]-x_j[0], x_i[1]-x_j[1], x_i[2]-x_j[2] };
+    double r2 = r_AB[0]*r_AB[0] + r_AB[1]*r_AB[1] + r_AB[2]*r_AB[2];
+    double r_mag = std::sqrt(r2);
+    double inv_r = 1.0 / r_mag;
+    double inv_r2 = inv_r * inv_r;
+    double dv[3] = { v_i[0]-v_j[0], v_i[1]-v_j[1], v_i[2]-v_j[2] };
+    double c2 = c_code * c_code;
+    double inv_c2 = 1.0 / c2;
+
+    EihPairCoeffs h{};
+    h.M = m_i + m_j;
+    if (pn_order & 4) {
+        double inv_c5 = inv_c2 * inv_c2 / c_code;
+        double dv2 = dv[0]*dv[0] + dv[1]*dv[1] + dv[2]*dv[2];
+        // 3 |dv|^2 before A25: in eih_pn_acceleration the (unused) PN2.5 coeff_n computes it first, which makes
+        // the FMA of A25's sum take 3 |dv|^2 as its product (GCC 13; otherwise ~20 % of results differ by 1 ulp)
+        double dv2_3 = 3.0 * dv2;
+        double M = m_i + m_j;
+        double mu_rel = G * M;
+        double eta = m_i * m_j / (M * M);
+        double r_dot_v = r_AB[0]*dv[0] + r_AB[1]*dv[1] + r_AB[2]*dv[2];
+        double n_dot_v_rel = r_dot_v * inv_r;
+        h.A25 = 8.0/5.0 * eta * mu_rel * inv_r * (17.0/3.0 * mu_rel * inv_r + dv2_3) * n_dot_v_rel;
+        h.B25 = -8.0/5.0 * eta * mu_rel * inv_r * (3.0 * mu_rel * inv_r + dv2);
+        h.p25 = mu_rel * inv_r2 * inv_c5;
+    }
+    if (pn_order & 8) {
+        double M = m_i + m_j;
+        double mu_rel = G * M;
+        double eta = m_i * m_j / (M * M);
+        double inv_c6 = inv_c2 * inv_c2 * inv_c2;
+        double Gm_r = mu_rel * inv_r;
+        double dv2 = dv[0]*dv[0] + dv[1]*dv[1] + dv[2]*dv[2];
+        double r_dot_v = r_AB[0]*dv[0] + r_AB[1]*dv[1] + r_AB[2]*dv[2];
+        double n_dot_v = r_dot_v * inv_r;
+
+        double Gm_r2 = Gm_r * Gm_r;
+        double Gm_r3 = Gm_r2 * Gm_r * inv_r;
+        double v4 = dv2 * dv2;
+        double v6 = v4 * dv2;
+        double ndv2 = n_dot_v * n_dot_v;
+        double ndv4 = ndv2 * ndv2;
+
+        h.A3 =
+            + eta * (3.0 - 6.0*eta + 3.0*eta*eta) * v6 / 16.0
+            + eta * Gm_r * (
+                - (13.5 - 5.0*eta + 21.75*eta*eta) * v4
+                + eta * (6.0 - 22.5*eta) * dv2 * ndv2
+                + (7.5*eta*eta) * ndv4
+            )
+            + Gm_r2 * inv_r * (
+                + (16.0 + 35.0/6.0*eta - 203.0/12.0*eta*eta) * dv2
+                + eta * (-31.5 + 22.5*eta) * ndv2
+            )
+            + Gm_r3 * (
+                + (227.0/12.0 - 53.0/4.0*eta + 41.0/64.0*M_PI*M_PI*eta)
+            );
+        h.B3 =
+            + eta * Gm_r * n_dot_v * (
+                (13.5 - 15.75*eta + 2.0*eta*eta) * dv2
+                - eta * (3.0 - 7.5*eta) * ndv2
+            )
+            + Gm_r2 * inv_r * n_dot_v * (
+                + (-16.0 + 13.0*eta + 4.5*eta*eta)
+            );
+        h.p3 = mu_rel * inv_r2 * inv_c6;
+    }
+    if (pn_order & 16) {
+        double M = m_i + m_j;
+        double mu_rel = G * M;
+        double eta = m_i * m_j / (M * M);
+        double inv_c7 = inv_c2 * inv_c2 * inv_c2 / c_code;
+        double Gm_r = mu_rel * inv_r;
+        double dv2 = dv[0]*dv[0] + dv[1]*dv[1] + dv[2]*dv[2];
+        double r_dot_v = r_AB[0]*dv[0] + r_AB[1]*dv[1] + r_AB[2]*dv[2];
+        double n_dot_v = r_dot_v * inv_r;
+
+        double Gm_r2 = Gm_r * Gm_r;
+        double ndv2 = n_dot_v * n_dot_v;
+
+        h.A35 = n_dot_v * eta * (
+            + (8.0/5.0) * Gm_r * (
+                + (23.0/14.0 - 295.0/14.0*eta) * dv2 * dv2
+                + Gm_r * (-(1690.0/21.0 + 15.0*eta) * dv2 + (326.0/21.0 + 536.0/7.0*eta) * ndv2)
+                + Gm_r2 * inv_r * (12404.0/105.0 + 1816.0/21.0*eta)
+            )
+        );
+        h.B35 = eta * (
+            + (8.0/5.0) * Gm_r * (
+                + (-3.0/14.0 + 55.0/14.0*eta) * dv2 * dv2
+                + Gm_r * ((454.0/21.0 - 3.0*eta) * dv2 + (-74.0/21.0 - 148.0/7.0*eta) * ndv2)
+                + Gm_r2 * inv_r * (-4538.0/105.0 - 344.0/21.0*eta)
+            )
+        );
+        h.p35 = mu_rel * inv_r2 * inv_c7;
+    }
+
+    eih_body(x_i, v_i, m_i, x_j, v_j, m_j, G, inv_c2, inv_r, h, pn_order, a_i);   // A = i, B = j
+    eih_body(x_j, v_j, m_j, x_i, v_i, m_i, G, inv_c2, inv_r, h, pn_order, a_j);   // A = j, B = i
+}
+
+// ============================================================================
 // PN1 conserved energy correction (Poisson & Will 2014, Section 9.3)
 // E_total = T + U + E_pn1 is conserved at PN1 order.
 //

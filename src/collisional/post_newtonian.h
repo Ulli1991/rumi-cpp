@@ -22,6 +22,12 @@ void eih_pn_acceleration(const double x_A[3], const double v_A[3], double m_A,
                          const double x_B[3], const double v_B[3], double m_B,
                          double G, double c_code, double a_pn_A[3], int pn_order);
 
+// Both bodies at once: a_i = eih_pn_acceleration(i from j), a_j = eih_pn_acceleration(j from i), bit-identical
+// to the two calls, with the geometry and the pair-symmetric PN2.5-3.5 coefficients computed once
+void eih_pn_acceleration_pair(const double x_i[3], const double v_i[3], double m_i,
+                              const double x_j[3], const double v_j[3], double m_j,
+                              double G, double c_code, double a_i[3], double a_j[3], int pn_order);
+
 // ============================================================================
 // PN conserved energy corrections (Poisson & Will 2014, Section 9.3)
 // ============================================================================

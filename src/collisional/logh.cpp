@@ -1,6 +1,8 @@
 #include "logh.h"
 #include "post_newtonian.h"
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 // ============================================================================
@@ -491,14 +493,25 @@ static void compute_pn_all_pairs(const LogHState& state, const double* eval_vel,
     std::memset(pn_out, 0, n * 3 * sizeof(double));
     for (int i = 0; i < n; i++) {
         for (int j = i + 1; j < n; j++) {
-            // EIH: compute individual PN accelerations directly
+            // EIH: compute individual PN accelerations directly (both bodies of the pair in one call)
             double a_pn_i[3], a_pn_j[3];
-            eih_pn_acceleration(&state.pos[i*3], &eval_vel[i*3], state.mass[i],
-                                &state.pos[j*3], &eval_vel[j*3], state.mass[j],
-                                G, c_code, a_pn_i, pn_order);
-            eih_pn_acceleration(&state.pos[j*3], &eval_vel[j*3], state.mass[j],
-                                &state.pos[i*3], &eval_vel[i*3], state.mass[i],
-                                G, c_code, a_pn_j, pn_order);
+            eih_pn_acceleration_pair(&state.pos[i*3], &eval_vel[i*3], state.mass[i],
+                                     &state.pos[j*3], &eval_vel[j*3], state.mass[j],
+                                     G, c_code, a_pn_i, a_pn_j, pn_order);
+            // NBODY_CHECK_EIH=1 (tests): the pair call must equal the two single-body calls bit for bit
+            static const bool check_eih = std::getenv("NBODY_CHECK_EIH") != nullptr;
+            if (check_eih) {
+                double ref_i[3], ref_j[3];
+                eih_pn_acceleration(&state.pos[i*3], &eval_vel[i*3], state.mass[i],
+                                    &state.pos[j*3], &eval_vel[j*3], state.mass[j], G, c_code, ref_i, pn_order);
+                eih_pn_acceleration(&state.pos[j*3], &eval_vel[j*3], state.mass[j],
+                                    &state.pos[i*3], &eval_vel[i*3], state.mass[i], G, c_code, ref_j, pn_order);
+                if (std::memcmp(ref_i, a_pn_i, sizeof ref_i) || std::memcmp(ref_j, a_pn_j, sizeof ref_j)) {
+                    std::fprintf(stderr, "EIH CHECK FAILED: pair %d-%d order %d: %a %a %a vs %a %a %a\n", i, j,
+                                 pn_order, a_pn_i[0], a_pn_i[1], a_pn_i[2], ref_i[0], ref_i[1], ref_i[2]);
+                    std::abort();
+                }
+            }
             for (int k = 0; k < 3; k++) {
                 pn_out[i*3+k] += a_pn_i[k];
                 pn_out[j*3+k] += a_pn_j[k];
