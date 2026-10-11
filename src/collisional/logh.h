@@ -87,5 +87,19 @@ void logh_leapfrog_step(LogHState& state, double ds, double G);
 void logh_leapfrog_step_pn(LogHState& state, double ds, double G,
                             double c_code, int pn_order);
 
+// Values a chain of leapfrog steps needs at its start, which every GBS stage of a step shares (all stages start
+// from the same state): the Newtonian acceleration, Omega = T + B, and for PN steps g(v) = PN(x, v, S)
+struct LogHStepStart {
+    double accel[LOGH_MAX_BODIES * 3];
+    double pn_v[LOGH_MAX_BODIES * 3];
+    double omega;
+};
+void logh_step_start(const LogHState& state, double G, double c_code, int pn_order, LogHStepStart& start);
+
+// nsteps logh_leapfrog_step_pn steps with the values at the start of each step carried from the end of the
+// previous one (bit-identical to single steps); start: the values at the first step (nullptr: computed here)
+void logh_leapfrog_steps_pn(LogHState& state, double ds, double G, double c_code, int pn_order, int nsteps,
+                            const LogHStepStart* start = nullptr);
+
 // Compute total energy (kinetic + potential) for error checking
 double logh_total_energy(const LogHState& state, double G);

@@ -47,9 +47,10 @@ struct GBSIntegrator {
     GBSIntegrator(double eta = 1e-10) : eta_gbs(eta) {}
 
     // Modified midpoint method: integrate LogHState by n_substeps of ds_total/n
+    // start: the values at the start of the first substep (logh_step_start of in; nullptr: computed here)
     void midpoint(const LogHState& in, LogHState& out,
                   int n_substeps, double ds_total, double G,
-                  double c_code = 0.0, int pn_order = 0);
+                  double c_code = 0.0, int pn_order = 0, const LogHStepStart* start = nullptr);
 
     // Rational polynomial extrapolation (Stoer & Bulirsch)
     // Returns max relative error across all extrapolated components
@@ -69,7 +70,8 @@ struct GBSIntegrator {
                           int max_iter = 100000);
 
 private:
-    void compute_stages(const LogHState& state, int k0, int k1, double ds, double G, double c_code, int pn_order);
+    void compute_stages(const LogHState& state, int k0, int k1, double ds, double G, double c_code, int pn_order,
+                        const LogHStepStart* start);
     // Pack LogHState into flat array for extrapolation
     void pack_state(const LogHState& state, double* y, int& dim);
     // Unpack flat array back into LogHState

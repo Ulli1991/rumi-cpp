@@ -81,13 +81,11 @@ void GBSIntegrator::restore_spin_norms(LogHState& state, const double norm[4]) {
 
 void GBSIntegrator::midpoint(const LogHState& in, LogHState& out,
                               int n_substeps, double ds_total, double G,
-                              double c_code, int pn_order) {
+                              double c_code, int pn_order, const LogHStepStart* start) {
     double h = ds_total / n_substeps;
     out = in;
     if (pn_order > 0 && out.use_aux_vel) {
-        for (int s = 0; s < n_substeps; s++) {
-            logh_leapfrog_step_pn(out, h, G, c_code, pn_order);
-        }
+        logh_leapfrog_steps_pn(out, h, G, c_code, pn_order, n_substeps, start);
     } else {
         for (int s = 0; s < n_substeps; s++) {
             logh_leapfrog_step(out, h, G);
@@ -196,13 +194,13 @@ struct GbsStats {
 
 // Midpoint results of stages k0..k1 into table[] on the host threads, the largest stage handed out first
 void GBSIntegrator::compute_stages(const LogHState& state, int k0, int k1, double ds, double G,
-                                   double c_code, int pn_order) {
+                                   double c_code, int pn_order, const LogHStepStart* start) {
     using Policy = Kokkos::RangePolicy<Kokkos::DefaultHostExecutionSpace, Kokkos::Schedule<Kokkos::Dynamic>>;
     Kokkos::parallel_for("gbs_stages", Policy(0, k1 - k0 + 1).set_chunk_size(1), [&](int i) {
         const int k = k1 - i;
         LogHState result;
         result = state;
-        midpoint(state, result, STEP_SEQ[k], ds, G, c_code, pn_order);
+        midpoint(state, result, STEP_SEQ[k], ds, G, c_code, pn_order, start);
         int d = 0;
         pack_state(result, table[k], d);
     });
@@ -215,6 +213,14 @@ bool GBSIntegrator::step(LogHState& state, double ds, double G, double& ds_next,
     pack_state(state, y0, dim);
 
     bool do_debug = (state.n_bodies == 2 && gbs_debug_counter < 5);
+
+    // Values at the start of the first substep, the same for every stage (PN chains)
+    LogHStepStart start_buf;
+    const LogHStepStart* start = nullptr;
+    if (pn_order > 0 && state.use_aux_vel) {
+        logh_step_start(state, G, c_code, pn_order, start_buf);
+        start = &start_buf;
+    }
 
     if (do_debug) {
         double w0 = omega_from_packed(y0, 2);
@@ -231,12 +237,12 @@ bool GBSIntegrator::step(LogHState& state, double ds, double G, double& ds_next,
                 // runs in the same order on the same table, so the result is the serial one; unused stages
                 // beyond the converged one are discarded
                 const int k1 = std::min(MAX_STAGES - 1, std::max(stage, par_hint));
-                compute_stages(state, stage, k1, ds, G, c_code, pn_order);
+                compute_stages(state, stage, k1, ds, G, c_code, pn_order, start);
                 computed = k1;
             } else {
                 LogHState result;
                 result = state;  // copy masses, B, n_bodies, etc.
-                midpoint(state, result, STEP_SEQ[stage], ds, G, c_code, pn_order);
+                midpoint(state, result, STEP_SEQ[stage], ds, G, c_code, pn_order, start);
                 pack_state(result, table[stage], dim);
                 computed = stage;
             }

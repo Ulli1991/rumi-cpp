@@ -527,7 +527,8 @@ static void compute_pn_all_pairs(const LogHState& state, const double* eval_vel,
 //   C = ½ Σ mᵢ vᵢ·Δᵢ, D = ⅛ Σ mᵢ|Δᵢ|², Δ = ε*(a+g(w))
 //   W_old = Σ mᵢ vᵢ·gᵢ(w), P = Σ mᵢ Δᵢ·gᵢ(w)
 //
-// The full step K(ds/2)·D(ds)·K(ds/2) has 6 PN evaluations (3 per half-kick).
+// The full step K(ds/2)·D(ds)·K(ds/2) has 6 PN evaluations (3 per half-kick); in a chain of steps the first
+// one equals the last one of the previous step (logh_leapfrog_steps_pn), 5 per step.
 // ============================================================================
 
 // Helper: perform one K_phys step with cubic-solved Omega.
@@ -547,7 +548,7 @@ static void compute_pn_all_pairs(const LogHState& state, const double* eval_vel,
 //   C = ½ Σ mᵢ vᵢ·Δᵢ, D = ⅛ Σ mᵢ|Δᵢ|², Δ = eps*(a+g(w))
 //   W_old = Σ mᵢ vᵢ·gᵢ(w), P = Σ mᵢ Δᵢ·gᵢ(w)
 static void k_phys_cubic(LogHState& state, const double* accel, const double* pn,
-                          double eps, double G) {
+                          double eps, double G, double Omega0) {
     int n = state.n_bodies;
     int n3 = n * 3;
 
@@ -556,8 +557,7 @@ static void k_phys_cubic(LogHState& state, const double* accel, const double* pn
     for (int i = 0; i < n3; i++)
         delta[i] = eps * (accel[i] + pn[i]);
 
-    // Cubic coefficients from T(v_mid)
-    double Omega0 = logh_kinetic_energy(state) + state.B;
+    // Cubic coefficients from T(v_mid); Omega0 = T(v_old) + B_old (the caller's)
     double C = 0.0, D = 0.0;
     for (int b = 0; b < n; b++) {
         double vdot = 0.0, dsq = 0.0;
@@ -609,91 +609,93 @@ static void k_phys_cubic(LogHState& state, const double* accel, const double* pn
                      state.spin1, state.spin2);
 }
 
+// K_aux(ds/4): w += (ds/4) [a + g(v)] / Omega, Z rotated by Omega(x, v, S)   [EXPLICIT: v, B unchanged, so
+// Omega = T(v) + B is the caller's]
+static inline void k_aux(LogHState& state, const double* accel, const double* pn_v, double ds_quarter,
+                         double Omega, double G) {
+    const int n = state.n_bodies, n3 = n * 3;
+    double inv_Omega = 1.0 / Omega;
+    for (int i = 0; i < n3; i++)
+        state.aux_vel[i] += ds_quarter * (accel[i] + pn_v[i]) * inv_Omega;
+    if (state.has_spins && n == 2)
+        rotate_spins(state, state.vel, state.spin1, state.spin2, G, ds_quarter * inv_Omega,
+                     state.aux_spin1, state.aux_spin2);
+}
+
+void logh_step_start(const LogHState& state, double G, double c_code, int pn_order, LogHStepStart& start) {
+    logh_internal_accel(state, G, start.accel);
+    start.omega = logh_kinetic_energy(state) + state.B;
+    if (pn_order > 0 && state.use_aux_vel)
+        compute_pn_all_pairs(state, state.vel, G, c_code, pn_order, start.pn_v, state.spin1, state.spin2);
+}
+
+// nsteps PN leapfrog steps. A step needs the Newtonian acceleration a(x), g(v) = PN(x, v, S) and Omega = T(v) + B
+// at its start: those at the end of the previous step (its last K_aux leaves x, v, S and B unchanged and rotates
+// only the auxiliary spins Z). They are computed once per chain (or taken from start: the same for all GBS
+// stages of a step) and then carried. The drift and the K_aux / K_phys after it use the Omega of the K_aux
+// before the drift (K_aux and drift change neither v nor B). 5 PN evaluations and 2 kinetic energies per step
+// instead of 6 and 7, with the same operations on the same values as single steps: bit-identical.
+void logh_leapfrog_steps_pn(LogHState& state, double ds, double G, double c_code, int pn_order, int nsteps,
+                            const LogHStepStart* start) {
+    const int n3 = state.n_bodies * 3;
+    const double ds_half = 0.5 * ds;
+    const double ds_quarter = 0.25 * ds;
+
+    double accel[LOGH_MAX_BODIES * 3];   // Newtonian acceleration at x
+    double pn_v[LOGH_MAX_BODIES * 3];    // g(v) = PN acceleration at (x, v, S)
+    double pn[LOGH_MAX_BODIES * 3];      // g(w) = PN acceleration at (x, w, Z)
+    double Omega;                        // T(v) + B
+    if (start) {
+        std::memcpy(accel, start->accel, n3 * sizeof(double));
+        std::memcpy(pn_v, start->pn_v, n3 * sizeof(double));
+        Omega = start->omega;
+    } else {
+        logh_internal_accel(state, G, accel);
+        Omega = logh_kinetic_energy(state) + state.B;
+        compute_pn_all_pairs(state, state.vel, G, c_code, pn_order, pn_v, state.spin1, state.spin2);
+    }
+
+    for (int s = 0; s < nsteps; s++) {
+        // ============ FIRST HALF-KICK: K(ds/2) = K_aux(ds/4) · K_phys(ds/2) · K_aux(ds/4) ============
+        // BIFROST Eq. (5): dw/ds = (1/Ω)[a + g(v)],  dv/ds = (1/Ω)[a + g(w)]
+        // K_aux kicks w by [a + g(v)],  K_phys kicks v by [a + g(w)]
+        // External perturbations handled via FSI kicks, not inside LogH.
+        k_aux(state, accel, pn_v, ds_quarter, Omega, G);
+
+        // K_phys(ds/2): cubic solve for implicit midpoint (v and B)
+        compute_pn_all_pairs(state, state.aux_vel, G, c_code, pn_order, pn, state.aux_spin1, state.aux_spin2);
+        k_phys_cubic(state, accel, pn, ds_half, G, Omega);
+
+        // K_aux(ds/4) with g(v') at the updated v', B'
+        Omega = logh_kinetic_energy(state) + state.B;
+        compute_pn_all_pairs(state, state.vel, G, c_code, pn_order, pn_v, state.spin1, state.spin2);
+        k_aux(state, accel, pn_v, ds_quarter, Omega, G);
+
+        // ============ DRIFT: x += ds * v / Omega,  t += ds / Omega  [EXPLICIT] ============
+        {
+            double inv_Omega = 1.0 / Omega;
+            for (int i = 0; i < n3; i++)
+                state.pos[i] += ds * state.vel[i] * inv_Omega;
+            state.t += ds * inv_Omega;
+        }
+
+        // ============ Newtonian acceleration and g(v) at the new positions ============
+        logh_internal_accel(state, G, accel);
+        compute_pn_all_pairs(state, state.vel, G, c_code, pn_order, pn_v, state.spin1, state.spin2);
+
+        // ============ SECOND HALF-KICK: K(ds/2) = K_aux(ds/4) · K_phys(ds/2) · K_aux(ds/4) ============
+        k_aux(state, accel, pn_v, ds_quarter, Omega, G);
+
+        compute_pn_all_pairs(state, state.aux_vel, G, c_code, pn_order, pn, state.aux_spin1, state.aux_spin2);
+        k_phys_cubic(state, accel, pn, ds_half, G, Omega);
+
+        Omega = logh_kinetic_energy(state) + state.B;
+        compute_pn_all_pairs(state, state.vel, G, c_code, pn_order, pn_v, state.spin1, state.spin2);
+        k_aux(state, accel, pn_v, ds_quarter, Omega, G);
+    }
+}
+
 void logh_leapfrog_step_pn(LogHState& state, double ds, double G,
                             double c_code, int pn_order) {
-    int n = state.n_bodies;
-    int n3 = n * 3;
-    double ds_half = 0.5 * ds;
-    double ds_quarter = 0.25 * ds;
-
-    // Compute Newtonian accelerations at current positions
-    double accel[LOGH_MAX_BODIES * 3];
-    logh_internal_accel(state, G, accel);
-
-    double pn[LOGH_MAX_BODIES * 3];
-
-    // ============ FIRST HALF-KICK: K(ds/2) = K_aux(ds/4) · K_phys(ds/2) · K_aux(ds/4) ============
-    // BIFROST Eq. (5): dw/ds = (1/Ω)[a + g(v)],  dv/ds = (1/Ω)[a + g(w)]
-    // K_aux kicks w by [a + g(v)],  K_phys kicks v by [a + g(w)]
-    // External perturbations handled via FSI kicks, not inside LogH.
-
-    // K_aux(ds/4): w += (ds/4) * [a + g(v)] / Omega   [EXPLICIT: v,B unchanged → Ω constant]
-    {
-        double Omega = logh_kinetic_energy(state) + state.B;
-        double inv_Omega = 1.0 / Omega;
-        compute_pn_all_pairs(state, state.vel, G, c_code, pn_order, pn, state.spin1, state.spin2);
-        for (int i = 0; i < n3; i++)
-            state.aux_vel[i] += ds_quarter * (accel[i] + pn[i]) * inv_Omega;
-        if (state.has_spins && n == 2)
-            rotate_spins(state, state.vel, state.spin1, state.spin2, G, ds_quarter * inv_Omega,
-                         state.aux_spin1, state.aux_spin2);
-    }
-
-    // K_phys(ds/2): cubic solve for implicit midpoint (v and B)
-    compute_pn_all_pairs(state, state.aux_vel, G, c_code, pn_order, pn, state.aux_spin1, state.aux_spin2);
-    k_phys_cubic(state, accel, pn, ds_half, G);
-
-    // K_aux(ds/4): w += (ds/4) * [a + g(v')] / Omega   [EXPLICIT, v' and B' updated]
-    {
-        double Omega = logh_kinetic_energy(state) + state.B;
-        double inv_Omega = 1.0 / Omega;
-        compute_pn_all_pairs(state, state.vel, G, c_code, pn_order, pn, state.spin1, state.spin2);
-        for (int i = 0; i < n3; i++)
-            state.aux_vel[i] += ds_quarter * (accel[i] + pn[i]) * inv_Omega;
-        if (state.has_spins && n == 2)
-            rotate_spins(state, state.vel, state.spin1, state.spin2, G, ds_quarter * inv_Omega,
-                         state.aux_spin1, state.aux_spin2);
-    }
-
-    // ============ DRIFT: x += ds * v / Omega,  t += ds / Omega  [EXPLICIT] ============
-    {
-        double Omega = logh_kinetic_energy(state) + state.B;
-        double inv_Omega = 1.0 / Omega;
-        for (int i = 0; i < n3; i++)
-            state.pos[i] += ds * state.vel[i] * inv_Omega;
-        state.t += ds * inv_Omega;
-    }
-
-    // ============ Recompute Newtonian accelerations at new positions ============
-    logh_internal_accel(state, G, accel);
-
-    // ============ SECOND HALF-KICK: K(ds/2) = K_aux(ds/4) · K_phys(ds/2) · K_aux(ds/4) ============
-
-    // K_aux(ds/4)   [EXPLICIT]
-    {
-        double Omega = logh_kinetic_energy(state) + state.B;
-        double inv_Omega = 1.0 / Omega;
-        compute_pn_all_pairs(state, state.vel, G, c_code, pn_order, pn, state.spin1, state.spin2);
-        for (int i = 0; i < n3; i++)
-            state.aux_vel[i] += ds_quarter * (accel[i] + pn[i]) * inv_Omega;
-        if (state.has_spins && n == 2)
-            rotate_spins(state, state.vel, state.spin1, state.spin2, G, ds_quarter * inv_Omega,
-                         state.aux_spin1, state.aux_spin2);
-    }
-
-    // K_phys(ds/2): cubic solve with PN
-    compute_pn_all_pairs(state, state.aux_vel, G, c_code, pn_order, pn, state.aux_spin1, state.aux_spin2);
-    k_phys_cubic(state, accel, pn, ds_half, G);
-
-    // K_aux(ds/4)   [EXPLICIT]
-    {
-        double Omega = logh_kinetic_energy(state) + state.B;
-        double inv_Omega = 1.0 / Omega;
-        compute_pn_all_pairs(state, state.vel, G, c_code, pn_order, pn, state.spin1, state.spin2);
-        for (int i = 0; i < n3; i++)
-            state.aux_vel[i] += ds_quarter * (accel[i] + pn[i]) * inv_Omega;
-        if (state.has_spins && n == 2)
-            rotate_spins(state, state.vel, state.spin1, state.spin2, G, ds_quarter * inv_Omega,
-                         state.aux_spin1, state.aux_spin2);
-    }
+    logh_leapfrog_steps_pn(state, ds, G, c_code, pn_order, 1);
 }
