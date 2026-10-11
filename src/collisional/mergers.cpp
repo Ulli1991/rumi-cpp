@@ -3,6 +3,9 @@
 #include "kepler.h"
 #include "constants.h"
 #include "integrator.h"
+#include "small_for.h"
+#include "device_staging.h"
+#include <vector>
 #include <cmath>
 #include <algorithm>
 #include <cstdio>
@@ -121,45 +124,59 @@ std::vector<MergerEvent> detect_mergers(const SubsystemManager& mgr,
 
     const auto& pid_to_idx = mgr.pid_to_idx();
 
-    // Find min/max index among subsystem members to copy only the needed range
-    int min_idx = p.N, max_idx = 0;
+    // Gather x, y, z, mass, stellar type and radius of the binaries' members only (rows 2j, 2j + 1 for the j-th
+    // binary): one small transfer through persistent buffers instead of nine copies of the members' index range
+    std::vector<const Subsystem*> bins;
+    std::vector<int> slots;
     for (const auto& sub : mgr.active) {
         if (sub.n_bodies != 2) continue;
-        for (int pid : sub.particle_ids) {
-            int idx = (pid >= 0 && pid < (int)pid_to_idx.size()) ? pid_to_idx[pid] : -1;
-            if (idx >= 0) { min_idx = std::min(min_idx, idx); max_idx = std::max(max_idx, idx); }
-        }
-    }
-    if (min_idx > max_idx) return events;
-
-    auto rng = Kokkos::pair<int,int>(min_idx, max_idx + 1);
-    auto h_x  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Kokkos::subview(p.x, rng));
-    auto h_y  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Kokkos::subview(p.y, rng));
-    auto h_z  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Kokkos::subview(p.z, rng));
-    auto h_vx = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Kokkos::subview(p.vx, rng));
-    auto h_vy = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Kokkos::subview(p.vy, rng));
-    auto h_vz = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Kokkos::subview(p.vz, rng));
-    auto h_m  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Kokkos::subview(p.mass, rng));
-    auto h_stype = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Kokkos::subview(p.stellar_type, rng));
-    auto h_srad = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Kokkos::subview(p.stellar_radius, rng));
-    const int off = min_idx;  // offset for remapping: h_x(idx - off)
-
-    double R_sun_to_pc = 2.254e-8;  // R_sun in parsecs
-
-    for (const auto& sub : mgr.active) {
-        if (sub.n_bodies != 2) continue;
-
         int idx1 = pid_to_idx[sub.particle_ids[0]];
         int idx2 = pid_to_idx[sub.particle_ids[1]];
         if (idx1 < 0 || idx2 < 0) continue;
+        bins.push_back(&sub);
+        slots.push_back(idx1);
+        slots.push_back(idx2);
+    }
+    if (bins.empty()) return events;
+    constexpr int NF = 6;
+    const int n_rows = (int)slots.size();
+    DeviceStaging& st = DeviceStaging::get<2>();
+    st.reserve(n_rows, NF);
+    std::copy(slots.begin(), slots.end(), st.h_idx.data());
+    st.upload_idx(n_rows);
+    {
+        auto d_idx = st.d_idx;
+        auto d_buf = st.d_buf;
+        auto px = p.x, py = p.y, pz = p.z, pm = p.mass, psr = p.stellar_radius;
+        auto pst = p.stellar_type;
+        small_for("merger_gather", n_rows, KOKKOS_LAMBDA(int k) {
+            int i = d_idx(k);
+            d_buf(k * NF + 0) = px(i); d_buf(k * NF + 1) = py(i); d_buf(k * NF + 2) = pz(i);
+            d_buf(k * NF + 3) = pm(i); d_buf(k * NF + 4) = (double)pst(i); d_buf(k * NF + 5) = psr(i);
+        });
+    }
+    st.download_buf((size_t)n_rows * NF);
+    auto h_buf = st.h_buf;
+    auto h_x = [&](int k) { return h_buf(k * NF + 0); };
+    auto h_y = [&](int k) { return h_buf(k * NF + 1); };
+    auto h_z = [&](int k) { return h_buf(k * NF + 2); };
+    auto h_m = [&](int k) { return h_buf(k * NF + 3); };
+    auto h_stype = [&](int k) { return (int)h_buf(k * NF + 4); };
+    auto h_srad = [&](int k) { return h_buf(k * NF + 5); };
 
-        double dx = h_x(idx2 - off) - h_x(idx1 - off);
-        double dy = h_y(idx2 - off) - h_y(idx1 - off);
-        double dz = h_z(idx2 - off) - h_z(idx1 - off);
+    double R_sun_to_pc = 2.254e-8;  // R_sun in parsecs
+
+    for (size_t j = 0; j < bins.size(); j++) {
+        const auto& sub = *bins[j];
+        const int r1 = 2 * (int)j, r2 = r1 + 1;   // rows of the two members
+
+        double dx = h_x(r2) - h_x(r1);
+        double dy = h_y(r2) - h_y(r1);
+        double dz = h_z(r2) - h_z(r1);
         double r = std::sqrt(dx*dx + dy*dy + dz*dz);
 
-        double m1 = h_m(idx1 - off), m2 = h_m(idx2 - off);
-        int stype1 = h_stype(idx1 - off), stype2 = h_stype(idx2 - off);
+        double m1 = h_m(r1), m2 = h_m(r2);
+        int stype1 = h_stype(r1), stype2 = h_stype(r2);
         bool is_bh1 = (stype1 == 14), is_bh2 = (stype2 == 14);
 
         MergerEvent ev{};
@@ -187,8 +204,8 @@ std::vector<MergerEvent> detect_mergers(const SubsystemManager& mgr,
 
         // Stellar collision
         if (ev.type == MergerType::NONE && !is_bh1 && !is_bh2) {
-            double R1_pc = h_srad(idx1 - off) * R_sun_to_pc;
-            double R2_pc = h_srad(idx2 - off) * R_sun_to_pc;
+            double R1_pc = h_srad(r1) * R_sun_to_pc;
+            double R2_pc = h_srad(r2) * R_sun_to_pc;
             if (r < R1_pc + R2_pc) {
                 ev.type = MergerType::STELLAR_COLLISION;
                 ev.m_remnant = m1 + m2;
@@ -198,14 +215,14 @@ std::vector<MergerEvent> detect_mergers(const SubsystemManager& mgr,
         // Tidal disruption (star + BH)
         if (ev.type == MergerType::NONE) {
             if (is_bh1 && !is_bh2) {
-                double R_star_pc = h_srad(idx2 - off) * R_sun_to_pc;
+                double R_star_pc = h_srad(r2) * R_sun_to_pc;
                 double R_td = tidal_disruption_radius(m2, R_star_pc, m1);
                 if (r < R_td) {
                     ev.type = MergerType::TIDAL_DISRUPTION;
                     ev.m_remnant = m1;  // BH eats the star (simplified)
                 }
             } else if (!is_bh1 && is_bh2) {
-                double R_star_pc = h_srad(idx1 - off) * R_sun_to_pc;
+                double R_star_pc = h_srad(r1) * R_sun_to_pc;
                 double R_td = tidal_disruption_radius(m1, R_star_pc, m2);
                 if (r < R_td) {
                     ev.type = MergerType::TIDAL_DISRUPTION;

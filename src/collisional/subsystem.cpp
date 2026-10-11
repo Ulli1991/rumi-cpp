@@ -267,19 +267,29 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
     n_pairs = std::min(n_pairs, max_ngb_pairs);
     last_level_pairs = n_pairs;
 
-    // Copy neighbor pairs to host
-    auto h_pi = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
-                    Kokkos::subview(ngb_pair_i, std::make_pair(0, n_pairs)));
-    auto h_pj = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
-                    Kokkos::subview(ngb_pair_j, std::make_pair(0, n_pairs)));
-    auto h_pa = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
-                    Kokkos::subview(ngb_pair_a, std::make_pair(0, n_pairs)));
-    auto h_pe = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
-                    Kokkos::subview(ngb_pair_e, std::make_pair(0, n_pairs)));
-    auto h_pE = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
-                    Kokkos::subview(ngb_pair_E, std::make_pair(0, n_pairs)));
-    auto h_pb = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
-                    Kokkos::subview(ngb_pair_bound, std::make_pair(0, n_pairs)));
+    // Copy neighbor pairs to host: packed by one kernel into a persistent buffer (i, j, a, e, E, bound per pair;
+    // the ints are exact as doubles), one transfer instead of six
+    constexpr int PF = 6;
+    DeviceStaging& st = DeviceStaging::get<3>();
+    st.reserve(1, PF * n_pairs);
+    {
+        auto d_buf = st.d_buf;
+        auto pi = ngb_pair_i, pj = ngb_pair_j, pb = ngb_pair_bound;
+        auto pa = ngb_pair_a, pe = ngb_pair_e, pE = ngb_pair_E;
+        small_for("ngb_pair_pack", n_pairs, KOKKOS_LAMBDA(int k) {
+            d_buf(k * PF + 0) = (double)pi(k); d_buf(k * PF + 1) = (double)pj(k);
+            d_buf(k * PF + 2) = pa(k); d_buf(k * PF + 3) = pe(k); d_buf(k * PF + 4) = pE(k);
+            d_buf(k * PF + 5) = (double)pb(k);
+        });
+    }
+    st.download_buf((size_t)PF * n_pairs);
+    auto h_pbuf = st.h_buf;
+    auto h_pi = [&](int k) { return (int)h_pbuf(k * PF + 0); };
+    auto h_pj = [&](int k) { return (int)h_pbuf(k * PF + 1); };
+    auto h_pa = [&](int k) { return h_pbuf(k * PF + 2); };
+    auto h_pe = [&](int k) { return h_pbuf(k * PF + 3); };
+    auto h_pE = [&](int k) { return h_pbuf(k * PF + 4); };
+    auto h_pb = [&](int k) { return (int)h_pbuf(k * PF + 5); };
 
     // Count bound pairs for diagnostics
     {
