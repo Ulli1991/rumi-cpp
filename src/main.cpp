@@ -619,6 +619,8 @@ int main(int argc, char** argv) {
         all_slow_split = cfg.get_bool("ALL_SLOW_SPLIT", true);
         hhs_cc = cfg.get_bool("HHS_CC", false);
         hhs_cc_max = cfg.get_int("HHS_CC_MAX", -1);
+        bool ngb_mass_scaling = false;
+        double ngb_mref = 0.0;
         flyby_cm_velocity = cfg.get_bool("FLYBY_CM_VELOCITY", false);   // FROST-CLUSTERS II sec. 2.1
         g_eattr.on = std::getenv("NBODY_EATTR") != nullptr;   // per-print energy attribution (diagnostics.h)
         distribute_subsystems = cfg.get_bool("DISTRIBUTE_SUBSYSTEMS", false);   // FROST Algorithm 3
@@ -672,6 +674,9 @@ int main(int argc, char** argv) {
             g_collisional.tidal_gamma     = cfg.get_double("TIDAL_GAMMA", 0.0);
             g_collisional.weak_perturber_gamma = cfg.get_double("WEAK_PERTURBER_GAMMA", 0.0);
             g_collisional.flyby_ngb_cm    = cfg.get_bool("FLYBY_NGB_CM", true);
+            ngb_mass_scaling              = cfg.get_bool("NGB_MASS_SCALING", false);
+            ngb_mref                      = cfg.get_double("NGB_MREF", 0.0);   // <m> override [Msun] (tests)
+            g_collisional.ngb_mass_gamma  = cfg.get_double("NGB_MASS_GAMMA", 1e-3);
             g_collisional.tidal_step_res  = cfg.get_double("TIDAL_STEP_RES", 1.0);
             g_collisional.secular_triples = cfg.get_bool("SECULAR_TRIPLES", true);
             g_collisional.sdar            = cfg.get_bool("SDAR", false);
@@ -951,6 +956,15 @@ int main(int argc, char** argv) {
         // FLYBY_CM_EPS scale: |E0| (the energy the run's |dE/E| refers to)
         if (g_collisional.enabled && g_collisional.flyby_cm_eps > 0.0)
             g_collisional.e_ref = std::fabs(compute_diagnostics(work_p, G, soft2).E_total);
+        // NGB_MASS_SCALING: <m> of the initial particles (fixed for the run)
+        if (g_collisional.enabled && ngb_mass_scaling && work_p.N > 0) {
+            double m_sum = 0.0;
+            auto pm = work_p.mass;
+            Kokkos::parallel_reduce("ngb_mref", work_p.N, KOKKOS_LAMBDA(int i, double& s) { s += pm(i); }, m_sum);
+            g_collisional.ngb_inv_mref = work_p.N / m_sum;
+            if (ngb_mref > 0.0) { g_collisional.ngb_inv_mref = 1.0 / ngb_mref; m_sum = ngb_mref * work_p.N; }
+            if (my_rank == 0) std::printf("NGB_MASS_SCALING: <m> = %.4f Msun\n", m_sum / work_p.N);
+        }
 #endif
         // Initial force computation + adaptive timestep
         if (my_rank == 0) {

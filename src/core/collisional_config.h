@@ -33,7 +33,9 @@ struct CollisionalConfig {
                                        //   energy a slow particle's kicks put into a subsystem per step by this x |E0|
     double e_ref = 0.0;                //   |E0| of the run
     double tidal_step_res = 1.0;       // TIDAL_STEP_RES: floor of the FLYBY_CM_EPS step, this x P (1 - e)^(3/2) of the binary (0: none)
-    bool flyby_ngb_cm = true;          // FLYBY_NGB_CM: distant fly-by neighbour test of a binary member against the binary's c.o.m.
+    bool flyby_ngb_cm = true;
+    double ngb_mass_gamma = 1e-3;      // NGB_MASS_GAMMA: tidal ratio above which a mass-scaled neighbour joins a binary
+    double ngb_inv_mref = 0.0;         // NGB_MASS_SCALING: 1 / mean particle mass (pair neighbour radius r_ngb max(1, m/<m>)^(1/3)), 0: off          // FLYBY_NGB_CM: distant fly-by neighbour test of a binary member against the binary's c.o.m.
     double tidal_res = 0.05;           //   their orbit, dt <= TIDAL_RES x period (0 = off; dense cores)
     double eta_restart = 1e-6;         // energy error restart threshold
 

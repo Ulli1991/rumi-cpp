@@ -159,7 +159,8 @@ struct SubsystemManager {
     int last_level_pairs = 0;       // neighbor pairs found at most recent detect_from_pairs
     int last_level_bound = 0;       // bound pairs at most recent detect_from_pairs
     int last_level_weak_split = 0;  // triples split into binary + field star (weak perturber) there
-    int last_level_flyby_cm_dropped = 0;  // distant fly-by pairs of a binary member that fail the c.o.m. test (FLYBY_NGB_CM)
+    int last_level_flyby_cm_dropped = 0;
+    int last_level_ngb_mass_kept = 0;      // pairs kept as strong perturbers by NGB_MASS_SCALING  // distant fly-by pairs of a binary member that fail the c.o.m. test (FLYBY_NGB_CM)
 
     // Step-level diagnostics: accumulated across HHS recursion levels
     int step_total_pairs = 0;       // total neighbor pairs found across all levels
@@ -168,6 +169,7 @@ struct SubsystemManager {
     int step_n_bin = 0, step_n_fly = 0, step_n_trip_s = 0, step_n_trip_u = 0, step_n_multi = 0;
     int step_weak_split = 0;
     int step_flyby_cm_dropped = 0;
+    int step_ngb_mass_kept = 0;
     int step_n_secular = 0;
     int step_total_members = 0;
 

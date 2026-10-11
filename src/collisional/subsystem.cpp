@@ -352,7 +352,9 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
     // the other particle against the pair's centre of mass instead, the same reasoning by which FROST-CLUSTERS II
     // (Rantala et al. 2025, sec. 2.1) takes binary c.o.m. velocities in the fly-by time steps.
     last_level_flyby_cm_dropped = 0;
-    if (g_collisional.flyby_ngb_cm) {
+    last_level_ngb_mass_kept = 0;
+    const bool mass_scaled = g_collisional.ngb_inv_mref > 0.0;
+    if (g_collisional.flyby_ngb_cm || mass_scaled) {
         std::unordered_map<int, int> partner;   // pid -> its bound partner, -1 with more than one
         for (const auto& pr : pairs) {
             if (!pr.bound) continue;
@@ -362,7 +364,7 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
                 if (!fresh) it->second = -1;
             }
         }
-        if (!partner.empty()) {
+        if (!partner.empty() || mass_scaled) {
             auto mx = md.col(MemberData::X), my = md.col(MemberData::Y), mz = md.col(MemberData::Z);
             auto mvx = md.col(MemberData::VX), mvy = md.col(MemberData::VY), mvz = md.col(MemberData::VZ);
             auto mm = md.col(MemberData::M);
@@ -381,15 +383,72 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
                 for (int k = 1; k < 7; k++) s[k] /= s[0];
                 return ids[1] >= 0;
             };
+            // Orbit of B about A: separation r, speed^2 u2, pericentre rp (current r if receding or bound beyond it)
+            auto orbit = [&](const double A[7], const double B[7], double& r, double& u2, double& a, double& e) {
+                const double rx = B[1] - A[1], ry = B[2] - A[2], rz = B[3] - A[3];
+                const double ux = B[4] - A[4], uy = B[5] - A[5], uz = B[6] - A[6];
+                r = std::sqrt(rx * rx + ry * ry + rz * rz); u2 = ux * ux + uy * uy + uz * uz;
+                const double mu = G * (A[0] + B[0]), en = 0.5 * u2 - mu / r;
+                const double lx = ry * uz - rz * uy, ly = rz * ux - rx * uz, lz = rx * uy - ry * ux;
+                a = -mu / (2.0 * en);
+                e = std::sqrt(std::max(en < 0.0 ? 0.0 : 1.0, 1.0 + 2.0 * en * (lx * lx + ly * ly + lz * lz) / (mu * mu)));
+            };
+            // Apocentre separation of a particle's bound pair (0 if it has none)
+            auto pair_apo = [&](int pid, int other) {
+                auto it = partner.find(pid);
+                if (it == partner.end() || it->second < 0 || it->second == other) return 0.0;
+                const int i = pid_to_idx[pid], j = pid_to_idx[it->second];
+                double P[7] = {mm(i), mx(i), my(i), mz(i), mvx(i), mvy(i), mvz(i)};
+                double Q[7] = {mm(j), mx(j), my(j), mz(j), mvx(j), mvy(j), mvz(j)};
+                double r, u2, a, e;
+                orbit(P, Q, r, u2, a, e);
+                return a > 0.0 ? a * (1.0 + e) : r;
+            };
             std::vector<PairInfo> kept;
             kept.reserve(pairs.size());
             for (const auto& pr : pairs) {
                 bool keep = true;
-                if (!pr.bound) {
+                if (mass_scaled) {
+                    // NGB_MASS_SCALING: the kernel took r_ngb (m_max / <m>)^(1/3). A pair that passes the unscaled
+                    // test (BIFROST Eq. 4, component velocities) is a neighbour as before; one that passes only with
+                    // the scaled radius joins only as a strong perturber of a binary: tidal ratio at its pericentre
+                    // about the binary's c.o.m., 2 m_p R^3 / (M r_p^3) with R the binary's apocentre, above
+                    // NGB_MASS_GAMMA. So hard binaries keep their distant stars out (orbit-by-orbit LogH, 900 s
+                    // intervals with the bare PeTar radius) and singles keep the old radius
+                    const int ia = pid_to_idx[pr.pid_lo], ib = pid_to_idx[pr.pid_hi];
+                    double P[7] = {mm(ia), mx(ia), my(ia), mz(ia), mvx(ia), mvy(ia), mvz(ia)};
+                    double Q[7] = {mm(ib), mx(ib), my(ib), mz(ib), mvx(ib), mvy(ib), mvz(ib)};
+                    double r, u2, a, e;
+                    orbit(P, Q, r, u2, a, e);
+                    const bool base = (a > 0.0) ? (a < r_ngb || r < r_ngb)
+                                                : (r < r_ngb || (std::fabs(a) * (e - 1.0) < r_ngb && u2 > 0.0 &&
+                                                                 0.5 * r / std::sqrt(u2) < dt_step));
+                    if (!base) {
+                        keep = false;
+                        double A[7], B[7];
+                        body(pr.pid_lo, pr.pid_hi, A);
+                        body(pr.pid_hi, pr.pid_lo, B);
+                        orbit(A, B, r, u2, a, e);
+                        double rp = (a > 0.0) ? a * (1.0 - e) : std::fabs(a) * (e - 1.0);
+                        // inside the scaled radius already, or reaching pericentre within the step (Eq. 4)
+                        const double rs = r_ngb * std::max(1.0, std::cbrt(std::max(mm(ia), mm(ib)) * g_collisional.ngb_inv_mref));
+                        const bool soon = a > 0.0 || r < rs || (u2 > 0.0 && 0.5 * r / std::sqrt(u2) < dt_step);
+                        rp = std::max(rp, 1e-30);
+                        const double Ra = pair_apo(pr.pid_lo, pr.pid_hi), Rb = pair_apo(pr.pid_hi, pr.pid_lo);
+                        const double ga = Ra > 0.0 ? 2.0 * B[0] * Ra * Ra * Ra / (A[0] * rp * rp * rp) : 0.0;
+                        const double gb = Rb > 0.0 ? 2.0 * A[0] * Rb * Rb * Rb / (B[0] * rp * rp * rp) : 0.0;
+                        if (soon && std::max(ga, gb) >= g_collisional.ngb_mass_gamma) { keep = true; last_level_ngb_mass_kept++; }
+                        if (!keep) last_level_flyby_cm_dropped++;
+                        if (keep) kept.push_back(pr);
+                        continue;
+                    }
+                }
+                if (!pr.bound && g_collisional.flyby_ngb_cm) {
                     const int ia = pid_to_idx[pr.pid_lo], ib = pid_to_idx[pr.pid_hi];
                     const double dx = mx(ib) - mx(ia), dy = my(ib) - my(ia), dz = mz(ib) - mz(ia);
                     double A[7], B[7];
-                    if (std::sqrt(dx * dx + dy * dy + dz * dz) >= r_ngb &&
+                    const double rn = r_ngb;   // pairs accepted only by the mass-scaled radius were handled above
+                    if (std::sqrt(dx * dx + dy * dy + dz * dz) >= rn &&
                         (body(pr.pid_lo, pr.pid_hi, A) | body(pr.pid_hi, pr.pid_lo, B))) {
                         const double rx = B[1] - A[1], ry = B[2] - A[2], rz = B[3] - A[3];
                         const double ux = B[4] - A[4], uy = B[5] - A[5], uz = B[6] - A[6];
@@ -399,8 +458,8 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
                         const double a = -mu / (2.0 * en);
                         const double e = std::sqrt(std::max(en < 0.0 ? 0.0 : 1.0,
                                                             1.0 + 2.0 * en * (lx * lx + ly * ly + lz * lz) / (mu * mu)));
-                        if (en < 0.0) keep = a < r_ngb || r < r_ngb;
-                        else keep = r < r_ngb || (std::fabs(a) * (e - 1.0) < r_ngb && u2 > 0.0 &&
+                        if (en < 0.0) keep = a < rn || r < rn;
+                        else keep = r < rn || (std::fabs(a) * (e - 1.0) < rn && u2 > 0.0 &&
                                                   0.5 * r / std::sqrt(u2) < dt_step);
                     }
                 }
@@ -1200,6 +1259,7 @@ void SubsystemManager::reset_step_diagnostics() {
     step_n_bin = 0; step_n_fly = 0; step_n_trip_s = 0; step_n_trip_u = 0; step_n_multi = 0;
     step_weak_split = 0;
     step_flyby_cm_dropped = 0;
+    step_ngb_mass_kept = 0;
     step_n_secular = 0;
     step_total_members = 0;
     last_level_pairs = 0;
@@ -1229,6 +1289,7 @@ void SubsystemManager::accumulate_diagnostics() {
     step_total_bound += last_level_bound;
     step_weak_split += last_level_weak_split;
     step_flyby_cm_dropped += last_level_flyby_cm_dropped;
+    step_ngb_mass_kept += last_level_ngb_mass_kept;
     step_total_subsystems += (int)active.size();
     for (const auto& sub : active) {
         step_total_members += sub.n_bodies;
@@ -1255,6 +1316,7 @@ void SubsystemManager::print_step_summary() const {
                 step_n_bin, step_n_fly, step_n_trip_s, step_n_trip_u, step_n_multi);
     if (step_weak_split > 0) std::printf("  weak_split=%d", step_weak_split);
     if (step_flyby_cm_dropped > 0) std::printf("  flyby_cm_dropped=%d", step_flyby_cm_dropped);
+    if (step_ngb_mass_kept > 0) std::printf("  ngb_mass_kept=%d", step_ngb_mass_kept);
     std::printf("\n");
 
     // Integration summary

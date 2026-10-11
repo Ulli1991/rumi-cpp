@@ -103,6 +103,15 @@ KOKKOS_INLINE_FUNCTION double pair_dt_below(double cur, double r2s, double ir, d
     return pair_dt(r2s, ir, dx, dy, dz, dvx, dvy, dvz, G, msum, eta_ff, eta_fb);
 }
 
+// Neighbour radius of a pair (NGB_MASS_SCALING): r_ngb max(1, m_max / <m>)^(1/3) with m_max the heavier particle,
+// inv_mref = 1 / <m> (0: off, r_ngb). PeTar's changeover radius (Wang et al. 2020, 2006.16560, sec. 6.1, Eq. 12):
+// a perturber's tide on a binary scales as m / r^3, so equal tidal strength needs r ~ m^(1/3). With a fixed r_ngb a
+// 23+23 Msun BH binary passed a 46 AU stellar binary 1.6 mpc away (outside r_ngb = 1 mpc) at tidal ratio 0.11; the
+// FSI kicks then carried that strong interaction (200k, 10 % binaries, seed 42, step 19: |dE/E| +4.7e-10)
+KOKKOS_INLINE_FUNCTION double ngb_radius(double r_ngb, double mi, double mj, double inv_mref) {
+    return r_ngb * Kokkos::fmax(1.0, Kokkos::cbrt(Kokkos::fmax(mi, mj) * inv_mref));
+}
+
 // The neighbour criteria of NgbK (BIFROST sec. 3.5) for a pair with r2 < r_ngb_max^2 (dx = x_j - x_i, dv = v_j - v_i,
 // mu = G (m_i + m_j)): bound with a or r below r_ngb, or a fly-by reaching pericentre below r_ngb within the step
 // (Eq. 4). Shared by the O(N^2) kernel and the tree range search (dt_tree.h), so both give bit-identical pairs.
@@ -138,7 +147,7 @@ struct NgbK {
     int *pi, *pj, *pb, *cnt;
     double *pa, *pe, *pE;
     int max_ngb;
-    double G, r_ngb, r_ngb_max_sq, pivot_dt;
+    double G, r_ngb, r_ngb_max_sq, pivot_dt, inv_mref;
     struct Sink { double x, y, z, m, vx, vy, vz; };
     KOKKOS_INLINE_FUNCTION Sink sink(int i) const { return {x(i), y(i), z(i), m(i), vx(i), vy(i), vz(i)}; }
     KOKKOS_INLINE_FUNCTION void source(int j, double* s) const {
@@ -151,8 +160,8 @@ struct NgbK {
         if (r2 >= r_ngb_max_sq) return;
         double a_val, e_val, E_orb;
         bool is_bound;
-        bool is_neighbor = ngb_pair_test(dx, dy, dz, r2, s[4] - a.vx, s[5] - a.vy, s[6] - a.vz, G * (a.m + s[3]), r_ngb,
-                                         pivot_dt, a_val, e_val, E_orb, is_bound);
+        bool is_neighbor = ngb_pair_test(dx, dy, dz, r2, s[4] - a.vx, s[5] - a.vy, s[6] - a.vz, G * (a.m + s[3]),
+                                         ngb_radius(r_ngb, a.m, s[3], inv_mref), pivot_dt, a_val, e_val, E_orb, is_bound);
         if (is_neighbor) {
             int k = Kokkos::atomic_fetch_add(cnt, 1);
             if (k < max_ngb) {   // array indices; detect_from_pairs converts to particle ids
