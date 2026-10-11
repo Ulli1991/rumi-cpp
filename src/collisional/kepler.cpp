@@ -241,41 +241,144 @@ void elements_to_cartesian(double a, double e, double inc, double Omega,
 }
 
 // ============================================================================
-// Kepler advance: advance 2-body orbit analytically by dt
+// Universal-variable Kepler drift (kepler.h)
 // ============================================================================
 
-void kepler_advance(double r[3], double v[3], double mu, double dt) {
-    // Convert to orbital elements
-    OrbitalElements oe = cartesian_to_elements(r, v, mu);
+namespace {
 
-    if (oe.E_orb >= 0.0 || oe.a <= 0.0) {
-        // Unbound orbit — use simple leapfrog as fallback
-        double r_mag = std::sqrt(r[0]*r[0] + r[1]*r[1] + r[2]*r[2]);
-        double inv_r3 = 1.0 / (r_mag * r_mag * r_mag);
-        // Half kick
-        v[0] -= 0.5 * dt * mu * r[0] * inv_r3;
-        v[1] -= 0.5 * dt * mu * r[1] * inv_r3;
-        v[2] -= 0.5 * dt * mu * r[2] * inv_r3;
-        // Full drift
-        r[0] += dt * v[0];
-        r[1] += dt * v[1];
-        r[2] += dt * v[2];
-        // Half kick
-        r_mag = std::sqrt(r[0]*r[0] + r[1]*r[1] + r[2]*r[2]);
-        inv_r3 = 1.0 / (r_mag * r_mag * r_mag);
-        v[0] -= 0.5 * dt * mu * r[0] * inv_r3;
-        v[1] -= 0.5 * dt * mu * r[1] * inv_r3;
-        v[2] -= 0.5 * dt * mu * r[2] * inv_r3;
-        return;
+// Stumpff c-functions c_n(z) = sum_j (-z)^j / (n + 2 j)!, n = 0..3. z is divided by 4 until |z| <= 0.1, c4 and c5 are
+// summed there to convergence, and the quarter-angle formulae c4(z) = c3(z/4) (1 + c1(z/4)) / 8,
+// c5(z) = (c5 + c4 + c3 c2)(z/4) / 16 (Mikkola 1997) with c_n = 1/n! - z c_{n+2} give the rest (WHFast, Rein & Tamayo
+// 2015, sec. 2.4; their pseudo code has a sign typo in the c4 formula, their Eq. 9 is right). For z < 0 (hyperbolic)
+// every term is positive, so the recursion has no cancellation at any |z|.
+inline void stumpff_c(double z, double& c0, double& c1, double& c2, double& c3) {
+    int n = 0;
+    while (std::fabs(z) > 0.1) { z *= 0.25; n++; }
+    // c4 = 1/4! - z/6! + z^2/8! ..., c5 = 1/5! - z/7! + ...
+    double c4 = 1.0 / 24.0, c5 = 1.0 / 120.0;
+    double term4 = c4, term5 = c5;
+    for (int k = 0; k < 12; k++) {
+        const double d4 = (6.0 + 2.0 * k) * (5.0 + 2.0 * k), d5 = (7.0 + 2.0 * k) * (6.0 + 2.0 * k);
+        term4 *= -z / d4;
+        term5 *= -z / d5;
+        const double c4n = c4 + term4;
+        c5 += term5;
+        if (c4n == c4) break;
+        c4 = c4n;
+    }
+    c3 = 1.0 / 6.0 - z * c5;
+    c2 = 0.5 - z * c4;
+    c1 = 1.0 - z * c3;
+    for (; n > 0; n--) {
+        z *= 4.0;
+        c5 = (c5 + c4 + c3 * c2) * 0.0625;
+        c4 = c3 * (1.0 + c1) * 0.125;
+        c3 = 1.0 / 6.0 - z * c5;
+        c2 = 0.5 - z * c4;
+        c1 = 1.0 - z * c3;
+    }
+    c0 = 1.0 - z * c2;
+}
+
+}  // namespace
+
+int kepler_drift(double r[3], double v[3], double mu, double dt) {
+    const double r0 = std::sqrt(r[0]*r[0] + r[1]*r[1] + r[2]*r[2]);
+    if (dt == 0.0 || !(r0 > 0.0) || !(mu > 0.0)) return 0;
+    const double v2 = v[0]*v[0] + v[1]*v[1] + v[2]*v[2];
+    const double eta0 = r[0]*v[0] + r[1]*v[1] + r[2]*v[2];
+    const double beta = 2.0 * mu / r0 - v2;          // mu / a (> 0 bound, < 0 hyperbolic)
+    const double zeta0 = mu - beta * r0;             // mu e cos E0 for bound orbits
+    constexpr double inf = std::numeric_limits<double>::infinity();
+
+    // Kepler's equation in the universal variable X (ds = dt / r): F(X) = r0 X + eta0 G2 + zeta0 G3 - h = 0 with
+    // G_n = X^n c_n(beta X^2) (WHFast Eq. 13); F is monotonic (dF/dX = r > 0), so [lo, hi] brackets the root
+    double h = dt;
+    double lo = -inf, hi = inf, X;
+    const double X_lin = h / r0 * (1.0 - 0.5 * eta0 * h / (r0 * r0));   // second order in h (WHFast Eq. 18)
+    if (beta > 0.0) {
+        // Bound: whole periods are the identity, so only h = dt mod P (in [-P/2, P/2]) is integrated; the phase
+        // error of that reduction, eps n dt, is the conditioning of the problem itself
+        const double sb = std::sqrt(beta);
+        const double P = 2.0 * M_PI * mu / (beta * sb);
+        if (std::fabs(h) > 0.5 * P) h = std::remainder(h, P);
+        if (h == 0.0) return 0;
+        // X = dE / sqrt(beta) with dE - dM = C sin dE + S (cos dE - 1), C = e cos E0, S = e sin E0, |dE - dM| <= 2 e
+        const double dM = h * beta * sb / mu;
+        const double C = zeta0 / mu, S = eta0 * sb / mu;
+        lo = (dM - 2.0) / sb;
+        hi = (dM + 2.0) / sb;
+        X = (std::fabs(X_lin * sb) < 0.3) ? X_lin : (dM + C * std::sin(dM) + S * (std::cos(dM) - 1.0)) / sb;
+    } else {
+        X = X_lin;
+        if (beta < 0.0) {
+            // Hyperbolic, |h| beyond the crossing time: F ~ e^{k|X|} (r0 k^2 +- eta0 k + mu) / (2 k^3), k = sqrt(-beta)
+            // (the bracket is > 0 for either sign), so |X| ~ ln(2 |h| k^3 / (r0 k^2 +- eta0 k + mu)) / k; the linear
+            // guess overshoots exponentially there
+            const double k = std::sqrt(-beta);
+            if (std::fabs(X_lin) * k > 1.0) {
+                const double sg = h > 0.0 ? 1.0 : -1.0;
+                const double den = r0 * k * k + sg * eta0 * k + mu;
+                const double arg = 2.0 * std::fabs(h) * k * k * k / den;
+                if (den > 0.0 && arg > 1.0) X = sg * std::log(arg) / k;
+            }
+        }
+    }
+    if (h > 0.0) lo = std::max(lo, 0.0); else hi = std::min(hi, 0.0);
+    if (!(X > lo && X < hi)) X = (std::isfinite(lo) && std::isfinite(hi)) ? 0.5 * (lo + hi) : (h > 0.0 ? 1.0 : -1.0) * std::fabs(X_lin);
+
+    // Laguerre-Conway iteration (n = 5; Conway 1986, as WHFast and Wisdom & Hernandez 2015 for long steps and high e),
+    // kept inside the bracket by bisection (or doubling while one side is open). Stops when X repeats (WHFast: the
+    // iteration may cycle between neighbouring floating-point values once converged)
+    double c0, c1, c2, c3, G1 = 0.0, G2 = 0.0, G3 = 0.0;
+    double hist[8];
+    int n_hist = 0, it = 0;
+    double X_eval = std::numeric_limits<double>::quiet_NaN();
+    for (; it < 100; it++) {
+        stumpff_c(beta * X * X, c0, c1, c2, c3);
+        X_eval = X;
+        G1 = X * c1; G2 = X * X * c2; G3 = X * X * X * c3;
+        const double F = r0 * X + eta0 * G2 + zeta0 * G3 - h;
+        if (F == 0.0) break;
+        if (F < 0.0) lo = std::max(lo, X); else hi = std::min(hi, X);
+        const double Fp = r0 + eta0 * G1 + zeta0 * G2;     // r(X)
+        const double Fpp = eta0 * c0 + zeta0 * G1;         // dr/dX
+        const double disc = 16.0 * Fp * Fp - 20.0 * F * Fpp;
+        double Xn = X - 5.0 * F / (Fp + std::copysign(std::sqrt(std::fabs(disc)), Fp));
+        if (!(Xn > lo && Xn < hi)) {
+            if (std::isfinite(lo) && std::isfinite(hi)) Xn = 0.5 * (lo + hi);
+            else Xn = 2.0 * (std::isfinite(lo) ? std::max(std::fabs(lo), std::fabs(X)) : -std::max(std::fabs(hi), std::fabs(X)));
+            if (!(Xn > lo && Xn < hi)) break;   // bracket exhausted at round-off
+        }
+        bool seen = (Xn == X);
+        for (int q = 0; q < n_hist && !seen; q++) seen = (hist[q] == Xn);
+        hist[n_hist < 8 ? n_hist++ : (it % 8)] = X;
+        X = Xn;
+        if (seen) break;
+    }
+    if (X != X_eval) {
+        stumpff_c(beta * X * X, c0, c1, c2, c3);
+        G1 = X * c1; G2 = X * X * c2; G3 = X * X * X * c3;
     }
 
-    // Advance mean anomaly
-    double n = std::sqrt(mu / (oe.a * oe.a * oe.a));
-    double M_new = oe.mean_anom + n * dt;
-
-    // Reconstruct Cartesian state
-    elements_to_cartesian(oe.a, oe.e, oe.inc, oe.Omega, oe.omega, M_new, mu, r, v);
+    // Gauss f and g functions in incremental form, r = r0 + (f - 1) r0 + g v0 (WHFast Eqs. 15-16, 20)
+    const double rr = r0 + eta0 * G1 + zeta0 * G2;
+    const double fm1 = -mu * G2 / r0;
+    const double g = h - mu * G3;
+    const double fd = -mu * G1 / (r0 * rr);
+    const double gdm1 = -mu * G2 / rr;
+    for (int k = 0; k < 3; k++) {
+        const double x = r[k], u = v[k];
+        r[k] = x + (fm1 * x + g * u);
+        v[k] = u + (fd * x + gdm1 * u);
+    }
+    return it + 1;
 }
+
+void kepler_advance(double r[3], double v[3], double mu, double dt) {
+    kepler_drift(r, v, mu, dt);
+}
+
 
 // x - sin x and sinh x - x without cancellation for small |x|
 static double x_minus_sin(double x) {

@@ -32,7 +32,18 @@ void elements_to_cartesian(double a, double e, double inc, double Omega,
 // + Newton-Raphson refinement + bisection fallback for guaranteed convergence
 double solve_kepler(double M, double e, double tol = 1e-14);
 
-// Advance a 2-body orbit by dt using the Kepler drift (analytical)
+// Exact two-body (Kepler) drift of the relative orbit r, v over dt (any sign) under mu = G (m1 + m2): universal
+// variables with Stumpff c-functions and Gauss f and g functions, no orbital elements or angles, so it holds for
+// every e (circular, radial, parabolic, hyperbolic) and any interval (bound orbits drop whole periods first).
+// Stumpff (1962); Danby (1992, Fundamentals of Celestial Mechanics, sec. 6.9); Mikkola & Innanen (1999); c-functions
+// with the quarter-angle formulae and f, g in the incremental form of WHFast (Rein & Tamayo 2015, MNRAS 452, 376,
+// sec. 2.2-2.5); Laguerre-Conway iteration safeguarded by bisection (Conway 1986; Wisdom & Hernandez 2015, MNRAS
+// 453, 3015). Returns the number of iterations of the Kepler equation.
+int kepler_drift(double r[3], double v[3], double mu, double dt);
+
+// Advance a 2-body orbit by dt (analytical): kepler_drift. The elements route it replaced (r, v -> a, e, angles,
+// M + n dt -> r, v) lost the phase at small e (1 drift vs 16: 1.6e-4 at e = 1e-6, order 1 at e <= 1e-8) and
+// leapfrogged unbound orbits
 void kepler_advance(double r[3], double v[3], double mu, double dt);
 
 // Time to the next pericentre passage of a two-body orbit from its osculating elements (FROST-CLUSTERS I,

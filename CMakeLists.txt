@@ -83,6 +83,13 @@ if(RSQRT_NEWTON)
     target_compile_definitions(dt-tree-bench PRIVATE RSQRT_NEWTON)
 endif()
 
+# Two-body drift check (tests/kepler_test.cpp; ctest case kepler_drift_unit)
+if(ENABLE_COLLISIONAL)
+    add_executable(kepler-test ${CMAKE_CURRENT_SOURCE_DIR}/tests/kepler_test.cpp ${SRC_DIR}/collisional/kepler.cpp)
+    target_include_directories(kepler-test PRIVATE ${SRC_DIR}/collisional)
+    target_compile_features(kepler-test PRIVATE cxx_std_17)
+endif()
+
 # FMM check against direct summation (tests/fmm_test.cpp)
 add_executable(fmm-test ${CMAKE_CURRENT_SOURCE_DIR}/tests/fmm_test.cpp ${SRC_DIR}/gravity/fmm.cpp)
 target_include_directories(fmm-test PRIVATE ${SRC_DIR}/core ${SRC_DIR}/gravity)
@@ -148,13 +155,18 @@ foreach(case kepler_e09 kepler_e0 frost4_e09 frost4_e099 planets_hhs planets_fsi
              cm_eps_tidal_components flyby_member_com
              coll_headon_triple coll_contact_flyby coll_contact_flyby_logh coll_tde_parabolic coll_bh_isco
              tree_dt_binaries tree_dt_binaries_cm tree_dt_binaries50 tree_dt_triples tree_dt_mergers tree_dt_softened tree_default_on
-             ic_mass_size_rh ic_binary_com_virial ic_r_break)
+             ic_mass_size_rh ic_binary_com_virial ic_r_break
+             secular_drift_e0 secular_drift_e1e-8)
     add_test(NAME ${case} COMMAND Python3::Interpreter ${CMAKE_SOURCE_DIR}/tests/run_case.py
              $<TARGET_FILE:nbody-kokkos> ${case})
     # Few-body cases: host threads only add overhead (and timeouts); every incremental pid-map update is
     # checked against a full rebuild, and every subsystem must be advanced exactly once per subsystem call
     set_tests_properties(${case} PROPERTIES ENVIRONMENT "OMP_NUM_THREADS=1;NBODY_CHECK_PIDMAP=1;NBODY_CHECK_SUBSYS=1")
 endforeach()
+if(ENABLE_COLLISIONAL)
+    add_test(NAME kepler_drift_unit COMMAND Python3::Interpreter ${CMAKE_SOURCE_DIR}/tests/run_case.py
+             $<TARGET_FILE:kepler-test> kepler_drift_unit)
+endif()
 if(USE_MPI)
     foreach(case spin_mpi2 mergers_mpi2 mpi_1v2 mergers_mpi2_dist mpi_1v2_dist)
         add_test(NAME ${case} COMMAND Python3::Interpreter ${CMAKE_SOURCE_DIR}/tests/run_case.py

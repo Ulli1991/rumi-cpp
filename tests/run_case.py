@@ -2,6 +2,7 @@
 import math
 import os
 import re
+import struct
 import subprocess
 import sys
 import tempfile
@@ -162,6 +163,17 @@ COLL_ISCO = dict(COLL_HEADON, TRIPLE_A_IN_PC="8.6e-12", TRIPLE_E_IN="0.0", TRIPL
                  TRIPLE_A_OUT_PC="8.6e-10", TRIPLE_E_OUT="0.0", TRIPLE_M3="1.0", TOTAL_TIME_MYR="2e-14",
                  DT_MAX_MYR="1e-15", DT_MIN_MYR="1e-24", PN_ORDER="31", M_PN="5.0", TEST_STELLAR_RADIUS_RSUN="0")
 
+# Kepler drift of an isolated binary subsystem: 1 + 1 Msun, a = 1e-5 pc (2 AU, P = 2.0944e-6 Myr), PN off, run for
+# T = 100.37 P as one step or as 16 steps of 6.27 P (both above N_ORB_SECULAR = 3: the secular binary path)
+G_CODE = 4.302194e-3                 # constants.h: pc^3 Msun^-1 TU^-2
+TU_MYR = 0.977792
+P_SEC_MYR = 2.0 * math.pi * math.sqrt(1e-15 / (G_CODE * 2.0)) * TU_MYR
+SEC_DRIFT = dict(TEST_CASE="binary_test", INTEGRATOR="hhs", BINARY_A_PC="1e-5", BINARY_E="0.0", BINARY_M1="1.0",
+                 BINARY_M2="1.0", TOTAL_TIME_MYR=f"{100.37 * P_SEC_MYR:.15e}", DT_MAX_MYR=f"{100.37 * P_SEC_MYR:.15e}",
+                 DT_MIN_MYR="1e-14", SOFTENING_PC="0", COLLISIONAL="true", R_NGB="1e-3", R_NGB_MAX="0.1",
+                 N_ORB_SECULAR="3", PN_ORDER="0", SSE_ENABLED="false", ETA_RESTART="0", PRINT_INTERVAL="1",
+                 PROFILING="false")
+
 # 16 stars inside r_ngb: one 15-body neighbour group, more than LogH's fixed storage (LOGH_MAX_BODIES = 8)
 # Collisional FSI run of a field binary (r_ngb below a, so no subsystem): the start-of-step kernel's criteria set the step
 FSI_BINARY = dict(TEST_CASE="binary_test", INTEGRATOR="fsi", TOTAL_TIME_MYR="1e-5", DT_MAX_MYR="1e-5", DT_MIN_MYR="1e-14",
@@ -184,9 +196,13 @@ def run(exe, cfg):
     return diagnostics(run_output(exe, cfg))
 
 
-def run_output(exe, cfg, env=None):
-    """stdout of one run (env: extra environment variables); raises on a nonzero exit or a timeout."""
+def run_output(exe, cfg, env=None, dump=False):
+    """stdout of one run (env: extra environment variables); raises on a nonzero exit or a timeout. dump=True: also
+    the particles of the last NBODY_DUMP snapshot (main.cpp dump_particles) as rows (pid, m, x, y, z, vx, vy, vz)
+    sorted by pid, returned as (stdout, rows)."""
     with tempfile.TemporaryDirectory() as d:
+        if dump:
+            env = {**(env or {}), "NBODY_DUMP": "1"}
         # NBODY_TEST_EXTRA="KEY=value,KEY2=value" overrides keys of every case (A/B comparisons)
         extra = dict(kv.split("=", 1) for kv in os.environ.get("NBODY_TEST_EXTRA", "").split(",") if "=" in kv)
         Path(d, "config.txt").write_text("".join(f"{k} = {v}\n" for k, v in {**cfg, **extra}.items()))
@@ -196,9 +212,17 @@ def run_output(exe, cfg, env=None):
                                  env={**os.environ, **(env or {})})
         except subprocess.TimeoutExpired:
             raise SystemExit(f"FAIL: no result within {TIMEOUT_S} s (hung or stuck in time)")
-    if out.returncode != 0:
-        raise SystemExit(f"FAIL: exit {out.returncode}\n{out.stdout[-2000:]}{out.stderr[-2000:]}")
-    return out.stdout
+        if out.returncode != 0:
+            raise SystemExit(f"FAIL: exit {out.returncode}\n{out.stdout[-2000:]}{out.stderr[-2000:]}")
+        if not dump:
+            return out.stdout
+        files = sorted(Path(d).glob("dump_*.bin"))
+        if not files:
+            raise SystemExit("FAIL: no NBODY_DUMP snapshot written")
+        raw = files[-1].read_bytes()
+        n = struct.unpack_from("i", raw)[0]
+        rows = [struct.unpack_from("9d", raw, 4 + 72 * i)[:8] for i in range(n)]
+        return out.stdout, sorted(rows)
 
 
 def diagnostics(stdout):
@@ -630,6 +654,67 @@ def subsys_collision(exe, label, cfg, kind, bound, min_landings=0):
     return ok & check(f"{label} max|dE/E| with merger sink", max(r[0] for r in rows), bound)
 
 
+def binary_rel(rows):
+    """Relative position and velocity (second body - first) of a two-body dump."""
+    a, b = rows[0], rows[1]
+    return [b[k] - a[k] for k in (2, 3, 4)], [b[k] - a[k] for k in (5, 6, 7)]
+
+
+def binary_test_reference(cfg, t_myr):
+    """Analytic relative position of the binary_test orbit at t: it starts at apocentre, r = (-a (1 + e), 0, 0),
+    counter-clockwise, so r(t) = (a (cos E - e), a sqrt(1 - e^2) sin E, 0) with E - e sin E = pi + n t."""
+    a, e = float(cfg["BINARY_A_PC"]), float(cfg["BINARY_E"])
+    mu = G_CODE * (float(cfg["BINARY_M1"]) + float(cfg["BINARY_M2"]))
+    M = math.fmod(math.pi + math.sqrt(mu / a ** 3) * t_myr / TU_MYR, 2.0 * math.pi)
+    E = M
+    for _ in range(50):
+        E -= (E - e * math.sin(E) - M) / (1.0 - e * math.cos(E))
+    return [a * (math.cos(E) - e), a * math.sqrt(1.0 - e * e) * math.sin(E), 0.0]
+
+
+def dist3(a, b):
+    return math.sqrt(sum((x - y) ** 2 for x, y in zip(a, b)))
+
+
+def secular_drift(exe, label, cfg, bounds):
+    """An isolated binary on the secular (Kepler-drift) path: one step of T against 16 steps of T / 16 (the exact flow
+    composes, so they agree to round-off), both against the analytic orbit; the two-body energy and angular momentum
+    are conserved to round-off. bounds: (1 vs 16, vs analytic, max |dE/E|, max |dL/L|)."""
+    total = float(cfg["TOTAL_TIME_MYR"])
+    # the run stops at the first t >= TOTAL_TIME, and n additions of DT_MAX may fall short of n DT_MAX by round-off
+    runs = {n: run_output(exe, dict(cfg, DT_MAX_MYR=f"{total / n:.15e}", TOTAL_TIME_MYR=f"{total * (1 - 1e-9):.15e}"),
+                          dump=True) for n in (1, 16)}
+    ref = binary_test_reference(cfg, total)
+    r = {n: binary_rel(rows)[0] for n, (_, rows) in runs.items()}
+    scale = math.sqrt(sum(x * x for x in ref))
+    ok = True
+    for n, (out, _) in runs.items():
+        n_sec = sum(int(m) for m in re.findall(r"Secular=(\d+)", out))
+        n_logh = sum(int(m) for m in re.findall(r"Integration: LogH=(\d+)", out))
+        ok &= check(f"{label} {n} step(s): secular evolutions", n_sec, n, lower=True)
+        ok &= check(f"{label} {n} step(s): LogH calls", n_logh, 0)
+        ok &= check(f"{label} {n} step(s): |r - r_analytic| / r", dist3(r[n], ref) / scale, bounds[1])
+        rows = diagnostics(out)
+        ok &= check(f"{label} {n} step(s): max|dE/E|", max(x[0] for x in rows), bounds[2])
+        ok &= check(f"{label} {n} step(s): max|dL/L|", max(x[2] for x in rows), bounds[3])
+    return ok & check(f"{label} |r(1 step) - r(16 steps)| / r", dist3(r[1], r[16]) / scale, bounds[0])
+
+
+def kepler_unit(exe, bounds):
+    """tests/kepler_test.cpp: worst errors of kepler_advance per orbit class against bounds (1v16, rt, ref, dE, dL)."""
+    out = subprocess.run([exe], capture_output=True, text=True, timeout=TIMEOUT_S).stdout
+    print(out, end="")
+    ok = True
+    for cls, bnd in bounds.items():
+        m = re.search(rf"KEPTEST {re.escape(cls)} 1v16=(\S+) rt=(\S+) ref=(\S+) dE=(\S+) dL=(\S+)", out)
+        if not m:
+            raise SystemExit(f"FAIL: no KEPTEST line for {cls}")
+        for name, val, b in zip(("1v16", "rt", "ref", "dE", "dL"), m.groups(), bnd):
+            if b is not None:
+                ok &= check(f"{cls} {name}", float(val), b)
+    return ok
+
+
 def check(name, value, bound, lower=False):
     ok = value >= bound if lower else value <= bound
     print(f"{'ok  ' if ok else 'FAIL'} {name} = {value:.3e} ({'>=' if lower else '<='} {bound:.3e})")
@@ -875,6 +960,23 @@ CASES = {
                                                             min_landings=1),
     "coll_tde_parabolic": lambda exe: subsys_collision(exe, "TDE, parabolic", COLL_TDE, "TDE", 1.5e-12),
     "coll_bh_isco": lambda exe: subsys_collision(exe, "BH binary to ISCO, PN", COLL_ISCO, "ISCO", 1e-14),
+    # Universal-variable Kepler drift (kepler_drift, subsystem audit #2). Bounds 1.3x measured (raven host build,
+    # 2026-10-11); 043190d's elements route: bound e < 0.5 1v16 = 2.0, ref = 1.2 (phase lost at e <= 1e-8), parabolic
+    # and hyperbolic dE = 1.8e9 / 1.5e8 (leapfrog fallback). 1e5 orbits and the far hyperbolae sit at the conditioning
+    # of the problem (eps n dt of phase; |r| |v| eps of L at r = 1e6 A)
+    "kepler_drift_unit": lambda exe: kepler_unit(exe, {
+        "bound_e<0.5": (5.2e-11, 1.2e-11, 7.8e-12, 2.6e-15, 1.3e-15),
+        "bound_e>=0.5": (2.7e-12, 2.2e-12, 1.2e-12, 9e-15, 3.4e-15),
+        "bound_1e5_orbits": (3.6e-10, 1.04e-9, 7.5e-10, 1e-15, 3.5e-15),
+        "parabolic": (2.1e-14, 7.7e-9, None, 1.3e-15, 6.9e-13),
+        "hyperbolic": (2.4e-14, 2e-9, 1.1e-14, 1.16e-13, 7.6e-11),
+        "hyperbolic_far": (3e-14, None, 1e-14, 2.9e-13, None)}),
+    # Secular (Kepler-drift) binary at e = 0 and 1e-8, 100.37 orbits as 1 or 16 steps. Measured: 1 vs 16 3.7e-13 /
+    # 1.2e-12, vs analytic 2.2e-13 / 1.5e-12, |dE/E| 5.3e-16 / 4.0e-16, |dL/L| 0. 043190d: 1 vs 16 = 2.0 / 0.55,
+    # vs analytic up to 2.0 / 1.3 (elements route)
+    "secular_drift_e0": lambda exe: secular_drift(exe, "e = 0", SEC_DRIFT, (5e-13, 3e-13, 7e-16, 1e-15)),
+    "secular_drift_e1e-8": lambda exe: secular_drift(exe, "e = 1e-8", dict(SEC_DRIFT, BINARY_E="1e-8"),
+                                                     (1.6e-12, 2e-12, 7e-16, 1e-15)),
     "logh_big_group": lambda exe: big_group(exe, "big group", BIG_GROUP, (1.2e-5, 1e-12)),
     # Exact tree searches (M7.4), forced at every set size, each search checked bitwise against O(N^2)
     # Tree searches on by default above the break-even set size (host builds 2048): 5000 stars use them at the top
