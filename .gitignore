@@ -58,3 +58,4 @@ tools/fmm/harm_test
 tools/hip_bench/nbody_bench
 tools/hip_bench/bench.out.*
 tools/hip_bench/bench.err.*
+__pycache__/
