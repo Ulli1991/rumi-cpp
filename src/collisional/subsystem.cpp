@@ -1,4 +1,6 @@
 #include "small_for.h"
+#include "device_staging.h"
+#include <climits>
 #include "subsystem.h"
 #include "collisional_config.h"
 #include "constants.h"
@@ -78,34 +80,50 @@ namespace {
 // columns keep the h_x(idx) call syntax of the code that used full-array mirrors.
 struct MemberData {
     enum { X, Y, Z, VX, VY, VZ, AX, AY, AZ, M, DT, PID, NF };
-    std::unordered_map<int, int> loc;   // particle slot -> member row
+    // particle slot -> member row: dense over the slots' range [lo, lo + loc.size()) (-1: not a member)
+    int lo = 0;
+    std::vector<int> loc;
     std::vector<int> idx;
     std::vector<double> f[NF];
 
     struct Col {
-        std::vector<double>* v; const std::unordered_map<int, int>* loc;
+        std::vector<double>* v; const std::vector<int>* loc; int lo;
         double& operator()(int i) const {
-            auto it = loc->find(i);
-            if (it == loc->end()) {   // a slot outside the gathered members: map and gather disagree
+            const int k = i - lo;
+            const int r = (k >= 0 && k < (int)loc->size()) ? (*loc)[k] : -1;
+            if (r < 0) {   // a slot outside the gathered members: map and gather disagree
                 std::fprintf(stderr, "MemberData: slot %d was not gathered\n", i);
                 std::abort();
             }
-            return (*v)[it->second];
+            return (*v)[r];
         }
     };
-    Col col(int k) { return Col{&f[k], &loc}; }
+    Col col(int k) { return Col{&f[k], &loc, lo}; }
+
+    // Rows in first-appearance order of the valid slots
+    template <class Slots>
+    void build(const Slots& for_each_slot, int N) {
+        int mn = INT_MAX, mx = -1;
+        for_each_slot([&](int i) { if (i >= 0 && i < N) { mn = std::min(mn, i); mx = std::max(mx, i); } });
+        if (mx < 0) return;
+        lo = mn;
+        loc.assign(mx - mn + 1, -1);
+        for_each_slot([&](int i) {
+            if (i < 0 || i >= N) return;
+            int& r = loc[i - lo];
+            if (r < 0) { r = (int)idx.size(); idx.push_back(i); }
+        });
+    }
 
     MemberData(const std::vector<Subsystem>& subs, const std::vector<int>& p2i, const Particles& p) {
-        for (const auto& sub : subs)
-            for (int pid : sub.particle_ids) {
-                int i = (pid >= 0 && pid < (int)p2i.size()) ? p2i[pid] : -1;
-                if (i >= 0 && i < p.N && loc.emplace(i, (int)idx.size()).second) idx.push_back(i);
-            }
+        build([&](auto&& fn) {
+            for (const auto& sub : subs)
+                for (int pid : sub.particle_ids) fn((pid >= 0 && pid < (int)p2i.size()) ? p2i[pid] : -1);
+        }, p.N);
         gather(p);
     }
     MemberData(const std::vector<int>& slots, const Particles& p) {
-        for (int i : slots)
-            if (i >= 0 && i < p.N && loc.emplace(i, (int)idx.size()).second) idx.push_back(i);
+        build([&](auto&& fn) { for (int i : slots) fn(i); }, p.N);
         gather(p);
     }
 
@@ -113,11 +131,12 @@ struct MemberData {
         const int n = (int)idx.size();
         for (auto& v : f) v.resize(n);
         if (n == 0) return;
-        Kokkos::View<int*> d_idx("member_idx", n);
-        Kokkos::View<double*> d_buf("member_gather", (size_t)n * NF);
-        auto h_idx = Kokkos::create_mirror_view(d_idx);
-        std::copy(idx.begin(), idx.end(), h_idx.data());
-        Kokkos::deep_copy(d_idx, h_idx);
+        DeviceStaging& st = DeviceStaging::get<1>();
+        st.reserve(n, NF);
+        std::copy(idx.begin(), idx.end(), st.h_idx.data());
+        st.upload_idx(n);
+        auto d_idx = st.d_idx;
+        auto d_buf = st.d_buf;
         auto px = p.x, py = p.y, pz = p.z, pvx = p.vx, pvy = p.vy, pvz = p.vz;
         auto pax = p.ax, pay = p.ay, paz = p.az, pm = p.mass, pdt = p.dt_adapt;
         auto ppid = p.particle_id;
@@ -128,7 +147,8 @@ struct MemberData {
             b[AX] = pax(i); b[AY] = pay(i); b[AZ] = paz(i); b[M] = pm(i); b[DT] = pdt(i);
             b[PID] = (double)ppid(i);   // ids are exactly representable
         });
-        auto h_buf = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), d_buf);
+        st.download_buf((size_t)n * NF);
+        auto h_buf = st.h_buf;
         for (int k = 0; k < n; k++)
             for (int c = 0; c < NF; c++) f[c][k] = h_buf(k * NF + c);
     }
@@ -137,13 +157,13 @@ struct MemberData {
     void scatter_dt(Particles& p) const {
         const int n = (int)idx.size();
         if (n == 0) return;
-        Kokkos::View<int*> d_idx("member_idx", n);
-        Kokkos::View<double*> d_dt("member_dt", n);
-        auto h_idx = Kokkos::create_mirror_view(d_idx);
-        auto h_dt = Kokkos::create_mirror_view(d_dt);
-        for (int k = 0; k < n; k++) { h_idx(k) = idx[k]; h_dt(k) = f[DT][k]; }
-        Kokkos::deep_copy(d_idx, h_idx);
-        Kokkos::deep_copy(d_dt, h_dt);
+        DeviceStaging& st = DeviceStaging::get<1>();
+        st.reserve(n, 1);
+        for (int k = 0; k < n; k++) { st.h_idx(k) = idx[k]; st.h_buf(k) = f[DT][k]; }
+        st.upload_idx(n);
+        st.upload_buf(n);
+        auto d_idx = st.d_idx;
+        auto d_dt = st.d_buf;
         auto pdt = p.dt_adapt;
         small_for("member_scatter_dt", n, KOKKOS_LAMBDA(int k) { pdt(d_idx(k)) = d_dt(k); });
     }
@@ -248,19 +268,29 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
     n_pairs = std::min(n_pairs, max_ngb_pairs);
     last_level_pairs = n_pairs;
 
-    // Copy neighbor pairs to host
-    auto h_pi = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
-                    Kokkos::subview(ngb_pair_i, std::make_pair(0, n_pairs)));
-    auto h_pj = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
-                    Kokkos::subview(ngb_pair_j, std::make_pair(0, n_pairs)));
-    auto h_pa = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
-                    Kokkos::subview(ngb_pair_a, std::make_pair(0, n_pairs)));
-    auto h_pe = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
-                    Kokkos::subview(ngb_pair_e, std::make_pair(0, n_pairs)));
-    auto h_pE = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
-                    Kokkos::subview(ngb_pair_E, std::make_pair(0, n_pairs)));
-    auto h_pb = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
-                    Kokkos::subview(ngb_pair_bound, std::make_pair(0, n_pairs)));
+    // Copy neighbor pairs to host: packed by one kernel into a persistent buffer (i, j, a, e, E, bound per pair;
+    // the ints are exact as doubles), one transfer instead of six
+    constexpr int PF = 6;
+    DeviceStaging& st = DeviceStaging::get<3>();
+    st.reserve(1, PF * n_pairs);
+    {
+        auto d_buf = st.d_buf;
+        auto pi = ngb_pair_i, pj = ngb_pair_j, pb = ngb_pair_bound;
+        auto pa = ngb_pair_a, pe = ngb_pair_e, pE = ngb_pair_E;
+        small_for("ngb_pair_pack", n_pairs, KOKKOS_LAMBDA(int k) {
+            d_buf(k * PF + 0) = (double)pi(k); d_buf(k * PF + 1) = (double)pj(k);
+            d_buf(k * PF + 2) = pa(k); d_buf(k * PF + 3) = pe(k); d_buf(k * PF + 4) = pE(k);
+            d_buf(k * PF + 5) = (double)pb(k);
+        });
+    }
+    st.download_buf((size_t)PF * n_pairs);
+    auto h_pbuf = st.h_buf;
+    auto h_pi = [&](int k) { return (int)h_pbuf(k * PF + 0); };
+    auto h_pj = [&](int k) { return (int)h_pbuf(k * PF + 1); };
+    auto h_pa = [&](int k) { return h_pbuf(k * PF + 2); };
+    auto h_pe = [&](int k) { return h_pbuf(k * PF + 3); };
+    auto h_pE = [&](int k) { return h_pbuf(k * PF + 4); };
+    auto h_pb = [&](int k) { return (int)h_pbuf(k * PF + 5); };
 
     // Count bound pairs for diagnostics
     {

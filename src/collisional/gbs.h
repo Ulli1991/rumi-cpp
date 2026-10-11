@@ -21,6 +21,12 @@ struct GBSIntegrator {
     double work[MAX_STAGES][GBS_DIM_MAX];
     double diag_prev[GBS_DIM_MAX];  // T[k-1][k-1] saved between extrapolate() calls
 
+    // Stage-parallel steps (host threads; only outside other host-parallel regions): the midpoint integrations
+    // of stages k..par_hint run concurrently, par_hint = the stage the previous step converged at. Same result
+    // as serial
+    bool par_stages = false;
+    int par_hint = 4;
+
     GBSIntegrator(double eta = 1e-10) : eta_gbs(eta) {}
 
     // Modified midpoint method: integrate LogHState by n_substeps of ds_total/n
@@ -46,6 +52,7 @@ struct GBSIntegrator {
                           int max_iter = 100000);
 
 private:
+    void compute_stages(const LogHState& state, int k0, int k1, double ds, double G, double c_code, int pn_order);
     // Pack LogHState into flat array for extrapolation
     void pack_state(const LogHState& state, double* y, int& dim);
     // Unpack flat array back into LogHState

@@ -1,4 +1,5 @@
 #include "gbs.h"
+#include <Kokkos_Core.hpp>
 #include <atomic>
 #include <cstring>
 #include <cmath>
@@ -191,6 +192,20 @@ struct GbsStats {
 } g_gbs_stats;
 }  // namespace
 
+// Midpoint results of stages k0..k1 into table[] on the host threads, the largest stage handed out first
+void GBSIntegrator::compute_stages(const LogHState& state, int k0, int k1, double ds, double G,
+                                   double c_code, int pn_order) {
+    using Policy = Kokkos::RangePolicy<Kokkos::DefaultHostExecutionSpace, Kokkos::Schedule<Kokkos::Dynamic>>;
+    Kokkos::parallel_for("gbs_stages", Policy(0, k1 - k0 + 1).set_chunk_size(1), [&](int i) {
+        const int k = k1 - i;
+        LogHState result;
+        result = state;
+        midpoint(state, result, STEP_SEQ[k], ds, G, c_code, pn_order);
+        int d = 0;
+        pack_state(result, table[k], d);
+    });
+}
+
 bool GBSIntegrator::step(LogHState& state, double ds, double G, double& ds_next,
                           double c_code, int pn_order) {
     int dim = 0;
@@ -205,12 +220,25 @@ bool GBSIntegrator::step(LogHState& state, double ds, double G, double& ds_next,
                     gbs_debug_counter.load(), ds, w0);
     }
 
+    int computed = -1;   // table[0..computed] holds the raw midpoint results
     for (int stage = 0; stage < MAX_STAGES; stage++) {
-        LogHState result;
-        result = state;  // copy masses, B, n_bodies, etc.
-
-        midpoint(state, result, STEP_SEQ[stage], ds, G, c_code, pn_order);
-        pack_state(result, table[stage], dim);
+        if (stage > computed) {
+            if (par_stages && !do_debug) {
+                // Stage-parallel: the substep divisions are independent (Rantala et al. 2020, MSTAR, Sec. 4);
+                // compute stage..k1 at once, k1 = the stage the last step converged at. The extrapolation below
+                // runs in the same order on the same table, so the result is the serial one; unused stages
+                // beyond the converged one are discarded
+                const int k1 = std::min(MAX_STAGES - 1, std::max(stage, par_hint));
+                compute_stages(state, stage, k1, ds, G, c_code, pn_order);
+                computed = k1;
+            } else {
+                LogHState result;
+                result = state;  // copy masses, B, n_bodies, etc.
+                midpoint(state, result, STEP_SEQ[stage], ds, G, c_code, pn_order);
+                pack_state(result, table[stage], dim);
+                computed = stage;
+            }
+        }
 
         if (do_debug) {
             double w_raw = omega_from_packed(table[stage], 2);
@@ -232,6 +260,7 @@ bool GBSIntegrator::step(LogHState& state, double ds, double G, double& ds_next,
 
             if (err < eta_gbs) {
                 g_gbs_stats.stage[stage]++;
+                par_hint = stage;
                 // Converged: unpack best estimate from work[stage]
                 double chi_norm[4];
                 if (state.has_spins) spin_norms(state, chi_norm);

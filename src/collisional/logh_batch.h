@@ -5,30 +5,39 @@
 #include "logh.h"
 #include <Kokkos_Core.hpp>
 #include <vector>
+#include <unordered_map>
 
-// GPU-batched LogH integration: each Kokkos team integrates one subsystem
-// Pack all subsystem states into contiguous arrays for GPU parallelism
+// Batched LogH integration of independent subsystems on the host threads. The packed state lives in host
+// memory: pack() fills it from a host copy of the members (HostSource) or by one gather from the device;
+// unpack() writes the results back with one scatter to the device (and optionally into the host copy).
+
+// Host copy of particle data [start, start + count) the caller already holds (column pointers, index - start)
+struct HostSource {
+    int start = 0, count = 0;
+    double *x = nullptr, *y = nullptr, *z = nullptr, *vx = nullptr, *vy = nullptr, *vz = nullptr;
+    const double* m = nullptr;
+};
 
 struct SubsystemBatch {
-    int n_subsystems;
+    int n_subsystems = 0;
 
     // Per-subsystem metadata
-    Kokkos::View<int*>    n_bodies;       // body count per subsystem
-    Kokkos::View<int*>    offset;         // offset into flat arrays
-    Kokkos::View<double*> dt_target;      // target physical time advance
+    std::vector<int>    n_bodies;       // body count per subsystem
+    std::vector<int>    offset;         // offset into flat arrays
+    std::vector<double> dt_target;      // target physical time advance
 
     // Flat packed arrays: [sum(n_bodies)] entries
-    Kokkos::View<double*> flat_pos;       // [x,y,z] interleaved
-    Kokkos::View<double*> flat_vel;       // [vx,vy,vz] interleaved
-    Kokkos::View<double*> flat_mass;
+    std::vector<double> flat_pos;       // [x,y,z] interleaved
+    std::vector<double> flat_vel;       // [vx,vy,vz] interleaved
+    std::vector<double> flat_mass;
 
     // Output: updated positions and velocities (same layout)
-    Kokkos::View<double*> flat_pos_out;
-    Kokkos::View<double*> flat_vel_out;
+    std::vector<double> flat_pos_out;
+    std::vector<double> flat_vel_out;
 
     // Per-subsystem results
-    Kokkos::View<double*> energy_error;   // |dE/E| per subsystem
-    Kokkos::View<int*>    converged;      // 1 if GBS converged
+    std::vector<double> energy_error;   // |dE/E| per subsystem
+    std::vector<int>    converged;      // 1 if GBS converged
 
     // Persistent auxiliary velocities for PN (code units, including CM).
     // Flat layout: stored_aux_vel[offset[s] * 3 + b*3 + c]
@@ -47,9 +56,9 @@ struct SubsystemBatch {
     std::vector<double> stored_V_scale, stored_R_scale, stored_T_scale, stored_E_scale;
     std::vector<char> stored_scales_set;
 
-    // Cached member indices from pack() — reused by unpack() to avoid recomputation
+    // Member slots from pack() (unique, first-appearance order) and each body's row in that list, reused by unpack()
     std::vector<int> cached_member_indices;
-    std::unordered_map<int, int> cached_idx_to_local;
+    std::vector<int> body_member;       // [sum(n_bodies)]: row in cached_member_indices
 
     // Output statistics (filled by logh_integrate_batch_gpu)
     int stat_total_gbs = 0;        // total GBS steps across all subsystems
@@ -58,19 +67,29 @@ struct SubsystemBatch {
     int stat_cap_hit = 0;          // subsystems that hit GBS step limit
     std::vector<double> t_reached; // physical time each subsystem's GBS integration reached (code units)
 
-    // Allocate buffers
+    // Size the host arrays
     void allocate(int n_sub, int total_bodies);
 
-    // Pack subsystems from SubsystemManager into batch
+    // Pack subsystems from SubsystemManager into batch. With src (all members inside its range) the state is read
+    // from that host copy, and spins are read from the device only when the spin couplings are on (otherwise LogH
+    // carries them unchanged); without src everything is gathered from the device.
     void pack(const SubsystemManager& mgr, const Particles& p,
-              double G, double dt);
+              double G, double dt, const HostSource* src = nullptr);
 
-    // Unpack results back into Particles
-    void unpack(SubsystemManager& mgr, Particles& p);
+    // Unpack results back into Particles (one scatter); with dst also into that host copy (positions, velocities)
+    void unpack(SubsystemManager& mgr, Particles& p, const HostSource* dst = nullptr);
 };
 
-// Integrate all subsystems in batch on GPU
-// Each Kokkos team (warp or block) handles one subsystem
+// Wall-time split of the batch calls (J-1 profile): accumulated by pack/run/unpack, read and cleared by the
+// caller after each call. *_xfer: allocations, gather/scatter kernels and host<->device copies; integ: wall time
+// of the host integration loop; crit: its longest single subsystem; work: sum over subsystems (all host threads)
+struct LoghBatchProf {
+    double pack_xfer = 0, run_xfer = 0, integ = 0, crit = 0, work = 0, unpack_xfer = 0;
+    long long n_sub = 0;
+};
+extern LoghBatchProf g_logh_prof;
+
+// Integrate all subsystems of the batch (host threads, one subsystem per task)
 void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs);
 
 // Global batch instance (reused across steps to avoid reallocation)
