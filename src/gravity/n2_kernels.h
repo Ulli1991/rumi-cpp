@@ -73,6 +73,17 @@ struct GradK {
     }
 };
 
+// GRAD_FRESH (fix 3): |g'_i| of the gradient time-step criteria (BIFROST sec. 3.4.4) as the GradK sum with
+// coeff = G GRAD_COEFF from the current accelerations (snapshots = ax, ay, az; nothing corrected), stored in gmag
+// (inv_dt2 = 1). Evaluated with the time steps from the current state, as the tidal-tensor step of Grudic & Hopkins
+// 2020 (arXiv:1910.06349), instead of read from whichever gradient kick last wrote it
+template <bool COLL>
+struct GradMagK : GradK<COLL> {
+    KOKKOS_INLINE_FUNCTION void finish(int i, const typename GradK<COLL>::Sink&, const double* sum, const double*) const {
+        this->gmag(i) = Kokkos::sqrt(sum[0] * sum[0] + sum[1] * sum[1] + sum[2] * sum[2]);
+    }
+};
+
 // Symmetrized pair time step (FROST Eqs. 23, 49) folded over the sources
 KOKKOS_INLINE_FUNCTION double pair_dt(double r2s, double ir, double dx, double dy, double dz,
                                       double dvx, double dvy, double dvz, double G, double msum,

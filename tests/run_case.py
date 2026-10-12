@@ -777,6 +777,18 @@ def tidal_books(exe, label, cfg, bound):
     return ok & check(f"{label} max|dE/E| with E_tidal", max(r[0] for r in diagnostics(out)), bound)
 
 
+def grad_sweep(exe, label, cfg, etas, bounds, order):
+    """max |dE/E| per ETA_GRAD and its order in ETA_GRAD (4: the step is eta_grad times a function of the state)."""
+    ok, maxima = True, []
+    for eta, bound in zip(etas, bounds):
+        rows = run(exe, {**cfg, "ETA_GRAD": eta})
+        maxima.append(max(r[0] for r in rows))
+        ok &= check(f"{label} ETA_GRAD={eta} max|dE/E|", maxima[-1], bound)
+    slope = math.log(maxima[0] / maxima[1]) / math.log(float(etas[0]) / float(etas[1]))
+    ok &= check(f"{label} order of max|dE/E| in ETA_GRAD", slope, order[0], lower=True)
+    return ok & check(f"{label} order of max|dE/E| in ETA_GRAD", slope, order[1])
+
+
 def tde_accretion(exe, label, cfg):
     """TDE remnant mass: m_BH + TDE_ACCRETION_FRACTION x m_star (FROST-CLUSTERS I, DRAGON-II: 0.5) for f = 0, 0.5, 1."""
     ok = True
@@ -1329,6 +1341,14 @@ CASES = {
     "tidal_energy_books": lambda exe: tidal_books(exe, "strong tide", dict(BINARIES, TOTAL_TIME_MYR="5e-3",
                                                                            TIDAL_FIELD="loghalo", GALAXY_VC_KMS="220",
                                                                            GALAXY_R_PC="100"), 1.5e-9),
+    # GRAD_FRESH (fix 3): the gradient criterion read grad_mag as the last gradient kick left it (0 before the first
+    # kick, the slow-fast part after a cross kick): as the only criterion the first step ran at ETA_FF/FB = 10 and
+    # the planets ran away (max|dE/E| 1.03 / 1.07); with |g'| from all particles at level 0: 3.61e-6 / 1.87e-7, order 4.27
+    "grad_only_planets": lambda exe: grad_sweep(exe, "gradient step only, planets, GRAD_FRESH",
+                                                dict(PLANETS, COLLISIONAL="true", R_NGB="1e-9", R_NGB_MAX="1e-9",
+                                                     PN_ORDER="0", SSE_ENABLED="false", PRINT_INTERVAL="10",
+                                                     ETA_FF="10", ETA_FB="10", ETA_JERK="0", ETA="0", GRAD_FRESH="true"),
+                                                ["0.1", "0.05"], [4.7e-6, 2.4e-7], (3.8, 4.7)),
     "coll_tde_accretion": lambda exe: tde_accretion(exe, "TDE accretion fraction", COLL_TDE),
     "coll_tde_parabolic": lambda exe: subsys_collision(exe, "TDE, parabolic", COLL_TDE, "TDE", 1.5e-12),
     "coll_bh_isco": lambda exe: subsys_collision(exe, "BH binary to ISCO, PN", COLL_ISCO, "ISCO", 1e-14),

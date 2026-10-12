@@ -58,6 +58,11 @@ void timestep_range(Particles& p, int i0, int ni, int j0, int nj, double G, doub
 struct GradSnapshot { double* x; double* y; double* z; int offset; };
 void gradient_correction_range(Particles& p, int i0, int ni, int j0, int nj, const GradSnapshot& si,
                                const GradSnapshot& sj, double G, double soft2, double dt, bool write_gmag);
+#ifdef ENABLE_COLLISIONAL
+// GRAD_FRESH: grad_mag(i) = |g'_i| of sinks [i0, i0+ni) from sources [j0, j0+nj) and the accelerations in ax, ay, az
+// (left unchanged), subsystem partners excluded
+void gradient_magnitude_range(Particles& p, int i0, int ni, int j0, int nj, double G, double soft2);
+#endif
 
 // Standalone neighbor search (BIFROST Section 3.5)
 // Lightweight N² tiled kernel: detects neighbor pairs without computing forces

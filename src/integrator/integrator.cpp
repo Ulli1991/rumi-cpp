@@ -2595,11 +2595,28 @@ static int hhs_fsi_recursive(
 #ifdef ENABLE_COLLISIONAL
         // Gradient + v/a timestep criteria (BIFROST Section 3.4.4, Eq. 24/26/27), each off at eta = 0
         if (p.collisional && (g_collisional.eta_grad > 0.0 || g_collisional.eta_va > 0.0)) {
+            // GRAD_FRESH (fix 3, b7dfabe): |g'| of every particle from the current accelerations at level 0 (the set is
+            // every particle, BIFROST's sum over all j != i); deeper levels inherit the step through the level-0
+            // clamp (sec. 3.4.1). Off: grad_mag as the last gradient kick left it (partial: self or slow-fast)
+            const bool fresh = g_collisional.grad_fresh && g_collisional.eta_grad > 0.0;
+            if (fresh && depth == 0) {
+                if (use_mpi) {
+                    int s0 = start, sc = count;
+                    dp->get_force_slice(start, count, s0, sc);
+                    n2_detail::SinkSetScope n2_set_gm(count);
+                    gradient_magnitude_range(p, s0, sc, start, count, G, soft2);
+                    Kokkos::fence();
+                    const int f[1] = {4};
+                    dp->allgather_fields(&start, &count, 1, f, 1);
+                } else {
+                    gradient_magnitude_range(p, start, count, start, count, G, soft2);
+                }
+            }
             auto dt_f = p.dt_adapt;
             auto gm = p.grad_mag;
             RawView agx{p.ax.data()}, agy{p.ay.data()}, agz{p.az.data()};
             RawView vvx{p.vx.data()}, vvy{p.vy.data()}, vvz{p.vz.data()};
-            double eta_g = g_collisional.eta_grad;
+            double eta_g = (fresh && depth > 0) ? 0.0 : g_collisional.eta_grad;
             double eta_va = g_collisional.eta_va;   // halved by the restart loop like the other etas
             small_for("dt_grad", count, KOKKOS_LAMBDA(int ii) {
                 int i = start + ii;

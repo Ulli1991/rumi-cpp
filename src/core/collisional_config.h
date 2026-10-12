@@ -52,6 +52,7 @@ struct CollisionalConfig {
     double r_ngb_wide = 0.0;           // NGB_WIDE_FAC x r_ngb: bound pairs with a below it are neighbours (wide binaries; 0: off)
     bool gbs_deuflhard = false;        // GBS_SEQUENCE = deuflhard (2, 4, 6, ...; MSTAR / FROST-CLUSTERS) instead of bulirsch
     int gbs_kmax = 10;                 // GBS_KMAX: extrapolation stages (FROST-CLUSTERS I: 8)
+    bool grad_fresh = false;           // GRAD_FRESH: gradient time step from a fresh |g'| at level 0 (fix 3)
     double tde_accretion = 0.5;        // TDE_ACCRETION_FRACTION: fraction of a disrupted star the BH accretes (FROST-CLUSTERS I, DRAGON-II: 0.5)
 
     // Secular evolution

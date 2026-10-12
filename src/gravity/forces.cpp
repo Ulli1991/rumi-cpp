@@ -256,6 +256,17 @@ static void grad_range(Particles& p, int i0, int ni, int j0, int nj, const GradS
     run_n2("grad", i0, ni, j0, nj, k);
 }
 
+#ifdef ENABLE_COLLISIONAL
+void gradient_magnitude_range(Particles& p, int i0, int ni, int j0, int nj, double G, double soft2) {
+    if (ni <= 0 || nj <= 0) return;
+    GradMagK<true> k;
+    static_cast<GradK<true>&>(k) = GradK<true>{{p.x.data()}, {p.y.data()}, {p.z.data()}, {p.mass.data()}, {p.ax.data()},
+        {p.ay.data()}, {p.az.data()}, {p.ax.data()}, {p.ay.data()}, {p.az.data()}, {p.ax.data()}, {p.ay.data()},
+        {p.az.data()}, 0, 0, {p.grad_mag.data()}, sid_ptr(p, true), G * GRAD_COEFF, soft2, 1.0};
+    run_n2("grad_mag", i0, ni, j0, nj, k);
+}
+#endif
+
 void gradient_correction_range(Particles& p, int i0, int ni, int j0, int nj, const GradSnapshot& si,
                                const GradSnapshot& sj, double G, double soft2, double dt, bool write_gmag) {
 #ifdef ENABLE_COLLISIONAL
