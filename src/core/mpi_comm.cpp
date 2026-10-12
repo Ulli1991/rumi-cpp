@@ -275,19 +275,10 @@ void DistributedParticles::distribute_initial(Particles& global_particles) {
     int max_per_rank = (N_total + n_ranks - 1) / n_ranks;
     mpi_acc_send_buf = Kokkos::View<double*>("mpi_acc_send", 3 * max_per_rank);
     mpi_acc_recv_buf = Kokkos::View<double*>("mpi_acc_recv", 3 * N_total);
-    mpi_acc_send_buf2 = Kokkos::View<double*>("mpi_acc_send2", 3 * max_per_rank);
-    mpi_acc_recv_buf2 = Kokkos::View<double*>("mpi_acc_recv2", 3 * N_total);
 
     // Pre-allocate count/displacement vectors to avoid heap allocs per allgather
     mpi_counts.resize(n_ranks);
     mpi_displs.resize(n_ranks);
-    mpi_packed_counts.resize(n_ranks);
-    mpi_packed_displs.resize(n_ranks);
-    // Per-slot copies for concurrent non-blocking iallgathers
-    for (int s = 0; s < 2; s++) {
-        mpi_packed_counts_slot[s].resize(n_ranks);
-        mpi_packed_displs_slot[s].resize(n_ranks);
-    }
 
     if (my_rank == 0) {
         std::printf("Replicated particles: %d total, rank 0 computes forces for [%d, %d)\n",
@@ -295,17 +286,11 @@ void DistributedParticles::distribute_initial(Particles& global_particles) {
         std::printf("  MPI topology: i-partitioned (allgatherv)\n");
         std::printf("  MPI transport of the allgathers: %s\n",
                     !HAVE_GPU_BACKEND ? "host memory"
-                    : mpi_transport == MpiTransport::Device ? "device buffers (GPU-aware MPI)"
                     : mpi_transport == MpiTransport::Nccl   ? "NCCL"
                                                             : "staged through pinned host memory");
     }
 
     // Pre-allocate persistent host-staged buffers
-    host_send_buf.resize(3 * (max_per_rank + 1));
-    host_recv_buf.resize(3 * N_total);
-    host_recv_ax.resize(N_total);
-    host_recv_ay.resize(N_total);
-    host_recv_az.resize(N_total);
     host_send_dt.resize(max_per_rank + 1);
     host_recv_dt.resize(N_total);
 
@@ -417,11 +402,10 @@ void DistributedParticles::get_force_slice(int start, int count, int& slice_star
 // dt + acc need one collective instead of two. The bytes that arrive are the computed values, so the result is
 // bit-identical to separate gathers.
 // Transport (MPI_TRANSPORT): "host" packs on the device, copies the send block to pinned host memory, gathers host
-// buffers and copies the result back; "device" hands device buffers to a GPU-aware MPI (USE_GPU_AWARE_MPI builds);
-// "nccl" pads every rank's block to the largest and runs ncclAllGather on the Kokkos stream (USE_NCCL builds).
-// raven's Open MPI 5.0.10 has no coll/ucc or hcoll, so collectives on device buffers fall back to generic p2p
-// algorithms: 3-30x slower than host staging; NCCL is fastest (table in the commit / bench/xport.cpp in the run
-// directory). Host builds gather in place either way.
+// buffers and copies the result back; "nccl" pads every rank's block to the largest and runs ncclAllGather on the
+// Kokkos stream (USE_NCCL builds). Device buffers handed to a GPU-aware MPI (the deleted "device" transport) were
+// 3-30x slower than host staging on raven (Open MPI 5.0.10 without coll/ucc or hcoll falls back to generic p2p
+// algorithms; f24a76b: 3488 vs 1028 us); NCCL is fastest. Host builds gather in place.
 MpiTransport mpi_transport = MpiTransport::Host;
 
 MpiTransport parse_mpi_transport(const std::string& s) {
@@ -435,11 +419,7 @@ MpiTransport parse_mpi_transport(const std::string& s) {
         if (MPIComm::rank() == 0) std::fprintf(stderr, "MPI_TRANSPORT = nccl: not built with USE_NCCL, using host\n");
         return MpiTransport::Host;
     }
-    if (s == "device") {
-        if (EFFECTIVE_GPU_AWARE_MPI) return MpiTransport::Device;
-        if (MPIComm::rank() == 0)
-            std::fprintf(stderr, "MPI_TRANSPORT = device: not a GPU-aware GPU build, using host\n");
-    } else if (s != "host" && s != "auto" && MPIComm::rank() == 0) {
+    if (s != "host" && s != "auto" && MPIComm::rank() == 0) {
         std::fprintf(stderr, "MPI_TRANSPORT = %s unknown, using host\n", s.c_str());
     }
     return MpiTransport::Host;
@@ -514,7 +494,7 @@ void DistributedParticles::allgather_fields(const int* seg_start, const int* seg
         if (nf > 3) o[3] = f3(i);
     });
 
-    const bool stage = HAVE_GPU_BACKEND && mpi_transport == MpiTransport::Host;
+    const bool stage = HAVE_GPU_BACKEND;   // host transport of a GPU build (host builds gather in place)
     if (nccl) {
 #ifdef USE_NCCL
         // same stream as the pack and unpack kernels: no fence needed around it
@@ -587,126 +567,15 @@ void DistributedParticles::allgather_accelerations_two(int start0, int count0, i
     allgather_fields(st, ct, 2, f, 3);
 }
 
+// MPI_NON_BLOCKING: the gathers of both sets are blocking (the device-buffer MPI_Iallgatherv went with
+// MPI_TRANSPORT = device, f24a76b); wait_and_unpack_accelerations has nothing left to do
 void DistributedParticles::iallgather_accelerations_subset(int start, int count, int slot) {
-#ifdef USE_MPI
-    if (MPIComm::size() == 1 || count == 0) return;
-    if (mpi_transport != MpiTransport::Device) {   // host / NCCL transport: blocking, nothing left to wait for
-        allgather_accelerations_subset(start, count);
-        mpi_reqs[slot] = MPI_REQUEST_NULL;
-        return;
-    }
-
-    int n_ranks = MPIComm::size();
-    int my_slice_start, my_slice_count;
-    get_force_slice(start, count, my_slice_start, my_slice_count);
-
-    // Compute per-rank packed counts and displacements (cheap, avoids storing per-slot)
-    int base = count / n_ranks;
-    int remainder = count % n_ranks;
-    mpi_displs[0] = 0;
-    for (int r = 0; r < n_ranks; r++) {
-        mpi_counts[r] = base + (r < remainder ? 1 : 0);
-        if (r > 0) mpi_displs[r] = mpi_displs[r-1] + mpi_counts[r-1];
-    }
-    for (int r = 0; r < n_ranks; r++) {
-        mpi_packed_counts[r] = 3 * mpi_counts[r];
-        mpi_packed_displs[r] = 3 * mpi_displs[r];
-    }
-
-    Kokkos::fence("mpi_comm.cpp:529");
-
-#if EFFECTIVE_GPU_AWARE_MPI
-    // GPU-aware: pack on device, issue non-blocking MPI_Iallgatherv
-    auto send = (slot == 0) ? mpi_acc_send_buf : mpi_acc_send_buf2;
-    auto recv = (slot == 0) ? mpi_acc_recv_buf : mpi_acc_recv_buf2;
-    auto lax = local.ax; auto lay = local.ay; auto laz = local.az;
-    int ss = my_slice_start;
-
-    Kokkos::parallel_for("ipack_acc", my_slice_count, KOKKOS_LAMBDA(int ii) {
-        int i = ss + ii;
-        send(3*ii)   = lax(i);
-        send(3*ii+1) = lay(i);
-        send(3*ii+2) = laz(i);
-    });
-    Kokkos::fence("mpi_comm.cpp:544");
-
-    // Copy counts/displs to per-slot arrays — MPI reads these asynchronously,
-    // so concurrent slots must not share the same underlying memory
-    for (int r = 0; r < n_ranks; r++) {
-        mpi_packed_counts_slot[slot][r] = mpi_packed_counts[r];
-        mpi_packed_displs_slot[slot][r] = mpi_packed_displs[r];
-    }
-
-    MPI_CHECK(MPI_Iallgatherv(send.data(), 3 * my_slice_count, MPI_DOUBLE,
-                     recv.data(), mpi_packed_counts_slot[slot].data(),
-                     mpi_packed_displs_slot[slot].data(), MPI_DOUBLE,
-                     MPI_COMM_WORLD, &mpi_reqs[slot]));
-    // Returns immediately — no wait, no unpack
-#else
-    // Host-staged: fall back to full blocking allgather (same as allgather_accelerations_subset)
-    auto h_ax = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
-        Kokkos::subview(local.ax, Kokkos::make_pair(my_slice_start, my_slice_start + my_slice_count)));
-    auto h_ay = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
-        Kokkos::subview(local.ay, Kokkos::make_pair(my_slice_start, my_slice_start + my_slice_count)));
-    auto h_az = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
-        Kokkos::subview(local.az, Kokkos::make_pair(my_slice_start, my_slice_start + my_slice_count)));
-
-    // Reuse persistent buffers
-    for (int i = 0; i < my_slice_count; i++) {
-        host_send_buf[3*i]   = h_ax(i);
-        host_send_buf[3*i+1] = h_ay(i);
-        host_send_buf[3*i+2] = h_az(i);
-    }
-
-    MPI_CHECK(MPI_Allgatherv(host_send_buf.data(), 3 * my_slice_count, MPI_DOUBLE,
-                   host_recv_buf.data(), mpi_packed_counts.data(), mpi_packed_displs.data(), MPI_DOUBLE,
-                   MPI_COMM_WORLD));
-
-    for (int i = 0; i < count; i++) {
-        host_recv_ax[i] = host_recv_buf[3*i];
-        host_recv_ay[i] = host_recv_buf[3*i+1];
-        host_recv_az[i] = host_recv_buf[3*i+2];
-    }
-
-    Kokkos::View<double*, Kokkos::HostSpace, Kokkos::MemoryUnmanaged> h_recv_ax(host_recv_ax.data(), count);
-    Kokkos::View<double*, Kokkos::HostSpace, Kokkos::MemoryUnmanaged> h_recv_ay(host_recv_ay.data(), count);
-    Kokkos::View<double*, Kokkos::HostSpace, Kokkos::MemoryUnmanaged> h_recv_az(host_recv_az.data(), count);
-
-    Kokkos::deep_copy(Kokkos::subview(local.ax, Kokkos::make_pair(start, start + count)), h_recv_ax);
-    Kokkos::deep_copy(Kokkos::subview(local.ay, Kokkos::make_pair(start, start + count)), h_recv_ay);
-    Kokkos::deep_copy(Kokkos::subview(local.az, Kokkos::make_pair(start, start + count)), h_recv_az);
-
-    mpi_reqs[slot] = MPI_REQUEST_NULL;  // signal no wait needed
-#endif
-
-#endif // USE_MPI
+    (void)slot;
+    allgather_accelerations_subset(start, count);
 }
 
 void DistributedParticles::wait_and_unpack_accelerations(int start, int count, int slot) {
-#ifdef USE_MPI
-    if (MPIComm::size() == 1 || count == 0) return;
-
-#if EFFECTIVE_GPU_AWARE_MPI
-    if (mpi_transport != MpiTransport::Device) return;   // host / NCCL: the blocking gather already unpacked
-    MPI_CHECK(MPI_Wait(&mpi_reqs[slot], MPI_STATUS_IGNORE));
-
-    auto recv = (slot == 0) ? mpi_acc_recv_buf : mpi_acc_recv_buf2;
-    auto lax = local.ax; auto lay = local.ay; auto laz = local.az;
-    int st = start;
-
-    Kokkos::parallel_for("iunpack_acc", count, KOKKOS_LAMBDA(int ii) {
-        int i = st + ii;
-        lax(i) = recv(3*ii);
-        lay(i) = recv(3*ii+1);
-        laz(i) = recv(3*ii+2);
-    });
-    Kokkos::fence("mpi_comm.cpp:615");
-#else
-    // Host-staged: blocking allgather already completed in initiate phase, no-op
     (void)start; (void)count; (void)slot;
-#endif
-
-#endif // USE_MPI
 }
 
 void DistributedParticles::allgather_timestep() {

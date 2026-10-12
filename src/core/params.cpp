@@ -191,9 +191,8 @@ const std::vector<ParamSpec> kParams = {
      "Distributed runs: check every this many steps that the replicas agree (0: off)"},
     {"MPI_NON_BLOCKING", B, "false", "Performance and parallelism", INTERNAL, "",
      "MPI_Iallgatherv for overlapped transfers"},
-    {"MPI_TRANSPORT", S, "auto", "Performance and parallelism", INTERNAL, "auto|nccl|host|device",
-     "Allgathers: nccl (USE_NCCL builds; auto there), host (staged through pinned host memory; auto otherwise), "
-     "device (GPU-aware MPI)"},
+    {"MPI_TRANSPORT", S, "auto", "Performance and parallelism", INTERNAL, "auto|nccl|host",
+     "Allgathers: nccl (USE_NCCL builds; auto there), host (staged through pinned host memory; auto otherwise)"},
     {"DISTRIBUTE_SUBSYSTEMS", B, "false", "Performance and parallelism", INTERNAL, "",
      "Each MPI rank integrates its share of the subsystems (FROST Algorithm 3)"},
     {"DISTRIBUTE_MIN_SUBSYSTEMS", I, "256", "Performance and parallelism", INTERNAL, "",

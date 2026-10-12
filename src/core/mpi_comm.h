@@ -47,11 +47,11 @@
 #define EFFECTIVE_GPU_AWARE_MPI (USE_GPU_AWARE_MPI && HAVE_GPU_BACKEND)
 
 // MPI_TRANSPORT of the per-particle allgathers (mpi_comm.cpp allgather_fields): host = pack on the device, stage
-// through pinned host memory; device = device buffers to a GPU-aware MPI (USE_GPU_AWARE_MPI builds); nccl =
-// ncclAllGather on the Kokkos stream (USE_NCCL builds). Default: nccl where built in, else host.
-enum class MpiTransport { Host, Device, Nccl };
+// through pinned host memory; nccl = ncclAllGather on the Kokkos stream (USE_NCCL builds). Default (auto): nccl
+// where built in, else host.
+enum class MpiTransport { Host, Nccl };
 extern MpiTransport mpi_transport;
-// Parse MPI_TRANSPORT ("auto", "host", "device", "nccl"); falls back to host for one the build lacks
+// Parse MPI_TRANSPORT ("auto", "host", "nccl"); falls back to host for one the build lacks
 MpiTransport parse_mpi_transport(const std::string& s);
 
 // =============================================================================
@@ -113,33 +113,17 @@ struct DistributedParticles {
     // Avoids cudaMalloc/cudaFree per allgather call
     Kokkos::View<double*> mpi_acc_send_buf;  // size: 3 * max_per_rank (slot 0)
     Kokkos::View<double*> mpi_acc_recv_buf;  // size: 3 * N_total     (slot 0)
-    Kokkos::View<double*> mpi_acc_send_buf2; // size: 3 * max_per_rank (slot 1, for concurrent iallgather)
-    Kokkos::View<double*> mpi_acc_recv_buf2; // size: 3 * N_total     (slot 1, for concurrent iallgather)
-
-#ifdef USE_MPI
-    MPI_Request mpi_reqs[2] = {MPI_REQUEST_NULL, MPI_REQUEST_NULL};
-#endif
 
     // Pre-allocated per-rank count/displacement arrays for MPI_Allgatherv
     // Avoids heap allocation on every allgather call
     std::vector<int> mpi_counts;        // size: n_ranks
     std::vector<int> mpi_displs;        // size: n_ranks
-    std::vector<int> mpi_packed_counts; // size: n_ranks (3x for packed ax/ay/az)
-    std::vector<int> mpi_packed_displs; // size: n_ranks
-
-    // Per-slot copies for non-blocking iallgather (MPI reads these asynchronously,
-    // so concurrent slots must not share the same arrays)
-    std::vector<int> mpi_packed_counts_slot[2];
-    std::vector<int> mpi_packed_displs_slot[2];
 
     // Pinned host staging buffers of allgather_fields (grown on demand)
     using PinnedView = Kokkos::View<double*, Kokkos::SharedHostPinnedSpace>;
     PinnedView host_send_pinned, host_recv_pinned;
 
     // Persistent host-staged buffers (reused across calls, avoids per-call allocation)
-    std::vector<double> host_send_buf;   // packed [ax,ay,az] for send
-    std::vector<double> host_recv_buf;   // packed [ax,ay,az] for recv
-    std::vector<double> host_recv_ax, host_recv_ay, host_recv_az;  // unpacked
     std::vector<double> host_send_dt, host_recv_dt;  // timestep staging
 
     // Initialize distributed particles from a global particle set
@@ -164,11 +148,9 @@ struct DistributedParticles {
     // Packs ax/ay/az into a single MPI message (3x fewer MPI calls)
     void allgather_accelerations_subset(int start, int count);
 
-    // Non-blocking allgather: pack + MPI_Iallgatherv, returns immediately
-    // slot=0 uses primary buffers, slot=1 uses secondary buffers
+    // MPI_NON_BLOCKING pair: the gather is blocking with the host and NCCL transports (allgather_accelerations_subset),
+    // the wait a no-op
     void iallgather_accelerations_subset(int start, int count, int slot);
-
-    // Wait for iallgather to complete + unpack recv buffer into ax/ay/az
     void wait_and_unpack_accelerations(int start, int count, int slot);
 
     // One MPI_Allgatherv of nf fields (0 = dt_adapt, 1 = ax, 2 = ay, 3 = az, 4 = grad_mag; nf <= 4) over the force slices of one or
