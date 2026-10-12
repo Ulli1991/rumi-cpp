@@ -1857,8 +1857,10 @@ static void self_gradient_correction_distributed(DistributedParticles& dp, int s
 
     if (slice_count > 0) {
         GradSnapshot snap{ax_save.data(), ay_save.data(), az_save.data(), start};
+        // grad_mag in the kernel for the slice, as on one rank (it was |a_after - a_before| / dt^2 from the gathered
+        // accelerations: other rounding, so the gradient time step depended on the rank count)
         gradient_correction_range(dp.local, slice_start, slice_count, start, count, snap, snap, G, soft2, grad_dt,
-                                  false);   // grad_mag below, from the gathered accelerations
+                                  dp.local.collisional);
         Kokkos::fence();
     }
 
@@ -1871,24 +1873,10 @@ static void self_gradient_correction_distributed(DistributedParticles& dp, int s
     }
 
 #ifdef ENABLE_COLLISIONAL
-    // Compute grad_mag from acceleration difference — identical on all ranks
+    // grad_mag of the other ranks' slices
     if (dp.local.collisional) {
-        auto ax_v = dp.local.ax;
-        auto ay_v = dp.local.ay;
-        auto az_v = dp.local.az;
-        auto gm = dp.local.grad_mag;
-        double inv_dt2 = 1.0 / (grad_dt * grad_dt);
-        int s = start;
-        auto axs = ax_save;
-        auto ays = ay_save;
-        auto azs = az_save;
-        Kokkos::parallel_for("compute_grad_mag_dist", count, KOKKOS_LAMBDA(int ii) {
-            double dx = ax_v(s + ii) - axs(ii);
-            double dy = ay_v(s + ii) - ays(ii);
-            double dz = az_v(s + ii) - azs(ii);
-            gm(s + ii) = Kokkos::sqrt(dx*dx + dy*dy + dz*dz) * inv_dt2;
-        });
-        Kokkos::fence();
+        const int f[1] = {4};
+        dp.allgather_fields(&start, &count, 1, f, 1);
     }
 #endif
 }
@@ -2259,12 +2247,14 @@ static void cross_acceleration_and_gradient_distributed(DistributedParticles& dp
     GradSnapshot snap_f{ax_snap_f.data(), ay_snap_f.data(), az_snap_f.data(), fast_start};
     int slice_start, slice_count;
     dp.get_force_slice(slow_start, slow_count, slice_start, slice_count);
+    // grad_mag written as by cross_gradient_correction on one rank (rank-count independence), gathered below
+    const bool gm_on = dp.local.collisional;
     gradient_correction_range(dp.local, slice_start, slice_count, fast_start, fast_count, snap_s, snap_f,
-                              G, soft2, dt, false);
+                              G, soft2, dt, gm_on);
     int slice_start_f, slice_count_f;
     dp.get_force_slice(fast_start, fast_count, slice_start_f, slice_count_f);
     gradient_correction_range(dp.local, slice_start_f, slice_count_f, slow_start, slow_count, snap_f, snap_s,
-                              G, soft2, dt, false);
+                              G, soft2, dt, gm_on);
     Kokkos::fence();
 
     // Slices of slow and fast computed independently: one gather of both (AUDIT G row 5)
@@ -2275,6 +2265,10 @@ static void cross_acceleration_and_gradient_distributed(DistributedParticles& dp
         dp.wait_and_unpack_accelerations(fast_start, fast_count, 1);
     } else {
         dp.allgather_accelerations_two(slow_start, slow_count, fast_start, fast_count);   // one collective
+    }
+    if (gm_on) {
+        const int st[2] = {slow_start, fast_start}, ct[2] = {slow_count, fast_count}, f[1] = {4};
+        dp.allgather_fields(st, ct, 2, f, 1);
     }
 }
 
@@ -2619,6 +2613,24 @@ static int hhs_fsi_recursive(
                     if (dt_va < dt_f(i)) dt_f(i) = dt_va;
                 }
             });
+        }
+        // NBODY_DUMP_DT=n (debug): pid, dt_adapt, grad_mag, ax of the set after the time-step criteria, first n calls
+        {
+            static int dump_calls = 0;
+            static const int dump_max = std::getenv("NBODY_DUMP_DT") ? std::atoi(std::getenv("NBODY_DUMP_DT")) : 0;
+            if (dump_calls < dump_max && MPIComm::rank() == 0) {
+                auto r = Kokkos::make_pair(start, start + count);
+                auto hp = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Kokkos::subview(p.particle_id, r));
+                auto hd = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Kokkos::subview(p.dt_adapt, r));
+                auto hg = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Kokkos::subview(p.grad_mag, r));
+                auto ha = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Kokkos::subview(p.ax, r));
+                char fn[64]; std::snprintf(fn, sizeof fn, "dtdump_%05d.txt", dump_calls);
+                if (FILE* f = std::fopen(fn, "w")) {
+                    for (int k = 0; k < count; k++) std::fprintf(f, "%d %a %a %a\n", hp(k), hd(k), hg(k), ha(k));
+                    std::fclose(f);
+                }
+            }
+            dump_calls++;
         }
         // Level-0 clamping (BIFROST Section 3.4.1)
         if (p.collisional && depth > 0) {

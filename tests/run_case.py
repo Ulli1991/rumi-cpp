@@ -1403,6 +1403,10 @@ CASES = {
     # the printed |dE/E| differed in the 7th digit). Sets above SERIAL_N2_GPU = 256 are split over the ranks
     "rankcount_binaries": lambda exe: rank_count_identical(exe, "binaries, split sets",
                                                           dict(BINARIES, TOTAL_TIME_MYR="3e-3", SERIAL_N2_GPU="256")),
+    # Dense core (triples, subsystems, restarts): the distributed gradient took grad_mag from |a_after - a_before| and
+    # its slow-fast gradient wrote none, so the gradient time step depended on the rank count (2026-10-12)
+    "rankcount_triples": lambda exe: rank_count_identical(exe, "dense core, split sets",
+                                                         dict(TRIPLES, SERIAL_N2_GPU="256")),
     "rankcount_mergers": lambda exe: rank_count_identical(exe, "mergers, split sets",
                                                          dict(MERGERS, SERIAL_N2_CPU="0", SERIAL_N2_GPU="64")),
     "mpi_1v2": lambda exe: ranks_agree(exe, "1 vs 2 ranks", dict(BINARIES, TOTAL_TIME_MYR="5e-3", REPLICA_CHECK_INTERVAL="1"),

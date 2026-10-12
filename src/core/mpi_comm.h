@@ -171,7 +171,7 @@ struct DistributedParticles {
     // Wait for iallgather to complete + unpack recv buffer into ax/ay/az
     void wait_and_unpack_accelerations(int start, int count, int slot);
 
-    // One MPI_Allgatherv of nf fields (0 = dt_adapt, 1 = ax, 2 = ay, 3 = az; nf <= 4) over the force slices of one or
+    // One MPI_Allgatherv of nf fields (0 = dt_adapt, 1 = ax, 2 = ay, 3 = az, 4 = grad_mag; nf <= 4) over the force slices of one or
     // two segments [seg_start[s], seg_start[s] + seg_count[s]) (nseg <= 2). Transport: mpi_transport.
     void allgather_fields(const int* seg_start, const int* seg_count, int nseg, const int* fields, int nf);
 

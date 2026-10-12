@@ -497,8 +497,8 @@ void DistributedParticles::allgather_fields(const int* seg_start, const int* seg
     if ((int)mpi_acc_send_buf.extent(0) < n_send_buf) Kokkos::realloc(mpi_acc_send_buf, n_send_buf);
     if ((int)mpi_acc_recv_buf.extent(0) < n_recv_buf) Kokkos::realloc(mpi_acc_recv_buf, n_recv_buf);
 
-    // fields: 0 = dt_adapt, 1 = ax, 2 = ay, 3 = az
-    Kokkos::View<double*> F[4] = {local.dt_adapt, local.ax, local.ay, local.az};
+    // fields: 0 = dt_adapt, 1 = ax, 2 = ay, 3 = az, 4 = grad_mag
+    Kokkos::View<double*> F[5] = {local.dt_adapt, local.ax, local.ay, local.az, local.grad_mag};
     RawView f0{F[fields[0]].data()}, f1{nf > 1 ? F[fields[1]].data() : nullptr},
         f2{nf > 2 ? F[fields[2]].data() : nullptr}, f3{nf > 3 ? F[fields[3]].data() : nullptr};
     RawView send{mpi_acc_send_buf.data()}, recv{mpi_acc_recv_buf.data()};
