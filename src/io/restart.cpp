@@ -1,6 +1,7 @@
 #include "restart.h"
 #include "h5_util.h"
 #include "git_version.h"
+#include "tidal_field.h"
 #ifdef ENABLE_COLLISIONAL
 #include "collisional_config.h"
 #include "subsystem.h"
@@ -32,7 +33,7 @@ const char* code_version() { return NBODY_GIT_VERSION; }
 #ifdef ENABLE_COLLISIONAL
 static_assert(sizeof(OrbitalElements) == 10 * sizeof(double), "OrbitalElements changed: update io/restart.cpp");
 static_assert(sizeof(Subsystem) == 392, "Subsystem changed: update io/restart.cpp (write_subsystems/read_subsystems)");
-static_assert(sizeof(EnergyBookkeeping) == 12 * sizeof(double), "EnergyBookkeeping changed: update io/restart.cpp");
+static_assert(sizeof(EnergyBookkeeping) == 13 * sizeof(double), "EnergyBookkeeping changed: update io/restart.cpp");
 static_assert(sizeof(MergerTreeNode) == 112, "MergerTreeNode changed: update io/restart.cpp");
 static_assert(sizeof(EscaperEvent) == 96, "EscaperEvent changed: update io/restart.cpp");
 static_assert(std::is_trivially_copyable_v<EnergyAttribution>, "g_eattr is stored as bytes");
@@ -136,6 +137,9 @@ void write_run(hid_t file, const RunState& rs) {
     h5::attr(g, "integrator", rs.integrator);
     h5::attr(g, "test", rs.test);
     h5::write(g, "diag0", diag_vec(rs.diag0));
+    // tidal field reference point (gravity/tidal_field.h): run state
+    h5::attr(g, "tidal_X", std::vector<double>(g_tidal.X, g_tidal.X + 3));
+    h5::attr(g, "tidal_V", std::vector<double>(g_tidal.V, g_tidal.V + 3));
     auto b = h5::create_group(g, "blobs");
     for (const auto& kv : rs.blobs) h5::write<uint8_t>(b, kv.first, kv.second.data(), kv.second.size());
 }
@@ -151,6 +155,10 @@ void read_run(hid_t file, RunState& rs) {
     std::vector<double> d;
     h5::read(g, "diag0", d);
     rs.diag0 = diag_from(d);
+    if (h5::has_attr(g, "tidal_X")) {
+        auto X = h5::get_doubles(g, "tidal_X"), V = h5::get_doubles(g, "tidal_V");
+        for (int k = 0; k < 3 && k < (int)X.size(); k++) { g_tidal.X[k] = X[k]; g_tidal.V[k] = V[k]; }
+    }
     rs.blobs.clear();
     auto b = h5::open_group(g, "blobs");
     H5G_info_t info;
@@ -300,6 +308,7 @@ void write_books(hid_t parent, const EnergyBookkeeping& b) {
     auto g = h5::create_group(parent, "energy_books");
     h5::attr(g, "E_escape", b.E_escape); h5::attr(g, "E_gw", b.E_gw); h5::attr(g, "E_merge", b.E_merge);
     h5::attr(g, "E_sse", b.E_sse); h5::attr(g, "E_pn", b.E_pn); h5::attr(g, "E_sd", b.E_sd);
+    h5::attr(g, "E_tidal", b.E_tidal);
     h5::attr(g, "P_sink", std::vector<double>(b.P_sink, b.P_sink + 3));
     h5::attr(g, "L_sink", std::vector<double>(b.L_sink, b.L_sink + 3));
 }
@@ -309,6 +318,7 @@ void read_books(hid_t parent, EnergyBookkeeping& b) {
     b.E_escape = h5::get_double(g, "E_escape"); b.E_gw = h5::get_double(g, "E_gw");
     b.E_merge = h5::get_double(g, "E_merge"); b.E_sse = h5::get_double(g, "E_sse");
     b.E_pn = h5::get_double(g, "E_pn"); b.E_sd = h5::get_double(g, "E_sd");
+    b.E_tidal = h5::has_attr(g, "E_tidal") ? h5::get_double(g, "E_tidal") : 0.0;
     auto P = h5::get_doubles(g, "P_sink"), L = h5::get_doubles(g, "L_sink");
     if (P.size() != 3 || L.size() != 3) h5::fail("restart energy books: bad sink vectors");
     for (int k = 0; k < 3; k++) { b.P_sink[k] = P[k]; b.L_sink[k] = L[k]; }

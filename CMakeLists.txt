@@ -23,6 +23,7 @@ add_executable(nbody-kokkos
     ${SRC_DIR}/core/particles.cpp
     ${SRC_DIR}/core/mpi_comm.cpp
     ${SRC_DIR}/gravity/forces.cpp
+    ${SRC_DIR}/gravity/tidal_field.cpp
     ${SRC_DIR}/gravity/tree.cpp
     ${SRC_DIR}/gravity/tree_forces.cpp
     ${SRC_DIR}/gravity/fmm.cpp
@@ -198,7 +199,7 @@ foreach(case kepler_e09 kepler_e0 frost4_e09 frost4_e099 planets_hhs planets_fsi
              cm_eps_tidal_sampling cm_eps_cpu_vs_device dense_core_split triple_id_order secular_triples_off secular_omega0_steps spin_precession spin_j spin_j_pn1 ic_binaries_no_mergers eta_jerk0_fsi va_without_grad restart_halves_va secular_stellar_no_pn secular_bh_tight_steps logh_hierarchy_complete weak_flyby_split
              sdar_kozai_triple sdar_f3_flyby sdar_pn_kappa1
              cm_eps_tidal_components flyby_member_com ngb_mass_scaling
-             coll_headon_triple coll_contact_flyby coll_contact_flyby_logh coll_tde_parabolic coll_tde_accretion fryer_rapid_gap pn_boost_logh pn_boost_secular wide_binaries_ngb gbs_deuflhard_pn cluster_diag coll_bh_isco
+             coll_headon_triple coll_contact_flyby coll_contact_flyby_logh coll_tde_parabolic coll_tde_accretion fryer_rapid_gap pn_boost_logh pn_boost_secular wide_binaries_ngb gbs_deuflhard_pn cluster_diag tidal_ref_orbit tidal_energy_books coll_bh_isco
              tree_dt_binaries tree_dt_binaries_cm tree_dt_binaries50 tree_dt_triples tree_dt_mergers tree_dt_softened tree_default_on
              tree_dt_tidal tree_dt_tidal_cm
              triple_stability ic_mass_size_rh ic_binary_com_virial ic_r_break
@@ -234,7 +235,7 @@ if(USE_HDF5 AND HDF5_FOUND)
     add_dependencies(nbody-kokkos h5-roundtrip)
     # LUNA_PYTHON: a Python in which LUNA (/raven/u/uli/LUNA) imports, for the luna_reader case (skipped if empty)
     set(LUNA_PYTHON "" CACHE FILEPATH "Python with LUNA importable (luna_reader test)")
-    foreach(case restart_binaries restart_walltime restart_triples restart_mergers restart_ngb_mergers restart_mergers_sse restart_pn_logh
+    foreach(case restart_binaries restart_walltime restart_triples restart_mergers restart_ngb_mergers restart_tidal restart_mergers_sse restart_pn_logh
                  restart_spin restart_secular restart_secular_triple restart_sdar restart_cm_velocity restart_spin_imbh
                  restart_fsi snapshot_roundtrip luna_reader)
         add_test(NAME ${case} COMMAND Python3::Interpreter ${CMAKE_SOURCE_DIR}/tests/run_case.py

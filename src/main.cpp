@@ -6,6 +6,7 @@
 #include "initial_conditions.h"
 #include "diagnostics.h"
 #include "cluster_diag.h"
+#include "tidal_field.h"
 #include "constants.h"
 #include "mpi_comm.h"
 #include "profiling.h"
@@ -1174,6 +1175,32 @@ int main(int argc, char** argv) {
             std::printf("Running...\n"); std::fflush(stdout);
         }
 
+        // TIDAL_FIELD = none | pointmass | loghalo (gravity/tidal_field.h): host galaxy, cluster on a circular orbit
+        // at GALAXY_R_PC; GALAXY_MASS_MSUN (point mass) or GALAXY_VC_KMS, GALAXY_RC_PC (logarithmic halo)
+        {
+            const std::string tf = cfg.get_str("TIDAL_FIELD", "none");
+            g_tidal.type = tf == "pointmass" ? TidalField::POINT_MASS : tf == "loghalo" ? TidalField::LOG_HALO
+                                                                                       : TidalField::NONE;
+            if (tf != "none" && !g_tidal.on()) { std::fprintf(stderr, "Unknown TIDAL_FIELD '%s'\n", tf.c_str()); return 1; }
+            g_tidal.M_gal = cfg.get_double("GALAXY_MASS_MSUN", 0.0);
+            g_tidal.V_c = cfg.get_double("GALAXY_VC_KMS", 220.0);
+            g_tidal.R_c = cfg.get_double("GALAXY_RC_PC", 0.0);
+            if (g_tidal.on() && !resuming) g_tidal.init_circular(cfg.get_double("GALAXY_R_PC", 8000.0), G);
+            if (g_tidal.on() && my_rank == 0)
+                std::printf("Tidal field %s: reference at (%.6g, %.6g, %.6g) pc, v = (%.6g, %.6g, %.6g) km/s\n", tf.c_str(),
+                            g_tidal.X[0], g_tidal.X[1], g_tidal.X[2], g_tidal.V[0], g_tidal.V[1], g_tidal.V[2]);
+        }
+        auto tidal_print = [&](int step_now) {
+            if (g_tidal.on() && my_rank == 0 && step_now % print_interval == 0)
+                std::printf("TIDAL step %d X %.12e %.12e %.12e V %.12e %.12e %.12e E_tidal %.6e\n", step_now, g_tidal.X[0],
+                            g_tidal.X[1], g_tidal.X[2], g_tidal.V[0], g_tidal.V[1], g_tidal.V[2]
+#ifdef ENABLE_COLLISIONAL
+                            , g_energy_books.E_tidal
+#else
+                            , 0.0
+#endif
+                            );
+        };
         auto wall_start = std::chrono::high_resolution_clock::now();
 
         double t = 0;
@@ -1318,8 +1345,11 @@ int main(int argc, char** argv) {
             if (my_rank == 0) std::printf("FSI global step: %.4e Myr\n", dt_global * TIME_UNIT_MYR);
             while (t < t_final) {
                 auto step_t0 = std::chrono::high_resolution_clock::now();
+                tidal_kick(work_p, 0.5 * dt_global, G, g_energy_books);
                 // In replicated mode, work_p contains all particles on all ranks
                 fsi_step(work_p, 0, work_p.N, G, soft2, dt_global);
+                tidal_drift_reference(dt_global);
+                tidal_kick(work_p, 0.5 * dt_global, G, g_energy_books);
 #ifdef ENABLE_COLLISIONAL
                 // Placeholders of bodies merged inside subsystem integrations
                 if (work_p.collisional && !g_subsystem_mgr.ghost_pids.empty() &&
@@ -1331,6 +1361,7 @@ int main(int argc, char** argv) {
 #endif
                 t += dt_global;
                 step++;
+                tidal_print(step);
                 auto step_t1 = std::chrono::high_resolution_clock::now();
                 double step_wall = std::chrono::duration<double>(step_t1 - step_t0).count();
                 g_profiler.step_wall_total += step_wall;
@@ -1370,6 +1401,7 @@ int main(int argc, char** argv) {
 #ifdef ENABLE_COLLISIONAL
                 g_sim_time = t;
 #endif
+                tidal_kick(work_p, 0.5 * dt_max, G, g_energy_books);
 
 #ifdef ENABLE_COLLISIONAL
                 // Runtime stellar evolution before each step
@@ -1509,9 +1541,12 @@ int main(int argc, char** argv) {
 #ifdef ENABLE_COLLISIONAL
                 }
 #endif
+                tidal_drift_reference(dt_max);
+                tidal_kick(work_p, 0.5 * dt_max, G, g_energy_books);
 
                 t += dt_max;
                 step++;
+                tidal_print(step);
 
                 // Replicated MPI state must stay bitwise identical; stop instead of diverging silently
                 if (use_distributed && replica_check_interval > 0 && step % replica_check_interval == 0 &&

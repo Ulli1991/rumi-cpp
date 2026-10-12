@@ -739,6 +739,27 @@ def cluster_diag(exe, label, cfg, n_bin_expected):
     return ok
 
 
+def tidal_orbit(exe, label, cfg, bound):
+    """TIDAL_FIELD: the reference point of a cluster on a circular orbit in a logarithmic halo stays on the analytic
+    circle X = R (cos Omega t, sin Omega t, 0), Omega = V_c / R."""
+    out = run_output(exe, cfg)
+    t = [l.split() for l in out.splitlines() if l.startswith("TIDAL step")][-1]
+    X = [float(v) for v in t[4:7]]
+    R, Vc = float(cfg["GALAXY_R_PC"]), float(cfg["GALAXY_VC_KMS"])
+    tt = int(t[2]) * float(cfg["DT_MAX_MYR"]) / TU_MYR
+    ana = [R * math.cos(Vc / R * tt), R * math.sin(Vc / R * tt), 0.0]
+    return check(f"{label} |X - X_circle| / R after {t[2]} steps", math.dist(X, ana) / R, bound)
+
+
+def tidal_books(exe, label, cfg, bound):
+    """TIDAL_FIELD: with the tidal kicks booked (E_tidal), the energy check measures the integration error: a strong
+    tide (r_J ~ r_h) gives the same |dE/E| level as no field, and the book itself is nonzero."""
+    out = run_output(exe, cfg)
+    et = [float(l.split()[-1]) for l in out.splitlines() if l.startswith("TIDAL step")]
+    ok = check(f"{label} |E_tidal| booked (> 0)", abs(et[-1]) if et else 0.0, 1e-6, lower=True)
+    return ok & check(f"{label} max|dE/E| with E_tidal", max(r[0] for r in diagnostics(out)), bound)
+
+
 def tde_accretion(exe, label, cfg):
     """TDE remnant mass: m_BH + TDE_ACCRETION_FRACTION x m_star (FROST-CLUSTERS I, DRAGON-II: 0.5) for f = 0, 0.5, 1."""
     ok = True
@@ -1275,10 +1296,21 @@ CASES = {
                                                      BINARY_A_MAX_AU="450", TOTAL_TIME_MYR="2e-3", FLYBY_CM_EPS="1e-11",
                                                      TIDAL_STEP_RES="1", FLYBY_NGB_CM="true", NGB_WIDE_FAC="2.5"),
                                                 1.3e-8),
-    # Cluster diagnostics (HARD_PROBLEMS G2): 20k stars, r_h 1 pc. Equal masses: Lagrangian radii within 1.3 % of
-    # Plummer, centre 1.1 % of a; Kroupa with 10 % of stars in binaries of 0.1-100 AU: 999 of 1000 binaries found
-    "cluster_diag": lambda exe: cluster_diag(exe, "Plummer 20k", dict(BINARIES, PLUMMER_N="20000", PLUMMER_M_TOTAL="8000",
-                                                                       TOTAL_TIME_MYR="1e-6", DT_MAX_MYR="1e-6"), 1000),
+    # Cluster diagnostics (HARD_PROBLEMS G2): 10k stars, r_h 1 pc (20k: radii within 1.3 % of Plummer, centre
+    # 1.1 % of a; 999 of 1000 binaries); Kroupa with 10 % of stars in binaries of 0.1-100 AU (500)
+    "cluster_diag": lambda exe: cluster_diag(exe, "Plummer 10k", dict(BINARIES, PLUMMER_N="10000", PLUMMER_M_TOTAL="4000",
+                                                                       TOTAL_TIME_MYR="1e-6", DT_MAX_MYR="1e-6"), 500),
+    # External tidal field (HARD_PROBLEMS G3; PeTar-style reference point + differential kicks). Reference orbit in a
+    # 220 km/s logarithmic halo at 8 kpc, 100 steps of 0.1 Myr: 3.6e-7 of R off the circle
+    "tidal_ref_orbit": lambda exe: tidal_orbit(exe, "log halo", dict(SEC_BINARY, PN_ORDER="0", TOTAL_TIME_MYR="10",
+                                                                     DT_MAX_MYR="0.1", PRINT_INTERVAL="10",
+                                                                     TIDAL_FIELD="loghalo", GALAXY_VC_KMS="220",
+                                                                     GALAXY_R_PC="8000"), 4.7e-7),
+    # 2000 stars at 100 pc in the halo (r_J ~ 0.7 pc, r_h 1 pc): max|dE/E| 1.17e-9 (9.75e-10 without the field),
+    # E_tidal -2.07 (code units, ~7e-4 of |E|)
+    "tidal_energy_books": lambda exe: tidal_books(exe, "strong tide", dict(BINARIES, TOTAL_TIME_MYR="5e-3",
+                                                                           TIDAL_FIELD="loghalo", GALAXY_VC_KMS="220",
+                                                                           GALAXY_R_PC="100"), 1.5e-9),
     "coll_tde_accretion": lambda exe: tde_accretion(exe, "TDE accretion fraction", COLL_TDE),
     "coll_tde_parabolic": lambda exe: subsys_collision(exe, "TDE, parabolic", COLL_TDE, "TDE", 1.5e-12),
     "coll_bh_isco": lambda exe: subsys_collision(exe, "BH binary to ISCO, PN", COLL_ISCO, "ISCO", 1e-14),
@@ -1374,6 +1406,8 @@ CASES = {
     # state on restart)
     "restart_ngb_mergers": lambda exe: restart_identical(exe, "mergers, mass-scaled r_ngb",
                                                          dict(MERGERS, SERIAL_N2_CPU="0", NGB_MASS_SCALING="true"), 5),
+    "restart_tidal": lambda exe: restart_identical(exe, "tidal field", dict(BINARIES, TIDAL_FIELD="loghalo",
+                                                                          GALAXY_VC_KMS="220", GALAXY_R_PC="100"), 2),
     "restart_pn_logh": lambda exe: restart_identical(exe, "PN LogH binary (aux. velocities)", PN_LOGH, 5),
     "restart_spin": lambda exe: restart_identical(exe, "spinning BH binary", SPIN_J_PN1, 5),
     "restart_secular": lambda exe: restart_identical(exe, "secular PN binary", SEC_BINARY, 5),

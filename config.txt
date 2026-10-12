@@ -77,6 +77,11 @@ KEPLER_2BODY = true                 		# Isolated 2-body subsystems without PN: a
 M_PN = 5.0                          		# Minimum mass (M_sun) for PN corrections
 PN_ORDER = 31                        		# PN bitmask: 1=PN1, 2=PN2, 4=PN2.5, 8=PN3, 16=PN3.5, 32=BH spin couplings (63=all) — DISABLED for energy test
 R_ESCAPE_RH = 100.0                 		# Escape radius in half-mass radii
+TIDAL_FIELD = none				# Host galaxy tide: none / pointmass / loghalo (cluster on a circular orbit; PeTar-style reference point)
+GALAXY_R_PC = 8000			# Galactocentric orbit radius (pc)
+GALAXY_VC_KMS = 220			# loghalo circular velocity (km/s)
+GALAXY_RC_PC = 0			# loghalo core radius (pc)
+GALAXY_MASS_MSUN = 0			# pointmass galaxy mass (Msun)
 MSTAR_THRESHOLD = 8                 		# N-body threshold: MSTAR (>=) vs LogH (<)
 SSE_ENABLED = false                  		# Runtime single stellar evolution
 SSE_METALLICITY = 0.0002            		# Metallicity Z for SSE (0.01 Z_sun)
