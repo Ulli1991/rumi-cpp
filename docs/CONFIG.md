@@ -1,6 +1,6 @@
 # Config reference
 
-All 136 keys of the config file (`config.txt`, or `--config <file>`), generated from the parameter table in `src/core/params.cpp` by `scripts/gen_config_md.py`. Every key has one default, in that table; an unknown key in a config file is an error. Each run writes the effective value of every key, and whether it came from the file or the default, to `run_params.txt`.
+All 135 keys of the config file (`config.txt`, or `--config <file>`), generated from the parameter table in `src/core/params.cpp` by `scripts/gen_config_md.py`. Every key has one default, in that table; an unknown key in a config file is an error. Each run writes the effective value of every key, and whether it came from the file or the default, to `run_params.txt`.
 
 Levels:
 
@@ -121,7 +121,6 @@ Levels:
 |---|---|---|---|---|---|
 | `R_NGB` | double | `1e-3` | expert |  | Neighbour radius (pc) of the subsystem search |
 | `R_NGB_MAX` | double | `0.1` | expert |  | Largest separation (pc) of the orbital-element check |
-| `KEPLER_2BODY` | bool | `true` | **experiment** |  | Isolated 2-body subsystems without PN: analytic Kepler drift at any orbit count (else LogH below N_ORB_SECULAR) |
 | `SECULAR_TRIPLES` | bool | `true` | **experiment** |  | Stable triples with >= N_ORB_SECULAR inner orbits per step take the double-averaged secular path; false: LogH |
 | `SDAR` | bool | `false` | **experiment** |  | Slow-down of weakly perturbed inner binaries in LogH (Wang+2020; FROST-CLUSTERS I App. A2); env NBODY_SDAR overrides |
 | `SDAR_KREF` | double | `1e-6` | **experiment** |  | SDAR k_ref of the slow-down factor (W20 Eq. 22) |

@@ -52,17 +52,17 @@ struct CollisionalConfig {
     // Secular evolution
     int n_orb_secular = 3;             // orbits/timestep threshold for secular
 
-    // KEPLER_2BODY: an isolated 2-body subsystem without PN takes the analytic Kepler drift (kepler_drift) at any
-    // orbit count, bound or unbound, instead of LogH + GBS below N_ORB_SECULAR orbits per step. Exact: with BIFROST's
+    // An isolated 2-body subsystem without PN takes the analytic Kepler drift (kepler_drift) at any orbit count, bound
+    // or unbound, instead of LogH + GBS below N_ORB_SECULAR orbits per step (KEPLER_2BODY until 2026-10-12, 9efdca7:
+    // 12-27 % faster; the LogH alternative is deleted). Exact: with BIFROST's
     // splitting of the Hamiltonian (Rantala et al. 2023, sec. 3.1) all external forces enter through the FSI kicks,
     // so the internal motion of a 2-body subsystem between kicks is a Kepler orbit; BIFROST sec. 3.10: without PN
     // the secular integrator reduces to a Kepler solver; NBODY6 advances unperturbed binaries analytically (Aarseth
     // 2003). Stays on LogH: PN pairs (a member >= M_PN with PN on), collision candidates whose pericentre falls in
     // the interval (FROST-CLUSTERS I App. B3, decided there), pairs with a merged-away (massless) member, and
     // every subsystem of 3 or more bodies
-    bool kepler_2body = true;          // default since 2026-10-12 (12-27 % faster; old E_gw booking hid the 200k difference)
     bool kepler_2body_pair(double m1, double m2) const {
-        return kepler_2body && !(pn_order > 0 && c_code > 0.0 && std::max(m1, m2) >= m_pn);
+        return !(pn_order > 0 && c_code > 0.0 && std::max(m1, m2) >= m_pn);
     }
 
     // Post-Newtonian

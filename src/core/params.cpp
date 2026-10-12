@@ -126,9 +126,6 @@ const std::vector<ParamSpec> kParams = {
     // ---- Subsystems ----
     {"R_NGB", D, "1e-3", "Subsystems", EXPERT, "", "Neighbour radius (pc) of the subsystem search"},
     {"R_NGB_MAX", D, "0.1", "Subsystems", EXPERT, "", "Largest separation (pc) of the orbital-element check"},
-    {"KEPLER_2BODY", B, "true", "Subsystems", EXPERIMENT, "",
-     "Isolated 2-body subsystems without PN: analytic Kepler drift at any orbit count (else LogH below "
-     "N_ORB_SECULAR)"},
     {"SECULAR_TRIPLES", B, "true", "Subsystems", EXPERIMENT, "",
      "Stable triples with >= N_ORB_SECULAR inner orbits per step take the double-averaged secular path; false: LogH"},
     {"SDAR", B, "false", "Subsystems", EXPERIMENT, "",

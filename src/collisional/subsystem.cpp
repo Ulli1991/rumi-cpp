@@ -705,7 +705,7 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
                 sub.n_orb_per_dt = (int)(dt_step / sub.orb.period);
                 sub.is_secular = (sub.n_orb_per_dt >= n_orb_secular);
             }
-            // KEPLER_2BODY: without PN any isolated pair takes the Kepler drift (advance_subsystems_in_range
+            // Without PN any isolated pair takes the Kepler drift (advance_subsystems_in_range
             // re-decides it from the current state every call)
             if (idx_i >= 0 && idx_j >= 0 && g_collisional.kepler_2body_pair(h_mass(idx_i), h_mass(idx_j)))
                 sub.is_secular = true;

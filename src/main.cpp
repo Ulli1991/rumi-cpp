@@ -634,7 +634,6 @@ int main(int argc, char** argv) {
             g_collisional.flyby_cm_eps    = cfg.get_double("FLYBY_CM_EPS");
             g_collisional.eta_restart     = cfg.get_double("ETA_RESTART");
             g_collisional.n_orb_secular   = cfg.get_int("N_ORB_SECULAR");
-            g_collisional.kepler_2body    = cfg.get_bool("KEPLER_2BODY");
             g_collisional.m_pn            = cfg.get_double("M_PN");
             g_collisional.pn_order        = cfg.get_int("PN_ORDER");
             g_collisional.r_escape_rh     = cfg.get_double("R_ESCAPE_RH");

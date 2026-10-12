@@ -564,7 +564,7 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
                 double r_mag = std::sqrt(r2);
                 double mu = G * (h_m(idx_i - start) + h_m(idx_j - start));
                 double E_orb = 0.5 * v2 - mu / r_mag;
-                // KEPLER_2BODY: without PN the pair is a Kepler problem at any orbit count (collisional_config.h)
+                // Without PN the pair is a Kepler problem at any orbit count (collisional_config.h kepler_2body_pair)
                 const bool kep2 = g_collisional.kepler_2body_pair(h_m(idx_i - start), h_m(idx_j - start));
 
                 // Update orbital elements
@@ -837,7 +837,7 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
             if (evolved[k]) adv_check.advanced(secular_idx[k], dt, "secular binary");
             g_subsystem_mgr.step_secular_substeps += substeps[k];
             const auto& sk = g_subsystem_mgr.active[secular_idx[k]];
-            if (evolved[k] && g_collisional.kepler_2body &&
+            if (evolved[k] &&
                 (sk.orb.E_orb >= 0.0 || sk.n_orb_per_dt < g_collisional.n_orb_secular))
                 g_subsystem_mgr.step_kepler2++;
         }
