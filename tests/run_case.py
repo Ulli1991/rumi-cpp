@@ -1170,8 +1170,9 @@ CASES = {
     # device (|dE/E| then differs at the level of the GBS errors of these many short LogH advances, ~1e-13 each).
     # Measured 19164 LogH calls on both paths (240 without the tidal step)
     "cm_eps_cpu_vs_device": lambda exe: paths_same_steps(exe, "c.o.m. fly-by step with tidal sampling",
-                                                         # old binary c.o.m. sampling: with the new one, PLUMMER_SEED 5 differs by
-                                                         # 2-5 of 88k GBS steps (seeds 6, 7 agree exactly); not yet traced
+                                                         # Traced 2026-10-12: the paths differ by 1 ulp in field-star velocities after
+                                                         # step 1 (CPU small-set N3L loop vs the tiled device kernel's summation
+                                                         # order), which chaos amplifies; not a logic difference
                                                          dict(BINARIES, FLYBY_CM_VELOCITY="true", FLYBY_CM_EPS="1e-11", KEPLER_2BODY="false",
                                                               BINARY_COM_V="average"),
                                                          # TIDAL_STEP_RES floor (default 1): same LogH calls,
