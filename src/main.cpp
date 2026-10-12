@@ -5,6 +5,7 @@
 #include "timestep.h"
 #include "initial_conditions.h"
 #include "diagnostics.h"
+#include "cluster_diag.h"
 #include "constants.h"
 #include "mpi_comm.h"
 #include "profiling.h"
@@ -1177,6 +1178,17 @@ int main(int argc, char** argv) {
 
         double t = 0;
         int step = 0;
+        // CLUSTER_DIAG_INTERVAL (steps, 0: off): density centre, core, Lagrangian radii and bound pairs
+        // (io/cluster_diag.h) appended to CLUSTER_DIAG_FILE by rank 0 (the full replica)
+        const int cluster_diag_interval = cfg.get_int("CLUSTER_DIAG_INTERVAL", 0);
+        const std::string cluster_diag_file = cfg.get_str("CLUSTER_DIAG_FILE", "cluster_diag.dat");
+        const double cluster_diag_rpair = cfg.get_double("CLUSTER_DIAG_RPAIR_PC", 0.02);
+        auto cluster_diag_now = [&](double t_now, int step_now) {
+            if (cluster_diag_interval <= 0 || step_now % cluster_diag_interval != 0 || my_rank != 0) return;
+            append_cluster_diag(cluster_diag_file, step_now,
+                                compute_cluster_diag(work_p, G, t_now * TIME_UNIT_MYR, cluster_diag_rpair));
+        };
+        if (!resuming) cluster_diag_now(t, step);
 #ifdef USE_HDF5
         if (resuming) { t = rs.t; step = rs.step; }
         int last_restart_step = resuming ? step : -1, last_snapshot_step = -1;
@@ -1334,6 +1346,7 @@ int main(int argc, char** argv) {
                     g_profiler.reset();
                     g_subset_hist.reset();
                 }
+                cluster_diag_now(t, step);
 #ifdef USE_HDF5
                 after_step_io(t, step, step_wall);
                 if (stop_run) break;
@@ -1552,6 +1565,7 @@ int main(int argc, char** argv) {
                     g_profiler.reset();
                     g_subset_hist.reset();
                 }
+                cluster_diag_now(t, step);
 #ifdef USE_HDF5
                 after_step_io(t, step, step_wall);
                 if (stop_run) break;

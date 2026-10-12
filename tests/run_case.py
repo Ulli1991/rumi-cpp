@@ -718,6 +718,27 @@ def wide_pairs(exe, label, cfg, bound):
     return ok & check(f"{label} max|dE/E|", max(r[0] for r in diagnostics(out)), bound)
 
 
+def cluster_diag(exe, label, cfg, n_bin_expected):
+    """CLUSTER_DIAG_INTERVAL output at step 0: Lagrangian radii of the Plummer model against r(f) = a (f^(-2/3) -
+    1)^(-1/2), a = r_h (2^(2/3) - 1)^(1/2), density centre near the origin, and every primordial binary found."""
+    def first_row(c):
+        with tempfile.TemporaryDirectory() as d:
+            run_in(exe, dict(c, CLUSTER_DIAG_INTERVAL="1"), d)
+            rows = [l.split() for l in Path(d, "cluster_diag.dat").read_text().splitlines() if not l.startswith("#")]
+        return [float(x) for x in rows[0]]
+    # structure from an equal-mass Plummer model (a Kroupa realisation's mass shells are dominated by a few heavy
+    # stars: r_lag(90 %) 2.47 vs 2.84 pc at 20k), the binary census from the Kroupa model with binaries
+    r0 = first_row(dict(cfg, PLUMMER_MASS_DIST="equal", BINARY_FRAC="0"))
+    rb = first_row(cfg)
+    a = float(cfg["PLUMMER_R_HALF"]) * math.sqrt(2.0 ** (2.0 / 3.0) - 1.0)
+    fr = (0.01, 0.05, 0.1, 0.25, 0.5, 0.75, 0.9)
+    worst = max(abs(r0[9 + k] / (a / math.sqrt(f ** (-2.0 / 3.0) - 1.0)) - 1.0) for k, f in enumerate(fr) if f >= 0.1)
+    ok = check(f"{label} Lagrangian radii 10-90 %: max relative deviation from Plummer", worst, 0.05)
+    ok &= check(f"{label} density centre offset / a", math.sqrt(r0[3] ** 2 + r0[4] ** 2 + r0[5] ** 2) / a, 0.05)
+    ok &= check(f"{label} |n_bin - primordial| / primordial", abs(rb[16] - n_bin_expected) / n_bin_expected, 0.02)
+    return ok
+
+
 def tde_accretion(exe, label, cfg):
     """TDE remnant mass: m_BH + TDE_ACCRETION_FRACTION x m_star (FROST-CLUSTERS I, DRAGON-II: 0.5) for f = 0, 0.5, 1."""
     ok = True
@@ -1254,6 +1275,10 @@ CASES = {
                                                      BINARY_A_MAX_AU="450", TOTAL_TIME_MYR="2e-3", FLYBY_CM_EPS="1e-11",
                                                      TIDAL_STEP_RES="1", FLYBY_NGB_CM="true", NGB_WIDE_FAC="2.5"),
                                                 1.3e-8),
+    # Cluster diagnostics (HARD_PROBLEMS G2): 20k stars, r_h 1 pc. Equal masses: Lagrangian radii within 1.3 % of
+    # Plummer, centre 1.1 % of a; Kroupa with 10 % of stars in binaries of 0.1-100 AU: 999 of 1000 binaries found
+    "cluster_diag": lambda exe: cluster_diag(exe, "Plummer 20k", dict(BINARIES, PLUMMER_N="20000", PLUMMER_M_TOTAL="8000",
+                                                                       TOTAL_TIME_MYR="1e-6", DT_MAX_MYR="1e-6"), 1000),
     "coll_tde_accretion": lambda exe: tde_accretion(exe, "TDE accretion fraction", COLL_TDE),
     "coll_tde_parabolic": lambda exe: subsys_collision(exe, "TDE, parabolic", COLL_TDE, "TDE", 1.5e-12),
     "coll_bh_isco": lambda exe: subsys_collision(exe, "BH binary to ISCO, PN", COLL_ISCO, "ISCO", 1e-14),

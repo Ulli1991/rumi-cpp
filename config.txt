@@ -153,6 +153,9 @@ RESTART_DIR = .                         	# Directory of restart_<step>.h5 (the n
 RESTART_FILE =                          	# Continue from this file; latest: newest in RESTART_DIR; auto: that or a fresh start
 SNAPSHOT_INTERVAL = 0                   	# LUNA-layout snapshot every this many steps, at step 0 and at the end (0: off)
 SNAPSHOT_DIR = .                        	# snapdir_NNN/snapshot_NNN.0.hdf5 go here
+CLUSTER_DIAG_INTERVAL = 0			# Steps between cluster diagnostics (density centre, core, Lagrangian radii, binaries; 0: off)
+CLUSTER_DIAG_FILE = cluster_diag.dat	# Appended by rank 0
+CLUSTER_DIAG_RPAIR_PC = 0.02		# Largest pair separation in the binary census (pc)
 PROFILING_FENCES = true            		# Fence the device at each timer stop (exact per-component times; ~4 % of a 200k step). false: host
                                     		# wall times only, queued GPU work charged to the next synchronising component
 TDE_ACCRETION_FRACTION = 0.5            # Fraction of a tidally disrupted star the BH accretes (FROST-CLUSTERS I, DRAGON-II)
