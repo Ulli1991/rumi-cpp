@@ -671,7 +671,7 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
     // osculating pericentre lies inside its collision distance (FROST-CLUSTERS I App. B3 candidate), or a subsystem
     // with a massless placeholder member, goes to the regularised integration, which decides it at the pericentre
     std::vector<char> to_logh(g_subsystem_mgr.active.size(), 0);
-    if (g_collisional.subsys_collisions && g_collisional.c_code > 0.0) {
+    if (g_collisional.c_code > 0.0) {
         std::vector<int> sec_rows;   // member indices of secular candidates, two per subsystem
         std::vector<int> sec_subs;
         std::vector<int> sec_pids;   // their particle ids

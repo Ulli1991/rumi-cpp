@@ -96,9 +96,6 @@ const std::vector<ParamSpec> kParams = {
      "Fraction of a tidally disrupted star the BH accretes (FROST-CLUSTERS I, DRAGON-II)"},
     {"BH_MERGE_RADIUS", S, "total", "Collisions and mergers", USER, "total|max_single",
      "BH-BH merger at r < 6 G (m1 + m2) / c^2 (total) or max(6 G m_i / c^2) (max_single, FROST-CLUSTERS I)"},
-    {"SUBSYS_COLLISIONS", B, "true", "Collisions and mergers", EXPERIMENT, "",
-     "Collisions decided inside the subsystem integration at the pericentre (FROST-CLUSTERS I App. B3); "
-     "false: per-level check of 2-body subsystems only"},
 
     // ---- Escapers and tidal field ----
     {"R_ESCAPE_RH", D, "100.0", "Escapers and tidal field", EXPERT, "", "Escape radius in half-mass radii"},

@@ -161,12 +161,11 @@ void SubsystemBatch::pack(const SubsystemManager& mgr, const Particles& p,
     // Buffer layout per member: x,y,z,vx,vy,vz,mass,spin_x,spin_y,spin_z,stype_as_double,radius (12 doubles)
     constexpr int PACK_STRIDE = 12;
     const bool want_spins = (g_collisional.pn_order & PN_SPIN) != 0;
-    // SDAR and in-integration collisions need the radii and types of all members: from the host cache by particle
+    // In-integration collisions (and SDAR) need the radii and types of all members: from the host cache by particle
     // id (stellar_cache.h; a device gather per call cost ~40 us), from the gathered buffer when there is one
-    const bool need_props = g_collisional.sdar || g_collisional.subsys_collisions;
-    const bool gather = !src || want_spins || (need_props && !StellarPropsCache::enabled());
+    const bool gather = !src || want_spins || !StellarPropsCache::enabled();
     StellarPropsCache& props = StellarPropsCache::get();
-    if (need_props && !gather) {
+    if (!gather) {
         props.ensure(p);
         bool all = true;
         for (const auto& sub : mgr.active)
@@ -239,7 +238,7 @@ void SubsystemBatch::pack(const SubsystemManager& mgr, const Particles& p,
     int off = 0;
     for (int s = 0; s < n_sub; s++) {
         const auto& sub = mgr.active[s];
-        if (!gather && need_props && sub.n_bodies == 2) {
+        if (!gather && sub.n_bodies == 2) {
             stored_stellar_type[s*2+0] = props.type_of(sub.particle_ids[0]);
             stored_stellar_type[s*2+1] = props.type_of(sub.particle_ids[1]);
         } else if (gather && sub.n_bodies == 2) {
@@ -273,7 +272,7 @@ void SubsystemBatch::pack(const SubsystemManager& mgr, const Particles& p,
             flat_stype[k] = static_cast<int>(h_buf(body_member[k] * PACK_STRIDE + 10));
             flat_radius[k] = h_buf(body_member[k] * PACK_STRIDE + 11);
         }
-    } else if (need_props) {
+    } else {
         for (int k = 0; k < total; k++) {
             flat_stype[k] = props.type_of(flat_pid[k]);
             flat_radius[k] = props.radius_of(flat_pid[k]);
@@ -653,7 +652,7 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
         // radius 1.3 (M / m)^{1/3} R, ISCO), normalised, and the event each gives; kw / radius per state body (a
         // remnant of a collision in this call keeps the compact type and the larger radius)
         constexpr double R_sun_to_pc = 2.254e-8;   // as mergers.cpp
-        const bool coll_on = g_collisional.subsys_collisions && g_collisional.c_code > 0.0;
+        const bool coll_on = g_collisional.c_code > 0.0;
         int kw[LOGH_MAX_BODIES];
         double rad_pc[LOGH_MAX_BODIES];
         for (int k = 0; k < n_live; k++) {

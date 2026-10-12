@@ -286,6 +286,7 @@ The code before the deletions is tagged archive/pre-step2-deletions.
 | key | winner (evidence) | status |
 |---|---|---|
 | ALL_SLOW_SPLIT | true: fsi(S, tau/2) twice (6655494: 16x lower error, same time) | deleted 2026-10-12, winner hard-wired |
+| SUBSYS_COLLISIONS | true: collisions decided inside LogH/GBS at the pericentre, FC-I App. B3 (7de902c, 043190d) | deleted 2026-10-12, winner hard-wired |
 
 ## Pending evaluations (agents stopped mid-work)
 - Task runtimes (HPX/Charm++/Legion): literature says tasks must be >= ~100 us; evaluate only at subtree granularity.

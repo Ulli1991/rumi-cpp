@@ -1,6 +1,6 @@
 # Config reference
 
-All 140 keys of the config file (`config.txt`, or `--config <file>`), generated from the parameter table in `src/core/params.cpp` by `scripts/gen_config_md.py`. Every key has one default, in that table; an unknown key in a config file is an error. Each run writes the effective value of every key, and whether it came from the file or the default, to `run_params.txt`.
+All 139 keys of the config file (`config.txt`, or `--config <file>`), generated from the parameter table in `src/core/params.cpp` by `scripts/gen_config_md.py`. Every key has one default, in that table; an unknown key in a config file is an error. Each run writes the effective value of every key, and whether it came from the file or the default, to `run_params.txt`.
 
 Levels:
 
@@ -87,7 +87,6 @@ Levels:
 | `COLL_MASS_LOSS_C` | double | `0.0` | user |  | Stellar-collision mass loss: m_rem = (m1 + m2)(1 - C q / (1 + q)^2) (Glebbeek 2013; FROST-CLUSTERS III: 0.3) |
 | `TDE_ACCRETION_FRACTION` | double | `0.5` | user |  | Fraction of a tidally disrupted star the BH accretes (FROST-CLUSTERS I, DRAGON-II) |
 | `BH_MERGE_RADIUS` | string | `total` | user | total\|max_single | BH-BH merger at r < 6 G (m1 + m2) / c^2 (total) or max(6 G m_i / c^2) (max_single, FROST-CLUSTERS I) |
-| `SUBSYS_COLLISIONS` | bool | `true` | **experiment** |  | Collisions decided inside the subsystem integration at the pericentre (FROST-CLUSTERS I App. B3); false: per-level check of 2-body subsystems only |
 
 ## Escapers and tidal field
 

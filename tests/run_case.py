@@ -1490,8 +1490,8 @@ CASES = {
                                          BINARY_FRAC="0.5", BINARY_A_MIN_AU="1", BINARY_A_MAX_AU="20",
                                          IC_R_BREAK="10"), 2.7e-4),
     # Collisions inside the subsystem integration (FROST-CLUSTERS I App. B3; host gcc/x86-64 measurements). Before
-    # (1890208; and with SUBSYS_COLLISIONS = false): head-on no merger, 9 x 8 LogH give-ups, max|dE/E| 5.3e-5;
-    # contact (SUBSYS_COLLISIONS = false) no merger, 4.2e5-4.8e5 GBS steps per step, LogH retries and a step restart,
+    # (1890208; and with the deleted SUBSYS_COLLISIONS = false): head-on no merger, 9 x 8 LogH give-ups, max|dE/E|
+    # 5.3e-5; contact no merger, 4.2e5-4.8e5 GBS steps per step, LogH retries and a step restart,
     # 6.3 s/step, 9.5e-9; TDE: the star passes the BH at 0.74 r_t; ISCO: the binary goes on inside the ISCO (3-body
     # subsystem). After: one merger each; max|dE/E| 1.38e-12 (head-on), 4.72e-11 (contact; the GBS error of the call,
     # the books are exact), 1.16e-12 (TDE), 6.1e-16 (ISCO, PN: all booked; round-off, bound 1e-14)

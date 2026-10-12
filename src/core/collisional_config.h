@@ -45,10 +45,6 @@ struct CollisionalConfig {
     double sdar_kref = 1e-6;           // SDAR_KREF: k_ref of the slow-down factor (W20 Eq. 22, FC-I Eq. A8)
     double sdar_c = 0.1;               // SDAR_C: kappa_max coefficient c (W20 Eq. 28, FC-I Eq. A9)
 
-    // SUBSYS_COLLISIONS: collisions decided inside the regularised subsystem integration (FROST-CLUSTERS I App. B3):
-    // pairs closer than their collision distance merge there; candidates (osculating pericentre inside it) get a
-    // step forced onto their pericentre and are decided there. Off: only the per-level check of 2-body subsystems
-    bool subsys_collisions = true;
     double r_ngb_wide = 0.0;           // NGB_WIDE_FAC x r_ngb: bound pairs with a below it are neighbours (wide binaries; 0: off)
     bool gbs_deuflhard = false;        // GBS_SEQUENCE = deuflhard (2, 4, 6, ...; MSTAR / FROST-CLUSTERS) instead of bulirsch
     int gbs_kmax = 10;                 // GBS_KMAX: extrapolation stages (FROST-CLUSTERS I: 8)

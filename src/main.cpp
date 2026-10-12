@@ -626,7 +626,6 @@ int main(int argc, char** argv) {
             if (const char* e = std::getenv("NBODY_SDAR")) g_collisional.sdar = std::atoi(e) != 0;
             g_collisional.sdar_kref       = cfg.get_double("SDAR_KREF");
             g_collisional.sdar_c          = cfg.get_double("SDAR_C");
-            g_collisional.subsys_collisions = cfg.get_bool("SUBSYS_COLLISIONS");
             g_collisional.tde_accretion = cfg.get_double("TDE_ACCRETION_FRACTION");
             g_collisional.coll_mass_loss_c = cfg.get_double("COLL_MASS_LOSS_C");
             g_collisional.bh_merge_max_single = cfg.get_str("BH_MERGE_RADIUS") == "max_single";
