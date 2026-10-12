@@ -535,8 +535,6 @@ int main(int argc, char** argv) {
         // few times a_max", Table A1); R_BREAK_AU (absolute, AU) takes precedence when > 0
         double r_break_au   = cfg.get_double("R_BREAK_AU");
         if (r_break_au <= 0.0) r_break_au = cfg.get_double("IC_R_BREAK") * bin_a_max_au;
-        // Binary centre-of-mass velocity: "sampled" (one f(E) draw per binary, SCIC/mcluster) or "average" (old)
-        std::string binary_com_v = cfg.get_str("BINARY_COM_V");
 
         // SSE model config (used by IC generator and runtime SSE)
         std::string sse_wind_str    = cfg.get_str("SSE_WIND_MODEL");
@@ -770,8 +768,7 @@ int main(int argc, char** argv) {
                 init_plummer(p, N_plummer, M_total_msun, r_half_pc, seed, mass_dist, age_gyr, metallicity,
                              remove_bh, binary_frac, bin_a_min_au, bin_a_max_au,
                              add_imbh, imbh_m1, imbh_m2, imbh_a_pc, imbh_e, imbh_spin,
-                             r_break_au, &ic_sse_cfg, binary_pop, binary_peri_check,
-                             binary_com_v == "sampled");
+                             r_break_au, &ic_sse_cfg, binary_pop, binary_peri_check);
             } else if (test == "binary_test") {
                 init_binary_test(p, binary_a_pc, binary_e, binary_m1, binary_m2, binary_rot);
                 set_binary_spins(p, cfg);

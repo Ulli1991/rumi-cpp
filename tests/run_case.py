@@ -678,13 +678,11 @@ def ic_mass_size(exe, label, cfg, bound):
 
 def ic_com_virial(exe, label, cfg, bound):
     """Binary centres of mass are sampled from the Plummer f(E) as single objects (BIFROST App. A, mcluster): the
-    virial ratio of singles and centres of mass must be 1/2 within sampling noise. BINARY_COM_V = average (the old
-    mass-weighted mean of the two members' independent draws) must fail the same check (kinematically cold)."""
+    virial ratio of singles and centres of mass must be 1/2 within sampling noise (the deleted BINARY_COM_V = average,
+    the mass-weighted mean of the two members' independent draws, gave 0.336: kinematically cold)."""
     q = ic_check(run_output(exe, cfg))[2]
-    q_avg = ic_check(run_output(exe, dict(cfg, BINARY_COM_V="average")))[2]
-    print(f"   Q_obj sampled {q:.4f}, average {q_avg:.4f}")
-    return check(f"{label} |Q_obj - 1/2|", abs(q - 0.5), bound) & \
-        check(f"{label} |Q_obj - 1/2| with BINARY_COM_V = average", abs(q_avg - 0.5), bound, lower=True)
+    print(f"   Q_obj {q:.4f}")
+    return check(f"{label} |Q_obj - 1/2|", abs(q - 0.5), bound)
 
 
 def ic_r_break(exe, label, cfg, bound):

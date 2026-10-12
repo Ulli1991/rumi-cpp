@@ -312,8 +312,7 @@ void init_plummer(Particles& p, int N, double M_total_msun, double r_half_pc, in
                   double imbh_a_pc, double imbh_e, double imbh_spin,
                   double r_break_au,
                   const SSEConfig* sse_cfg,
-                  const std::string& binary_pop, bool binary_peri_check,
-                  bool binary_com_sampled) {
+                  const std::string& binary_pop, bool binary_peri_check) {
     // Use host-side std::vectors so we can resize for REMOVE_BH / ADD_IMBH
     double M_total = M_total_msun;
 
@@ -672,15 +671,10 @@ void init_plummer(Particles& p, int N, double M_total_msun, double r_half_pc, in
 
             // Centre of mass = particle i's Plummer phase-space point: the binary is sampled from f(E) as one
             // object (BIFROST App. A; mcluster, Kupper et al. 2011). The mean of both members' independent draws
-            // (BINARY_COM_V = average, the old default) shrinks the c.o.m. velocity dispersion by
-            // sqrt(m_i^2 + m_j^2) / M_bin (1/sqrt(2) for q = 1): binaries start kinematically cold.
+            // (BINARY_COM_V = average, deleted 2026-10-12, a8728fb) shrank the c.o.m. velocity dispersion by
+            // sqrt(m_i^2 + m_j^2) / M_bin (1/sqrt(2) for q = 1): binaries started kinematically cold.
             double cx = hx[i], cy = hy[i], cz = hz[i];
             double cvx = hvx[i], cvy = hvy[i], cvz = hvz[i];
-            if (!binary_com_sampled) {
-                cvx = (m_i * hvx[i] + m_j * hvx[j]) / M_bin;
-                cvy = (m_i * hvy[i] + m_j * hvy[j]) / M_bin;
-                cvz = (m_i * hvz[i] + m_j * hvz[j]) / M_bin;
-            }
 
             // Split binary around COM
             hx[i]  = cx - (m_j / M_bin) * r_rel[0];

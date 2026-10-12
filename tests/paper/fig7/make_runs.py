@@ -45,7 +45,7 @@ BASE = dict(
     # SCIC cluster (App. A)
     PLUMMER_R_HALF="mass_size", PLUMMER_SEED="42", PLUMMER_MASS_DIST="kroupa_evolved", PLUMMER_AGE_GYR="1.0",
     PLUMMER_METALLICITY="0.0002", BINARY_A_MIN_AU="0.25", BINARY_A_MAX_AU="1000", BINARY_POP="bifrost",
-    BINARY_PERI_CHECK="true", BINARY_COM_V="sampled", IC_R_BREAK="3",
+    BINARY_PERI_CHECK="true", IC_R_BREAK="3",
     PRINT_INTERVAL="1", PROFILING="true",
 )
 

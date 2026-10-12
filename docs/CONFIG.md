@@ -1,6 +1,6 @@
 # Config reference
 
-All 135 keys of the config file (`config.txt`, or `--config <file>`), generated from the parameter table in `src/core/params.cpp` by `scripts/gen_config_md.py`. Every key has one default, in that table; an unknown key in a config file is an error. Each run writes the effective value of every key, and whether it came from the file or the default, to `run_params.txt`.
+All 134 keys of the config file (`config.txt`, or `--config <file>`), generated from the parameter table in `src/core/params.cpp` by `scripts/gen_config_md.py`. Every key has one default, in that table; an unknown key in a config file is an error. Each run writes the effective value of every key, and whether it came from the file or the default, to `run_params.txt`.
 
 Levels:
 
@@ -44,7 +44,6 @@ Levels:
 | `R_BREAK_AU` | double | `0.0` | user |  | Remove artificial binaries with a < r_break (AU) from the ICs (BIFROST App. A); 0: IC_R_BREAK |
 | `IC_R_BREAK` | double | `0.0` | expert |  | r_break in units of BINARY_A_MAX_AU (BIFROST Table A1: a few); used only when R_BREAK_AU = 0 |
 | `BINARY_PERI_CHECK` | bool | `true` | expert |  | Redraw e (or a) until r_p = a (1 - e) > R1 + R2 (TDE radius / ISCO with BHs), FROST-CLUSTERS II sec. 2.3 |
-| `BINARY_COM_V` | string | `sampled` | **experiment** | sampled\|average | Binary c.o.m. velocity: sampled (one f(E) draw per binary, SCIC/mcluster) or average (old) |
 
 ## IMBH binary
 

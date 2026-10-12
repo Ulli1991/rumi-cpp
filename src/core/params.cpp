@@ -53,8 +53,6 @@ const std::vector<ParamSpec> kParams = {
      "r_break in units of BINARY_A_MAX_AU (BIFROST Table A1: a few); used only when R_BREAK_AU = 0"},
     {"BINARY_PERI_CHECK", B, "true", "Primordial binaries", EXPERT, "",
      "Redraw e (or a) until r_p = a (1 - e) > R1 + R2 (TDE radius / ISCO with BHs), FROST-CLUSTERS II sec. 2.3"},
-    {"BINARY_COM_V", S, "sampled", "Primordial binaries", EXPERIMENT, "sampled|average",
-     "Binary c.o.m. velocity: sampled (one f(E) draw per binary, SCIC/mcluster) or average (old)"},
 
     // ---- IMBH binary ----
     {"ADD_IMBH", B, "false", "IMBH binary", USER, "", "Put an IMBH binary at the cluster centre"},
