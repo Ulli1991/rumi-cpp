@@ -1574,37 +1574,33 @@ RemnantResult SSEContext::compute_remnant(double mc, double mcbagb,
             fb = 1.0;
             mt = mt_presn;  // full fallback → direct collapse
         }
-    } else if (nsflag == 3) {
-        // Fryer 2012 rapid: piecewise with island of explodability
-        if (mc < 2.5) {
-            fb = 0.2 / (mc - 1.0);
-        } else if (mc < 3.5) {
-            fb = 0.286*mc - 0.514;
-        } else if (mc < 11.0) {
-            // island: linear ramp down then up
-            double a1 = 0.25 - 1.275/(mc - 1.0);
-            double b1 = -11.0*a1 + 1.0;
-            fb = a1*mc + b1;
+    } else if (nsflag == 3 || nsflag == 4) {
+        // Fryer et al. 2012 (ApJ 749, 91) rapid (Eqs. 15-16) and delayed (Eqs. 18-19) fallback, in the CO core mass
+        // mc; M_fb is a MASS below the f_fb branches, and a1, a2 use the pre-SN mass M (not mc). Remnant (baryonic)
+        // M_proto + M_fb with M_fb = f_fb (M - M_proto). Before 2026-10-12 the mass branches were used as fractions
+        // and a1/a2 took mc - 1: low-mass cores kept 20 % - all of the envelope (1111 BHs from 2.7 Msun instead of
+        // the rapid mass gap)
+        const double M = mt_presn, env = std::max(0.0, M - mcx);
+        double m_fb = 0.0;
+        if (nsflag == 3) {
+            if (mc < 2.5)       m_fb = 0.2;
+            else if (mc < 6.0)  m_fb = 0.286 * mc - 0.514;
+            else if (mc < 7.0)  m_fb = env;
+            else if (mc < 11.0) {
+                const double a1 = 0.25 - 1.275 / (M - mcx), b1 = -11.0 * a1 + 1.0;
+                m_fb = std::max(0.0, std::min(1.0, a1 * mc + b1)) * env;
+            } else              m_fb = env;
         } else {
-            fb = 1.0;
+            if (mc < 2.5)       m_fb = 0.2;
+            else if (mc < 3.5)  m_fb = 0.5 * mc - 1.05;
+            else if (mc < 11.0) {
+                const double a2 = 0.133 - 0.093 / (M - mcx), b2 = -11.0 * a2 + 1.0;
+                m_fb = std::max(0.0, std::min(1.0, a2 * mc + b2)) * env;
+            } else              m_fb = env;
         }
-        fb = std::max(0.0, std::min(1.0, fb));
-        mt = mcx + fb * (mt_presn - mcx);
-    } else if (nsflag == 4) {
-        // Fryer 2012 delayed: smooth prescription
-        if (mc < 2.5) {
-            fb = 0.2 / (mc - 1.0);
-        } else if (mc < 3.5) {
-            fb = 0.5*mc - 1.05;
-        } else if (mc < 11.0) {
-            double a2 = 0.133 - 0.093 / (mc - 1.0);
-            double b2 = -11.0*a2 + 1.0;
-            fb = a2*mc + b2;
-        } else {
-            fb = 1.0;
-        }
-        fb = std::max(0.0, std::min(1.0, fb));
-        mt = mcx + fb * (mt_presn - mcx);
+        m_fb = std::max(0.0, std::min(env, m_fb));
+        fb = env > 0.0 ? m_fb / env : 1.0;
+        mt = mcx + m_fb;
     } else if (nsflag == 5) {
         // Eldridge & Tout 2004: direct (no separate fallback)
         mt = mcx;

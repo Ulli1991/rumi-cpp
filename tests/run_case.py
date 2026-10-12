@@ -682,6 +682,16 @@ def restarts(exe, label, cfg, bound):
         check(f"{label} max|dE/E|", max(r[0] for r in rows), bound)
 
 
+def remnant_masses(exe, label, cfg, bh_min, ns_max):
+    """Remnant populations of the IC stellar evolution: lowest BH mass and highest NS mass (Fryer 2012 rapid: the
+    2-5 Msun mass gap)."""
+    out = run_output(exe, cfg)
+    bh = re.findall(r"BH masses:\s+(\S+) - (\S+)", out)
+    ns = re.findall(r"NS masses:\s+(\S+) - (\S+)", out)
+    ok = check(f"{label} lowest BH mass [Msun]", float(bh[0][0]) if bh else 0.0, bh_min, lower=True)
+    return ok & check(f"{label} highest NS mass [Msun]", float(ns[0][1]) if ns else 1e30, ns_max)
+
+
 def tde_accretion(exe, label, cfg):
     """TDE remnant mass: m_BH + TDE_ACCRETION_FRACTION x m_star (FROST-CLUSTERS I, DRAGON-II: 0.5) for f = 0, 0.5, 1."""
     ok = True
@@ -1193,6 +1203,13 @@ CASES = {
     "coll_contact_flyby_logh": lambda exe: subsys_collision(exe, "contact binary + fly-by, LogH",
                                                             dict(COLL_CONTACT, SDAR="false"), "STELLAR", 6.1e-11,
                                                             min_landings=1),
+    # Fryer et al. 2012 rapid: fallback masses were used as fractions (BHs from 2.7 Msun, 3x too many). Measured
+    # after (200k evolved Kroupa, Z = 2e-4, 1 Gyr): 339 BHs 5.53-45 Msun (BIFROST Fig. 9: 357, 5.5-41.6); here 20k
+    "fryer_rapid_gap": lambda exe: remnant_masses(exe, "Fryer rapid", dict(BINARIES, PLUMMER_N="20000", PLUMMER_M_TOTAL="8000",
+                                                  PLUMMER_MASS_DIST="kroupa_evolved", BINARY_FRAC="0",
+                                                  SSE_METALLICITY="0.0002", SSE_REMNANT_MODEL="FRYER_RAPID",
+                                                  SSE_WIND_MODEL="VINK", SSE_PPISN_MODEL="STRONG",
+                                                  TOTAL_TIME_MYR="1e-6", DT_MAX_MYR="1e-6"), 5.0, 2.0),
     "coll_tde_accretion": lambda exe: tde_accretion(exe, "TDE accretion fraction", COLL_TDE),
     "coll_tde_parabolic": lambda exe: subsys_collision(exe, "TDE, parabolic", COLL_TDE, "TDE", 1.5e-12),
     "coll_bh_isco": lambda exe: subsys_collision(exe, "BH binary to ISCO, PN", COLL_ISCO, "ISCO", 1e-14),
