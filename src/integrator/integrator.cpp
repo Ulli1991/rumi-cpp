@@ -106,7 +106,10 @@ static void fire_pre_host_hook() {
 //   random (default): delta_a_i = eps |a_i| u_i, u_i an isotropic unit vector from a hash of (particle id, force-call
 //     counter): white noise in space and time, the error model of Hernquist, Hut & Makino (1993); breaks momentum
 //     conservation at ~eps |a| m sqrt(N) per call, as a tree code without momentum correction does.
-//   smooth: delta_a_i = eps a_rms M (x_i - x_c) / r_rms, x_c the mass centre and r_rms the mass-weighted rms radius
+//   frozen: as random, but u_i from the particle id alone (the same direction at every call): an error that is
+//     coherent in time, the worst case of an FMM/tree error that changes only as the configuration does (the
+//     random-walk energy error of the white models becomes a drift; Dehnen 2014 App. A).
+//   smooth (white in time, like random): delta_a_i = eps a_rms M (x_i - x_c) / r_rms, x_c the mass centre and r_rms the mass-weighted rms radius
 //     of the range, a_rms the rms |a| over the range, M a 3x3 matrix of N(0, 1/3) entries drawn per force call (so the
 //     rms |delta_a| is ~eps a_rms): a spatially smooth error field like the truncation error of a low-order multipole
 //     expansion (Dehnen 2014 sec. 2-3: correlated, not white). sum_i m_i delta_a_i = 0 (momentum conserved, as
@@ -118,7 +121,7 @@ struct ForceErr {
     double eps = 0.0;
     int nmin = 16384;
     bool smooth = false;
-    std::uint64_t calls = 0;   // per-run force-call counter: identical on every rank (replicated control flow)
+    bool frozen = false;   // random directions fixed per particle for the whole run (time-correlated)
 };
 const ForceErr& force_err_cfg() {
     static const ForceErr f = [] {
@@ -128,19 +131,20 @@ const ForceErr& force_err_cfg() {
         if (const char* v = std::getenv("NBODY_FORCE_ERR_MODEL")) {
             const std::string m(v);
             if (m == "smooth") c.smooth = true;
+            else if (m == "frozen") c.frozen = true;
             else if (m != "random" && !m.empty()) {
-                std::fprintf(stderr, "NBODY_FORCE_ERR_MODEL = '%s': random or smooth\n", v);
+                std::fprintf(stderr, "NBODY_FORCE_ERR_MODEL = '%s': random, frozen or smooth\n", v);
                 std::exit(1);
             }
         }
         if (c.eps > 0.0 && MPIComm::rank() == 0)
             std::printf("NBODY_FORCE_ERR: eps %.3e model %s for HHS sets >= %d\n", c.eps,
-                        c.smooth ? "smooth" : "random", c.nmin);
+                        c.smooth ? "smooth" : c.frozen ? "frozen" : "random", c.nmin);
         return c;
     }();
     return f;
 }
-std::uint64_t g_force_err_calls = 0;
+std::uint64_t g_force_err_calls = 0;   // per-run force-call counter: identical on every rank (replicated control flow)
 
 KOKKOS_INLINE_FUNCTION std::uint64_t ferr_mix(std::uint64_t z) {   // splitmix64 finaliser
     z += 0x9e3779b97f4a7c15ULL;
@@ -158,7 +162,7 @@ void force_err_inject(Particles& p, int start, int count, int set_count) {
     auto ax = p.ax, ay = p.ay, az = p.az;
     if (!c.smooth) {
         auto pid = p.particle_id;
-        const std::uint64_t key = ferr_mix(call ^ 0x46455252ULL);
+        const std::uint64_t key = ferr_mix((c.frozen ? 0 : call) ^ 0x46455252ULL);
         Kokkos::parallel_for("force_err_random", count, KOKKOS_LAMBDA(int ii) {
             const int i = start + ii;
             const std::uint64_t h1 = ferr_mix(key ^ (std::uint64_t)(unsigned)pid(i));

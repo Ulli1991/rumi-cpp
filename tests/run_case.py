@@ -435,13 +435,13 @@ def paths_agree(exe, label, cfg, bound):
 def force_err(exe, label, cfg, ratio):
     """NBODY_FORCE_ERR (synthetic far-field force errors, plan I-1): eps = 0 leaves the run bit-identical to no
     variable (diagnostics and every particle); eps = 1e-3 on every set of >= 256 particles must raise max |dE/E| by
-    at least `ratio` in both error models."""
+    at least `ratio` in every error model."""
     out0, dump0 = run_output(exe, cfg, dump=True)
     out1, dump1 = run_output(exe, cfg, env={"NBODY_FORCE_ERR": "0", "NBODY_FORCE_ERR_MIN": "256"}, dump=True)
     ok = check(f"{label} eps = 0: diagnostics differ (0 = identical)", float(diagnostics(out0) != diagnostics(out1)), 0)
     ok &= check(f"{label} eps = 0: particles differ (0 = identical)", float(dump0 != dump1), 0)
     base = max(r[0] for r in diagnostics(out0))
-    for model in ("random", "smooth"):
+    for model in ("random", "frozen", "smooth"):
         out = run_output(exe, cfg, env={"NBODY_FORCE_ERR": "1e-3", "NBODY_FORCE_ERR_MIN": "256",
                                         "NBODY_FORCE_ERR_MODEL": model})
         ok &= check(f"{label} {model}: injection announced", float("NBODY_FORCE_ERR: eps" in out), 1, lower=True)
@@ -1363,7 +1363,7 @@ CASES = {
     # HHS_CC_MIN = 64: 542 -> 239 components, max|dE/E| 7.7e-11 vs plain 1.0e-10 (GPU 200k: 36.5 -> 10.9 s/step, plain 9.1)
     "cc_min_binaries50": lambda exe: cc_min_groups(exe, "50 % binaries", BINARIES50, 3.0),
     "cc_vs_plain_binaries50": lambda exe: cc_vs_plain(exe, "50 % binaries", BINARIES50, 3.0),
-    # 2000 Kroupa singles, 2 steps: eps = 1e-3 raised max|dE/E| from 1.5e-11 to 3.4e-8 (random) and 6.4e-8 (smooth)
+    # 2000 Kroupa singles, 2 steps: eps = 1e-3 raised max|dE/E| from 1.5e-11 to 3.4e-8 (random), 2.5e-7 (frozen), 6.4e-8 (smooth)
     "force_err_injection": lambda exe: force_err(exe, "2000 stars", dict(BINARIES, BINARY_FRAC="0.0"), 1000.0),
     # HHS_CC must split with the pair time steps of the time-step kernel (with the c.o.m. velocities of the deleted
     # FLYBY_CM_VELOCITY, 331 particles had a pair step in the split below their dt_adapt before the fix; max |dE/E|
