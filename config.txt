@@ -16,8 +16,9 @@ DT_MAX_MYR = 1.0e-3                       	# BIFROST uses 1e-3 Myr for cluster r
 DT_MIN_MYR = 1.0e-14                      	# Needs to resolve compact binary encounters
 ETA_FF = 0.2					# Free-fall timestep eta
 ETA_FB = 0.2					# Fly-by timestep eta
-ETA_GRAD = 0.1					# Gradient timestep eta
-ETA_JERK = 0.1					# Jerk timestep eta
+ETA_GRAD = 0.2					# Gradient timestep eta (FROST-CLUSTERS criteria; BIFROST 0.1)
+ETA_JERK = 0					# Jerk timestep eta (0: off, FROST-CLUSTERS; BIFROST 0.1)
+ETA = 0						# Velocity/acceleration timestep eta (0: off, FROST-CLUSTERS; BIFROST 0.2)
 SOFTENING_PC = 1e-3                        	# Softening length in pc (= 206 AU)
 SERIAL_N2_GPU = 16384                      	# Full N² on GPU without MPI or tree below this count
 SERIAL_N2_CPU = 0                          	# Full N² on CPU below this count; 0 on MI300A (200k, 10 % binaries: 13-14 s/step vs 15.3 s at 256)
