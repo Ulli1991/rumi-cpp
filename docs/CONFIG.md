@@ -1,6 +1,6 @@
 # Config reference
 
-All 141 keys of the config file (`config.txt`, or `--config <file>`), generated from the parameter table in `src/core/params.cpp` by `scripts/gen_config_md.py`. Every key has one default, in that table; an unknown key in a config file is an error. Each run writes the effective value of every key, and whether it came from the file or the default, to `run_params.txt`.
+All 140 keys of the config file (`config.txt`, or `--config <file>`), generated from the parameter table in `src/core/params.cpp` by `scripts/gen_config_md.py`. Every key has one default, in that table; an unknown key in a config file is an error. Each run writes the effective value of every key, and whether it came from the file or the default, to `run_params.txt`.
 
 Levels:
 
@@ -186,7 +186,6 @@ Levels:
 | `HHS_CC` | bool | `false` | **experiment** |  | Fast HHS sets split into connected components (Janes et al. 2014) |
 | `HHS_CC_MAX` | int | `-1` | **experiment** |  | Largest set split, run locally on every rank (-1: max(SERIAL_N2_GPU, 16384)) |
 | `HHS_CC_MIN` | int | `0` | **experiment** |  | Components smaller than this recurse together as one group (0: off) |
-| `ALL_SLOW_SPLIT` | bool | `true` | **experiment** |  | An all-slow HHS set takes two FSI steps of tau/2 (FROST Algorithm 3) |
 | `INTEGER_POSITIONS` | bool | `false` | **experiment** |  | int64 positions (exact drift, MPI-safe) |
 | `DOMAIN_HALFSIZE_PC` | double | `200` | **experiment** |  | Half-size of the INTEGER_POSITIONS domain (pc) |
 

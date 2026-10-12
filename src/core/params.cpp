@@ -227,8 +227,6 @@ const std::vector<ParamSpec> kParams = {
      "Largest set split, run locally on every rank (-1: max(SERIAL_N2_GPU, 16384))"},
     {"HHS_CC_MIN", I, "0", "Performance and parallelism", EXPERIMENT, "",
      "Components smaller than this recurse together as one group (0: off)"},
-    {"ALL_SLOW_SPLIT", B, "true", "Performance and parallelism", EXPERIMENT, "",
-     "An all-slow HHS set takes two FSI steps of tau/2 (FROST Algorithm 3)"},
     {"INTEGER_POSITIONS", B, "false", "Performance and parallelism", EXPERIMENT, "",
      "int64 positions (exact drift, MPI-safe)"},
     {"DOMAIN_HALFSIZE_PC", D, "200", "Performance and parallelism", EXPERIMENT, "",

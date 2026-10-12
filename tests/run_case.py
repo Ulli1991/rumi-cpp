@@ -1270,7 +1270,7 @@ def sweep(exe, label, base, etas, bounds, order, drift_max=None):
 
 
 CASES = {
-    # bounds ~1.3x measured with ALL_SLOW_SPLIT (FROST Alg. 3; default): 3.24e-7, 8.98e-9, 5.24e-10, order
+    # bounds ~1.3x measured with the all-slow split (FROST Alg. 3, hard-wired): 3.24e-7, 8.98e-9, 5.24e-10, order
     # 4.64 -0.1/+0.3 (without the split 5.6e-6, 1.2e-7, 8.3e-9, order 4.70); drift 1.1-1.2 (5.0 before the
     # symmetrised-step fix, which also gave 4.6e-3 at eta = 0.064)
     "kepler_e09": lambda exe: sweep(exe, "e=0.9", dict(KEPLER, BINARY_E="0.9"), ["0.064", "0.032", "0.016"],

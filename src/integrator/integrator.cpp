@@ -61,7 +61,6 @@ bool use_nonblocking_mpi = false;
 
 // Barnes-Hut tree configuration
 bool use_tree = false;
-bool all_slow_split = false;
 bool hhs_cc = false;
 int hhs_cc_max = -1;   // -1: SERIAL_N2_GPU
 int hhs_cc_min = 0;
@@ -2957,22 +2956,19 @@ static int hhs_fsi_recursive(
 
     // Base case: all particles are slow — reuse fused forces for first FSI kick
     if (fast_count == 0) {
-        // ALL_SLOW_SPLIT (FROST Algorithm 3, F empty): fsi(S, tau/2) twice, on every path
-        const int n_sub = all_slow_split ? 2 : 1;
-        const double h = pivot_dt / n_sub;
+        // FROST Algorithm 3 with an empty fast set: fsi(S, tau/2) twice, on every path (one step of tau: 16x the
+        // energy error at the same time, 6655494)
+        const double h = pivot_dt * 0.5;
         if (dp && global_tree_available && tree_eligible) {
-            for (int k = 0; k < n_sub; k++)
+            for (int k = 0; k < 2; k++)
                 fsi_step_distributed(*dp, start, count, G, soft2, h, k == 0 && forces_valid, false, 0);
         } else if (use_mpi) {
-            for (int k = 0; k < n_sub; k++)
+            for (int k = 0; k < 2; k++)
                 fsi_step_distributed(*dp, start, count, G, soft2, h, k == 0 && forces_valid,
                                      k == 0 && tree_built_for_subset);
-        } else if (all_slow_split) {
-            // FROST Algorithm 3 with an empty fast set: fsi(S, tau/2) twice
+        } else {
             fsi_step(p, start, count, G, soft2, pivot_dt * 0.5, forces_valid, true);
             fsi_step(p, start, count, G, soft2, pivot_dt * 0.5, false, true);
-        } else {
-            fsi_step(p, start, count, G, soft2, pivot_dt, forces_valid, true);
         }
         return n_removed;
     }

@@ -280,6 +280,13 @@ Only the items below are adopted; everything else in those documents is referenc
 Survey corrections already applied: SSE memory note fixed; F3 understood as a dragged-in fly-by (now handled by SDAR,
 collisions, FLYBY_NGB_CM); r_strong is only a BSE switch; FMM needs eps <~ 1e-8 at today's accuracy.
 
+## Deleted options (decided A/B comparisons: winner hard-wired, losing path and key deleted)
+The code before the deletions is tagged archive/pre-step2-deletions.
+
+| key | winner (evidence) | status |
+|---|---|---|
+| ALL_SLOW_SPLIT | true: fsi(S, tau/2) twice (6655494: 16x lower error, same time) | deleted 2026-10-12, winner hard-wired |
+
 ## Pending evaluations (agents stopped mid-work)
 - Task runtimes (HPX/Charm++/Legion): literature says tasks must be >= ~100 us; evaluate only at subtree granularity.
 - GPU idle prototypes (uncommitted in worktree agent-a80a0259e1d880784): overlap of host LogH with device forces.

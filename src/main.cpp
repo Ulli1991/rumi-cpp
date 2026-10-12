@@ -554,7 +554,6 @@ int main(int argc, char** argv) {
         g_profiler.fence = profiling_enabled && cfg.get_bool("PROFILING_FENCES");
         serial_n2_gpu = cfg.get_int("SERIAL_N2_GPU");
         serial_n2_cpu = cfg.get_int("SERIAL_N2_CPU");
-        all_slow_split = cfg.get_bool("ALL_SLOW_SPLIT");
         hhs_cc = cfg.get_bool("HHS_CC");
         hhs_cc_max = cfg.get_int("HHS_CC_MAX");
         hhs_cc_min = cfg.get_int("HHS_CC_MIN");
