@@ -20,12 +20,15 @@
 //
 // Occupancy: with few sinks (multi-GPU slices, mid HHS levels) one team per TILE_SIZE sinks leaves most of
 // the GPU idle. The source range is then split into chunks over extra teams; the partial sums are combined
-// in chunk order in a second kernel, so results do not depend on scheduling. Host backends never split.
+// in chunk order in a second kernel, so results do not depend on scheduling. Host backends never split. The chunk
+// count follows the whole sink set (n2_sinkset.h), so one rank's slice of a large set can still leave SMs idle; such
+// launches put P = 2 or 4 threads on each sink (run_tiled), which leaves every sum bit-identical.
 
 #include "constants.h"
 #include "small_for.h"
 #include <Kokkos_Core.hpp>
 #include <algorithm>
+#include <type_traits>
 
 constexpr int N2_KAHAN_BLOCK = 128;
 
@@ -76,15 +79,25 @@ inline long long n2_host_max() {
 }
 
 namespace n2_detail {
-template <int TS, class K>
+// One team: TS threads, TS / P sinks, P threads per sink. Each sink's sources are taken in tiles of TS (aligned to the
+// chunk start; a tile is the Kahan block, as TS >= N2_KAHAN_BLOCK on the devices), and the P threads of a sink take
+// P consecutive tiles at a time: thread p computes the plain sum of tile p, the first thread then Kahan-adds the P tile
+// sums in tile order. That is exactly the P = 1 accumulation (plain sum per tile, Kahan over tiles in order), so the
+// sums are bit-identical for every P; minima are order-independent (the pre-rejects only skip pairs that cannot lower
+// the minimum). P > 1 multiplies the teams by P (finer load balance; threads_per_sink).
+template <int TS, int P, class K>
 void run_tiled(const char* name, int i0, int ni, int j0, int nj, const K& k) {
     using team_policy = Kokkos::TeamPolicy<>;
     using member_type = team_policy::member_type;
     using scratch_space = Kokkos::DefaultExecutionSpace::scratch_memory_space;
     constexpr int NS = K::NS, NM = K::NM, NSRC = K::NSRC;
     constexpr int NSa = NS > 0 ? NS : 1, NMa = NM > 0 ? NM : 1;
-    const size_t scratch = TS * NSRC * sizeof(double);
-    const int iblocks = (ni + TS - 1) / TS;
+    constexpr int S = TS / P;                 // sinks per team
+    constexpr int GROUP = P * TS;             // sources staged per step
+    static_assert(P == 1 || (TS % P == 0 && TS >= N2_KAHAN_BLOCK), "P > 1 needs tiles that are whole Kahan blocks");
+    constexpr int XCH = P > 1 ? (P - 1) * S * (NS + NM) : 0;   // tile sums / minima handed to the first thread
+    const size_t scratch = (size_t)std::max(GROUP * NSRC, XCH) * sizeof(double);
+    const int iblocks = (ni + S - 1) / S;
     const int nchunk = nj > 0 ? n2_detail::chunk_count(n2_detail::set_size(ni), nj, TS) : 1;
     const int chunk = nchunk > 1 ? ((nj + nchunk - 1) / nchunk + TS - 1) / TS * TS : nj;
     const int nc = nchunk > 1 ? (nj + chunk - 1) / chunk : 1;
@@ -103,11 +116,14 @@ void run_tiled(const char* name, int i0, int ni, int j0, int nj, const K& k) {
         KOKKOS_LAMBDA(const member_type& team) {
             const int q = team.league_rank() / iblocks;          // source chunk
             const int ib = team.league_rank() - q * iblocks;
-            const int ii = ib * TS + team.team_rank();
+            const int t = team.team_rank();
+            const int p = P > 1 ? t / S : 0;                     // tile of the group taken by this thread
+            const int ii = ib * S + (P > 1 ? t - p * S : t);
             const int i = i0 + ii;
             const bool active = ii < ni;
             const int c0 = j0 + q * chunk, c1 = Kokkos::min(j0 + nj, c0 + chunk);
-            Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged> tile(team.team_scratch(0), TS * NSRC);
+            Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged> tile(team.team_scratch(0),
+                                                                               scratch / sizeof(double));
 
             typename K::Sink s{};
             if (active) s = k.sink(i);
@@ -115,23 +131,46 @@ void run_tiled(const char* name, int i0, int ni, int j0, int nj, const K& k) {
             for (int a = 0; a < NSa; a++) sum[a] = comp[a] = blk[a] = 0.0;
             for (int a = 0; a < NMa; a++) mn[a] = 1e30;
             int in_block = 0;
+            (void)in_block;
 
-            for (int t0 = c0; t0 < c1; t0 += TS) {
-                const int n = Kokkos::min(TS, c1 - t0);
-                const int t = team.team_rank();
-                if (t < n) k.source(t0 + t, &tile(t * NSRC));
+            for (int g0 = c0; g0 < c1; g0 += GROUP) {
+                const int ng = Kokkos::min(GROUP, c1 - g0);
+                for (int u = t; u < ng; u += TS) k.source(g0 + u, &tile(u * NSRC));
                 team.team_barrier();
-                if (active) {
-                    for (int jt = 0; jt < n; jt++) k.pair(s, i, &tile(jt * NSRC), t0 + jt, blk, mn);
-                    in_block += n;
-                    if (in_block >= N2_KAHAN_BLOCK || t0 + n >= c1) {
-                        for (int a = 0; a < NS; a++) { kahan_add(sum[a], comp[a], blk[a]); blk[a] = 0.0; }
-                        in_block = 0;
+                const int b0 = p * TS, n = Kokkos::min(TS, ng - b0);   // this thread's tile of the group
+                if (active && n > 0) {
+                    for (int jt = 0; jt < n; jt++) k.pair(s, i, &tile((b0 + jt) * NSRC), g0 + b0 + jt, blk, mn);
+                    if (P == 1) {   // not constexpr-if: nvcc extended lambdas cannot first-capture there
+                        in_block += n;
+                        if (in_block >= N2_KAHAN_BLOCK || g0 + n >= c1) {
+                            for (int a = 0; a < NS; a++) { kahan_add(sum[a], comp[a], blk[a]); blk[a] = 0.0; }
+                            in_block = 0;
+                        }
                     }
                 }
                 team.team_barrier();
+                if (P > 1) {
+                    const int ntile = (ng + TS - 1) / TS;        // tiles in this group (the last may be partial)
+                    double* x = &tile(0);
+                    if (p > 0 && active && p < ntile) {
+                        double* o = x + ((size_t)(p - 1) * S + (t - p * S)) * (NS + NM);
+                        for (int a = 0; a < NS; a++) o[a] = blk[a];
+                        for (int a = 0; a < NM; a++) o[NS + a] = mn[a];
+                    }
+                    team.team_barrier();
+                    if (p == 0 && active) {
+                        for (int a = 0; a < NS; a++) { kahan_add(sum[a], comp[a], blk[a]); blk[a] = 0.0; }
+                        for (int r = 1; r < ntile; r++) {
+                            const double* o = x + ((size_t)(r - 1) * S + t) * (NS + NM);
+                            for (int a = 0; a < NS; a++) kahan_add(sum[a], comp[a], o[a]);
+                            for (int a = 0; a < NM; a++) mn[a] = Kokkos::fmin(mn[a], o[NS + a]);
+                        }
+                    }
+                    if (p > 0) for (int a = 0; a < NS; a++) blk[a] = 0.0;
+                    team.team_barrier();
+                }
             }
-            if (!active) return;
+            if (!active || p > 0) return;
             if (nc == 1) {
                 double out[NSa];
                 for (int a = 0; a < NS; a++) out[a] = sum[a] - comp[a];
@@ -162,6 +201,41 @@ void run_tiled(const char* name, int i0, int ni, int j0, int nj, const K& k) {
             k.finish(i, k.sink(i), out, mn);
         });
     }
+}
+
+// Threads per sink (P of run_tiled). Results do not depend on P, so the choice may follow the local slice (unlike the
+// chunk count). Measured on one A100 (n2-bench, 200k Plummer/Kroupa, 10 % binaries; sinks:sources:set):
+//   force 200k:200k 161 -> 176 Gpairs/s with P = 4, 35k:140k:140k 107 -> 146, 12.5k:50k:50k 140 -> 164, never slower;
+//   grad (P = 4 exceeds 48 KB at TS = 256) 103 -> 109 and 70 -> 92 with P = 2;
+//   time steps (DtK, AccDtK: FILL_ONLY) gain only where a launch has fewer than ~1.5 teams per SM (35k:140k:140k,
+//   137 teams of 256: 43 -> 49) and lose elsewhere (fewer pre-rejected pairs per thread, three barriers per group).
+// So: the largest P <= 4 whose staged sources fit in 48 KB, for FILL_ONLY kernels P = 2 below 1.5 teams per SM.
+// NBODY_N2_P = 1, 2 or 4 forces P (where it fits).
+template <class K, class = void> struct fill_only : std::false_type {};
+template <class K> struct fill_only<K, std::void_t<decltype(K::FILL_ONLY)>> : std::bool_constant<K::FILL_ONLY> {};
+
+inline int threads_per_sink(long long teams, int TS, int nsrc, int ns_nm, bool fill_only_kernel) {
+    static const int forced = std::getenv("NBODY_N2_P") ? std::atoi(std::getenv("NBODY_N2_P")) : 0;
+    if (ns_nm == 0) return 1;   // append-only kernels (NgbK, EdgeK) keep one thread per sink
+    auto fits = [&](int P) { return (size_t)P * TS * nsrc * sizeof(double) <= 48 * 1024; };
+    if (forced == 1 || forced == 2 || forced == 4) return fits(forced) ? forced : 1;
+    if (fill_only_kernel) {
+        const double sms = Kokkos::DefaultExecutionSpace().concurrency() / 2048.0;
+        return (teams < 1.5 * sms && fits(2)) ? 2 : 1;
+    }
+    return fits(4) ? 4 : fits(2) ? 2 : 1;
+}
+
+template <int TS, class K>
+void run_tiled_p(const char* name, int i0, int ni, int j0, int nj, const K& k) {
+    const int nchunk = nj > 0 ? chunk_count(set_size(ni), nj, TS) : 1;
+    const int chunk = nchunk > 1 ? ((nj + nchunk - 1) / nchunk + TS - 1) / TS * TS : nj;
+    const int nc = nchunk > 1 ? (nj + chunk - 1) / chunk : 1;
+    const long long teams = (long long)((ni + TS - 1) / TS) * nc;
+    const int P = threads_per_sink(teams, TS, K::NSRC, K::NS + K::NM, fill_only<K>::value);
+    if (P == 4) run_tiled<TS, 4>(name, i0, ni, j0, nj, k);
+    else if (P == 2) run_tiled<TS, 2>(name, i0, ni, j0, nj, k);
+    else run_tiled<TS, 1>(name, i0, ni, j0, nj, k);
 }
 }  // namespace n2_detail
 
@@ -199,7 +273,9 @@ void run_n2(const char* name, int i0, int ni, int j0, int nj, const K& k) {
     // where the source split matters more
 #if defined(KOKKOS_ENABLE_CUDA) || defined(KOKKOS_ENABLE_HIP) || defined(KOKKOS_ENABLE_SYCL)
     static const int big_tile_min = std::getenv("NBODY_TILE256_MIN") ? std::atoi(std::getenv("NBODY_TILE256_MIN")) : 131072;
-    if (n2_detail::set_size(ni) >= big_tile_min) { n2_detail::run_tiled<256>(name, i0, ni, j0, nj, k); return; }
+    if (n2_detail::set_size(ni) >= big_tile_min) { n2_detail::run_tiled_p<256>(name, i0, ni, j0, nj, k); return; }
+    n2_detail::run_tiled_p<TILE_SIZE>(name, i0, ni, j0, nj, k);
+#else
+    n2_detail::run_tiled<TILE_SIZE, 1>(name, i0, ni, j0, nj, k);
 #endif
-    n2_detail::run_tiled<TILE_SIZE>(name, i0, ni, j0, nj, k);
 }

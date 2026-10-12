@@ -7,8 +7,15 @@
 #include "n2_driver.h"
 #include "constants.h"
 
+// r^2 + soft2 of a pair; SOFT = false (soft2 == 0, collisional runs; run_n2 picks it): r^2 + 0 == r^2 exactly for
+// r^2 >= 0, so the sum is bit-identical at one FP64 addition less per pair
+template <bool SOFT>
+KOKKOS_INLINE_FUNCTION double n2_r2(double dx, double dy, double dz, double soft2) {
+    return SOFT ? dx * dx + dy * dy + dz * dz + soft2 : dx * dx + dy * dy + dz * dz;
+}
+
 // Acceleration on the sinks: a_i = sum_j G m_j r_ij / |r_ij|^3 (softened). Overwrites ax, ay, az.
-template <bool COLL>
+template <bool COLL, bool SOFT = true>
 struct ForceK {
     static constexpr int NSRC = COLL ? 5 : 4, NS = 3, NM = 0;
     RawView x, y, z, m, ax, ay, az;
@@ -23,7 +30,7 @@ struct ForceK {
     KOKKOS_INLINE_FUNCTION void pair(const Sink& a, int i, const double* s, int j, double* sum, double*) const {
         const bool w = pair_weight(i, j, a.sid, COLL ? n2_lo(s[4]) : -1);
         double dx = s[0] - a.x, dy = s[1] - a.y, dz = s[2] - a.z;
-        double r2 = w ? dx * dx + dy * dy + dz * dz + soft2 : 1.0;
+        double r2 = w ? n2_r2<SOFT>(dx, dy, dz, soft2) : 1.0;
         double ir = fast_rsqrt(r2);
         double f = (w ? s[3] : 0.0) * ir * ir * ir;
         sum[0] += f * dx; sum[1] += f * dy; sum[2] += f * dz;
@@ -36,7 +43,7 @@ struct ForceK {
 // FSI gradient correction (FROST Eq. 19): a_i <- a0_i + coeff * sum_j m_j [r^2 da - 3 (r.da) r] / r^5,
 // da = a0_j - a0_i, from snapshots of the uncorrected accelerations (sink snapshot index i - ioff, source
 // snapshot index j - joff). Optionally stores |correction| / dt^2 in grad_mag for the gradient criterion.
-template <bool COLL>
+template <bool COLL, bool SOFT = true>
 struct GradK {
     static constexpr int NSRC = COLL ? 8 : 7, NS = 3, NM = 0;
     RawView x, y, z, m, ax, ay, az;
@@ -58,7 +65,7 @@ struct GradK {
         const bool w = pair_weight(i, j, a.sid, COLL ? n2_lo(s[7]) : -1);
         double dx = s[0] - a.x, dy = s[1] - a.y, dz = s[2] - a.z;
         double dax = s[4] - a.ax, day = s[5] - a.ay, daz = s[6] - a.az;
-        double r2 = w ? dx * dx + dy * dy + dz * dz + soft2 : 1.0;
+        double r2 = w ? n2_r2<SOFT>(dx, dy, dz, soft2) : 1.0;
         double ir = fast_rsqrt(r2);
         double ir2 = ir * ir;
         double f = (w ? s[3] : 0.0) * ir2 * ir2 * ir;
@@ -320,17 +327,18 @@ KOKKOS_INLINE_FUNCTION void dt_pair_min(const DtSink& a, double* mn, bool w, dou
 // JERK = false: no jerk sums (ETA_JERK = 0, the default; run_n2 below picks it): the acceleration sums and the minimum
 // are the same expressions in the same order, so bit-identical, at ~10 fewer FP64 operations per pair.
 // Source tile: x y z m vx vy vz | (sid, fp32 m) | k kf (fp32 k, fp32 1/m) (collisional)
-template <bool COLL, bool MN_IN = false, bool F32 = true, bool JERK = true>
+template <bool COLL, bool MN_IN = false, bool F32 = true, bool JERK = true, bool SOFT = true>
 struct DtK {
     static constexpr int KI = 8;     // source slots of k, kf and the packed (fp32 k, fp32 1/m) (collisional)
     static constexpr int NSRC = COLL ? KI + 3 : 8, NS = COLL ? (JERK ? 6 : 3) : 0, NM = 1;
+    static constexpr bool FILL_ONLY = true;   // P > 1 threads per sink only for nearly empty launches (n2_driver.h)
     RawView x, y, z, m, vx, vy, vz, ax, ay, az, dt;
     RawView ktid, kfl;       // TidalSampling::k, kf (null: no tidal-sampling step)
     const int* sid;
     double G, soft2, eta_ff, eta_fb, eta_jerk;
     using Sink = DtSink;
-    template <bool J>
-    DtK<COLL, MN_IN, F32, J> with_jerk() const {
+    template <bool J, bool S>
+    DtK<COLL, MN_IN, F32, J, S> with() const {
         return {x, y, z, m, vx, vy, vz, ax, ay, az, dt, ktid, kfl, sid, G, soft2, eta_ff, eta_fb, eta_jerk};
     }
     KOKKOS_INLINE_FUNCTION Sink sink(int i) const {
@@ -351,7 +359,7 @@ struct DtK {
         const bool w = pair_weight(i, j, a.sid, COLL ? n2_lo(s[7]) : -1);
         double dx = s[0] - a.x, dy = s[1] - a.y, dz = s[2] - a.z;
         double dvx = s[4] - a.vx, dvy = s[5] - a.vy, dvz = s[6] - a.vz;
-        double r2s = w ? dx * dx + dy * dy + dz * dz + soft2 : 1.0;
+        double r2s = w ? n2_r2<SOFT>(dx, dy, dz, soft2) : 1.0;
         double ir = fast_rsqrt(r2s);
         if constexpr (!MN_IN) {
             // pair-step velocity difference: the same dv as the jerk sum
@@ -391,6 +399,7 @@ struct DtK {
 template <bool COLL, bool JERK = true>
 struct AccDtK {
     static constexpr int NSRC = COLL ? 11 : 8, NS = COLL ? (JERK ? 6 : 3) : 3, NM = 1;
+    static constexpr bool FILL_ONLY = true;
     RawView x, y, z, m, vx, vy, vz, ax, ay, az, dt;
     RawView ktid, kfl;       // TidalSampling::k, kf (null: no tidal-sampling step)
     const int* sid;
@@ -453,11 +462,26 @@ struct AccDtK {
     }
 };
 
-// ETA_JERK = 0: the time-step kernels without the jerk sums (bit-identical, see DtK)
+// ETA_JERK = 0: the time-step kernels without the jerk sums; soft2 = 0: without the softening addition (both
+// bit-identical, see DtK and n2_r2)
 template <bool COLL, bool MN_IN, bool F32>
-void run_n2(const char* name, int i0, int ni, int j0, int nj, const DtK<COLL, MN_IN, F32, true>& k) {
-    if (COLL && !(k.eta_jerk > 0.0)) run_n2<DtK<COLL, MN_IN, F32, false>>(name, i0, ni, j0, nj, k.template with_jerk<false>());
-    else run_n2<DtK<COLL, MN_IN, F32, true>>(name, i0, ni, j0, nj, k);
+void run_n2(const char* name, int i0, int ni, int j0, int nj, const DtK<COLL, MN_IN, F32, true, true>& k) {
+    const bool jerk = !COLL || k.eta_jerk > 0.0, soft = k.soft2 != 0.0;
+    if (jerk && soft) run_n2<DtK<COLL, MN_IN, F32, true, true>>(name, i0, ni, j0, nj, k);
+    else if (jerk) run_n2<DtK<COLL, MN_IN, F32, true, false>>(name, i0, ni, j0, nj, k.template with<true, false>());
+    else if (soft) run_n2<DtK<COLL, MN_IN, F32, false, true>>(name, i0, ni, j0, nj, k.template with<false, true>());
+    else run_n2<DtK<COLL, MN_IN, F32, false, false>>(name, i0, ni, j0, nj, k.template with<false, false>());
+}
+template <bool COLL>
+void run_n2(const char* name, int i0, int ni, int j0, int nj, const ForceK<COLL, true>& k) {
+    if (k.soft2 != 0.0) run_n2<ForceK<COLL, true>>(name, i0, ni, j0, nj, k);
+    else run_n2<ForceK<COLL, false>>(name, i0, ni, j0, nj, ForceK<COLL, false>{k.x, k.y, k.z, k.m, k.ax, k.ay, k.az, k.sid, k.G, k.soft2});
+}
+template <bool COLL>
+void run_n2(const char* name, int i0, int ni, int j0, int nj, const GradK<COLL, true>& k) {
+    if (k.soft2 != 0.0) run_n2<GradK<COLL, true>>(name, i0, ni, j0, nj, k);
+    else run_n2<GradK<COLL, false>>(name, i0, ni, j0, nj, GradK<COLL, false>{k.x, k.y, k.z, k.m, k.ax, k.ay, k.az, k.isx,
+        k.isy, k.isz, k.jsx, k.jsy, k.jsz, k.ioff, k.joff, k.gmag, k.sid, k.coeff, k.soft2, k.inv_dt2});
 }
 template <bool COLL>
 void run_n2(const char* name, int i0, int ni, int j0, int nj, const AccDtK<COLL, true>& k) {
