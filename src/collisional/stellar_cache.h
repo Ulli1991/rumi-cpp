@@ -24,11 +24,6 @@ struct StellarPropsCache {
         static StellarPropsCache c;
         return c;
     }
-    // NBODY_STELLAR_CACHE=0: the device gathers of 043190d instead (A/B of the cache in one binary)
-    static bool enabled() {
-        static const bool e = [] { const char* v = std::getenv("NBODY_STELLAR_CACHE"); return !(v && v[0] == '0'); }();
-        return e;
-    }
     static bool check_enabled() {
         static const bool e = [] { const char* v = std::getenv("NBODY_CHECK_STELLAR_CACHE"); return v && v[0] && v[0] != '0'; }();
         return e;

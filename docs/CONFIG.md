@@ -229,7 +229,6 @@ Levels:
 | `NBODY_LEAN_SYNC` | =0: keep every device fence of the original code (default on: lean copies, bit-identical) |
 | `NBODY_OVERLAP` | =1: experimental GPU-idle prototype, field forces of the next kick overlap the host LogH (not bit-identical) |
 | `NBODY_OVERLAP_MIN` | =n: smallest set that uses NBODY_OVERLAP (default 1024) |
-| `NBODY_DETECT_TOP_ONLY` | Detect subsystems at depth 0 only and keep them below |
 | `NBODY_DUMP` | Particle state at each print to dump_<step>.bin |
 | `NBODY_DUMP_DT` | =n: pid, dt_adapt, grad_mag, ax of the set after the time-step criteria, first n calls |
 | `NBODY_EATTR` | Per-print energy attribution |
@@ -242,11 +241,9 @@ Levels:
 | `NBODY_GBS_TTOL` | Relative tolerance of the LogH end time (default 1e-4) |
 | `NBODY_LOGH_SLOW` | =k: name every LogH integration that took at least k GBS steps |
 | `NBODY_SDAR` | =0/1: overrides SDAR |
-| `NBODY_SECULAR_PREC_STEP` | =1: secular step also limited by 1/\|omega-dot\| (old) |
 | `NBODY_SLOW0_STATS` | Statistics of small all-fast HHS sets, printed at the end |
 | `NBODY_SMALL_FOR` | Largest loop run on the host where it can access device memory (default 256; 0: off) |
 | `NBODY_SMALL_N2` | Largest pair count run on the host where it can access device memory (default 4096) |
-| `NBODY_STELLAR_CACHE` | =0: device gathers instead of the stellar-property cache |
 | `NBODY_TILE256_MIN` | N^2 kernel: 256-thread tiles from this set size (GPUs; default 131072) |
 
 <!-- notes: written by hand below this line; gen_config_md.py keeps them -->

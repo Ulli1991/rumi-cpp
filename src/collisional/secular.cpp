@@ -126,8 +126,7 @@ int secular_evolve_binary(SecularBinary& bin, double dt, double G, double c_code
     // every call ran the 100000-step cap), and the drift of omega is the midpoint rule of omega-dot(a, e):
     // exact while a and e are constant; with a, e changing on t_GW its error over dt is ~ eta_sec^2 of the
     // precession angle. A precession term (1/omega-dot) made a 10+10 Msun binary at 0.01 AU take the
-    // 100000-step cap in every evolution (48 ms each). NBODY_SECULAR_PREC_STEP=1 restores 1/|omega-dot|.
-    static const bool prec_step = std::getenv("NBODY_SECULAR_PREC_STEP") && std::atoi(std::getenv("NBODY_SECULAR_PREC_STEP"));
+    // 100000-step cap in every evolution (48 ms each; the A/B of 4ebc740).
     const double eta_sec = 0.01;
     constexpr int max_steps = 100000;
     auto step_size = [&](double a, double e) {
@@ -136,10 +135,6 @@ int secular_evolve_binary(SecularBinary& bin, double dt, double G, double c_code
         double t_sec = 1e30;
         if (std::fabs(da) > 0.0) t_sec = std::min(t_sec, std::fabs(a / da));
         if (std::fabs(de) > 0.0 && e > 0.0) t_sec = std::min(t_sec, std::fabs(e / de));
-        if (prec_step) {
-            const double dw = compute_domega_dt(a, e, mu, c2, pn_order);
-            if (std::fabs(dw) > 0.0) t_sec = std::min(t_sec, 1.0 / std::fabs(dw));
-        }
         return std::max(eta_sec * t_sec, dt / max_steps);
     };
 

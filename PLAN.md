@@ -290,6 +290,9 @@ The code before the deletions is tagged archive/pre-step2-deletions.
 | WEAK_PERTURBER_GAMMA | off: no weak-perturber split (C-1, 7c5b3ca: 3.6x worse energy); test weak_flyby_split deleted | deleted 2026-10-12, winner hard-wired |
 | TIDAL_GAMMA, TIDAL_RES (+ NBODY_TIDAL_DEBUG) | off: no orbit-resolving step for strongly perturbed binaries (fe207ed, 6278068: no benefit) | deleted 2026-10-12, winner hard-wired |
 | MPI_TRANSPORT = device | host staging (f24a76b: 3488 vs 1028 us; no UCC/hcoll on raven); key stays for host vs nccl on USE_NCCL builds (auto) | value deleted 2026-10-12; MPI_NON_BLOCKING gathers are now always blocking (the Iallgatherv path was device-only) |
+| NBODY_SECULAR_PREC_STEP | off: no 1/omega-dot limit on the secular step (4ebc740: 100000-step cap per evolution) | deleted 2026-10-12, winner hard-wired |
+| NBODY_STELLAR_CACHE=0 | host stellar-property cache (a728868: device gathers cost 0.4-0.6 s/step at 200k) | deleted 2026-10-12, winner hard-wired |
+| NBODY_DETECT_TOP_ONLY | finished diagnostic (fe207ed): detection at every HHS depth | deleted 2026-10-12 |
 
 ## Pending evaluations (agents stopped mid-work)
 - Task runtimes (HPX/Charm++/Legion): literature says tasks must be >= ~100 us; evaluate only at subtree granularity.

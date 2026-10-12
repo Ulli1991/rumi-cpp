@@ -702,36 +702,13 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
             // Stellar types and radii of those members from the host cache by particle id (stellar_cache.h): the
             // device gather it replaced cost ~40 us + 0.25 us per binary per call (0.4-0.6 s per step at 200k)
             StellarPropsCache& props = StellarPropsCache::get();
-            const bool use_cache = StellarPropsCache::enabled();
-            std::vector<int> kw_g;          // NBODY_STELLAR_CACHE=0: the device gather (two values per member)
-            std::vector<double> rad_g;
-            if (use_cache) {
-                props.ensure(p);
-                bool all = true;
-                for (int pid : sec_pids) all = all && props.has(pid);
-                if (!all) { props.invalidate(); props.ensure(p); }
-                if (StellarPropsCache::check_enabled()) props.verify(p, sec_rows, sec_pids, "secular candidates");
-            } else {
-                DeviceStaging& st = DeviceStaging::get<4>();
-                const int nr = (int)sec_rows.size();
-                st.reserve(nr, 2);
-                std::copy(sec_rows.begin(), sec_rows.end(), st.h_idx.data());
-                st.upload_idx(nr);
-                auto d_idx = st.d_idx;
-                auto d_buf = st.d_buf;
-                auto pst = p.stellar_type;
-                auto psr = p.stellar_radius;
-                small_for("coll_props_gather", nr, KOKKOS_LAMBDA(int k) {
-                    const int i = d_idx(k);
-                    d_buf(2 * k) = (double)pst(i);
-                    d_buf(2 * k + 1) = psr(i);
-                });
-                st.download_buf((size_t)nr * 2);
-                kw_g.resize(nr); rad_g.resize(nr);
-                for (int k = 0; k < nr; k++) { kw_g[k] = (int)st.h_buf(2 * k); rad_g[k] = st.h_buf(2 * k + 1); }
-            }
-            auto kw_of = [&](int row) { return use_cache ? props.type_of(sec_pids[row]) : kw_g[row]; };
-            auto rad_of = [&](int row) { return use_cache ? props.radius_of(sec_pids[row]) : rad_g[row]; };
+            props.ensure(p);
+            bool all = true;
+            for (int pid : sec_pids) all = all && props.has(pid);
+            if (!all) { props.invalidate(); props.ensure(p); }
+            if (StellarPropsCache::check_enabled()) props.verify(p, sec_rows, sec_pids, "secular candidates");
+            auto kw_of = [&](int row) { return props.type_of(sec_pids[row]); };
+            auto rad_of = [&](int row) { return props.radius_of(sec_pids[row]); };
             constexpr double R_sun_to_pc = 2.254e-8;   // as mergers.cpp
             for (size_t q = 0; q < sec_subs.size(); q++) {
                 const int ia = sec_rows[2 * q] - start, ib = sec_rows[2 * q + 1] - start;
@@ -2649,9 +2626,7 @@ static int hhs_fsi_recursive(
     if (!dt_valid && count > 1) {
 #ifdef ENABLE_COLLISIONAL
         // Step 1: Standalone neighbor search + detection (before timestep)
-        // NBODY_DETECT_TOP_ONLY (diagnostic): detect at depth 0 only and keep those subsystems below
-        static const bool detect_top_only = std::getenv("NBODY_DETECT_TOP_ONLY") != nullptr;
-        if (p.collisional && !(detect_top_only && depth > 0)) {
+        if (p.collisional) {
             g_profiler.start();
             PhaseClock det_clock;
             g_subsystem_mgr.reset_ngb_count();

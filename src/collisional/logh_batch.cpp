@@ -163,7 +163,7 @@ void SubsystemBatch::pack(const SubsystemManager& mgr, const Particles& p,
     const bool want_spins = (g_collisional.pn_order & PN_SPIN) != 0;
     // In-integration collisions (and SDAR) need the radii and types of all members: from the host cache by particle
     // id (stellar_cache.h; a device gather per call cost ~40 us), from the gathered buffer when there is one
-    const bool gather = !src || want_spins || !StellarPropsCache::enabled();
+    const bool gather = !src || want_spins;
     StellarPropsCache& props = StellarPropsCache::get();
     if (!gather) {
         props.ensure(p);
