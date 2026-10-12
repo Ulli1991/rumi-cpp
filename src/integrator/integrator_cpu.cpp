@@ -645,6 +645,15 @@ static void cpu_sync_pos_vel_from_device(CpuSubset& s, Particles& p, int cpu_sta
         s.cvx[cpu_start + i] = h_cvx(i); s.cvy[cpu_start + i] = h_cvy(i); s.cvz[cpu_start + i] = h_cvz(i);
         s.mass[cpu_start + i] = h_m(i);   // a collision inside a subsystem integration changes masses
     }
+    // INTEGER_POSITIONS: the subsystem integrators moved the members' double positions; their integer coordinates
+    // (the drift's source, uploaded at the end of the subset) follow (as advance_subsystems_in_range on the device)
+    if (use_integer_positions) {
+        const double inv = int_pos_inv_scale;
+        for (int i = cpu_start; i < cpu_start + count; i++) {
+            if (s.sid[i] < 0) continue;
+            s.ix[i] = llrint(s.x[i] * inv); s.iy[i] = llrint(s.y[i] * inv); s.iz[i] = llrint(s.z[i] * inv);
+        }
+    }
 }
 #endif
 

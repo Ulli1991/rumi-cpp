@@ -1402,6 +1402,35 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
         g_subsystem_mgr.step_subsys_collisions += (int)colls.size();
         g_subsystem_mgr.update_particle_flags(p);
     }
+
+    // INTEGER_POSITIONS: the drift takes positions from the integer coordinates, but the subsystem integrators
+    // (LogH / SDAR, Kepler, secular) wrote the double positions of the members they advanced. Their integer
+    // coordinates follow those positions here; otherwise a member's next field drift restarted from the position it
+    // had before the advance (200k, 10 % binaries: |dE/E| 2e-7 against 1.4e-11 with double positions)
+    if (use_integer_positions) {
+        g_subsystem_mgr.rebuild_pid_to_idx(p);
+        std::vector<int> idx;
+        for (int s : eligible) {
+            if (s >= (int)g_subsystem_mgr.active.size()) continue;
+            for (int pid : g_subsystem_mgr.active[s].particle_ids) {
+                const int i = g_subsystem_mgr.safe_pid_to_idx(pid);
+                if (i >= 0) idx.push_back(i);
+            }
+        }
+        if (!idx.empty()) {
+            Kokkos::View<int*> d_idx("int_pos_sync_idx", idx.size());
+            Kokkos::deep_copy(d_idx, Kokkos::View<int*, Kokkos::HostSpace, Kokkos::MemoryUnmanaged>(idx.data(), idx.size()));
+            auto px = p.x, py = p.y, pz = p.z;
+            auto pix = p.ix, piy = p.iy, piz = p.iz;
+            const double inv = int_pos_inv_scale;
+            Kokkos::parallel_for("int_pos_sync", (int)idx.size(), KOKKOS_LAMBDA(int k) {
+                const int i = d_idx(k);
+                pix(i) = llrint(px(i) * inv);
+                piy(i) = llrint(py(i) * inv);
+                piz(i) = llrint(pz(i) * inv);
+            });
+        }
+    }
 }
 #endif
 

@@ -792,6 +792,23 @@ def tidal_books(exe, label, cfg, bound):
     return ok & check(f"{label} max|dE/E| with E_tidal", max(r[0] for r in diagnostics(out)), bound)
 
 
+def no_runaway_depth(exe, label, cfg, max_level, bound):
+    """A configuration that drove the field recursion tens of levels deep (or hung) must finish with every particle
+    on a sane level and the energy conserved."""
+    out = run_output(exe, cfg)
+    lv = [int(m) for m in re.findall(r"^\s+L(\d+)\s+\S+\s+[1-9]", out, re.M)]
+    ok = check(f"{label} deepest occupied HHS level", max(lv) if lv else 99, max_level)
+    return ok & check(f"{label} max|dE/E|", max(r[0] for r in diagnostics(out)), bound)
+
+
+def int_pos_vs_double(exe, label, cfg, ratio):
+    """INTEGER_POSITIONS against double positions on the same run: max |dE/E| within `ratio` of the double one."""
+    dbl = max(r[0] for r in run(exe, dict(cfg, INTEGER_POSITIONS="false")))
+    ip = max(r[0] for r in run(exe, dict(cfg, INTEGER_POSITIONS="true")))
+    print(f"   double {dbl:.3e}, integer {ip:.3e}")
+    return check(f"{label} max|dE/E| integer / double positions", ip / dbl, ratio)
+
+
 def tidal_escapers(exe, label, cfg, bound):
     """TIDAL_FIELD + R_ESCAPE_RJ = 2 (NBODY6, Baumgardt & Makino 2003): stars beyond 2 r_J leave, r_J from the total
     mass at the first removal matches (G M R^2 / 2 V_c^2)^(1/3) (singular logarithmic halo), the energy with the
@@ -1437,6 +1454,25 @@ CASES = {
     "tidal_energy_books": lambda exe: tidal_books(exe, "strong tide", dict(BINARIES, TOTAL_TIME_MYR="5e-3",
                                                                            TIDAL_FIELD="loghalo", GALAXY_VC_KMS="220",
                                                                            GALAXY_R_PC="100"), 1.5e-9),
+    # A 0.76 Msun star bound to a 258 Msun body at 260 AU (a just above r_ngb) while a 600 km/s star passes that body
+    # at 6e-4 pc: the fly-by subsystem formed without the companion (the mass-scaled filter weighed its tide only
+    # against bound partners), whose pull on the subsystem then forced 1.5e-14 Myr tidal-sampling steps (35 HHS
+    # levels, no step finished in 120 s). Now the companion joins (tidal ratio ~2e3 against the fly-by's separation):
+    # deepest level 7, max|dE/E| 2.12e-9
+    "ss_companion_flyby": lambda exe: no_runaway_depth(exe, "companion of a fly-by member", dict(
+        HIER_LOGH, TRIPLE_A_IN_PC="1.26e-3", TRIPLE_E_IN="0.1", TRIPLE_M1="258", TRIPLE_M2="0.76",
+        TRIPLE_A_OUT_PC="6e-4", TRIPLE_E_OUT="200", TRIPLE_OUT_START_Q="133.333333", TRIPLE_M3="0.13",
+        TRIPLE_INCL_DEG="20", TOTAL_TIME_MYR="2e-3", DT_MAX_MYR="1e-3", ETA_PERT="0.02", ETA_RESTART="0",
+        NGB_MASS_SCALING="true", ETA="0", ETA_JERK="0", ETA_GRAD="0.2", FLYBY_CM_EPS="1e-11", DT_MIN_MYR="1e-14"),
+        12, 2.8e-9),
+    # INTEGER_POSITIONS with a fly-by subsystem that forms and dissolves (1 + 1 Msun, q = 20 AU, e = 1.5, a third star
+    # at 0.05 pc): the subsystem integrators moved the members' double positions but not their integer coordinates,
+    # so the members snapped back to where they joined when the fly-by ended: max|dE/E| 1.75 (double positions
+    # 3.92e-7; 200k, 10 % binaries on 4 GPUs: 2e-7 against 1.4e-11). Now identical to the double run
+    "int_pos_flyby": lambda exe: int_pos_vs_double(exe, "fly-by subsystem dissolving", dict(
+        HIER_LOGH, TRIPLE_A_IN_PC="1e-4", TRIPLE_E_IN="1.5", TRIPLE_IN_START_Q="5", TRIPLE_M1="1", TRIPLE_M2="1",
+        TRIPLE_A_OUT_PC="0.05", TRIPLE_E_OUT="0.3", TRIPLE_M3="1", TOTAL_TIME_MYR="2e-2", DT_MAX_MYR="1e-3",
+        ETA_RESTART="0", DOMAIN_HALFSIZE_PC="1"), 1.3),
     # Same cluster, R_ESCAPE_RJ = 2: r_J 0.708 pc at M = 800 Msun, 623 stars leave over 5 steps, max|dE/E| 9.77e-10
     "tidal_jacobi_escapers": lambda exe: tidal_escapers(exe, "2 r_J", dict(BINARIES, TOTAL_TIME_MYR="5e-3",
                                                                           TIDAL_FIELD="loghalo", GALAXY_VC_KMS="220",

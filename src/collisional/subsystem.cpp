@@ -367,6 +367,38 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
     // (Rantala et al. 2025, sec. 2.1) takes binary c.o.m. velocities in the fly-by time steps.
     last_level_flyby_cm_dropped = 0;
     last_level_ngb_mass_kept = 0;
+    last_level_flyby_curved = 0;
+    // A distant fly-by (unbound, r >= r_ngb, accepted by Eq. 4 alone) assumes straight-line motion until pericentre.
+    // When the pair's differential acceleration changes its relative velocity by more than that velocity within
+    // the time to pericentre, the extrapolation is void: a star orbiting a 258 Msun binary at 260 AU "reached" a
+    // light star 0.08 pc away along its orbital velocity (200k, seed 42, step 64), the fake fly-by subsystem carried
+    // the binary's pull as an external perturbation and its 6e-11 Myr perturbation step became the level-0 step of
+    // both stars (25 HHS levels). Such pairs stay in the field, where the pair time steps resolve them
+    {
+        auto ax = md.col(MemberData::AX), ay = md.col(MemberData::AY), az = md.col(MemberData::AZ);
+        auto px = md.col(MemberData::X), py = md.col(MemberData::Y), pz = md.col(MemberData::Z);
+        auto vx = md.col(MemberData::VX), vy = md.col(MemberData::VY), vz = md.col(MemberData::VZ);
+        auto pm = md.col(MemberData::M);
+        std::vector<PairInfo> kept;
+        kept.reserve(pairs.size());
+        for (const auto& pr : pairs) {
+            if (!pr.bound) {
+                const int ia = pid_to_idx[pr.pid_lo], ib = pid_to_idx[pr.pid_hi];
+                const double dx = px(ib) - px(ia), dy = py(ib) - py(ia), dz = pz(ib) - pz(ia);
+                const double r = std::sqrt(dx * dx + dy * dy + dz * dz);
+                const double rs = r_ngb * std::max(1.0, std::cbrt(std::max(pm(ia), pm(ib)) * g_collisional.ngb_inv_mref));
+                if (r >= std::max(r_ngb, rs)) {
+                    const double ux = vx(ib) - vx(ia), uy = vy(ib) - vy(ia), uz = vz(ib) - vz(ia);
+                    const double v = std::sqrt(ux * ux + uy * uy + uz * uz);
+                    const double gx = ax(ib) - ax(ia), gy = ay(ib) - ay(ia), gz = az(ib) - az(ia);
+                    const double da = std::sqrt(gx * gx + gy * gy + gz * gz);
+                    if (v > 0.0 && da * 0.5 * r / v > v) { last_level_flyby_curved++; continue; }
+                }
+            }
+            kept.push_back(pr);
+        }
+        pairs.swap(kept);
+    }
     const bool mass_scaled = g_collisional.ngb_inv_mref > 0.0;
     if (g_collisional.flyby_ngb_cm || mass_scaled) {
         std::unordered_map<int, int> partner;   // pid -> its bound partner, -1 with more than one
@@ -418,6 +450,37 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
                 orbit(P, Q, r, u2, a, e);
                 return a > 0.0 ? a * (1.0 + e) : r;
             };
+            // The internal scale of each particle's other neighbour pairs that pass the unscaled test: apocentre of
+            // a bound partner, current separation of a fly-by partner. A perturber's tide is measured against it when
+            // the particle has no bound partner: a star bound to a massive body just beyond r_ngb, next to that body's
+            // fly-by partner, dominates the fly-by (tidal ratio ~1e3, 3-body reproduction ss_companion_flyby) and
+            // left in the field it forced 1e-14 Myr tidal-sampling steps on the subsystem
+            std::unordered_map<int, std::vector<std::pair<int, double>>> base_scale;   // pid -> (partner, scale)
+            if (mass_scaled) {
+                for (const auto& pr : pairs) {
+                    const int ia = pid_to_idx[pr.pid_lo], ib = pid_to_idx[pr.pid_hi];
+                    double P[7] = {mm(ia), mx(ia), my(ia), mz(ia), mvx(ia), mvy(ia), mvz(ia)};
+                    double Q[7] = {mm(ib), mx(ib), my(ib), mz(ib), mvx(ib), mvy(ib), mvz(ib)};
+                    double r, u2, a, e;
+                    orbit(P, Q, r, u2, a, e);
+                    const bool base = (a > 0.0) ? (a < r_ngb || r < r_ngb || a < g_collisional.r_ngb_wide)
+                                                : (r < r_ngb || (std::fabs(a) * (e - 1.0) < r_ngb && u2 > 0.0 &&
+                                                                 0.5 * r / std::sqrt(u2) < dt_step));
+                    if (!base) continue;
+                    const double sc = a > 0.0 ? a * (1.0 + e) : r;
+                    base_scale[pr.pid_lo].push_back({pr.pid_hi, sc});
+                    base_scale[pr.pid_hi].push_back({pr.pid_lo, sc});
+                }
+            }
+            auto scale_of = [&](int pid, int other) {
+                const double apo = pair_apo(pid, other);
+                if (apo > 0.0) return apo;
+                double sc = 0.0;
+                auto it = base_scale.find(pid);
+                if (it != base_scale.end())
+                    for (const auto& ps : it->second) if (ps.first != other) sc = std::max(sc, ps.second);
+                return sc;
+            };
             std::vector<PairInfo> kept;
             kept.reserve(pairs.size());
             for (const auto& pr : pairs) {
@@ -448,7 +511,7 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
                         const double rs = r_ngb * std::max(1.0, std::cbrt(std::max(mm(ia), mm(ib)) * g_collisional.ngb_inv_mref));
                         const bool soon = a > 0.0 || r < rs || (u2 > 0.0 && 0.5 * r / std::sqrt(u2) < dt_step);
                         rp = std::max(rp, 1e-30);
-                        const double Ra = pair_apo(pr.pid_lo, pr.pid_hi), Rb = pair_apo(pr.pid_hi, pr.pid_lo);
+                        const double Ra = scale_of(pr.pid_lo, pr.pid_hi), Rb = scale_of(pr.pid_hi, pr.pid_lo);
                         const double ga = Ra > 0.0 ? 2.0 * B[0] * Ra * Ra * Ra / (A[0] * rp * rp * rp) : 0.0;
                         const double gb = Rb > 0.0 ? 2.0 * A[0] * Rb * Rb * Rb / (B[0] * rp * rp * rp) : 0.0;
                         if (soon && std::max(ga, gb) >= g_collisional.ngb_mass_gamma) { keep = true; last_level_ngb_mass_kept++; }
@@ -1021,7 +1084,7 @@ void SubsystemManager::enforce_shared_timestep(Particles& p) const {
 
 // Perturbation time step (BIFROST Eq. 30) on gathered member data; returns whether any member was clamped
 static bool perturbation_timestep_md(const std::vector<Subsystem>& active, const std::vector<int>& pid_to_idx,
-                                     MemberData& md, double G, double eta_pert) {
+                                     MemberData& md, double G, double eta_pert, const Particles* p_dbg) {
     auto h_x  = md.col(MemberData::X);
     auto h_y  = md.col(MemberData::Y);
     auto h_z  = md.col(MemberData::Z);
@@ -1142,6 +1205,25 @@ static bool perturbation_timestep_md(const std::vector<Subsystem>& active, const
                 dt_a = std::fabs(a / adot);
             if (std::fabs(edot) > 1e-30)
                 dt_e = 1.0 / std::fabs(edot);
+            if (E_orb >= 0.0) {
+                // Unbound (fly-by) pair: the anomaly form above holds for e < 1 only (cos E = (e + cos nu) /
+                // (1 + e cos nu) diverges on the asymptote, 1 + e cos nu = p / r -> 0), and a unit change of e means
+                // nothing at e >> 1. Vector form, valid for any orbit: |a / adot| = |E / Edot| with Edot = v . f,
+                // and the relative change of the eccentricity vector e = (v x L) / mu - r_hat,
+                // de/dt = (f x L + v x (r x f)) / mu (BIFROST sec. 3.4.3: rates "from the positions, velocities and
+                // accelerations"). Seed 42, step 64: e = 346, cos E = 146, 1 / |edot| gave 5.7e-11 Myr
+                const double Edot = dvx * fx + dvy * fy + dvz * fz;
+                dt_a = std::fabs(Edot) > 1e-30 ? std::fabs(E_orb / Edot) : 1e30;
+                const double ex = (dvy * Lz - dvz * Ly) / mu - rx * r_inv;
+                const double ey = (dvz * Lx - dvx * Lz) / mu - ry * r_inv;
+                const double ez = (dvx * Ly - dvy * Lx) / mu - rz * r_inv;
+                const double rfx = ry * fz - rz * fy, rfy = rz * fx - rx * fz, rfz = rx * fy - ry * fx;
+                const double gx = ((fy * Lz - fz * Ly) + (dvy * rfz - dvz * rfy)) / mu;
+                const double gy = ((fz * Lx - fx * Lz) + (dvz * rfx - dvx * rfz)) / mu;
+                const double gz = ((fx * Ly - fy * Lx) + (dvx * rfy - dvy * rfx)) / mu;
+                const double en = std::sqrt(ex * ex + ey * ey + ez * ez), gn = std::sqrt(gx * gx + gy * gy + gz * gz);
+                dt_e = gn > 1e-30 ? en / gn : 1e30;
+            }
             dt_pert = std::min(dt_a, dt_e) * eta_pert;
             {
                 static const bool deep_log = std::getenv("NBODY_DEEP_LOG") != nullptr;
@@ -1150,6 +1232,35 @@ static bool perturbation_timestep_md(const std::vector<Subsystem>& active, const
                                 "cos_nu %.6g cos_E %.3e adot %.3e edot %.3e f %.3e r %.3e v %.3e\n",
                                 sub.particle_ids[0], sub.particle_ids[1], (int)sub.type, dt_pert * TIME_UNIT_MYR,
                                 dt_a, dt_e, a, e, p_param * r_inv, cos_nu, cos_E, adot, edot, f_mag, r_mag, std::sqrt(v2));
+                if (deep_log && dt_pert * TIME_UNIT_MYR < 1e-9) {   // each member's 3 nearest particles
+                    auto ax_ = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p_dbg->x);
+                    auto ay_ = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p_dbg->y);
+                    auto az_ = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p_dbg->z);
+                    auto avx = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p_dbg->vx);
+                    auto avy = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p_dbg->vy);
+                    auto avz = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p_dbg->vz);
+                    auto am = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p_dbg->mass);
+                    auto apid = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p_dbg->particle_id);
+                    auto asid = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p_dbg->subsystem_id);
+                    for (int q : {idx_i, idx_j}) {
+                        std::vector<std::pair<double, int>> nb;
+                        for (int k = 0; k < p_dbg->N; k++) {
+                            if (k == q) continue;
+                            const double dx = ax_(k) - ax_(q), dy = ay_(k) - ay_(q), dz = az_(k) - az_(q);
+                            nb.push_back({dx*dx + dy*dy + dz*dz, k});
+                        }
+                        std::partial_sort(nb.begin(), nb.begin() + 3, nb.end());
+                        std::printf("PERT2   member pid %d m %.4g sid %d:", apid(q), am(q), asid(q));
+                        for (int t = 0; t < 3; t++) {
+                            const int k = nb[t].second;
+                            const double ux = avx(k) - avx(q), uy = avy(k) - avy(q), uz = avz(k) - avz(q);
+                            std::printf(" | pid %d m %.4g sid %d r %.3e v %.3e", apid(k), am(k), asid(k),
+                                        std::sqrt(nb[t].first), std::sqrt(ux*ux + uy*uy + uz*uz));
+                        }
+                        std::printf("\n");
+                    }
+                    std::fflush(stdout);
+                }
             }
             if (g_eattr.on && a > 0.0) {
                 const double mi = h_m(idx_i), mj = h_m(idx_j);
@@ -1278,14 +1389,14 @@ static bool perturbation_timestep_md(const std::vector<Subsystem>& active, const
 void SubsystemManager::apply_perturbation_timestep(Particles& p, double G, double eta_pert) const {
     if (active.empty() || eta_pert <= 0.0) return;
     MemberData md(active, pid_to_idx_, p);
-    if (perturbation_timestep_md(active, pid_to_idx_, md, G, eta_pert)) md.scatter_dt(p);
+    if (perturbation_timestep_md(active, pid_to_idx_, md, G, eta_pert, &p)) md.scatter_dt(p);
 }
 
 void SubsystemManager::subsystem_timesteps(Particles& p, double G, double eta_pert) const {
     if (active.empty()) return;
     MemberData md(active, pid_to_idx_, p);   // one gather and one scatter for both passes
     shared_timestep_md(active, pid_to_idx_, md);
-    if (eta_pert > 0.0) perturbation_timestep_md(active, pid_to_idx_, md, G, eta_pert);
+    if (eta_pert > 0.0) perturbation_timestep_md(active, pid_to_idx_, md, G, eta_pert, &p);
     md.scatter_dt(p);
 }
 
@@ -1296,6 +1407,7 @@ void SubsystemManager::reset_step_diagnostics() {
     step_n_bin = 0; step_n_fly = 0; step_n_trip_s = 0; step_n_trip_u = 0; step_n_multi = 0;
     step_weak_split = 0;
     step_flyby_cm_dropped = 0;
+    step_flyby_curved = 0;
     step_ngb_mass_kept = 0;
     step_n_secular = 0;
     step_total_members = 0;
@@ -1327,6 +1439,7 @@ void SubsystemManager::accumulate_diagnostics() {
     step_total_bound += last_level_bound;
     step_weak_split += last_level_weak_split;
     step_flyby_cm_dropped += last_level_flyby_cm_dropped;
+    step_flyby_curved += last_level_flyby_curved;
     step_ngb_mass_kept += last_level_ngb_mass_kept;
     step_total_subsystems += (int)active.size();
     for (const auto& sub : active) {
@@ -1354,6 +1467,7 @@ void SubsystemManager::print_step_summary() const {
                 step_n_bin, step_n_fly, step_n_trip_s, step_n_trip_u, step_n_multi);
     if (step_weak_split > 0) std::printf("  weak_split=%d", step_weak_split);
     if (step_flyby_cm_dropped > 0) std::printf("  flyby_cm_dropped=%d", step_flyby_cm_dropped);
+    if (step_flyby_curved > 0) std::printf("  flyby_curved=%d", step_flyby_curved);
     if (step_ngb_mass_kept > 0) std::printf("  ngb_mass_kept=%d", step_ngb_mass_kept);
     std::printf("\n");
 

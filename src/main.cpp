@@ -825,6 +825,7 @@ int main(int argc, char** argv) {
         bool triple_outer_first = cfg.get_bool("TRIPLE_OUTER_FIRST", false);
         double triple_in_rot = cfg.get_double("TRIPLE_IN_ROT_DEG", 0.0);
         double triple_in_start_q = cfg.get_double("TRIPLE_IN_START_Q", 5.0);
+        double triple_out_start_q = cfg.get_double("TRIPLE_OUT_START_Q", 5.0);
 
 #ifdef USE_HDF5
         RunState rs;   // run-loop state of a restart (written and read by io/restart.cpp)
@@ -865,7 +866,7 @@ int main(int argc, char** argv) {
             } else if (test == "triple_test") {
                 init_triple_test(p, triple_a_in, triple_e_in, triple_m1, triple_m2,
                                  triple_a_out, triple_e_out, triple_m3, triple_incl, triple_outer_first,
-                                 triple_in_rot, triple_in_start_q);
+                                 triple_in_rot, triple_in_start_q, triple_out_start_q);
             } else {
                 std::fprintf(stderr, "Unknown test case: %s\n", test.c_str());
                 MPIComm::finalize();

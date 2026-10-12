@@ -1001,7 +1001,8 @@ void init_binary_test_peri(Particles& p, double a_pc, double e,
 void init_triple_test(Particles& p,
                       double a_in_pc, double e_in, double m1_msun, double m2_msun,
                       double a_out_pc, double e_out, double m3_msun,
-                      double i_deg, bool outer_first, double in_rot_deg, double in_start_q) {
+                      double i_deg, bool outer_first, double in_rot_deg, double in_start_q,
+                      double out_start_q) {
     p.allocate(3, COLL_ENABLED);
 
     double M_in  = m1_msun + m2_msun;
@@ -1046,7 +1047,7 @@ void init_triple_test(Particles& p,
     {
         double rx, rw, vx_, vw;
         if (e_out >= 1.0) {
-            const double q = a_out_pc, p_semi = q * (1.0 + e_out), r0 = 5.0 * q;
+            const double q = a_out_pc, p_semi = q * (1.0 + e_out), r0 = out_start_q * q;   // TRIPLE_OUT_START_Q
             const double f = -std::acos(std::max(-1.0, std::min(1.0, (p_semi / r0 - 1.0) / e_out)));
             const double vs = std::sqrt(mu_out / p_semi);
             rx = r0 * std::cos(f);  rw = r0 * std::sin(f);
