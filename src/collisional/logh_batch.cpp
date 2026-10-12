@@ -937,10 +937,11 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
         static const int slow_log = std::getenv("NBODY_LOGH_SLOW") ? std::atoi(std::getenv("NBODY_LOGH_SLOW")) : 0;
         if (slow_log > 0 && n_gbs_steps >= slow_log) {
             char head[200];
-            std::snprintf(head, sizeof(head), "      LogH slow: gbs=%d dt=%.3e Myr sd=%d colls=%zu n=%d m[Msun]=",
-                          n_gbs_steps, dt_norm * T_scale * TIME_UNIT_MYR, (int)sd_on,
+            std::snprintf(head, sizeof(head), "      LogH slow: gbs=%d dt=%.3e Myr sd=%d kappa_peak=%.3g colls=%zu n=%d m[Msun]=",
+                          n_gbs_steps, dt_norm * T_scale * TIME_UNIT_MYR, (int)sd_on, state.sd_kappa_peak,
                           colls.size(), nb);
             std::printf("%s\n", describe(head).c_str());
+            std::fflush(stdout);
         }
         // SDAR: name the integrations that fail the energy check (members, slowed binaries, steps)
         if (sd_on && converged && g_collisional.eta_restart > 0.0 && dE_rel > g_collisional.eta_restart) {

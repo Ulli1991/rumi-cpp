@@ -2658,6 +2658,90 @@ static int hhs_fsi_recursive(
             }
             dump_calls++;
         }
+        // NBODY_DEEP_LOG=d (debug), at depth 0: every particle with dt below the depth-d pivot and its 4 nearest
+        // neighbours (pid, mass, subsystem id, separation, relative speed): the pairs that set the level-0 steps
+        {
+            static const int deep_log0 = std::getenv("NBODY_DEEP_LOG") ? std::atoi(std::getenv("NBODY_DEEP_LOG")) : 0;
+            if (deep_log0 > 0 && depth == 0 && MPIComm::rank() == 0) {
+                const double thr = pivot_dt / std::ldexp(1.0, deep_log0);
+                auto r = Kokkos::make_pair(start, start + count);
+                auto cp = [&](auto v) { return Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Kokkos::subview(v, r)); };
+                auto hd = cp(p.dt_adapt);
+                std::vector<int> low;
+                for (int k = 0; k < count && low.size() < 10; k++) if (hd(k) < thr) low.push_back(k);
+                if (!low.empty()) {
+                    auto hp = cp(p.particle_id); auto hm = cp(p.mass);
+                    auto hx = cp(p.x); auto hy = cp(p.y); auto hz = cp(p.z);
+                    auto hvx = cp(p.vx); auto hvy = cp(p.vy); auto hvz = cp(p.vz);
+#ifdef ENABLE_COLLISIONAL
+                    auto hs = cp(p.subsystem_id);
+#endif
+                    for (int k : low) {
+                        std::vector<std::pair<double, int>> nb;
+                        for (int j = 0; j < count; j++) {
+                            if (j == k) continue;
+                            const double dx = hx(j) - hx(k), dy = hy(j) - hy(k), dz = hz(j) - hz(k);
+                            nb.push_back({dx*dx + dy*dy + dz*dz, j});
+                        }
+                        std::partial_sort(nb.begin(), nb.begin() + std::min<size_t>(4, nb.size()), nb.end());
+                        int sk = -1;
+#ifdef ENABLE_COLLISIONAL
+                        sk = hs(k);
+#endif
+                        std::printf("DEEP0 pid %d m %.4g dt %.3e Myr sid %d:", hp(k), hm(k), hd(k) * TIME_UNIT_MYR, sk);
+                        for (size_t q = 0; q < std::min<size_t>(4, nb.size()); q++) {
+                            const int j = nb[q].second;
+                            const double ux = hvx(j) - hvx(k), uy = hvy(j) - hvy(k), uz = hvz(j) - hvz(k);
+                            int sj = -1;
+#ifdef ENABLE_COLLISIONAL
+                            sj = hs(j);
+#endif
+                            std::printf(" | pid %d m %.4g sid %d dt %.3e r %.3e v %.3e", hp(j), hm(j), sj,
+                                        hd(j) * TIME_UNIT_MYR, std::sqrt(nb[q].first), std::sqrt(ux*ux + uy*uy + uz*uz));
+                        }
+                        std::printf("\n");
+                    }
+                    std::fflush(stdout);
+                }
+            }
+        }
+        // NBODY_DEEP_LOG=d (debug): the first 4 sets at each depth >= d (count <= 32): members with mass, dt, subsystem
+        // id, and every pair's separation, relative speed and two-body energy (what keeps the set this deep)
+        {
+            static const int deep_log = std::getenv("NBODY_DEEP_LOG") ? std::atoi(std::getenv("NBODY_DEEP_LOG")) : 0;
+            static int deep_seen[64] = {};
+            if (deep_log > 0 && depth >= deep_log && depth < 64 && count <= 32 && deep_seen[depth] < 4 &&
+                MPIComm::rank() == 0) {
+                deep_seen[depth]++;
+                auto r = Kokkos::make_pair(start, start + count);
+                auto cp = [&](auto v) { return Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Kokkos::subview(v, r)); };
+                auto hp = cp(p.particle_id); auto hd = cp(p.dt_adapt); auto hm = cp(p.mass); auto hl = cp(p.dt_level0);
+                auto hx = cp(p.x); auto hy = cp(p.y); auto hz = cp(p.z);
+                auto hvx = cp(p.vx); auto hvy = cp(p.vy); auto hvz = cp(p.vz);
+#ifdef ENABLE_COLLISIONAL
+                auto hs = cp(p.subsystem_id);
+#endif
+                std::printf("DEEP depth %d pivot %.3e Myr count %d\n", depth, pivot_dt * TIME_UNIT_MYR, count);
+                for (int k = 0; k < count; k++) {
+                    int sid = -1;
+#ifdef ENABLE_COLLISIONAL
+                    sid = hs(k);
+#endif
+                    std::printf("DEEP   pid %d m %.4g dt %.3e dt_level0 %.3e Myr sid %d x %.9e %.9e %.9e\n", hp(k), hm(k),
+                                hd(k) * TIME_UNIT_MYR, hl(k) * TIME_UNIT_MYR, sid, hx(k), hy(k), hz(k));
+                }
+                for (int a = 0; a < count; a++)
+                    for (int c = a + 1; c < count; c++) {
+                        const double dx = hx(c) - hx(a), dy = hy(c) - hy(a), dz = hz(c) - hz(a);
+                        const double ux = hvx(c) - hvx(a), uy = hvy(c) - hvy(a), uz = hvz(c) - hvz(a);
+                        const double rr = std::sqrt(dx*dx + dy*dy + dz*dz), vv = std::sqrt(ux*ux + uy*uy + uz*uz);
+                        const double eps = 0.5 * vv * vv - G * (hm(a) + hm(c)) / rr;
+                        std::printf("DEEP   pair %d-%d r %.3e pc v %.3e km/s eps %.3e a %.3e pc\n", hp(a), hp(c), rr, vv,
+                                    eps, eps < 0.0 ? -G * (hm(a) + hm(c)) / (2.0 * eps) : 0.0);
+                    }
+                std::fflush(stdout);
+            }
+        }
         // Level-0 clamping (BIFROST Section 3.4.1)
         if (p.collisional && depth > 0) {
             auto dt_f = p.dt_adapt;

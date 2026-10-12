@@ -1001,7 +1001,7 @@ void init_binary_test_peri(Particles& p, double a_pc, double e,
 void init_triple_test(Particles& p,
                       double a_in_pc, double e_in, double m1_msun, double m2_msun,
                       double a_out_pc, double e_out, double m3_msun,
-                      double i_deg, bool outer_first, double in_rot_deg) {
+                      double i_deg, bool outer_first, double in_rot_deg, double in_start_q) {
     p.allocate(3, COLL_ENABLED);
 
     double M_in  = m1_msun + m2_msun;
@@ -1026,8 +1026,8 @@ void init_triple_test(Particles& p,
     x0 *= cr; x1 *= cr; vy0 *= cr; vy1 *= cr;
     if (e_in >= 1.0) {
         // Parabolic / hyperbolic inner encounter (as init_binary_test): a_in_pc is the pericentre distance q,
-        // start inbound at 5 q; relative vector r_1 - r_0 = r0 (cos f, sin f)
-        const double q = a_in_pc, p_semi = q * (1.0 + e_in), r0 = 5.0 * q;
+        // start inbound at in_start_q q (TRIPLE_IN_START_Q, default 5); relative vector r_1 - r_0 = r0 (cos f, sin f)
+        const double q = a_in_pc, p_semi = q * (1.0 + e_in), r0 = in_start_q * q;
         const double f = -std::acos(std::max(-1.0, std::min(1.0, (p_semi / r0 - 1.0) / e_in)));
         const double vs = std::sqrt(mu_in / p_semi);
         const double rr[2] = {r0 * std::cos(f), r0 * std::sin(f)};

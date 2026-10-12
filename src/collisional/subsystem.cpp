@@ -1143,6 +1143,14 @@ static bool perturbation_timestep_md(const std::vector<Subsystem>& active, const
             if (std::fabs(edot) > 1e-30)
                 dt_e = 1.0 / std::fabs(edot);
             dt_pert = std::min(dt_a, dt_e) * eta_pert;
+            {
+                static const bool deep_log = std::getenv("NBODY_DEEP_LOG") != nullptr;
+                if (deep_log && dt_pert * TIME_UNIT_MYR < 1e-9)
+                    std::printf("PERT2 pids %d %d type %d dt_pert %.3e Myr dt_a %.3e dt_e %.3e a %.3e e %.6g p/r %.3e "
+                                "cos_nu %.6g cos_E %.3e adot %.3e edot %.3e f %.3e r %.3e v %.3e\n",
+                                sub.particle_ids[0], sub.particle_ids[1], (int)sub.type, dt_pert * TIME_UNIT_MYR,
+                                dt_a, dt_e, a, e, p_param * r_inv, cos_nu, cos_E, adot, edot, f_mag, r_mag, std::sqrt(v2));
+            }
             if (g_eattr.on && a > 0.0) {
                 const double mi = h_m(idx_i), mj = h_m(idx_j);
                 const double dte = std::min(std::min(h_dt(idx_i), dt_pert), g_eattr.dt_cap);
@@ -1246,6 +1254,10 @@ static bool perturbation_timestep_md(const std::vector<Subsystem>& active, const
                 dt_pert = std::min(dt_pert, L_mag / std::fabs(dL_dt));
 
             dt_pert *= eta_pert;
+            static const bool deep_log = std::getenv("NBODY_DEEP_LOG") != nullptr;
+            if (deep_log && dt_pert * TIME_UNIT_MYR < 1e-9)
+                std::printf("PERTN n %d pid0 %d type %d dt_pert %.3e Myr E %.3e dE/dt %.3e L %.3e dL/dt %.3e\n", sub.n_bodies,
+                            sub.particle_ids[0], (int)sub.type, dt_pert * TIME_UNIT_MYR, E_int, dE_dt, L_mag, dL_dt);
         }
 
         if (dt_pert >= 1e30) continue;
