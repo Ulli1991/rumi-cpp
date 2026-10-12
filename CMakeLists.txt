@@ -94,9 +94,6 @@ add_executable(n2-bench ${CMAKE_CURRENT_SOURCE_DIR}/tests/n2_bench.cpp)
 target_include_directories(n2-bench PRIVATE ${SRC_DIR}/core ${SRC_DIR}/gravity)
 target_link_libraries(n2-bench Kokkos::kokkos)
 target_compile_features(n2-bench PRIVATE cxx_std_17)
-if(RSQRT_NEWTON)
-    target_compile_definitions(n2-bench PRIVATE RSQRT_NEWTON)
-endif()
 
 # Exact tree time-step / neighbour search against the O(N^2) kernels: bitwise check and timings (tests/dt_tree_bench.cpp)
 add_executable(dt-tree-bench ${CMAKE_CURRENT_SOURCE_DIR}/tests/dt_tree_bench.cpp)
@@ -169,16 +166,19 @@ endif()
 option(ACCURATE_RSQRT "Device kernels use 1/sqrt (correctly rounded) instead of rsqrt (~1 ulp)" OFF)
 if(ACCURATE_RSQRT)
     target_compile_definitions(nbody-kokkos PRIVATE ACCURATE_RSQRT)
+    target_compile_definitions(n2-bench PRIVATE ACCURATE_RSQRT)   # the benchmark times the production kernels
 endif()
 
 option(RSQRT_NEWTON "Device rsqrt refined by one Newton step (~0.5 ulp; +4 % per 200k step, GPU accuracy = CPU)" ON)
 if(RSQRT_NEWTON)
     target_compile_definitions(nbody-kokkos PRIVATE RSQRT_NEWTON)
+    target_compile_definitions(n2-bench PRIVATE RSQRT_NEWTON)   # the benchmark times the production kernels
 endif()
 
 option(DT_FP32_PREREJECT "Device time-step kernel: single-precision conservative pre-reject of distant pairs (bit-identical)" ON)
 if(DT_FP32_PREREJECT)
     target_compile_definitions(nbody-kokkos PRIVATE DT_FP32_PREREJECT)
+    target_compile_definitions(n2-bench PRIVATE DT_FP32_PREREJECT)   # the benchmark times the production kernels
 endif()
 
 option(DISABLE_PROFILING_FENCES "Remove Kokkos::fence() around profiler regions" OFF)
