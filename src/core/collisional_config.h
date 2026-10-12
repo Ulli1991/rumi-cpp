@@ -37,7 +37,7 @@ struct CollisionalConfig {
 
     // SDAR slow-down of weakly perturbed inner binaries in LogH subsystems (Wang, Nitadori & Makino 2020;
     // FROST-CLUSTERS I App. A2, which replaced plain LogH by it). Off: plain LogH (BIFROST 2023)
-    bool sdar = false;                 // SDAR (env NBODY_SDAR=0/1 overrides)
+    bool sdar = true;                  // SDAR (env NBODY_SDAR=0/1 overrides)
     double sdar_kref = 1e-6;           // SDAR_KREF: k_ref of the slow-down factor (W20 Eq. 22, FC-I Eq. A8)
     double sdar_c = 0.1;               // SDAR_C: kappa_max coefficient c (W20 Eq. 28, FC-I Eq. A9)
 

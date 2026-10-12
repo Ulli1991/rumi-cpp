@@ -126,7 +126,7 @@ const std::vector<ParamSpec> kParams = {
     {"R_NGB_MAX", D, "0.1", "Subsystems", EXPERT, "", "Largest separation (pc) of the orbital-element check"},
     {"SECULAR_TRIPLES", B, "true", "Subsystems", EXPERIMENT, "",
      "Stable triples with >= N_ORB_SECULAR inner orbits per step take the double-averaged secular path; false: LogH"},
-    {"SDAR", B, "false", "Subsystems", EXPERIMENT, "",
+    {"SDAR", B, "true", "Subsystems", INTERNAL, "",
      "Slow-down of weakly perturbed inner binaries in LogH (Wang+2020; FROST-CLUSTERS I App. A2); env NBODY_SDAR "
      "overrides"},
     {"SDAR_KREF", D, "1e-6", "Subsystems", EXPERIMENT, "", "SDAR k_ref of the slow-down factor (W20 Eq. 22)"},

@@ -14,7 +14,7 @@ from pathlib import Path
 OLD_DEFAULTS = dict(DT_MIN_MYR="1.0e-9", ETA="0.2", ETA_GRAD="0.1", ETA_JERK="0.1", ETA_RESTART="0", FLYBY_CM_EPS="0.0",
                     NGB_MASS_SCALING="false", SERIAL_N2_GPU="0", TREE_THRESHOLD="10000", TREE_THETA="0.5",
                     BINARY_A_PC="4.848e-5", BINARY_E="0.0", TRIPLE_A_OUT_PC="2e-7", TRIPLE_E_OUT="0.3",
-                    TRIPLE_INCL_DEG="85.0")
+                    TRIPLE_INCL_DEG="85.0", SDAR="false")
 TIMEOUT_S = int(os.environ.get("NBODY_TEST_TIMEOUT", 120))  # seconds per run on one CPU core; GPUs need more (launch latency)
 # FROST Fig. 4 binary: m1 = m2 = 10 Msun, a = 10 AU, ~1000 orbits; diagnostics every 1e-5 Myr
 KEPLER = dict(TEST_CASE="binary_test", INTEGRATOR="hhs", TOTAL_TIME_MYR="7.0711e-3", DT_MAX_MYR="1.0e-5",

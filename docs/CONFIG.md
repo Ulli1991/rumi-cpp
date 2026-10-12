@@ -121,7 +121,7 @@ Levels:
 | `R_NGB` | double | `1e-3` | expert |  | Neighbour radius (pc) of the subsystem search |
 | `R_NGB_MAX` | double | `0.1` | expert |  | Largest separation (pc) of the orbital-element check |
 | `SECULAR_TRIPLES` | bool | `true` | **experiment** |  | Stable triples with >= N_ORB_SECULAR inner orbits per step take the double-averaged secular path; false: LogH |
-| `SDAR` | bool | `false` | **experiment** |  | Slow-down of weakly perturbed inner binaries in LogH (Wang+2020; FROST-CLUSTERS I App. A2); env NBODY_SDAR overrides |
+| `SDAR` | bool | `true` | internal |  | Slow-down of weakly perturbed inner binaries in LogH (Wang+2020; FROST-CLUSTERS I App. A2); env NBODY_SDAR overrides |
 | `SDAR_KREF` | double | `1e-6` | **experiment** |  | SDAR k_ref of the slow-down factor (W20 Eq. 22) |
 | `SDAR_C` | double | `0.1` | **experiment** |  | SDAR kappa_max coefficient c (W20 Eq. 28) |
 | `GBS_SEQUENCE` | string | `bulirsch` | **experiment** | bulirsch\|deuflhard | GBS substep sequence: bulirsch (2, 4, 6, 8, 12, 16, ...) or deuflhard (2, 4, 6, 8, 10, ...; MSTAR) |
