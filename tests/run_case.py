@@ -442,6 +442,23 @@ def ranks_agree(exe, label, cfg, bound):
     return ok & check(f"{label} max |dE/E(1) - dE/E(2)|", max(abs(a[0] - b[0]) for a, b in zip(one, two)), bound)
 
 
+def rank_count_identical(exe, label, cfg):
+    """SCALING_DESIGN.md sec. 6.1: the same run on 1 and 2 ranks must be bitwise identical (every particle dump and
+    every printed L0 row), so results do not depend on the GPU count."""
+    launcher = os.environ.get("NBODY_TEST_LAUNCHER", "")
+    res = []
+    for lch in (launcher.replace("-n 2", "-n 1"), launcher):
+        os.environ["NBODY_TEST_LAUNCHER"] = lch
+        with tempfile.TemporaryDirectory() as d:
+            out = run_in(exe, cfg, d, env={"NBODY_DUMP": "1"})
+            res.append((l0_by_step(out), {f.name: f.read_bytes() for f in sorted(Path(d).glob("dump_*.bin"))}))
+    os.environ["NBODY_TEST_LAUNCHER"] = launcher
+    (l1, d1), (l2, d2) = res
+    ok = check(f"{label} L0 rows differing (1 vs 2 ranks)", sum(l1[s] != l2.get(s) for s in l1), 0)
+    ok &= check(f"{label} dumps", len(d1), 2, lower=True)
+    return ok & check(f"{label} particle dumps differing (1 vs 2 ranks)", sum(d1[k] != d2.get(k) for k in d1), 0)
+
+
 def triples(exe, label, cfg, bound):
     """Triples among particles with large ids must be classified (inner binary, outer companion)."""
     out = run_output(exe, cfg)
@@ -1382,6 +1399,12 @@ CASES = {
     # flags on the host (internal forces counted twice), |dE/E| 2e-5 per step, hidden by restarts. Measured
     # now 1.4e-10 / 6.7e-13 km/s, as the GPU path.
     # 2000 stars with binaries on 1 and 2 ranks: measured |difference| 4e-15 over 5 steps (summation order)
+    # Rank-count independence (2026-10-12: trajectories already were; the PE check now sums fixed row blocks, before
+    # the printed |dE/E| differed in the 7th digit). Sets above SERIAL_N2_GPU = 256 are split over the ranks
+    "rankcount_binaries": lambda exe: rank_count_identical(exe, "binaries, split sets",
+                                                          dict(BINARIES, TOTAL_TIME_MYR="3e-3", SERIAL_N2_GPU="256")),
+    "rankcount_mergers": lambda exe: rank_count_identical(exe, "mergers, split sets",
+                                                         dict(MERGERS, SERIAL_N2_CPU="0", SERIAL_N2_GPU="64")),
     "mpi_1v2": lambda exe: ranks_agree(exe, "1 vs 2 ranks", dict(BINARIES, TOTAL_TIME_MYR="5e-3", REPLICA_CHECK_INTERVAL="1"),
                                        1e-13),
     # The same with DISTRIBUTE_SUBSYSTEMS (each rank integrates its share, then exchanges): replicas must stay

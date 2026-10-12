@@ -99,56 +99,54 @@ double compute_potential_energy_tiled(const Particles& p, double G, double soft2
 // ==========================================================================
 // Compute PE distributed across MPI ranks (tiled kernel + allreduce)
 // ==========================================================================
-static double compute_potential_energy_distributed(const Particles& p, double G, double soft2) {
+// ==========================================================================
+// Potential energy as the sum of PE_BLOCKS fixed row blocks of the triangle (about equal pair counts: N - b_k =
+// N sqrt(1 - k / PE_BLOCKS)), each block summed by compute_potential_energy_tiled and the block sums added in block
+// order. With MPI each rank computes a contiguous range of blocks and the per-block sums are allreduced (one
+// nonzero term per block, so the sum is exact) before the ordered addition: every rank count, 1 included, gives
+// the same bits (SCALING_DESIGN.md sec. 6.1). Before 2026-10-12 the partial sums depended on the rank count, so the
+// printed |dE/E| differed in the 7th digit between 1 and 4 ranks while the trajectories were identical.
+// ==========================================================================
+namespace {
+constexpr int PE_BLOCKS = 64;
+int pe_block_bound(int N, int k) {
+    if (k <= 0) return 0;
+    if (k >= PE_BLOCKS) return N;
+    const int b = N - (int)std::lround(N * std::sqrt(1.0 - (double)k / PE_BLOCKS));
+    return std::min(std::max(b, 0), N);
+}
+double pe_fixed_blocks(const Particles& p, double G, double soft2) {
     const int N = p.N;
+    int k0 = 0, k1 = PE_BLOCKS;
 #ifdef USE_MPI
-    if (MPIComm::size() > 1) {
-        int n_ranks = MPIComm::size();
-        int my_rank = MPIComm::rank();
-        int base = N / n_ranks;
-        int rem  = N % n_ranks;
-        int i_start = my_rank * base + (my_rank < rem ? my_rank : rem);
-        int i_count = base + (my_rank < rem ? 1 : 0);
-
-        double local_PE = compute_potential_energy_tiled(p, G, soft2, i_start, i_count);
-
-        double total_PE = 0;
-        MPI_Allreduce(&local_PE, &total_PE, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-        return total_PE;
+    const int n_ranks = MPIComm::size(), r = MPIComm::rank();
+    if (n_ranks > 1) { k0 = (int)((long long)r * PE_BLOCKS / n_ranks); k1 = (int)((long long)(r + 1) * PE_BLOCKS / n_ranks); }
+#endif
+    std::vector<double> blk(PE_BLOCKS, 0.0);
+    for (int k = k0; k < k1; k++) {
+        const int b0 = pe_block_bound(N, k), b1 = pe_block_bound(N, k + 1);
+        if (b1 > b0) blk[k] = compute_potential_energy_tiled(p, G, soft2, b0, b1 - b0);
+    }
+#ifdef USE_MPI
+    if (n_ranks > 1) {
+        std::vector<double> all(PE_BLOCKS, 0.0);
+        MPI_Allreduce(blk.data(), all.data(), PE_BLOCKS, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+        blk.swap(all);
     }
 #endif
-    return compute_potential_energy_tiled(p, G, soft2, 0, N);
+    double PE = 0.0;
+    for (double v : blk) PE += v;
+    return PE;
+}
+}  // namespace
+
+static double compute_potential_energy_distributed(const Particles& p, double G, double soft2) {
+    return pe_fixed_blocks(p, G, soft2);
 }
 
-// ==========================================================================
-// PE split over the MPI ranks for the per-step energy check (compute_total_energy): rank r takes the rows
-// [b_r, b_r+1) with about 1/n_ranks of the N (N - 1) / 2 pairs of the triangle (rows near 0 have most j > i), and
-// the partial sums are added in rank order on every rank (MPI_Allgather), so all ranks get the same bits, as the
-// restart decision requires. One rank: compute_potential_energy_tiled over all rows (unchanged sum).
-// ==========================================================================
+// PE for the per-step energy check (compute_total_energy): the same fixed blocks, split over the ranks
 double compute_potential_energy_split(const Particles& p, double G, double soft2) {
-    const int N = p.N;
-#ifdef USE_MPI
-    const int n_ranks = MPIComm::size();
-    if (n_ranks > 1) {
-        const int r = MPIComm::rank();
-        // pairs in rows [b, N): (N - b)(N - b - 1) / 2; equal shares: N - b_r = N sqrt(1 - r / n_ranks)
-        auto bound = [&](int k) {
-            if (k <= 0) return 0;
-            if (k >= n_ranks) return N;
-            int b = N - (int)std::lround(N * std::sqrt(1.0 - (double)k / n_ranks));
-            return std::min(std::max(b, 0), N);
-        };
-        const int b0 = bound(r), b1 = bound(r + 1);
-        double mine = b1 > b0 ? compute_potential_energy_tiled(p, G, soft2, b0, b1 - b0) : 0.0;
-        std::vector<double> all(n_ranks);
-        MPI_Allgather(&mine, 1, MPI_DOUBLE, all.data(), 1, MPI_DOUBLE, MPI_COMM_WORLD);
-        double PE = 0;
-        for (double v : all) PE += v;
-        return PE;
-    }
-#endif
-    return compute_potential_energy_tiled(p, G, soft2, 0, N);
+    return pe_fixed_blocks(p, G, soft2);
 }
 
 DiagnosticState compute_diagnostics(const Particles& p, double G, double soft2) {

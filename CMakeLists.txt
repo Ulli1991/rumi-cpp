@@ -218,7 +218,7 @@ if(ENABLE_COLLISIONAL)
              $<TARGET_FILE:kepler-test> kepler_drift_unit)
 endif()
 if(USE_MPI)
-    foreach(case spin_mpi2 mergers_mpi2 mpi_1v2 mergers_mpi2_dist mpi_1v2_dist)
+    foreach(case spin_mpi2 mergers_mpi2 mpi_1v2 rankcount_binaries rankcount_mergers mergers_mpi2_dist mpi_1v2_dist)
         add_test(NAME ${case} COMMAND Python3::Interpreter ${CMAKE_SOURCE_DIR}/tests/run_case.py
                  $<TARGET_FILE:nbody-kokkos> ${case})
         set_tests_properties(${case} PROPERTIES
