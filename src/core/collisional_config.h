@@ -62,7 +62,7 @@ struct CollisionalConfig {
     // 2003). Stays on LogH: PN pairs (a member >= M_PN with PN on), collision candidates whose pericentre falls in
     // the interval (FROST-CLUSTERS I App. B3, decided there), pairs with a merged-away (massless) member, and
     // every subsystem of 3 or more bodies
-    bool kepler_2body = false;
+    bool kepler_2body = true;          // default since 2026-10-12 (12-27 % faster; old E_gw booking hid the 200k difference)
     bool kepler_2body_pair(double m1, double m2) const {
         return kepler_2body && !(pn_order > 0 && c_code > 0.0 && std::max(m1, m2) >= m_pn);
     }

@@ -1090,7 +1090,7 @@ CASES = {
     "cm_eps_cpu_vs_device": lambda exe: paths_same_steps(exe, "c.o.m. fly-by step with tidal sampling",
                                                          # old binary c.o.m. sampling: with the new one, PLUMMER_SEED 5 differs by
                                                          # 2-5 of 88k GBS steps (seeds 6, 7 agree exactly); not yet traced
-                                                         dict(BINARIES, FLYBY_CM_VELOCITY="true", FLYBY_CM_EPS="1e-11",
+                                                         dict(BINARIES, FLYBY_CM_VELOCITY="true", FLYBY_CM_EPS="1e-11", KEPLER_2BODY="false",
                                                               BINARY_COM_V="average"),
                                                          # TIDAL_STEP_RES floor (default 1): same LogH calls,
                                                          # GBS steps 85647/85645 and 87750/87737 (1.5e-4, host)
