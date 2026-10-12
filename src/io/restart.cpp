@@ -193,6 +193,7 @@ void visit_config(CollisionalConfig& c, F&& f) {
     f("gbs_deuflhard", c.gbs_deuflhard); f("gbs_kmax", c.gbs_kmax);
     f("grad_fresh", c.grad_fresh); f("bh_merge_max_single", c.bh_merge_max_single);
     f("coll_mass_loss_c", c.coll_mass_loss_c);
+    f("sse_natal_kicks", c.sse_natal_kicks); f("kick_seed", c.kick_seed);
 }
 
 void write_config(hid_t parent) {

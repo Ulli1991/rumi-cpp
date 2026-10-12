@@ -68,6 +68,11 @@ struct SSEResult {
     double mass_core; // Core mass (M_sun)
     double radius;    // Stellar radius (R_sun)
     double luminosity;// Luminosity (L_sun)
+    // Supernova that formed the remnant (kw 13/14), for the natal kick (runtime_sse.cpp): fallback fraction f_fb of
+    // the remnant prescription (Fryer et al. 2012 rapid/delayed; Belczynski et al. 2002/2008; 0 for HURLEY and
+    // ELDRIDGE_TOUT, which have none) and whether it was an electron-capture SN
+    double fbfac = 0.0;
+    bool ecsn = false;
 };
 
 // =========================================================================
@@ -77,7 +82,8 @@ struct SSEResult {
 struct RemnantResult {
     double mt;    // remnant mass
     int kw;       // stellar type (13=NS, 14=BH, 15=massless SN)
-    double fbfac; // fallback fraction (informational)
+    double fbfac; // fallback fraction f_fb (scales the natal kick, runtime_sse.cpp)
+    bool ecsn = false;  // electron-capture SN (low natal kick)
 };
 
 class SSEContext {
@@ -148,7 +154,7 @@ private:
     void hrdiag(double& mass, double& aj, double& mt, double& tm, double& tn,
                 double tscls[20], double lums[10], double GB[10],
                 double& r, double& lum, int& kw, double& mc, double& rc,
-                double& menv, double& renv) const;
+                double& menv, double& renv, RemnantResult* rem_out = nullptr) const;
     double mlwind(int kw, double lum, double r, double mt, double mc,
                   double rl, double z) const;
     void deltat(int kw, double age, double tm, double tn,

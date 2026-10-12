@@ -221,6 +221,17 @@ BIG_GROUP = dict(TEST_CASE="plummer", INTEGRATOR="hhs", TOTAL_TIME_MYR="1e-5", D
                  SOFTENING_PC="0", COLLISIONAL="true", R_NGB="1e-3", R_NGB_MAX="0.1", PN_ORDER="0", SSE_ENABLED="false",
                  PLUMMER_N="16", PLUMMER_M_TOTAL="16", PLUMMER_R_HALF="2e-4", PLUMMER_SEED="3", PLUMMER_MASS_DIST="equal",
                  PRINT_INTERVAL="1", PROFILING="false")
+# Natal kicks (runtime_sse.cpp): 500 12-Msun stars at Z = 0.02 in a cluster of r_h = 1 kpc (no dynamics to speak of),
+# 1 Myr steps through their core collapse at 19-21 Myr: 500 NSs (Fryer 2012 rapid, f_fb ~ 0.025)
+NATAL_NS = dict(TEST_CASE="plummer", INTEGRATOR="hhs", TOTAL_TIME_MYR="22", DT_MAX_MYR="1.0", DT_MIN_MYR="1e-14",
+                SOFTENING_PC="0", COLLISIONAL="true", PN_ORDER="0", SSE_ENABLED="true", SSE_METALLICITY="0.02",
+                SSE_REMNANT_MODEL="FRYER_RAPID", SSE_ECSN_MODEL="OFF", SSE_PPISN_MODEL="NONE", PLUMMER_N="500",
+                PLUMMER_M_TOTAL="6000", PLUMMER_R_HALF="1000", PLUMMER_SEED="3", PLUMMER_MASS_DIST="equal",
+                R_ESCAPE_RH="1000", PRINT_INTERVAL="1", PROFILING="false")
+# 500 Kroupa masses scaled to <m> = 8 Msun (1.1-295 Msun) at Z = 2e-4 (FRYER_RAPID, ECSN, PPISN STRONG), 60 Myr:
+# 89 NSs, 21 BHs with partial fallback, 6 direct-collapse BHs, 6 ECSN NSs
+NATAL_MIX = dict(NATAL_NS, TOTAL_TIME_MYR="60", PLUMMER_MASS_DIST="kroupa", PLUMMER_M_TOTAL="4000",
+                 PLUMMER_R_HALF="2000", SSE_METALLICITY="0.0002", SSE_ECSN_MODEL="ON", SSE_PPISN_MODEL="STRONG")
 
 
 def run(exe, cfg):
@@ -869,6 +880,71 @@ def coll_mass_loss(exe, label, cfg, bound):
     return ok & check(f"{label} max|dE/E| with merger sink", max(r[0] for r in diagnostics(out)), bound)
 
 
+SIGMA_NS, SIGMA_ECSN = 265.0, 3.0   # km/s: Hobbs et al. 2005; Banerjee et al. 2020 sec. 3.2 (Gessner & Janka 2018)
+
+
+def natal_kicks_printed(out):
+    """(pid, new kw, m, f_fb, ecsn, dv) of every "SSE natal kick" line"""
+    pat = r"SSE natal kick: pid (\d+) kw \d+ -> (\d+) m (\S+) Msun f_fb (\S+) ecsn (\d) dv (\S+) (\S+) (\S+) km/s"
+    return [(int(p), int(k), float(m), float(f), e == "1", [float(a), float(b), float(c)])
+            for p, k, m, f, e, a, b, c in re.findall(pat, out)]
+
+
+def maxwell_mean_check(label, vs, sigma):
+    """Mean of Maxwellian samples (1D dispersion sigma) against 2 sigma sqrt(2/pi), within 3 standard errors"""
+    if not vs:
+        return check(f"{label} kicks", 0, 1, lower=True)
+    mean, se = sum(vs) / len(vs), sigma * math.sqrt(3 - 8 / math.pi) / math.sqrt(len(vs))
+    return check(f"{label}: |<v> - 2 sigma sqrt(2/pi)| [km/s] (n = {len(vs)}, bound 3 SE)",
+                 abs(mean - 2 * sigma * math.sqrt(2 / math.pi)), 3 * se)
+
+
+def natal_kicks_ns(exe, label, cfg, bound):
+    """SSE_NATAL_KICKS = hobbs: every new NS gets an isotropic Maxwellian kick of sigma_NS (1 - f_fb) (Banerjee et
+    al. 2020 eq. 1). 500 NSs: <|v|/(1 - f_fb)> = 2 sigma sqrt(2/pi) = 423 km/s, each component's dispersion sigma and
+    the mean kick direction zero, all within 3 standard errors; E with the E_sse sink conserved. Before 2026-10-12:
+    265 km/s along the current velocity (mean 265 km/s), and E_sse missed the potential energy on host builds (|dE/E|
+    2 at the supernovae). SSE_NATAL_KICKS = none: no kicks."""
+    out = run_output(exe, cfg)
+    k = [x for x in natal_kicks_printed(out) if x[1] == 13 and not x[4]]
+    ok = check(f"{label} NSs kicked", len(k), 450, lower=True)
+    if not k:
+        return False
+    n = len(k)
+    s = [[c / (1 - f) for c in dv] for _, _, _, f, _, dv in k]
+    ok &= maxwell_mean_check(label, [math.sqrt(sum(c * c for c in v)) for v in s], SIGMA_NS)
+    for i, ax in enumerate("xyz"):
+        disp = math.sqrt(sum(v[i] ** 2 for v in s) / n)
+        ok &= check(f"{label}: |sigma_{ax} - 265| [km/s] (bound 3 SE)", abs(disp - SIGMA_NS), 3 * SIGMA_NS / math.sqrt(2 * n))
+        mean_dir = sum(v[i] / math.sqrt(sum(c * c for c in v)) for v in s) / n
+        ok &= check(f"{label}: |<n_{ax}>| (isotropic; bound 3 / sqrt(3 n))", abs(mean_dir), 3 / math.sqrt(3 * n))
+    ok &= check(f"{label} max|dE/E| with E_sse", max(r[0] for r in diagnostics(out)), bound)
+    none = run_output(exe, dict(cfg, SSE_NATAL_KICKS="none"))
+    ok &= check(f"{label} SSE_NATAL_KICKS = none: kicks", len(natal_kicks_printed(none)), 0)
+    return ok & check(f"{label} SSE_NATAL_KICKS = none: NSs formed", none.count(" 500 type changes"), 2, lower=True)
+
+
+def natal_kicks_fallback(exe, label, cfg, bound):
+    """Fallback scaling (Banerjee et al. 2020 eq. 1; Fryer et al. 2012 rapid f_fb): direct-collapse BHs (f_fb = 1)
+    exactly unkicked; BHs with partial fallback kicked; <|v|/(1 - f_fb)> of all non-ECSN NSs and BHs = 423 km/s
+    within 3 standard errors; ECSN NSs from the 3 km/s Maxwellian; E with the E_sse sink conserved. Before
+    2026-10-12: BHs 50 km/s (1 - (1 - m_rem/m_old)), direct collapse included, ECSN NSs 265 km/s."""
+    out = run_output(exe, cfg)
+    k = natal_kicks_printed(out)
+    dc = [x for x in k if x[1] == 14 and x[3] >= 1.0]
+    part = [x for x in k if x[1] == 14 and 0.0 < x[3] < 1.0 and not x[4]]
+    ec = [x for x in k if x[4]]
+    mag = lambda dv: math.sqrt(sum(c * c for c in dv))
+    ok = check(f"{label} direct-collapse BHs", len(dc), 3, lower=True)
+    ok &= check(f"{label} direct-collapse BHs kicked", sum(mag(x[5]) != 0.0 for x in dc), 0)
+    ok &= check(f"{label} BHs with partial fallback, kicked", sum(mag(x[5]) > 0.0 for x in part), 10, lower=True)
+    ok &= maxwell_mean_check(f"{label} NS+BH, |v|/(1 - f_fb)",
+                             [mag(x[5]) / (1 - x[3]) for x in k if x[3] < 1.0 and not x[4]], SIGMA_NS)
+    ok &= check(f"{label} ECSN NSs", len(ec), 3, lower=True)
+    ok &= maxwell_mean_check(f"{label} ECSN", [mag(x[5]) for x in ec], SIGMA_ECSN)
+    return ok & check(f"{label} max|dE/E| with E_sse", max(r[0] for r in diagnostics(out)), bound)
+
+
 def tde_accretion(exe, label, cfg):
     """TDE remnant mass: m_BH + TDE_ACCRETION_FRACTION x m_star (FROST-CLUSTERS I, DRAGON-II: 0.5) for f = 0, 0.5, 1."""
     ok = True
@@ -1499,6 +1575,11 @@ CASES = {
     "bh_merge_radius_total": lambda exe: bh_merge_radius(exe, "total-mass ISCO", COLL_ISCO, 5.7384e-12),
     # Glebbeek 2013 / FROST-CLUSTERS III collision mass loss (head-on 1 + 1 Msun: remnant 1.85 Msun)
     "coll_mass_loss": lambda exe: coll_mass_loss(exe, "head-on with mass loss", COLL_HEADON, 1.8e-12),
+    # Natal kicks (2026-10-12): max |dE/E| with E_sse 4.3e-9 and 9.6e-9 (round-off of the ~1e7 kick energy against
+    # |E0| = 30), bounds 1.3x; the statistical bounds are 3 standard errors (measured: <|v|> at 0.45, 0.28 and 0.29
+    # of them, <n_k> up to 0.86)
+    "natal_kicks_ns": lambda exe: natal_kicks_ns(exe, "500 NSs", NATAL_NS, 5.6e-9),
+    "natal_kicks_fallback": lambda exe: natal_kicks_fallback(exe, "rapid + ECSN", NATAL_MIX, 1.25e-8),
     "coll_tde_accretion": lambda exe: tde_accretion(exe, "TDE accretion fraction", COLL_TDE),
     "coll_tde_parabolic": lambda exe: subsys_collision(exe, "TDE, parabolic", COLL_TDE, "TDE", 1.5e-12),
     "coll_bh_isco": lambda exe: subsys_collision(exe, "BH binary to ISCO, PN", COLL_ISCO, "ISCO", 1e-14),
@@ -1579,6 +1660,9 @@ CASES = {
                                                          dict(TRIPLES, SERIAL_N2_GPU="256")),
     "rankcount_mergers": lambda exe: rank_count_identical(exe, "mergers, split sets",
                                                          dict(MERGERS, SERIAL_N2_CPU="0", SERIAL_N2_GPU="64")),
+    # Natal kicks: hashed from (pid, PLUMMER_SEED, kw), the same on every rank count
+    "rankcount_natal_kicks": lambda exe: rank_count_identical(exe, "natal kicks, split sets",
+                                                             dict(NATAL_MIX, SERIAL_N2_GPU="256")),
     "mpi_1v2": lambda exe: ranks_agree(exe, "1 vs 2 ranks", dict(BINARIES, TOTAL_TIME_MYR="5e-3", REPLICA_CHECK_INTERVAL="1"),
                                        1e-13),
     # The same with DISTRIBUTE_SUBSYSTEMS (each rank integrates its share, then exchanges): replicas must stay
@@ -1600,6 +1684,8 @@ CASES = {
     "restart_mergers": lambda exe: restart_identical(exe, "mergers, step restarts", dict(MERGERS, SERIAL_N2_CPU="0"), 5),
     "restart_mergers_sse": lambda exe: restart_identical(exe, "mergers + SSE", dict(MERGERS, SERIAL_N2_CPU="0",
                                                                                    SSE_ENABLED="true"), 3),
+    # Natal kicks before and after the restart at 30 Myr (draws hashed from pid, PLUMMER_SEED and kw)
+    "restart_natal_kicks": lambda exe: restart_identical(exe, "natal kicks", NATAL_MIX, 30),
     # NGB_MASS_SCALING: <m> of the initial particles is a run constant (043190d..: recomputed from the merged-down
     # state on restart)
     "restart_ngb_mergers": lambda exe: restart_identical(exe, "mergers, mass-scaled r_ngb",

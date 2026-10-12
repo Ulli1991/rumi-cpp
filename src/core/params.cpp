@@ -85,6 +85,9 @@ const std::vector<ParamSpec> kParams = {
     {"SSE_MXNS", D, "-1.0", "Stellar evolution", USER, "",
      "Largest neutron-star mass (Msun); -1: 1.8 for HURLEY, 2.5 otherwise"},
     {"SSE_FLBV", D, "1.5", "Stellar evolution", USER, "", "LBV wind scaling factor"},
+    {"SSE_NATAL_KICKS", S, "hobbs", "Stellar evolution", USER, "hobbs|none",
+     "Natal kicks of new NSs and BHs: Maxwellian sigma = 265 km/s (Hobbs 2005) times (1 - f_fb), ECSN 3 km/s "
+     "(Banerjee 2020); none: no kick"},
 
     // ---- Collisions and mergers ----
     {"COLL_MASS_LOSS_C", D, "0.0", "Collisions and mergers", USER, "",

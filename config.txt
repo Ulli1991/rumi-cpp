@@ -45,6 +45,7 @@ SSE_PPISN_MODEL = STRONG                # NONE / STRONG / MODERATE / WEAK
 SSE_ECSN_MODEL = ON                     # OFF / ON
 SSE_MXNS = 2.5                          # Largest NS mass (Msun; -1: 1.8 for HURLEY, 2.5 otherwise)
 SSE_FLBV = 1.5                          # LBV wind scaling
+SSE_NATAL_KICKS = hobbs                 # hobbs (Maxwellian 265 km/s x (1 - f_fb), ECSN 3 km/s) / none
 
 # ---- Collisions and mergers ----
 COLL_MASS_LOSS_C = 0                    # Stellar-collision mass loss C (Glebbeek 2013; FROST-CLUSTERS III: 0.3)

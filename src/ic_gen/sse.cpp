@@ -1473,6 +1473,7 @@ RemnantResult SSEContext::compute_remnant(double mc, double mcbagb,
         res.mt = 1.26;
         res.kw = 13;  // NS
         res.fbfac = 0.0;
+        res.ecsn = true;
         return res;
     }
 
@@ -1646,7 +1647,7 @@ RemnantResult SSEContext::compute_remnant(double mc, double mcbagb,
 void SSEContext::hrdiag(double& mass, double& aj, double& mt, double& tm, double& tn,
                         double tscls[20], double lums[10], double GB[10],
                         double& r, double& lum, int& kw, double& mc, double& rc,
-                        double& menv, double& renv) const {
+                        double& menv, double& renv, RemnantResult* rem_out) const {
     const double mch = 1.44, mlp = 12.0, tiny = 1.0e-14;
     const double taumin = 5.0e-08;
     const double lum0 = 7.0e+04, kap = -0.5, ahe = 4.0, aco = 16.0;
@@ -1975,6 +1976,7 @@ void SSEContext::hrdiag(double& mass, double& aj, double& mt, double& tm, double
                         r = 1.0e-10;
                     } else {
                         auto rem = compute_remnant(mc, mcbagb, mt, mass, false);
+                        if (rem_out) *rem_out = rem;
                         mt = rem.mt;
                         kw = rem.kw;
                         mc = mt;
@@ -2028,6 +2030,7 @@ label_90:
                         r = 1.0e-10;
                     } else {
                         auto rem = compute_remnant(mc, mass, mt, mass, true);
+                        if (rem_out) *rem_out = rem;
                         mt = rem.mt;
                         kw = rem.kw;
                         mc = mt;
@@ -2185,6 +2188,7 @@ SSEResult SSEContext::evolve(double m_zams, double age_myr) const {
     double dtm = 0.0;
     double rm0 = 0.0;
     double ajhold = 0.0;
+    RemnantResult rem{0.0, 0, 0.0, false};   // the supernova of the main track (not of the look-ahead copies)
 
     for (int j = 1; j <= nv; j++) {
         double dms = 0.0;
@@ -2242,7 +2246,7 @@ SSEResult SSEContext::evolve(double m_zams, double age_myr) const {
 
         int kwold = kw;
         hrdiag(mass, aj, mt, tm, tn, tscls, lums, GB,
-               r, lum, kw, mc, rc, menv, renv);
+               r, lum, kw, mc, rc, menv, renv, &rem);
 
         // Check for type change / end condition
         if (kw == 15) {
@@ -2250,7 +2254,7 @@ SSEResult SSEContext::evolve(double m_zams, double age_myr) const {
         }
 
         if (tphys >= tphysf) {
-            return {kw, mt, mc, r, lum};
+            return {kw, mt, mc, r, lum, rem.fbfac, rem.ecsn};
         }
 
         // Record radius and age
@@ -2335,5 +2339,5 @@ SSEResult SSEContext::evolve(double m_zams, double age_myr) const {
     }
 
     // If we get here, max iterations reached
-    return {kw, mt, mc, r, lum};
+    return {kw, mt, mc, r, lum, rem.fbfac, rem.ecsn};
 }

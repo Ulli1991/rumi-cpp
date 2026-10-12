@@ -93,6 +93,8 @@ struct CollisionalConfig {
     std::string sse_ecsn = "OFF";               // ECSN model
     double sse_mxns = -1.0;                     // Max NS mass (-1 = auto)
     double sse_flbv = 1.5;                      // LBV scaling factor
+    std::string sse_natal_kicks = "hobbs";      // NS/BH natal kicks: hobbs / none (runtime_sse.cpp)
+    int kick_seed = 42;                         // PLUMMER_SEED: seed of the deterministic natal-kick draws
 
     // Derived quantities (computed at init)
     double r_ngb_sq = 0.0;            // r_ngb²
@@ -120,6 +122,7 @@ struct CollisionalConfig {
         one_of(sse_remnant, {"HURLEY","BELCZYNSKI02","BELCZYNSKI08","FRYER_RAPID","FRYER_DELAYED","ELDRIDGE_TOUT"}, "SSE_REMNANT_MODEL");
         one_of(sse_ppisn, {"NONE","STRONG","MODERATE","WEAK"}, "SSE_PPISN_MODEL");
         one_of(sse_ecsn, {"OFF","ON"}, "SSE_ECSN_MODEL");
+        one_of(sse_natal_kicks, {"hobbs","none"}, "SSE_NATAL_KICKS");
 
         r_ngb_sq = r_ngb * r_ngb;
         r_ngb_max_sq = r_ngb_max * r_ngb_max;

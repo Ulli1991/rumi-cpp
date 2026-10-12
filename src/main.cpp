@@ -653,6 +653,8 @@ int main(int argc, char** argv) {
             g_collisional.sse_ecsn        = sse_ecsn_str;
             g_collisional.sse_mxns        = sse_mxns_val;
             g_collisional.sse_flbv        = sse_flbv_val;
+            g_collisional.sse_natal_kicks = cfg.get_str("SSE_NATAL_KICKS");
+            g_collisional.kick_seed       = seed;
             g_collisional.compute_derived();
 
             // Collisional mode requires zero softening
@@ -939,12 +941,13 @@ int main(int argc, char** argv) {
                     std::printf("  SDAR slow-down in LogH subsystems: k_ref=%.1e, c=%.3g\n",
                                 g_collisional.sdar_kref, g_collisional.sdar_c);
                 if (g_collisional.sse_enabled) {
-                    std::printf("  SSE: Z=%.4f, wind=%s, remnant=%s, ppisn=%s, ecsn=%s\n",
+                    std::printf("  SSE: Z=%.4f, wind=%s, remnant=%s, ppisn=%s, ecsn=%s, natal kicks=%s\n",
                                 g_collisional.sse_metallicity,
                                 g_collisional.sse_wind.c_str(),
                                 g_collisional.sse_remnant.c_str(),
                                 g_collisional.sse_ppisn.c_str(),
-                                g_collisional.sse_ecsn.c_str());
+                                g_collisional.sse_ecsn.c_str(),
+                                g_collisional.sse_natal_kicks.c_str());
                 }
             }
 #endif

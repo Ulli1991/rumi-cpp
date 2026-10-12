@@ -1,10 +1,10 @@
 # Config reference
 
-All 140 keys of the config file (`config.txt`, or `--config <file>`), generated from the parameter table in `src/core/params.cpp` by `scripts/gen_config_md.py`. Every key has one default, in that table; an unknown key in a config file is an error. Each run writes the effective value of every key, and whether it came from the file or the default, to `run_params.txt`.
+All 141 keys of the config file (`config.txt`, or `--config <file>`), generated from the parameter table in `src/core/params.cpp` by `scripts/gen_config_md.py`. Every key has one default, in that table; an unknown key in a config file is an error. Each run writes the effective value of every key, and whether it came from the file or the default, to `run_params.txt`.
 
 Levels:
 
-- **user**: the choices of a run; these 49 keys are in `config.txt`.
+- **user**: the choices of a run; these 50 keys are in `config.txt`.
 - **expert**: accuracy and output knobs; the default is the production value.
 - **test**: parameters of the few-body test problems.
 - **internal**: performance tuning thresholds; results do not depend on them (or only through the reduction order).
@@ -78,6 +78,7 @@ Levels:
 | `SSE_ECSN_MODEL` | string | `OFF` | user | OFF\|ON | Electron-capture supernovae |
 | `SSE_MXNS` | double | `-1.0` | user |  | Largest neutron-star mass (Msun); -1: 1.8 for HURLEY, 2.5 otherwise |
 | `SSE_FLBV` | double | `1.5` | user |  | LBV wind scaling factor |
+| `SSE_NATAL_KICKS` | string | `hobbs` | user | hobbs\|none | Natal kicks of new NSs and BHs: Maxwellian sigma = 265 km/s (Hobbs 2005) times (1 - f_fb), ECSN 3 km/s (Banerjee 2020); none: no kick |
 
 ## Collisions and mergers
 
