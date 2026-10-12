@@ -704,6 +704,7 @@ int main(int argc, char** argv) {
             g_collisional.sdar_c          = cfg.get_double("SDAR_C", 0.1);
             g_collisional.subsys_collisions = cfg.get_bool("SUBSYS_COLLISIONS", true);
             g_collisional.tde_accretion = cfg.get_double("TDE_ACCRETION_FRACTION", 0.5);
+            g_collisional.bh_merge_max_single = cfg.get_str("BH_MERGE_RADIUS", "total") == "max_single";
             g_collisional.grad_fresh = cfg.get_bool("GRAD_FRESH", false);
             g_collisional.gbs_deuflhard = cfg.get_str("GBS_SEQUENCE", "bulirsch") == "deuflhard";
             g_collisional.gbs_kmax = cfg.get_int("GBS_KMAX", 10);

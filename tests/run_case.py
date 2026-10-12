@@ -789,6 +789,16 @@ def grad_sweep(exe, label, cfg, etas, bounds, order):
     return ok & check(f"{label} order of max|dE/E| in ETA_GRAD", slope, order[1])
 
 
+def bh_merge_radius(exe, label, cfg, r_expect):
+    """BH_MERGE_RADIUS: the collision distance of the ISCO event (printed r_coll) and r_sep < r_coll at the decision."""
+    out = run_output(exe, cfg)
+    m = re.findall(r"\[SUBSYS COLLISION\] ISCO .*?r_sep / r_coll = (\S+), r_coll = (\S+) pc", out)
+    if not m:
+        return check(f"{label} ISCO event", 0, 1, lower=True)
+    ok = check(f"{label} |r_coll / r_expected - 1|", abs(float(m[0][1]) / r_expect - 1.0), 3e-3)   # G, c rounding
+    return ok & check(f"{label} r_sep / r_coll at the decision", float(m[0][0]), 1.0)
+
+
 def tde_accretion(exe, label, cfg):
     """TDE remnant mass: m_BH + TDE_ACCRETION_FRACTION x m_star (FROST-CLUSTERS I, DRAGON-II: 0.5) for f = 0, 0.5, 1."""
     ok = True
@@ -1349,6 +1359,11 @@ CASES = {
                                                      PN_ORDER="0", SSE_ENABLED="false", PRINT_INTERVAL="10",
                                                      ETA_FF="10", ETA_FB="10", ETA_JERK="0", ETA="0", GRAD_FRESH="true"),
                                                 ["0.1", "0.05"], [4.7e-6, 2.4e-7], (3.8, 4.7)),
+    # BH_MERGE_RADIUS: total (default) 6 G (m1 + m2) / c^2 = 5.74e-12 pc for 10 + 10 Msun; max_single (FROST-CLUSTERS
+    # I sec. 2.6.3) 6 G max(m1, m2) / c^2 = 2.87e-12 pc (the inspiral runs longer)
+    "bh_merge_radius_fc": lambda exe: bh_merge_radius(exe, "max single ISCO", dict(COLL_ISCO, BH_MERGE_RADIUS="max_single",
+                                                                                   TOTAL_TIME_MYR="6e-14"), 2.8692e-12),
+    "bh_merge_radius_total": lambda exe: bh_merge_radius(exe, "total-mass ISCO", COLL_ISCO, 5.7384e-12),
     "coll_tde_accretion": lambda exe: tde_accretion(exe, "TDE accretion fraction", COLL_TDE),
     "coll_tde_parabolic": lambda exe: subsys_collision(exe, "TDE, parabolic", COLL_TDE, "TDE", 1.5e-12),
     "coll_bh_isco": lambda exe: subsys_collision(exe, "BH binary to ISCO, PN", COLL_ISCO, "ISCO", 1e-14),

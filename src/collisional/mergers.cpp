@@ -54,7 +54,12 @@ double collision_distance(int kw1, double m1, double R1, int kw2, double m2, dou
                           MergerType& type) {
     const bool bh1 = (kw1 == 14), bh2 = (kw2 == 14);
     const double r_isco = c > 0.0 ? 6.0 * G * (m1 + m2) / (c * c) : 0.0;
-    if (bh1 && bh2) { type = MergerType::ISCO; return r_isco; }
+    // BH_MERGE_RADIUS = max_single: FROST-CLUSTERS I sec. 2.6.3, r_sep < max(r_ISCO,1, r_ISCO,2) with r_ISCO = 6 G m / c^2
+    // of each zero-spin BH (default total: the ISCO of the pair's total mass, the conventional plunge separation)
+    if (bh1 && bh2) {
+        type = MergerType::ISCO;
+        return g_collisional.bh_merge_max_single && c > 0.0 ? 6.0 * G * std::max(m1, m2) / (c * c) : r_isco;
+    }
     if (bh1 || bh2) {
         const double m_s = bh1 ? m2 : m1, R_s = bh1 ? R2 : R1, M_bh = bh1 ? m1 : m2;
         const double r_t = R_s > 0.0 && m_s > 0.0 ? std::max(tidal_disruption_radius(m_s, R_s, M_bh), R_s) : 0.0;
@@ -513,9 +518,9 @@ void finalize_subsystem_collision(const SubsystemCollision& c, Particles& p, Sub
     }
     g_merger_tree.record(ev, tmp, g_sim_time);
     static const char* names[] = {"GW", "ISCO", "TDE", "STELLAR", "NONE"};
-    std::printf("  [SUBSYS COLLISION] %s pids %d + %d, m %.4g + %.4g -> %.4g Msun, r_sep / r_coll = %.4g, a = %.4g pc,"
+    std::printf("  [SUBSYS COLLISION] %s pids %d + %d, m %.4g + %.4g -> %.4g Msun, r_sep / r_coll = %.4g, r_coll = %.6g pc, a = %.4g pc,"
                 " e = %.6f, n = %d, dE_int = %.6e\n", names[(int)c.type], c.pid_keep, c.pid_gone, c.m_keep, c.m_gone,
-                m_rem, c.r_coll > 0.0 ? c.r_sep / c.r_coll : -1.0, tmp.orb.a, tmp.orb.e, c.n_members, c.dE_int);
+                m_rem, c.r_coll > 0.0 ? c.r_sep / c.r_coll : -1.0, c.r_coll, tmp.orb.a, tmp.orb.e, c.n_members, c.dE_int);
 }
 
 // ============================================================================

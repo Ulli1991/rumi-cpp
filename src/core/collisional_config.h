@@ -53,6 +53,7 @@ struct CollisionalConfig {
     bool gbs_deuflhard = false;        // GBS_SEQUENCE = deuflhard (2, 4, 6, ...; MSTAR / FROST-CLUSTERS) instead of bulirsch
     int gbs_kmax = 10;                 // GBS_KMAX: extrapolation stages (FROST-CLUSTERS I: 8)
     bool grad_fresh = false;           // GRAD_FRESH: gradient time step from a fresh |g'| at level 0 (fix 3)
+    bool bh_merge_max_single = false;  // BH_MERGE_RADIUS = max_single (FROST-CLUSTERS I) | total (default)
     double tde_accretion = 0.5;        // TDE_ACCRETION_FRACTION: fraction of a disrupted star the BH accretes (FROST-CLUSTERS I, DRAGON-II: 0.5)
 
     // Secular evolution
