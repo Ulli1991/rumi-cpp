@@ -3,11 +3,18 @@
 // of the outputs so kernel changes can be checked for bit-identity.
 //   n2-bench [ni:nj[:set] ...]      sinks [0, ni) from sources [0, nj); set: sink-set size (SinkSetScope) as when one
 //                                   of several ranks computes a slice of a set (default ni)
-// env: N2_KERNELS  comma list of force,force0,grad,dt,dt64,accdt (default force,grad,dt,accdt)
+// env: N2_KERNELS  comma list of force,force0,grad,dt,dt64,accdt (default force,grad,dt,accdt), and the experimental
+//                  force variants that change results (not used by the code; timed and compared with force):
+//                  force_nn  ForceK without the RSQRT_NEWTON step (CUDA double rsqrt only, ~1 ulp)
+//                  force_mix mixed precision as Sapporo (Gaburov et al. 2009): positions as fp32 hi + lo pairs, the
+//                            difference in double-single, everything else fp32 (rsqrt.approx), fp32 sums over 32
+//                            sources folded into the fp64 tile sums (needs nj and source offsets multiple of 32)
 //      N2_N        particles of the synthetic cluster (default max nj), N2_DUMP=dump_XXXX.bin: load that state instead
 //      N2_REPS     repetitions (default: ~2e11 pairs per kernel and case)
 //      N2_OUT      prefix: write each kernel's outputs to <prefix>_<kernel>_<ni>_<nj>.bin (doubles) for error comparisons
-//      N2_ACC=1    force kernel: relative error against a long-double reference on 200 sample sinks
+//      N2_KMEM     TidalSampling::k of binary members (tidal-sampling step; default 1e30 as non-members)
+//      dtcheck     (in N2_KERNELS) safety margin of the fp32 time-step pre-rejects
+//      N2_ACC=1    force kernels: relative error against a long-double reference on 200 sample sinks
 #include "n2_kernels.h"
 #include <Kokkos_Core.hpp>
 #include <algorithm>
@@ -107,6 +114,102 @@ bool load_dump(const char* fn, Cluster& c) {
     return true;
 }
 
+// ---- experimental force variants (results differ from ForceK; for the speed / accuracy trade-off only)
+KOKKOS_INLINE_FUNCTION double rsqrt_plain(double x) {
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
+    return rsqrt(x);
+#else
+    return 1.0 / std::sqrt(x);
+#endif
+}
+KOKKOS_INLINE_FUNCTION float rsqrt_ftz(float x) {
+#if defined(__CUDA_ARCH__)
+    float y;
+    asm("rsqrt.approx.ftz.f32 %0, %1;" : "=f"(y) : "f"(x));
+    return y;
+#else
+    return 1.0f / std::sqrt(x);
+#endif
+}
+
+// ForceK (collisional, soft2 = 0) with the plain device rsqrt: 4 FP64 operations less per pair
+struct ForceNNK : ForceK<true, false> {
+    KOKKOS_INLINE_FUNCTION void pair(const Sink& a, int i, const double* s, int j, double* sum, double*) const {
+        const bool w = pair_weight(i, j, a.sid, n2_lo(s[4]));
+        double dx = s[0] - a.x, dy = s[1] - a.y, dz = s[2] - a.z;
+        double r2 = w ? dx * dx + dy * dy + dz * dz : 1.0;
+        double ir = rsqrt_plain(r2);
+        double f = (w ? s[3] : 0.0) * ir * ir * ir;
+        sum[0] += f * dx; sum[1] += f * dy; sum[2] += f * dz;
+    }
+};
+
+// Mixed precision: x = hi + lo (fp32 each), dx = (xj_hi - xi_hi) + (xj_lo - xi_lo) in fp32 (the hi difference is exact
+// for nearby pairs), r^-3 and G m r^-3 dx in fp32, fp32 partial sums over 32 sources added to the fp64 sum
+struct ForceMixK {
+    static constexpr int NSRC = 4, NS = 3, NM = 0;
+    RawView x, y, z, m, ax, ay, az;
+    const int* sid;
+    double G;
+    struct Sink { float xh, xl, yh, yl, zh, zl; int sid; mutable float b0, b1, b2; };
+    static KOKKOS_INLINE_FUNCTION float lo(double v, float h) { return (float)(v - (double)h); }
+    KOKKOS_INLINE_FUNCTION Sink sink(int i) const {
+        const float xh = (float)x(i), yh = (float)y(i), zh = (float)z(i);
+        return {xh, lo(x(i), xh), yh, lo(y(i), yh), zh, lo(z(i), zh), sid[i], 0.0f, 0.0f, 0.0f};
+    }
+    KOKKOS_INLINE_FUNCTION void source(int j, double* s) const {
+        const float xh = (float)x(j), yh = (float)y(j), zh = (float)z(j);
+        s[0] = n2_pack(xh, lo(x(j), xh)); s[1] = n2_pack(yh, lo(y(j), yh)); s[2] = n2_pack(zh, lo(z(j), zh));
+        s[3] = n2_pack(sid[j], (float)(G * m(j)));
+    }
+    KOKKOS_INLINE_FUNCTION void pair(const Sink& a, int i, const double* s, int j, double* sum, double*) const {
+        const bool w = pair_weight(i, j, a.sid, n2_lo(s[3]));
+        const float dx = (n2_lo_f(s[0]) - a.xh) + (n2_hi_f(s[0]) - a.xl);
+        const float dy = (n2_lo_f(s[1]) - a.yh) + (n2_hi_f(s[1]) - a.yl);
+        const float dz = (n2_lo_f(s[2]) - a.zh) + (n2_hi_f(s[2]) - a.zl);
+        const float r2 = w ? dx * dx + dy * dy + dz * dz : 1.0f;
+        const float ir = rsqrt_ftz(r2);
+        const float f = (w ? n2_hi_f(s[3]) : 0.0f) * ir * ir * ir;
+        a.b0 += f * dx; a.b1 += f * dy; a.b2 += f * dz;
+        if ((j & 31) == 31) {
+            sum[0] += (double)a.b0; sum[1] += (double)a.b1; sum[2] += (double)a.b2;
+            a.b0 = a.b1 = a.b2 = 0.0f;
+        }
+    }
+    KOKKOS_INLINE_FUNCTION void finish(int i, const Sink&, const double* sum, const double*) const {
+        ax(i) = sum[0]; ay(i) = sum[1]; az(i) = sum[2];
+    }
+};
+
+// Safety check of the fp32 pre-rejects (dtcheck): every pair evaluated in fp64; for the pairs the pre-rejects would skip,
+// the smallest ratio of the exact step to the running minimum they were tested against (must stay >= 1; the design
+// margin is 1.49 for the pair step, (1 + 4e-5) / (1 - 4e-5) for the tidal-sampling step), per sink in dt and ax
+struct DtCheckK : DtK<true, false, true, false, false> {
+    static constexpr int NS = 0, NM = 3;
+    KOKKOS_INLINE_FUNCTION void pair(const Sink& a, int i, const double* s, int j, double*, double* mn) const {
+        const bool w = pair_weight(i, j, a.sid, n2_lo(s[7]));
+        double dx = s[0] - a.x, dy = s[1] - a.y, dz = s[2] - a.z;
+        double dvx = s[4] - a.vx, dvy = s[5] - a.vy, dvz = s[6] - a.vz;
+        double r2s = w ? dx * dx + dy * dy + dz * dz : 1.0;
+        double ir = fast_rsqrt(r2s);
+        bool rp = false, rt = false;
+#ifdef N2_DT_F32
+        const float r2f = (float)r2s, irf = rsqrt_f32_normal(r2f);
+        rp = pair_dt_reject_f32(a.cur3, r2f, irf, dvx * dvx + dvy * dvy + dvz * dvz, dx * dvx + dy * dvy + dz * dvz,
+                                (float)G * (a.m32 + n2_hi_f(s[7])), (float)eta_ff, (float)eta_fb);
+        rt = tidal_dt_reject_f32(a.curt, r2f, r2f * irf, a.k32, n2_hi_f(s[KI + 2]), n2_lo_f(s[KI + 2]), a.rm32);
+#endif
+        const double tp = pair_dt(r2s, ir, dx, dy, dz, dvx, dvy, dvz, G, a.m + s[3], eta_ff, eta_fb);
+        const double tt = tidal_sampling_dt(a.k, s[KI], a.m, s[3], r2s, a.kf, s[KI + 1]);
+        if (w && rp) mn[1] = Kokkos::fmin(mn[1], tp / mn[0]);
+        if (w && rt) mn[2] = Kokkos::fmin(mn[2], tt / mn[0]);
+        dt_min(a, mn, w ? Kokkos::fmin(tp, tt) : 1e30);
+    }
+    KOKKOS_INLINE_FUNCTION void finish(int i, const Sink&, const double*, const double* mn) const {
+        dt(i) = mn[1]; ax(i) = mn[2];
+    }
+};
+
 uint64_t fnv(uint64_t h, const std::vector<double>& v) {
     for (double d : v) {
         uint64_t b;
@@ -163,7 +266,12 @@ int main(int argc, char** argv) {
             for (int i = 0; i < N; i++) hs(i) = cl.sid[i];
             Kokkos::deep_copy(sid, hs);
         }
-        Kokkos::deep_copy(kt, 1e30);   // TidalSampling::k: non-members
+        Kokkos::deep_copy(kt, 1e30);   // TidalSampling::k: non-members; N2_KMEM: k of subsystem members (default 1e30)
+        if (std::getenv("N2_KMEM")) {
+            auto hk = Kokkos::create_mirror_view(kt);
+            for (int i = 0; i < N; i++) hk(i) = cl.sid[i] >= 0 ? std::atof(std::getenv("N2_KMEM")) : 1e30;
+            Kokkos::deep_copy(kt, hk);
+        }
         Kokkos::deep_copy(kf, 0.0);
         const double G = G_CODE, eta = 0.2, dtg = 1e-3 / 0.9778;   // gradient kick step of 1e-3 Myr in code units
         RawView X{x.data()}, Y{y.data()}, Z{z.data()}, VX{vx.data()}, VY{vy.data()}, VZ{vz.data()}, M{m.data()};
@@ -205,33 +313,64 @@ int main(int argc, char** argv) {
                 }
                 std::fflush(stdout);
             };
-            if (want("force")) {
-                ForceK<true> k{X, Y, Z, M, AX, AY, AZ, sid.data(), G, 0.0};
-                bench("force", [&] { run_n2("bench_force", 0, c.ni, 0, c.nj, k); }, {ax, ay, az});
+            // relative force error per sink, |a - a_ref| / |a_ref|: against the production kernel on all sinks (fref)
+            // and, with N2_ACC, against a long-double sum on 200 sample sinks
+            std::vector<double> fref[3];
+            auto force_errors = [&](const char* name) {
+                std::vector<double> hx = host(ax, c.ni), hy = host(ay, c.ni), hz = host(az, c.ni);
+                auto stats = [&](std::vector<double>& e, const char* what) {
+                    std::sort(e.begin(), e.end());
+                    double rms = 0;
+                    for (double v : e) rms += v * v;
+                    std::printf("       %-9s rel. force error vs %s: rms %.2e median %.2e max %.2e\n", name, what,
+                                std::sqrt(rms / e.size()), e[e.size() / 2], e.back());
+                };
+                if (!fref[0].empty() && std::string(name) != "force") {
+                    std::vector<double> e(c.ni);
+                    for (int i = 0; i < c.ni; i++) {
+                        const double d = std::sqrt(std::pow(hx[i] - fref[0][i], 2) + std::pow(hy[i] - fref[1][i], 2) +
+                                                   std::pow(hz[i] - fref[2][i], 2));
+                        e[i] = d / std::sqrt(fref[0][i] * fref[0][i] + fref[1][i] * fref[1][i] + fref[2][i] * fref[2][i]);
+                    }
+                    stats(e, "force");
+                }
                 if (std::getenv("N2_ACC")) {
-                    std::vector<double> hax = host(ax, c.ni), hay = host(ay, c.ni), haz = host(az, c.ni), err;
+                    std::vector<double> e;
                     std::mt19937_64 rng(7);
                     std::uniform_int_distribution<int> pick(0, c.ni - 1);
-                    for (int s = 0; s < 200; s++) {
+                    for (int smp = 0; smp < 200; smp++) {
                         int i = pick(rng);
-                        long double a[3] = {0, 0, 0};
+                        long double acc[3] = {0, 0, 0};
                         for (int j = 0; j < c.nj; j++) {
                             if (j == i || (cl.sid[i] >= 0 && cl.sid[j] == cl.sid[i])) continue;
                             long double dx = (long double)cl.x[j] - cl.x[i], dy = (long double)cl.y[j] - cl.y[i],
                                         dz = (long double)cl.z[j] - cl.z[i];
                             long double r2 = dx * dx + dy * dy + dz * dz;
                             long double f = (long double)(G * cl.m[j]) / (r2 * sqrtl(r2));
-                            a[0] += f * dx; a[1] += f * dy; a[2] += f * dz;
+                            acc[0] += f * dx; acc[1] += f * dy; acc[2] += f * dz;
                         }
-                        long double d = sqrtl(powl(hax[i] - a[0], 2) + powl(hay[i] - a[1], 2) + powl(haz[i] - a[2], 2));
-                        err.push_back((double)(d / sqrtl(a[0] * a[0] + a[1] * a[1] + a[2] * a[2])));
+                        long double d = sqrtl(powl(hx[i] - acc[0], 2) + powl(hy[i] - acc[1], 2) + powl(hz[i] - acc[2], 2));
+                        e.push_back((double)(d / sqrtl(acc[0] * acc[0] + acc[1] * acc[1] + acc[2] * acc[2])));
                     }
-                    std::sort(err.begin(), err.end());
-                    double rms = 0;
-                    for (double e : err) rms += e * e;
-                    std::printf("       rel force error vs long double: rms %.2e median %.2e max %.2e\n",
-                                std::sqrt(rms / err.size()), err[err.size() / 2], err.back());
+                    stats(e, "long dbl");
                 }
+            };
+            const bool variants = want("force_nn") || want("force_mix");
+            if (want("force") || variants) {
+                ForceK<true> k{X, Y, Z, M, AX, AY, AZ, sid.data(), G, 0.0};
+                bench("force", [&] { run_n2("bench_force", 0, c.ni, 0, c.nj, k); }, {ax, ay, az});
+                fref[0] = host(ax, c.ni); fref[1] = host(ay, c.ni); fref[2] = host(az, c.ni);
+                force_errors("force");
+            }
+            if (want("force_nn")) {
+                ForceNNK k{ForceK<true, false>{X, Y, Z, M, AX, AY, AZ, sid.data(), G, 0.0}};
+                bench("force_nn", [&] { run_n2("bench_force_nn", 0, c.ni, 0, c.nj, k); }, {ax, ay, az});
+                force_errors("force_nn");
+            }
+            if (want("force_mix")) {
+                ForceMixK k{X, Y, Z, M, AX, AY, AZ, sid.data(), G};
+                bench("force_mix", [&] { run_n2("bench_force_mix", 0, c.ni, 0, c.nj, k); }, {ax, ay, az});
+                force_errors("force_mix");
             }
             if (want("force0")) {   // non-collisional variant (no subsystem exclusion)
                 ForceK<false> k{X, Y, Z, M, AX, AY, AZ, nullptr, G, 0.0};
@@ -257,6 +396,15 @@ int main(int argc, char** argv) {
                 AccDtK<true> k{X, Y, Z, M, VX, VY, VZ, AX, AY, AZ, DT, KT, KF, sid.data(), G, 0.0, eta, eta,
                                0.0, 0.0};
                 bench("accdt", [&] { run_n2("bench_accdt", 0, c.ni, 0, c.nj, k); }, {dt, ax, ay, az});
+            }
+            if (want("dtcheck")) {
+                DtCheckK k{DtK<true, false, true, false, false>{X, Y, Z, M, VX, VY, VZ, AX, AY, AZ, DT,
+                                                                       KT, KF, sid.data(), G, 0.0, eta, eta, 0.0}};
+                run_n2("bench_dtcheck", 0, c.ni, 0, c.nj, k);
+                std::vector<double> r = host(dt, c.ni), rt = host(ax, c.ni);
+                std::printf("dtcheck ni=%7d nj=%7d  smallest exact step / running minimum over pre-rejected pairs: "
+                            "pair step %.4f, tidal-sampling step %.6f\n", c.ni, c.nj, *std::min_element(r.begin(), r.end()),
+                            *std::min_element(rt.begin(), rt.end()));
             }
         }
     }

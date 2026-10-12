@@ -122,29 +122,45 @@ KOKKOS_INLINE_FUNCTION double pair_dt(double r2s, double ir, double dx, double d
 // Cost: 64-bit conversions run at half the FP64 rate on A100 (16/clk/SM) and the old version converted ~15 values per
 // pair (positions, velocities, masses, k, cur), as much FP64-pipe time as the fp64 arithmetic of the pair. Now a pair
 // converts three (r2s, |dv|^2, r.dv): m, k and 1/m come as fp32 from the source tile (n2_pack) and the sink, cur from
-// DtSink::curf (refreshed only when the minimum changes).
+// DtSink (refreshed only when the minimum changes).
 // NBODY_CHECK_DT_FP32=1 runs the fp64-only DtK after every time-step kernel and aborts on any bitwise difference
 // (forces.cpp); n2-bench checksums dt against dt64.
+//  * Instruction count: rsqrt.approx.ftz (rel. error < 2^-22.9, as rsqrtf, without its subnormal fix-up) on arguments
+//    that are normal: r2 in [1e-30, 1e30] (other r2 are not tested; a flushed r2 gives ir = inf and fails the range
+//    tests), v2 >= 1e-30, r max(G m, 1e-20) >= 1e-35 (replacing G m by max(G m, 1e-20) only lowers t_ff and raises
+//    d_fb: conservative). The cur-dependent factors 3 (1 + 4e-5) cur and (1 + 4e-5) cur are kept in the sink (DtSink),
+//    the eta factors are launch constants; each regrouping adds at most a rounding (u) inside the 20 u budget.
 #if (defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)) && defined(DT_FP32_PREREJECT)
 #define N2_DT_F32 1
 #endif
-KOKKOS_INLINE_FUNCTION bool pair_dt_reject_f32(float cur, float r2, float ir, double v2s, double rdvs, float gm,
+KOKKOS_INLINE_FUNCTION float rsqrt_f32_normal(float x) {   // x normal, or the result is not used
+#if defined(__CUDA_ARCH__)
+    float y;
+    asm("rsqrt.approx.ftz.f32 %0, %1;" : "=f"(y) : "f"(x));
+    return y;
+#elif defined(__HIP_DEVICE_COMPILE__)
+    return rsqrtf(x);
+#else
+    return 1.0f / std::sqrt(x);
+#endif
+}
+// cur3 = 3 (1 + 4e-5) cur_32
+KOKKOS_INLINE_FUNCTION bool pair_dt_reject_f32(float cur3, float r2, float ir, double v2s, double rdvs, float gm,
                                                float eff, float efb) {
 #ifdef N2_DT_F32
     if (!(r2 >= 1e-30f && r2 <= 1e30f)) return false;
+    gm = fmaxf(gm, 1e-20f);
     const float v2 = (float)v2s + 1e-30f;
     const float r = r2 * ir;
-    const float tff = r2 * rsqrtf(r * (gm + 1e-30f));
-    const float iv = rsqrtf(v2), tfb = r * iv;
+    const float tff = r2 * rsqrt_f32_normal(r * gm);
+    const float iv = rsqrt_f32_normal(v2), tfb = r * iv;
     const float rdv = fabsf((float)rdvs) + 1e-6f * r * v2 * iv;   // >= |r.dv|
     const float c = rdv * ir * ir;
-    const float dff = 1.5f * c * tff * eff;
-    const float dfb = c * (1.0f + gm * ir * iv * iv) * tfb * efb;
-    const float c3 = 3.0f * cur * (1.0f + 4e-5f);
-    const float rff = c3 * (1.0f + dff * (1.0f + 4e-5f)), rfb = c3 * (1.0f + dfb * (1.0f + 4e-5f));
-    return rff < 3e38f && rfb < 3e38f && eff * tff * (1.0f - 4e-5f) >= rff && efb * tfb * (1.0f - 4e-5f) >= rfb;
+    const float kff = 1.5f * (1.0f + 4e-5f) * eff, kfb = (1.0f + 4e-5f) * efb;   // launch constants
+    const float rff = cur3 * (1.0f + (c * tff) * kff), rfb = cur3 * (1.0f + (c * (1.0f + gm * ir * iv * iv) * tfb) * kfb);
+    return rff < 3e38f && rfb < 3e38f && tff * ((1.0f - 4e-5f) * eff) >= rff && tfb * ((1.0f - 4e-5f) * efb) >= rfb;
 #else
-    (void)cur; (void)r2; (void)ir; (void)v2s; (void)rdvs; (void)gm; (void)eff; (void)efb;
+    (void)cur3; (void)r2; (void)ir; (void)v2s; (void)rdvs; (void)gm; (void)eff; (void)efb;
     return false;
 #endif
 }
@@ -259,33 +275,40 @@ KOKKOS_INLINE_FUNCTION double tidal_sampling_dt(double ki, double kj, double mi,
 // r = r2 rsqrtf(r2) (rsqrtf <= 2 ulp): rel. error < 1e-6, covered by the factors 1 -+ 4e-5; an overflow to inf means a
 // true value beyond FLT_MAX > cur, NaN fails. Non-members carry k = 1e30, so almost every pair skips the two fp64
 // divisions and the square root.
-KOKKOS_INLINE_FUNCTION bool tidal_dt_reject_f32(float cur, float r2, float r, float ki, float rmj, float kj, float rmi) {
+// curt = (1 + 4e-5) cur_32
+KOKKOS_INLINE_FUNCTION bool tidal_dt_reject_f32(float curt, float r2, float r, float ki, float rmj, float kj, float rmi) {
 #ifdef N2_DT_F32
     if (!(r2 >= 1e-30f)) return false;
-    return fminf(ki * rmj, kj * rmi) * r2 * r * (1.0f - 4e-5f) >= cur * (1.0f + 4e-5f);
+    return fminf(ki * rmj, kj * rmi) * r2 * r * (1.0f - 4e-5f) >= curt;
 #else
-    (void)cur; (void)r2; (void)r; (void)ki; (void)rmj; (void)kj; (void)rmi;
+    (void)curt; (void)r2; (void)r; (void)ki; (void)rmj; (void)kj; (void)rmi;
     return false;
 #endif
 }
 
-// Sink of the time-step kernels. m32, k32, rm32: fp32 m, k, 1/m for the pre-rejects; curf: the running minimum in fp32
-// (updated with it, so a pair does not convert it)
+// Sink of the time-step kernels. m32, k32, rm32: fp32 m, k, 1/m for the pre-rejects; cur3, curt: 3 (1 + 4e-5) and
+// (1 + 4e-5) times the running minimum in fp32 (updated with it, so a pair does not convert it)
 struct DtSink {
     double x, y, z, m, vx, vy, vz, k, kf;
     int sid;
     float m32, k32, rm32;
-    mutable float curf;
+    mutable float cur3, curt;
 };
 KOKKOS_INLINE_FUNCTION DtSink dt_sink(double x, double y, double z, double m, double vx, double vy, double vz,
                                       double k, double kf, int sid) {
     const float m32 = (float)m;
-    return {x, y, z, m, vx, vy, vz, k, kf, sid, m32, (float)k, 1.0f / m32, 1e30f};
+    return {x, y, z, m, vx, vy, vz, k, kf, sid, m32, (float)k, 1.0f / m32, 1e30f * (3.0f * (1.0f + 4e-5f)),
+            1e30f * (1.0f + 4e-5f)};
 }
-// fmin(mn[0], t), keeping curf = (float)mn[0]
+// fmin(mn[0], t), keeping cur3 and curt
 KOKKOS_INLINE_FUNCTION void dt_min(const DtSink& a, double* mn, double t) {
 #ifdef N2_DT_F32
-    if (t < mn[0]) { mn[0] = t; a.curf = (float)t; }
+    if (t < mn[0]) {
+        mn[0] = t;
+        const float c = (float)t;
+        a.cur3 = c * (3.0f * (1.0f + 4e-5f));
+        a.curt = c * (1.0f + 4e-5f);
+    }
 #else
     (void)a;
     mn[0] = Kokkos::fmin(mn[0], t);
@@ -303,10 +326,10 @@ KOKKOS_INLINE_FUNCTION void dt_pair_min(const DtSink& a, double* mn, bool w, dou
     bool rp = false, rt = false;
 #ifdef N2_DT_F32
     if (F32) {
-        const float r2f = (float)r2s, irf = rsqrtf(r2f);
-        rp = pair_dt_reject_f32(a.curf, r2f, irf, cdx * cdx + cdy * cdy + cdz * cdz, dx * cdx + dy * cdy + dz * cdz,
+        const float r2f = (float)r2s, irf = rsqrt_f32_normal(r2f);
+        rp = pair_dt_reject_f32(a.cur3, r2f, irf, cdx * cdx + cdy * cdy + cdz * cdz, dx * cdx + dy * cdy + dz * cdz,
                                 (float)G * (a.m32 + m32j), (float)eta_ff, (float)eta_fb);
-        if (COLL) rt = tidal_dt_reject_f32(a.curf, r2f, r2f * irf, a.k32, rm32j, k32j, a.rm32);
+        if (COLL) rt = tidal_dt_reject_f32(a.curt, r2f, r2f * irf, a.k32, rm32j, k32j, a.rm32);
     }
 #else
     (void)m32j; (void)k32j; (void)rm32j;

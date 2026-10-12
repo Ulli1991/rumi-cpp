@@ -79,22 +79,24 @@ inline long long n2_host_max() {
 }
 
 namespace n2_detail {
-// One team: TS threads, TS / P sinks, P threads per sink. Each sink's sources are taken in tiles of TS (aligned to the
+// One team: TS / R threads, TS / (R P) sinks, P threads per sink. Each sink's sources are taken in tiles of TS (aligned to the
 // chunk start; a tile is the Kahan block, as TS >= N2_KAHAN_BLOCK on the devices), and the P threads of a sink take
 // P consecutive tiles at a time: thread p computes the plain sum of tile p, the first thread then Kahan-adds the P tile
 // sums in tile order. That is exactly the P = 1 accumulation (plain sum per tile, Kahan over tiles in order), so the
 // sums are bit-identical for every P; minima are order-independent (the pre-rejects only skip pairs that cannot lower
-// the minimum). P > 1 multiplies the teams by P (finer load balance; threads_per_sink).
-template <int TS, int P, class K>
+// the minimum). P > 1 multiplies the teams by P, R > 1 by R at the same tile (finer load balance; team_shape).
+template <int TS, int P, int R, class K>
 void run_tiled(const char* name, int i0, int ni, int j0, int nj, const K& k) {
     using team_policy = Kokkos::TeamPolicy<>;
     using member_type = team_policy::member_type;
     using scratch_space = Kokkos::DefaultExecutionSpace::scratch_memory_space;
     constexpr int NS = K::NS, NM = K::NM, NSRC = K::NSRC;
     constexpr int NSa = NS > 0 ? NS : 1, NMa = NM > 0 ? NM : 1;
-    constexpr int S = TS / P;                 // sinks per team
+    constexpr int TT = TS / R;                // threads per team
+    constexpr int S = TT / P;                 // sinks per team
     constexpr int GROUP = P * TS;             // sources staged per step
-    static_assert(P == 1 || (TS % P == 0 && TS >= N2_KAHAN_BLOCK), "P > 1 needs tiles that are whole Kahan blocks");
+    static_assert(TS % R == 0 && TT % P == 0, "team shape");
+    static_assert((P == 1 && R == 1) || TS >= N2_KAHAN_BLOCK, "P, R > 1 need tiles that are whole Kahan blocks");
     constexpr int XCH = P > 1 ? (P - 1) * S * (NS + NM) : 0;   // tile sums / minima handed to the first thread
     const size_t scratch = (size_t)std::max(GROUP * NSRC, XCH) * sizeof(double);
     const int iblocks = (ni + S - 1) / S;
@@ -112,7 +114,7 @@ void run_tiled(const char* name, int i0, int ni, int j0, int nj, const K& k) {
     }
 
     Kokkos::parallel_for(name,
-        team_policy(iblocks * nc, TS).set_scratch_size(0, Kokkos::PerTeam(scratch)),
+        team_policy(iblocks * nc, TT).set_scratch_size(0, Kokkos::PerTeam(scratch)),
         KOKKOS_LAMBDA(const member_type& team) {
             const int q = team.league_rank() / iblocks;          // source chunk
             const int ib = team.league_rank() - q * iblocks;
@@ -135,7 +137,7 @@ void run_tiled(const char* name, int i0, int ni, int j0, int nj, const K& k) {
 
             for (int g0 = c0; g0 < c1; g0 += GROUP) {
                 const int ng = Kokkos::min(GROUP, c1 - g0);
-                for (int u = t; u < ng; u += TS) k.source(g0 + u, &tile(u * NSRC));
+                for (int u = t; u < ng; u += TT) k.source(g0 + u, &tile(u * NSRC));
                 team.team_barrier();
                 const int b0 = p * TS, n = Kokkos::min(TS, ng - b0);   // this thread's tile of the group
                 if (active && n > 0) {
@@ -203,27 +205,37 @@ void run_tiled(const char* name, int i0, int ni, int j0, int nj, const K& k) {
     }
 }
 
-// Threads per sink (P of run_tiled). Results do not depend on P, so the choice may follow the local slice (unlike the
-// chunk count). Measured on one A100 (n2-bench, 200k Plummer/Kroupa, 10 % binaries; sinks:sources:set):
+// Team shape (P threads per sink, team of TS / R threads) of run_tiled. Results do not depend on it, so the choice may
+// follow the local slice (unlike the chunk count). Measured on one A100 (n2-bench, 200k Plummer/Kroupa, 10 % binaries;
+// sinks:sources:set):
 //   force 200k:200k 161 -> 176 Gpairs/s with P = 4, 35k:140k:140k 107 -> 146, 12.5k:50k:50k 140 -> 164, never slower;
 //   grad (P = 4 exceeds 48 KB at TS = 256) 103 -> 109 and 70 -> 92 with P = 2;
-//   time steps (DtK, AccDtK: FILL_ONLY) gain only where a launch has fewer than ~1.5 teams per SM (35k:140k:140k,
-//   137 teams of 256: 43 -> 49) and lose elsewhere (fewer pre-rejected pairs per thread, three barriers per group).
-// So: the largest P <= 4 whose staged sources fit in 48 KB, for FILL_ONLY kernels P = 2 below 1.5 teams per SM.
-// NBODY_N2_P = 1, 2 or 4 forces P (where it fits).
+//   time steps (DtK, AccDtK: FILL_ONLY) lose with P > 1 except below ~1.5 teams per SM (fewer pre-rejected pairs per
+//   thread, three barriers per group): 35k:140k:140k (137 teams of 256) 43.8 -> 49.5 with P = 2, R = 2. Teams of 128
+//   threads on 256-source tiles (R = 2; ~108 registers, so 2 teams of 256 per SM fill unevenly) give dt 200k:200k
+//   65.9 -> 69.6, 50k:200k:200k 62.4 -> 61.1; teams of 64 (TS = 128, R = 2) lose (12.5k:50k:50k 46.1 -> 38.2).
+// So: forces / gradients the largest P <= 4 within 48 KB, R = 1; time steps R = 2 at TS = 256, P = 2 below 1.5 teams
+// per SM.
+// NBODY_N2_P = 1, 2, 4 and NBODY_N2_R = 1, 2 force the shape (where it is instantiated and fits).
 template <class K, class = void> struct fill_only : std::false_type {};
 template <class K> struct fill_only<K, std::void_t<decltype(K::FILL_ONLY)>> : std::bool_constant<K::FILL_ONLY> {};
 
-inline int threads_per_sink(long long teams, int TS, int nsrc, int ns_nm, bool fill_only_kernel) {
-    static const int forced = std::getenv("NBODY_N2_P") ? std::atoi(std::getenv("NBODY_N2_P")) : 0;
-    if (ns_nm == 0) return 1;   // append-only kernels (NgbK, EdgeK) keep one thread per sink
+struct TeamShape { int P, R; };
+inline TeamShape team_shape(long long teams, int TS, int nsrc, int ns_nm, bool fill_only_kernel) {
+    static const int fp = std::getenv("NBODY_N2_P") ? std::atoi(std::getenv("NBODY_N2_P")) : 0;
+    static const int fr = std::getenv("NBODY_N2_R") ? std::atoi(std::getenv("NBODY_N2_R")) : 0;
+    if (ns_nm == 0) return {1, 1};   // append-only kernels (NgbK, EdgeK) keep one thread per sink
     auto fits = [&](int P) { return (size_t)P * TS * nsrc * sizeof(double) <= 48 * 1024; };
-    if (forced == 1 || forced == 2 || forced == 4) return fits(forced) ? forced : 1;
+    TeamShape t;
     if (fill_only_kernel) {
         const double sms = Kokkos::DefaultExecutionSpace().concurrency() / 2048.0;
-        return (teams < 1.5 * sms && fits(2)) ? 2 : 1;
+        t = {(teams < 1.5 * sms && fits(2)) ? 2 : 1, TS >= 256 ? 2 : 1};
+    } else {
+        t = {fits(4) ? 4 : fits(2) ? 2 : 1, 1};
     }
-    return fits(4) ? 4 : fits(2) ? 2 : 1;
+    if ((fp == 1 || fp == 2 || fp == 4) && fits(fp)) t.P = fp;
+    if (fr == 1 || fr == 2) t.R = fr;
+    return t;
 }
 
 template <int TS, class K>
@@ -232,10 +244,16 @@ void run_tiled_p(const char* name, int i0, int ni, int j0, int nj, const K& k) {
     const int chunk = nchunk > 1 ? ((nj + nchunk - 1) / nchunk + TS - 1) / TS * TS : nj;
     const int nc = nchunk > 1 ? (nj + chunk - 1) / chunk : 1;
     const long long teams = (long long)((ni + TS - 1) / TS) * nc;
-    const int P = threads_per_sink(teams, TS, K::NSRC, K::NS + K::NM, fill_only<K>::value);
-    if (P == 4) run_tiled<TS, 4>(name, i0, ni, j0, nj, k);
-    else if (P == 2) run_tiled<TS, 2>(name, i0, ni, j0, nj, k);
-    else run_tiled<TS, 1>(name, i0, ni, j0, nj, k);
+    const TeamShape t = team_shape(teams, TS, K::NSRC, K::NS + K::NM, fill_only<K>::value);
+    if constexpr (fill_only<K>::value) {   // instantiated shapes: (P, R) = (1, 1), (1, 2), (2, 2)
+        if (t.R == 1) run_tiled<TS, 1, 1>(name, i0, ni, j0, nj, k);
+        else if (t.P >= 2) run_tiled<TS, 2, 2>(name, i0, ni, j0, nj, k);
+        else run_tiled<TS, 1, 2>(name, i0, ni, j0, nj, k);
+    } else {                               // (1, 1), (2, 1), (4, 1)
+        if (t.P == 4) run_tiled<TS, 4, 1>(name, i0, ni, j0, nj, k);
+        else if (t.P == 2) run_tiled<TS, 2, 1>(name, i0, ni, j0, nj, k);
+        else run_tiled<TS, 1, 1>(name, i0, ni, j0, nj, k);
+    }
 }
 }  // namespace n2_detail
 
@@ -276,6 +294,6 @@ void run_n2(const char* name, int i0, int ni, int j0, int nj, const K& k) {
     if (n2_detail::set_size(ni) >= big_tile_min) { n2_detail::run_tiled_p<256>(name, i0, ni, j0, nj, k); return; }
     n2_detail::run_tiled_p<TILE_SIZE>(name, i0, ni, j0, nj, k);
 #else
-    n2_detail::run_tiled<TILE_SIZE, 1>(name, i0, ni, j0, nj, k);
+    n2_detail::run_tiled<TILE_SIZE, 1, 1>(name, i0, ni, j0, nj, k);
 #endif
 }
