@@ -5,6 +5,7 @@
 #include "constants.h"
 #include "collisional_config.h"
 #include "gw_recoil.h"
+#include "tidal_field.h"
 #include <cstdint>
 #include <cstring>
 #include "integrator.h"
@@ -76,6 +77,12 @@ double collision_remnant_mass(MergerType type, int kw1, double m1, int kw2, doub
     // FROST-CLUSTERS 0.5); the rest leaves the cluster, booked as mass loss by the callers
     if (type == MergerType::TIDAL_DISRUPTION)
         return kw1 == 14 ? m1 + g_collisional.tde_accretion * m2 : m2 + g_collisional.tde_accretion * m1;
+    // Stellar collisions: Glebbeek et al. 2013 mass loss f = C q / (1 + q)^2 of m1 + m2, q = m_small / m_large
+    // (FROST-CLUSTERS III sec. 2.2.3: C = 0.3, 7.5 % for equal masses); COLL_MASS_LOSS_C = 0 (default): none
+    if (type == MergerType::STELLAR_COLLISION && g_collisional.coll_mass_loss_c > 0.0) {
+        const double q = std::min(m1, m2) / std::max(m1, m2);
+        return (m1 + m2) * (1.0 - g_collisional.coll_mass_loss_c * q / ((1.0 + q) * (1.0 + q)));
+    }
     (void)kw1; (void)kw2;
     return m1 + m2;
 }
@@ -492,6 +499,15 @@ void finalize_subsystem_collision(const SubsystemCollision& c, Particles& p, Sub
     Kokkos::deep_copy(p.stellar_type, h_stype);
     StellarPropsCache::get().invalidate();   // remnant type (and radius below)
     Kokkos::deep_copy(p.spin_vec, h_spin);
+    // The remnant's subsystem keeps integrating with it: LogH's stored normalisation (R = G M_total / V^2) and the
+    // PN auxiliary velocities belong to the old masses, so they start afresh (as strip_removed does) when the mass
+    // changed; otherwise the next call runs with G_norm != 1 in effect
+    if (m_rem != M)
+        for (auto& sub : mgr.active)
+            if (std::find(sub.particle_ids.begin(), sub.particle_ids.end(), c.pid_keep) != sub.particle_ids.end()) {
+                sub.scales_set = false;
+                sub.has_aux_vel = false;
+            }
     if (h_stype(ik) < 10) {   // a merged star restarts as a zero-age star of its mass (as execute_merger)
         auto h_mzams = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.m_zams);
         auto h_sage  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.stellar_age);
@@ -561,10 +577,13 @@ int remove_escapers(Particles& p, double G, double r_escape_rh,
 
     // Compute radial distances from CM
     std::vector<double> radii(N);
-    for (int i = 0; i < N; i++) {
-        double dx = h_x(i) - cm_x, dy = h_y(i) - cm_y, dz = h_z(i) - cm_z;
-        radii[i] = std::sqrt(dx*dx + dy*dy + dz*dz);
-    }
+    auto set_radii = [&]() {
+        for (int i = 0; i < N; i++) {
+            double dx = h_x(i) - cm_x, dy = h_y(i) - cm_y, dz = h_z(i) - cm_z;
+            radii[i] = std::sqrt(dx*dx + dy*dy + dz*dz);
+        }
+    };
+    set_radii();
 
     // Estimate half-mass radius
     std::vector<std::pair<double,double>> r_mass(N);
@@ -581,6 +600,35 @@ int remove_escapers(Particles& p, double G, double r_escape_rh,
     }
 
     double R_escape = r_escape_rh * r_half;
+    // With a tidal field (NBODY6, Aarseth 2003; Baumgardt & Makino 2003): a star is lost once it is farther than
+    // R_ESCAPE_RJ (2) Jacobi radii from the cluster centre, with no energy test (the tail stars are energetically
+    // unbound only in the rotating frame). r_J from the current total mass (as NBODY6; an iteration on the mass
+    // inside r_J strips a supertidal cluster at once instead of over its dissolution time); the centre is the c.o.m.
+    // of the stars inside r_J, iterated from the overall c.o.m. so the tails do not pull it
+    double r_jac = 0.0;
+    const bool jacobi = g_tidal.on() && g_collisional.r_escape_rj > 0.0;
+    if (jacobi) {
+        for (int it = 0; it < 10; it++) {
+            const double Xg[3] = {g_tidal.X[0] + cm_x, g_tidal.X[1] + cm_y, g_tidal.X[2] + cm_z};
+            r_jac = g_tidal.jacobi_radius(Xg, M_total, G);
+            if (!(r_jac > 0.0)) break;
+            double mm = 0, cx = 0, cy = 0, cz = 0, cvx = 0, cvy = 0, cvz = 0;
+            for (int i = 0; i < N; i++) {
+                if (radii[i] > r_jac) continue;
+                const double m = h_m(i);
+                mm += m; cx += m * h_x(i); cy += m * h_y(i); cz += m * h_z(i);
+                cvx += m * h_vx(i); cvy += m * h_vy(i); cvz += m * h_vz(i);
+            }
+            if (mm <= 0.0) break;
+            const double shift = std::sqrt((cx / mm - cm_x) * (cx / mm - cm_x) + (cy / mm - cm_y) * (cy / mm - cm_y) +
+                                           (cz / mm - cm_z) * (cz / mm - cm_z));
+            cm_x = cx / mm; cm_y = cy / mm; cm_z = cz / mm;
+            cm_vx = cvx / mm; cm_vy = cvy / mm; cm_vz = cvz / mm;
+            set_radii();
+            if (shift <= 1e-6 * r_jac) break;
+        }
+        if (r_jac > 0.0) R_escape = g_collisional.r_escape_rj * r_jac;
+    }
     if (R_escape <= 0) return 0;
 
     int n_escaped = 0;
@@ -597,17 +645,15 @@ int remove_escapers(Particles& p, double G, double r_escape_rh,
         double v2 = dvx*dvx + dvy*dvy + dvz*dvz;
         double r_dot_v = dx*dvx + dy*dvy + dz*dvz;
 
-        // Moving outward?
-        if (r_dot_v <= 0) continue;
-
         // Specific energy: E_spec = 0.5*v^2 - G*M_enclosed/r
         // Approximate M_enclosed ~ M_total for particles at large r
         double E_spec = 0.5 * v2 - G * M_total / r;
-        if (E_spec <= 0) continue;
+        // Isolated cluster: moving outward and unbound
+        if (!jacobi && (r_dot_v <= 0 || E_spec <= 0)) continue;
 
         // This particle is escaping
-        // Energy accounting: KE + PE relative to cluster
-        double KE_esc = 0.5 * h_m(i) * v2;
+        // Energy accounting: the particle's share of the measured E = T + U (T in the frame of the diagnostics)
+        double KE_esc = 0.5 * h_m(i) * (h_vx(i)*h_vx(i) + h_vy(i)*h_vy(i) + h_vz(i)*h_vz(i));
         // PE with all other particles
         double PE_esc = 0;
         for (int j = 0; j < N; j++) {
@@ -634,8 +680,8 @@ int remove_escapers(Particles& p, double G, double r_escape_rh,
 
     if (n_escaped > 0) {
         Kokkos::deep_copy(p.mass, h_m);
-        std::printf("ESCAPER: removed %d particles, E_escape=%.4e, R_half=%.4e, R_escape=%.4e\n",
-                    n_escaped, books.E_escape, r_half, R_escape);
+        std::printf("ESCAPER: removed %d particles, E_escape=%.4e, R_half=%.4e, R_escape=%.4e, r_J=%.9e, M=%.9e\n",
+                    n_escaped, books.E_escape, r_half, R_escape, r_jac, M_total);
     }
 
     return n_escaped;

@@ -777,6 +777,24 @@ def tidal_books(exe, label, cfg, bound):
     return ok & check(f"{label} max|dE/E| with E_tidal", max(r[0] for r in diagnostics(out)), bound)
 
 
+def tidal_escapers(exe, label, cfg, bound):
+    """TIDAL_FIELD + R_ESCAPE_RJ = 2 (NBODY6, Baumgardt & Makino 2003): stars beyond 2 r_J leave, r_J from the total
+    mass at the first removal matches (G M R^2 / 2 V_c^2)^(1/3) (singular logarithmic halo), the energy with the
+    escaper and tidal books stays conserved; with R_ESCAPE_RJ = 0 the isolated criterion (R_ESCAPE_RH) keeps them."""
+    out = run_output(exe, cfg)
+    ev = re.findall(r"ESCAPER: removed (\d+) particles.*r_J=(\S+), M=(\S+)", out)
+    if not ev:
+        return check(f"{label} escapers removed", 0, 1, lower=True)
+    ok = check(f"{label} stars removed beyond 2 r_J", sum(int(e[0]) for e in ev), 1, lower=True)
+    R, Vc = float(cfg["GALAXY_R_PC"]), float(cfg["GALAXY_VC_KMS"])
+    rj = (G_CODE * float(ev[0][2]) * R * R / (2 * Vc * Vc)) ** (1 / 3)
+    ok &= check(f"{label} |r_J / (G M R^2 / 2 V_c^2)^(1/3) - 1| (centre off the reference point)",
+                abs(float(ev[0][1]) / rj - 1), 2e-3)
+    ok &= check(f"{label} max|dE/E| with E_escape, E_tidal", max(r[0] for r in diagnostics(out)), bound)
+    out = run_output(exe, dict(cfg, R_ESCAPE_RJ="0"))
+    return ok & check(f"{label} R_ESCAPE_RJ = 0: removals (R_ESCAPE_RH = 100)", len(re.findall("ESCAPER: removed", out)), 0)
+
+
 def grad_sweep(exe, label, cfg, etas, bounds, order):
     """max |dE/E| per ETA_GRAD and its order in ETA_GRAD (4: the step is eta_grad times a function of the state)."""
     ok, maxima = True, []
@@ -797,6 +815,19 @@ def bh_merge_radius(exe, label, cfg, r_expect):
         return check(f"{label} ISCO event", 0, 1, lower=True)
     ok = check(f"{label} |r_coll / r_expected - 1|", abs(float(m[0][1]) / r_expect - 1.0), 3e-3)   # G, c rounding
     return ok & check(f"{label} r_sep / r_coll at the decision", float(m[0][0]), 1.0)
+
+
+def coll_mass_loss(exe, label, cfg, bound):
+    """COLL_MASS_LOSS_C = 0.3 (FROST-CLUSTERS III, Glebbeek 2013): an equal-mass stellar collision keeps 92.5 % of
+    m1 + m2, and the energy with the merger sink stays conserved (the lost mass is booked)."""
+    out = run_output(exe, dict(cfg, COLL_MASS_LOSS_C="0.3"))
+    m = re.findall(r"\[SUBSYS COLLISION\] STELLAR pids \d+ \+ \d+, m (\S+) \+ (\S+) -> (\S+) Msun", out)
+    if not m:
+        return check(f"{label} stellar collision", 0, 1, lower=True)
+    m1, m2, mr = (float(x) for x in m[0])
+    q = min(m1, m2) / max(m1, m2)
+    ok = check(f"{label} |m_rem / ((m1 + m2)(1 - 0.3 q/(1+q)^2)) - 1|", abs(mr / ((m1 + m2) * (1 - 0.3 * q / (1 + q) ** 2)) - 1), 1e-3)
+    return ok & check(f"{label} max|dE/E| with merger sink", max(r[0] for r in diagnostics(out)), bound)
 
 
 def tde_accretion(exe, label, cfg):
@@ -853,12 +884,13 @@ def run_in(exe, cfg, d, args=(), env=None):
 
 
 def l0_by_step(stdout):
-    """L0 diagnostic rows as printed (|dE/E| |dP| |dL/L| t step), keyed by step (the last printed row wins)."""
+    """L0 diagnostic rows as printed (|dE/E| |dP| |dL/L| t step), keyed by step (the first printed row wins: the
+    final summary repeats the last step after the escaper removal, which changes |dP|/M)."""
     rows = {}
     for line in stdout.splitlines():
         f = line.split()
         if re.match(r"^\s+L0\s", line) and len(f) >= 8:
-            rows[int(f[-1])] = " ".join(f[3:])
+            rows.setdefault(int(f[-1]), " ".join(f[3:]))
     return rows
 
 
@@ -936,6 +968,43 @@ def snapshot_roundtrip(exe, label, cfg):
         if res.returncode != 0:
             print(res.stderr[-2000:])
         return ok & check(f"{label} snapshot vs restart file (h5-roundtrip exit code)", res.returncode, 0)
+
+
+def snapshot_cluster_header(exe, label, cfg):
+    """The snapshot Header carries the cluster structure (SNAPSHOT_CLUSTER_DIAG) and the tidal reference: at the
+    final step the Cluster_* attributes equal the CLUSTER_DIAG_FILE row of the same step, Tidal_RefPosition the
+    last TIDAL line, Tidal_JacobiRadius_pc = (G M R^2 / 2 V_c^2)^(1/3) at the reference point + density centre."""
+    with tempfile.TemporaryDirectory() as d:
+        out = run_in(exe, dict(cfg, SNAPSHOT_INTERVAL="1000000", RESTART_INTERVAL="1000000", CLUSTER_DIAG_INTERVAL="1"), d)
+        snaps = sorted(Path(d).glob("snapdir_*/snapshot_*.0.hdf5"))
+        rsts = sorted(Path(d).glob("restart_*.h5"))
+        rows = [l.split() for l in Path(d, "cluster_diag.dat").read_text().splitlines() if not l.startswith("#")]
+        if not snaps or not rsts or not rows:
+            return check(f"{label} snapshot, restart file and cluster_diag.dat written", 0, 1, lower=True)
+        res = subprocess.run([str(Path(exe).with_name("h5-roundtrip")), str(snaps[-1]), str(rsts[-1])],
+                             capture_output=True, text=True)
+        hdr = {f[1]: [float(v) for v in f[2:]] for f in (l.split() for l in res.stdout.splitlines()) if f[0] == "header"}
+    row = [float(v) for v in rows[-1]]
+    need = ("Cluster_MassTotal", "Cluster_CoreRadius_pc", "Cluster_LagrangianRadii_pc", "Cluster_NBinaries",
+            "Tidal_RefPosition", "Tidal_JacobiRadius_pc", "E_tidal")
+    missing = [k for k in need if k not in hdr]
+    ok = check(f"{label} Header attributes missing", len(missing), 0)
+    if missing:
+        print("   missing:", missing, res.stdout[-1500:])
+        return False
+    rel = lambda a, b: abs(a - b) / max(abs(b), 1e-300)
+    # cluster_diag.dat: step t M cx cy cz r_core rho_core sigma_c r_lag[7] n_bin n_bin_hard E_bin (%.9e)
+    dev = max([rel(hdr["Cluster_MassTotal"][0], row[2]), rel(hdr["Cluster_CoreRadius_pc"][0], row[6])] +
+              [rel(a, b) for a, b in zip(hdr["Cluster_LagrangianRadii_pc"], row[9:16])])
+    ok &= check(f"{label} Header vs cluster_diag.dat row of step {int(row[0])} (max rel. dev.)", dev, 1e-8)
+    ok &= check(f"{label} Header vs cluster_diag.dat binaries", abs(hdr["Cluster_NBinaries"][0] - row[16]), 0)
+    t = [l.split() for l in out.splitlines() if l.startswith("TIDAL step")][-1]
+    X = hdr["Tidal_RefPosition"]
+    ok &= check(f"{label} Tidal_RefPosition vs TIDAL line", max(rel(a, float(b)) for a, b in zip(X, t[4:7])), 1e-8)
+    Xg = [X[k] + row[3 + k] for k in range(3)]
+    R2, Vc = sum(v * v for v in Xg), float(cfg["GALAXY_VC_KMS"])
+    rj = (G_CODE * row[2] * R2 / (2 * Vc * Vc)) ** (1 / 3)
+    return ok & check(f"{label} Tidal_JacobiRadius_pc / (G M R^2 / 2 V_c^2)^(1/3) - 1", rel(hdr["Tidal_JacobiRadius_pc"][0], rj), 1e-6)
 
 
 def luna_reader(exe, label, cfg):
@@ -1347,10 +1416,14 @@ CASES = {
                                                                      TIDAL_FIELD="loghalo", GALAXY_VC_KMS="220",
                                                                      GALAXY_R_PC="8000"), 4.7e-7),
     # 2000 stars at 100 pc in the halo (r_J ~ 0.7 pc, r_h 1 pc): max|dE/E| 1.17e-9 (9.75e-10 without the field),
-    # E_tidal -2.07 (code units, ~7e-4 of |E|)
+    # E_tidal -2.07 (code units, ~7e-4 of |E|); with the Jacobi escapers (R_ESCAPE_RJ = 2, default) 9.77e-10
     "tidal_energy_books": lambda exe: tidal_books(exe, "strong tide", dict(BINARIES, TOTAL_TIME_MYR="5e-3",
                                                                            TIDAL_FIELD="loghalo", GALAXY_VC_KMS="220",
                                                                            GALAXY_R_PC="100"), 1.5e-9),
+    # Same cluster, R_ESCAPE_RJ = 2: r_J 0.708 pc at M = 800 Msun, 623 stars leave over 5 steps, max|dE/E| 9.77e-10
+    "tidal_jacobi_escapers": lambda exe: tidal_escapers(exe, "2 r_J", dict(BINARIES, TOTAL_TIME_MYR="5e-3",
+                                                                          TIDAL_FIELD="loghalo", GALAXY_VC_KMS="220",
+                                                                          GALAXY_R_PC="100"), 1.3e-9),
     # GRAD_FRESH (fix 3): the gradient criterion read grad_mag as the last gradient kick left it (0 before the first
     # kick, the slow-fast part after a cross kick): as the only criterion the first step ran at ETA_FF/FB = 10 and
     # the planets ran away (max|dE/E| 1.03 / 1.07); with |g'| from all particles at level 0: 3.61e-6 / 1.87e-7, order 4.27
@@ -1364,6 +1437,8 @@ CASES = {
     "bh_merge_radius_fc": lambda exe: bh_merge_radius(exe, "max single ISCO", dict(COLL_ISCO, BH_MERGE_RADIUS="max_single",
                                                                                    TOTAL_TIME_MYR="6e-14"), 2.8692e-12),
     "bh_merge_radius_total": lambda exe: bh_merge_radius(exe, "total-mass ISCO", COLL_ISCO, 5.7384e-12),
+    # Glebbeek 2013 / FROST-CLUSTERS III collision mass loss (head-on 1 + 1 Msun: remnant 1.85 Msun)
+    "coll_mass_loss": lambda exe: coll_mass_loss(exe, "head-on with mass loss", COLL_HEADON, 1.8e-12),
     "coll_tde_accretion": lambda exe: tde_accretion(exe, "TDE accretion fraction", COLL_TDE),
     "coll_tde_parabolic": lambda exe: subsys_collision(exe, "TDE, parabolic", COLL_TDE, "TDE", 1.5e-12),
     "coll_bh_isco": lambda exe: subsys_collision(exe, "BH binary to ISCO, PN", COLL_ISCO, "ISCO", 1e-14),
@@ -1482,6 +1557,9 @@ CASES = {
     # FSI: the global step is the fastest occupied level, not DT_MAX: the first run stops after step 1
     "restart_fsi": lambda exe: restart_identical(exe, "FSI integrator", dict(FSI_BINARY, DT_MAX_MYR="1e-6"), 5,
                                                  stop="walltime"),
+    "snapshot_cluster_header": lambda exe: snapshot_cluster_header(exe, "tidal cluster", dict(BINARIES, TOTAL_TIME_MYR="3e-3",
+                                                                                             TIDAL_FIELD="loghalo", GALAXY_VC_KMS="220",
+                                                                                             GALAXY_R_PC="100")),
     "snapshot_roundtrip": lambda exe: snapshot_roundtrip(exe, "IMBH cluster", dict(SPIN_IMBH, TOTAL_TIME_MYR="3e-4")),
     "luna_reader": lambda exe: luna_reader(exe, "IMBH cluster", dict(SPIN_IMBH, TOTAL_TIME_MYR="3e-4",
                                                                      SNAPSHOT_INTERVAL="1")),

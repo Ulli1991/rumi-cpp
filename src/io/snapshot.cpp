@@ -4,6 +4,7 @@
 #include "constants.h"
 #ifdef ENABLE_COLLISIONAL
 #include "subsystem.h"
+#include "tidal_field.h"
 #endif
 #include <Kokkos_Core.hpp>
 #include <algorithm>
@@ -200,9 +201,37 @@ std::string write_snapshot(const SnapshotOptions& opt, const Particles& p, const
         sink = b.total_sink();
         h5::attr(H, "E_escape", b.E_escape); h5::attr(H, "E_gw", b.E_gw); h5::attr(H, "E_merge", b.E_merge);
         h5::attr(H, "E_sse", b.E_sse); h5::attr(H, "E_pn", b.E_pn); h5::attr(H, "E_sd", b.E_sd);
+        h5::attr(H, "E_tidal", b.E_tidal);
         h5::attr(H, "P_sink", std::vector<double>(b.P_sink, b.P_sink + 3));
         h5::attr(H, "L_sink", std::vector<double>(b.L_sink, b.L_sink + 3));
 #endif
+        if (m.has_cluster) {
+            const ClusterDiag& d = m.cluster;
+            h5::attr(H, "Cluster_MassTotal", d.M_total);
+            h5::attr(H, "Cluster_DensityCentre", std::vector<double>(d.center, d.center + 3));
+            h5::attr(H, "Cluster_DensityCentreVelocity", std::vector<double>(d.vcenter, d.vcenter + 3));
+            h5::attr(H, "Cluster_CoreRadius_pc", d.r_core);
+            h5::attr(H, "Cluster_CoreDensity", d.rho_core);
+            h5::attr(H, "Cluster_Sigma1D_kms", d.sigma_c);
+            h5::attr(H, "Cluster_LagrangianFractions",
+                     std::vector<double>(ClusterDiag::LAG_FRAC, ClusterDiag::LAG_FRAC + ClusterDiag::NLAG));
+            h5::attr(H, "Cluster_LagrangianRadii_pc", std::vector<double>(d.r_lag, d.r_lag + ClusterDiag::NLAG));
+            h5::attr(H, "Cluster_NBinaries", d.n_bin);
+            h5::attr(H, "Cluster_NBinariesHard", d.n_bin_hard);
+            h5::attr(H, "Cluster_EBinaries", d.E_bin);
+        }
+        if (g_tidal.on()) {
+            h5::attr(H, "Tidal_Field", g_tidal.type == TidalField::POINT_MASS ? "pointmass" : "loghalo");
+            h5::attr(H, "Tidal_RefPosition", std::vector<double>(g_tidal.X, g_tidal.X + 3));
+            h5::attr(H, "Tidal_RefVelocity", std::vector<double>(g_tidal.V, g_tidal.V + 3));
+            double rj = 0.0;
+            if (m.has_cluster) {
+                const double Xg[3] = {g_tidal.X[0] + m.cluster.center[0], g_tidal.X[1] + m.cluster.center[1],
+                                      g_tidal.X[2] + m.cluster.center[2]};
+                rj = g_tidal.jacobi_radius(Xg, m.cluster.M_total, m.G);
+            }
+            h5::attr(H, "Tidal_JacobiRadius_pc", rj);
+        }
         h5::attr(H, "dE_rel", m.diag0.E_total != 0.0
                                   ? (m.diag.E_total + sink - m.diag0.E_total) / std::fabs(m.diag0.E_total) : 0.0);
 

@@ -77,6 +77,7 @@ KEPLER_2BODY = true                 		# Isolated 2-body subsystems without PN: a
 M_PN = 5.0                          		# Minimum mass (M_sun) for PN corrections
 PN_ORDER = 31                        		# PN bitmask: 1=PN1, 2=PN2, 4=PN2.5, 8=PN3, 16=PN3.5, 32=BH spin couplings (63=all) — DISABLED for energy test
 R_ESCAPE_RH = 100.0                 		# Escape radius in half-mass radii
+R_ESCAPE_RJ = 2.0                   		# With TIDAL_FIELD: escape radius in Jacobi radii (NBODY6, Baumgardt & Makino 2003); 0 = use R_ESCAPE_RH
 TIDAL_FIELD = none				# Host galaxy tide: none / pointmass / loghalo (cluster on a circular orbit; PeTar-style reference point)
 GALAXY_R_PC = 8000			# Galactocentric orbit radius (pc)
 GALAXY_VC_KMS = 220			# loghalo circular velocity (km/s)
@@ -158,9 +159,11 @@ RESTART_DIR = .                         	# Directory of restart_<step>.h5 (the n
 RESTART_FILE =                          	# Continue from this file; latest: newest in RESTART_DIR; auto: that or a fresh start
 SNAPSHOT_INTERVAL = 0                   	# LUNA-layout snapshot every this many steps, at step 0 and at the end (0: off)
 SNAPSHOT_DIR = .                        	# snapdir_NNN/snapshot_NNN.0.hdf5 go here
+SNAPSHOT_CLUSTER_DIAG = true            	# Header: density centre, core, Lagrangian radii, binaries (and r_J with TIDAL_FIELD) of each snapshot
 CLUSTER_DIAG_INTERVAL = 0			# Steps between cluster diagnostics (density centre, core, Lagrangian radii, binaries; 0: off)
 CLUSTER_DIAG_FILE = cluster_diag.dat	# Appended by rank 0
 CLUSTER_DIAG_RPAIR_PC = 0.02		# Largest pair separation in the binary census (pc)
 PROFILING_FENCES = true            		# Fence the device at each timer stop (exact per-component times; ~4 % of a 200k step). false: host
                                     		# wall times only, queued GPU work charged to the next synchronising component
 TDE_ACCRETION_FRACTION = 0.5            # Fraction of a tidally disrupted star the BH accretes (FROST-CLUSTERS I, DRAGON-II)
+COLL_MASS_LOSS_C = 0                     # Stellar-collision mass loss C: m_rem = (m1+m2)(1 - C q/(1+q)^2) (Glebbeek 2013; FROST-CLUSTERS III: 0.3)

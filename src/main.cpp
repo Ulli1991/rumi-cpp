@@ -704,6 +704,7 @@ int main(int argc, char** argv) {
             g_collisional.sdar_c          = cfg.get_double("SDAR_C", 0.1);
             g_collisional.subsys_collisions = cfg.get_bool("SUBSYS_COLLISIONS", true);
             g_collisional.tde_accretion = cfg.get_double("TDE_ACCRETION_FRACTION", 0.5);
+            g_collisional.coll_mass_loss_c = cfg.get_double("COLL_MASS_LOSS_C", 0.0);
             g_collisional.bh_merge_max_single = cfg.get_str("BH_MERGE_RADIUS", "total") == "max_single";
             g_collisional.grad_fresh = cfg.get_bool("GRAD_FRESH", false);
             g_collisional.gbs_deuflhard = cfg.get_str("GBS_SEQUENCE", "bulirsch") == "deuflhard";
@@ -717,6 +718,7 @@ int main(int argc, char** argv) {
             g_collisional.m_pn            = cfg.get_double("M_PN", 5.0);
             g_collisional.pn_order        = cfg.get_int("PN_ORDER", 7);
             g_collisional.r_escape_rh     = cfg.get_double("R_ESCAPE_RH", 100.0);
+            g_collisional.r_escape_rj     = cfg.get_double("R_ESCAPE_RJ", 2.0);
             g_collisional.mstar_threshold = cfg.get_int("MSTAR_THRESHOLD", 8);
             g_collisional.sse_enabled     = cfg.get_bool("SSE_ENABLED", true);
             g_collisional.sse_metallicity = cfg.get_double("SSE_METALLICITY", 0.02);
@@ -1225,6 +1227,8 @@ int main(int argc, char** argv) {
         double max_step_wall = 0.0;
         bool stop_run = false;
         // Snapshot (all ranks enter: the diagnostics are collective) and restart file of the state after step_now
+        // SNAPSHOT_CLUSTER_DIAG (default on): density centre, core, Lagrangian radii, binaries in the snapshot Header
+        const bool snapshot_cluster_diag = cfg.get_bool("SNAPSHOT_CLUSTER_DIAG", true);
         auto write_snapshot_now = [&](double t_now, int step_now) {
             if (snapshot_interval <= 0 || last_snapshot_step == step_now) return;
             SnapshotMeta sm;
@@ -1233,6 +1237,10 @@ int main(int argc, char** argv) {
             sm.diag0 = diag0;
             sm.config_json = config_json(cfg.params);
             if (my_rank == 0) {
+                if (snapshot_cluster_diag) {
+                    sm.has_cluster = true;
+                    sm.cluster = compute_cluster_diag(work_p, G, t_now * TIME_UNIT_MYR, cluster_diag_rpair);
+                }
                 std::string path = write_snapshot(snap_opt, work_p, sm);
                 std::printf("Snapshot %d written: %s\n", rs.snapshot_index, path.c_str());
                 std::fflush(stdout);

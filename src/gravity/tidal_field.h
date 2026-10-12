@@ -23,6 +23,9 @@ struct TidalField {
     bool on() const { return type != NONE; }
     void acc(const double x[3], double G, double a[3]) const;
     double v_circ(double R, double G) const;
+    // Jacobi (tidal) radius of a cluster of mass M at galactocentric position Xg on a circular orbit:
+    // r_J = (G M / (Omega^2 - d2Phi/dR2))^(1/3) (King 1962; point mass: R (M / 3 M_gal)^(1/3))
+    double jacobi_radius(const double Xg[3], double M, double G) const;
     // Circular orbit at galactocentric radius R in the x-y plane, starting on the +x axis
     void init_circular(double R, double G);
 };

@@ -74,6 +74,16 @@ int main(int argc, char** argv) {
             for (const char* d : {"density", "velocity_x", "velocity_y", "velocity_z", "pressure", "internal_energy"})
                 if (!h5::exists(C, d)) { std::printf("cells lacks dataset %s\n", d); bad++; }
         }
+        // Header structure attributes (snapshot_cluster_header): one line each, full precision
+        for (const char* a : {"Cluster_MassTotal", "Cluster_DensityCentre", "Cluster_CoreRadius_pc", "Cluster_CoreDensity",
+                              "Cluster_Sigma1D_kms", "Cluster_LagrangianRadii_pc", "Cluster_NBinaries",
+                              "Cluster_NBinariesHard", "Cluster_EBinaries", "Tidal_RefPosition", "Tidal_RefVelocity",
+                              "Tidal_JacobiRadius_pc", "E_tidal"}) {
+            if (!h5::has_attr(H, a)) continue;
+            std::printf("header %s", a);
+            for (double v : h5::get_doubles(H, a)) std::printf(" %.17g", v);
+            std::printf("\n");
+        }
         std::printf("round trip: %lld particles compared, %d mismatches\n", seen, bad);
         return bad ? 1 : 0;
     } catch (const std::exception& e) {

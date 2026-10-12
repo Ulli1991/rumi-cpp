@@ -19,6 +19,14 @@ double TidalField::v_circ(double R, double G) const {
     return 0.0;
 }
 
+double TidalField::jacobi_radius(const double Xg[3], double M, double G) const {
+    const double R2 = Xg[0] * Xg[0] + Xg[1] * Xg[1] + Xg[2] * Xg[2];
+    double k = 0.0;   // Omega^2 - d2Phi/dR2
+    if (type == POINT_MASS) k = R2 > 0.0 ? 3.0 * G * M_gal / (R2 * std::sqrt(R2)) : 0.0;
+    else if (type == LOG_HALO) k = 2.0 * V_c * V_c * R2 / ((R_c * R_c + R2) * (R_c * R_c + R2));
+    return k > 0.0 && M > 0.0 ? std::cbrt(G * M / k) : 0.0;
+}
+
 void TidalField::init_circular(double R, double G) {
     X[0] = R; X[1] = 0.0; X[2] = 0.0;
     V[0] = 0.0; V[1] = v_circ(R, G); V[2] = 0.0;

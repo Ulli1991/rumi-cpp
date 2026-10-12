@@ -184,7 +184,7 @@ void visit_config(CollisionalConfig& c, F&& f) {
     f("tidal_step_res", c.tidal_step_res); f("flyby_ngb_cm", c.flyby_ngb_cm); f("tidal_res", c.tidal_res);
     f("eta_restart", c.eta_restart); f("sdar", c.sdar); f("sdar_kref", c.sdar_kref); f("sdar_c", c.sdar_c);
     f("subsys_collisions", c.subsys_collisions); f("n_orb_secular", c.n_orb_secular); f("m_pn", c.m_pn);
-    f("pn_order", c.pn_order); f("r_escape_rh", c.r_escape_rh); f("mstar_threshold", c.mstar_threshold);
+    f("pn_order", c.pn_order); f("r_escape_rh", c.r_escape_rh); f("r_escape_rj", c.r_escape_rj); f("mstar_threshold", c.mstar_threshold);
     f("sse_enabled", c.sse_enabled); f("sse_metallicity", c.sse_metallicity); f("sse_wind", c.sse_wind);
     f("sse_remnant", c.sse_remnant); f("sse_ppisn", c.sse_ppisn); f("sse_ecsn", c.sse_ecsn);
     f("sse_mxns", c.sse_mxns); f("sse_flbv", c.sse_flbv); f("r_ngb_sq", c.r_ngb_sq);
@@ -192,6 +192,7 @@ void visit_config(CollisionalConfig& c, F&& f) {
     f("tde_accretion", c.tde_accretion); f("r_ngb_wide", c.r_ngb_wide);
     f("gbs_deuflhard", c.gbs_deuflhard); f("gbs_kmax", c.gbs_kmax);
     f("grad_fresh", c.grad_fresh); f("bh_merge_max_single", c.bh_merge_max_single);
+    f("coll_mass_loss_c", c.coll_mass_loss_c);
 }
 
 void write_config(hid_t parent) {

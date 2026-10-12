@@ -242,6 +242,11 @@ Only the items below are adopted; everything else in those documents is referenc
    shape (REVIEW #7, 3 seeds), parallel GBS columns for stragglers (REVIEW #10).
 4. Validation ladder (HARD_PROBLEMS §6.2): equal-mass collapse 16-32k; mass-spectrum collapse; BIFROST §5.6;
    Rizzuto-type; DRAGON-II-like; Fig 9 to BH collapse; 1e6 flagship A.
+   4b. Head-to-head with PeTar (user, 2026-10-12; github.com/lwang-astro/PeTar, Wang et al. 2020: P3T tree + SDAR +
+   slow-down, galpy tidal field, the closest public code in scope). Same ICs written for both (cpp-nbody snapshot ->
+   PeTar input), N = 1e4 / 1e5 / 2e5, without and with 10-50 % binaries, isolated and in a tidal field; compare
+   |dE/E| per interval and over the run, wall time per Myr on one raven node (PeTar MPI+OpenMP(+CUDA tree)),
+   and the physics (Lagrangian radii, core collapse time, escaper rate, binary census) on seed ensembles.
 5. Physics for A/B: multiplicity ICs (Moe & Di Stefano / Offner, triples, quadruples), spin-dependent recoil
    (Zlochower-Lousto), runtime SSE upgrade (M6), MSTAR for >8 bodies (M4), BSE/SEVN.
 6. Accuracy study for the far field (experiment I-1; statistical equivalence on ensembles) before M8 FMM.

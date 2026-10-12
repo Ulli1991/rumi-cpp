@@ -54,6 +54,7 @@ struct CollisionalConfig {
     int gbs_kmax = 10;                 // GBS_KMAX: extrapolation stages (FROST-CLUSTERS I: 8)
     bool grad_fresh = false;           // GRAD_FRESH: gradient time step from a fresh |g'| at level 0 (fix 3)
     bool bh_merge_max_single = false;  // BH_MERGE_RADIUS = max_single (FROST-CLUSTERS I) | total (default)
+    double coll_mass_loss_c = 0.0;     // COLL_MASS_LOSS_C: Glebbeek 2013 stellar-collision mass loss C (FROST-CLUSTERS III: 0.3)
     double tde_accretion = 0.5;        // TDE_ACCRETION_FRACTION: fraction of a disrupted star the BH accretes (FROST-CLUSTERS I, DRAGON-II: 0.5)
 
     // Secular evolution
@@ -78,6 +79,7 @@ struct CollisionalConfig {
 
     // Escaper removal
     double r_escape_rh = 100.0;        // escape radius in half-mass radii
+    double r_escape_rj = 2.0;          // R_ESCAPE_RJ: with TIDAL_FIELD, escape radius in Jacobi radii (NBODY6: 2); 0 = R_ESCAPE_RH
 
     // MSTAR
     int mstar_threshold = 8;           // bodies threshold for MSTAR vs LogH
