@@ -31,44 +31,34 @@ Etas etas(double eta) {
 }
 const int* sid_ptr(const Particles& p, bool coll) { return coll ? p.subsystem_id.data() : nullptr; }
 
-struct PairVel { RawView x, y, z, k, kf; };
-PairVel pair_vel(Particles& p, bool coll, int lo, int hi) {
-    PairVelocities v = coll ? pair_velocities(p, lo, hi)
-                            : PairVelocities{p.vx.data(), p.vy.data(), p.vz.data(), nullptr, nullptr};
-    return {{v.x}, {v.y}, {v.z}, {v.k}, {v.kf}};
+struct PairTidal { RawView k, kf; };
+PairTidal pair_tidal(Particles& p, bool coll, int lo, int hi) {
+    TidalSampling t = coll ? tidal_sampling(p, lo, hi) : TidalSampling{nullptr, nullptr};
+    return {{t.k}, {t.kf}};
 }
 // Union of the sink and source ranges of a pairwise kernel
 int range_lo(int i0, int ni, int j0, int nj) { return std::min(ni > 0 ? i0 : j0, nj > 0 ? j0 : i0); }
 int range_hi(int i0, int ni, int j0, int nj) { return std::max(i0 + ni, j0 + nj); }
 }  // namespace
 
-bool flyby_cm_velocity = false;
-
-PairVelocities pair_velocities(Particles& p, int lo, int hi) {
+TidalSampling tidal_sampling(Particles& p, int lo, int hi) {
 #ifdef ENABLE_COLLISIONAL
-    // FLYBY_CM_EPS x |E0|: the tidal-sampling step applies with either velocity choice. With component velocities
-    // the slow particle's kicks sample the subsystem's orbit just the same (200k, 10 % binaries, seed 7: a 29+29
-    // Msun BH binary at 55 AU and a passing star, |dE/E| 1.2e-8 over four steps)
+    // FLYBY_CM_EPS x |E0|: a slow particle's kicks sample a subsystem's orbit (200k, 10 % binaries, seed 7: a 29+29
+    // Msun BH binary at 55 AU and a passing star, |dE/E| 1.2e-8 over four steps without this step)
     const double tol = g_collisional.flyby_cm_eps * g_collisional.e_ref;
-    if (p.collisional && (flyby_cm_velocity || tol > 0.0)) {
-        static Kokkos::View<double*> cx("cm_vx", 0), cy("cm_vy", 0), cz("cm_vz", 0), ck("cm_k", 0), cf("cm_kf", 0);
-        static bool hook = (Kokkos::push_finalize_hook([] { cx = cy = cz = ck = cf = Kokkos::View<double*>(); }), true);
+    if (p.collisional && tol > 0.0) {
+        static Kokkos::View<double*> ck("tidal_k", 0), cf("tidal_kf", 0);
+        static bool hook = (Kokkos::push_finalize_hook([] { ck = cf = Kokkos::View<double*>(); }), true);
         (void)hook;
-        if ((int)ck.extent(0) < p.N) {
-            if (flyby_cm_velocity) { Kokkos::realloc(cx, p.N); Kokkos::realloc(cy, p.N); Kokkos::realloc(cz, p.N); }
-            Kokkos::realloc(ck, p.N); Kokkos::realloc(cf, p.N);
-        }
-        g_subsystem_mgr.fill_cm_velocity(p, std::max(lo, 0), std::min(hi, p.N), cx, cy, cz, ck, cf, tol,
-                                         g_collisional.tidal_step_res, flyby_cm_velocity);
-        double* k = tol > 0.0 ? ck.data() : nullptr;
-        double* kf = tol > 0.0 ? cf.data() : nullptr;
-        if (!flyby_cm_velocity) return {p.vx.data(), p.vy.data(), p.vz.data(), k, kf};
-        return {cx.data(), cy.data(), cz.data(), k, kf};
+        if ((int)ck.extent(0) < p.N) { Kokkos::realloc(ck, p.N); Kokkos::realloc(cf, p.N); }
+        g_subsystem_mgr.fill_tidal_sampling(p, std::max(lo, 0), std::min(hi, p.N), ck, cf, tol,
+                                            g_collisional.tidal_step_res);
+        return {ck.data(), cf.data()};
     }
 #else
-    (void)lo; (void)hi;
+    (void)p; (void)lo; (void)hi;
 #endif
-    return {p.vx.data(), p.vy.data(), p.vz.data(), nullptr, nullptr};
+    return {nullptr, nullptr};
 }
 int tree_dt_min_n = 0;
 int tree_ngb_min_n = 0;
@@ -138,19 +128,20 @@ TreePair<Exec>& trees() {
 
 // Minimum pair step of the sinks over the sources into dt_adapt (sink i), on Exec
 template <class Exec>
-void tree_min_dt_on(Particles& p, int i0, int ni, int j0, int nj, const PairVel& cv, const int* sid, double G,
+void tree_min_dt_on(Particles& p, int i0, int ni, int j0, int nj, const PairTidal& cv, const int* sid, double G,
                     double soft2, double eta_ff, double eta_fb) {
     auto& T = trees<Exec>();
     const double *X = p.x.data(), *Y = p.y.data(), *Z = p.z.data(), *M = p.mass.data();
-    T.pos.build(j0, nj, X, Y, Z, cv.x.ptr, cv.y.ptr, cv.z.ptr, M, false, true, cv.k.ptr, cv.kf.ptr);
-    T.vel.build(j0, nj, X, Y, Z, cv.x.ptr, cv.y.ptr, cv.z.ptr, M, true, false, cv.k.ptr, cv.kf.ptr);
+    const double *VX = p.vx.data(), *VY = p.vy.data(), *VZ = p.vz.data();
+    T.pos.build(j0, nj, X, Y, Z, VX, VY, VZ, M, false, true, cv.k.ptr, cv.kf.ptr);
+    T.vel.build(j0, nj, X, Y, Z, VX, VY, VZ, M, true, false, cv.k.ptr, cv.kf.ptr);
     dtt::DtParams prm{G, soft2, eta_ff, eta_fb, tree_dt_vc_fac, cv.k.ptr, cv.kf.ptr};
     long long np = 0;
-    dtt::min_pair_dt(T.pos, T.vel, i0, ni, X, Y, Z, cv.x.ptr, cv.y.ptr, cv.z.ptr, M, sid, p.dt_adapt.data(), prm, &np);
+    dtt::min_pair_dt(T.pos, T.vel, i0, ni, X, Y, Z, VX, VY, VZ, M, sid, p.dt_adapt.data(), prm, &np);
     g_tree_stats.dt_pairs += np;
 }
 
-void tree_min_dt(TreeMode mode, Particles& p, int i0, int ni, int j0, int nj, const PairVel& cv, const int* sid,
+void tree_min_dt(TreeMode mode, Particles& p, int i0, int ni, int j0, int nj, const PairTidal& cv, const int* sid,
                  double G, double soft2, double eta_ff, double eta_fb) {
     g_tree_stats.dt_calls++;
     g_tree_stats.dt_sinks += ni;
@@ -193,10 +184,10 @@ void compare_or_abort(const char* what, const std::vector<double>& a, const std:
 template <bool COLL>
 static void acc_dt_range(Particles& p, int i0, int ni, int j0, int nj, double G, double soft2, double eta) {
     Etas e = etas(eta);
-    PairVel cv = pair_vel(p, COLL, range_lo(i0, ni, j0, nj), range_hi(i0, ni, j0, nj));
+    PairTidal cv = pair_tidal(p, COLL, range_lo(i0, ni, j0, nj), range_hi(i0, ni, j0, nj));
     AccDtK<COLL> k{{p.x.data()}, {p.y.data()}, {p.z.data()}, {p.mass.data()}, {p.vx.data()}, {p.vy.data()},
                    {p.vz.data()}, {p.ax.data()}, {p.ay.data()}, {p.az.data()}, {p.dt_adapt.data()},
-                   cv.x, cv.y, cv.z, cv.k, cv.kf, sid_ptr(p, COLL), G, soft2, e.ff, e.fb, e.jerk, e.va};
+                   cv.k, cv.kf, sid_ptr(p, COLL), G, soft2, e.ff, e.fb, e.jerk, e.va};
     run_n2("acc_dt", i0, ni, j0, nj, k);
 }
 
@@ -399,22 +390,14 @@ void cross_gradient_correction(Particles& p, int a_start, int a_count, int b_sta
 template <bool COLL>
 static void dt_range(Particles& p, int i0, int ni, int j0, int nj, double G, double soft2, double eta) {
     Etas e = etas(eta);
-    PairVel cv = pair_vel(p, COLL, range_lo(i0, ni, j0, nj), range_hi(i0, ni, j0, nj));
-    // O(N^2) time-step kernel; with component fly-by velocities (cv = v) without the second staged velocity copy
-    // F32: with the single-precision pre-rejects (pair_dt_reject_f32, device code)
+    PairTidal cv = pair_tidal(p, COLL, range_lo(i0, ni, j0, nj), range_hi(i0, ni, j0, nj));
+    // O(N^2) time-step kernel; F32: with the single-precision pre-rejects (pair_dt_reject_f32, device code)
     auto run_dtk_f = [&](const char* name, auto f32_tag) {
         constexpr bool F32 = decltype(f32_tag)::value;
-        if (COLL && cv.x.ptr == p.vx.data()) {
-            DtK<COLL, false, false, F32> k{{p.x.data()}, {p.y.data()}, {p.z.data()}, {p.mass.data()}, {p.vx.data()}, {p.vy.data()},
-                    {p.vz.data()}, {p.ax.data()}, {p.ay.data()}, {p.az.data()}, {p.dt_adapt.data()},
-                    cv.x, cv.y, cv.z, cv.k, cv.kf, sid_ptr(p, COLL), G, soft2, e.ff, e.fb, COLL ? e.jerk : 0.0};
-            run_n2(name, i0, ni, j0, nj, k);
-        } else {
-            DtK<COLL, false, true, F32> k{{p.x.data()}, {p.y.data()}, {p.z.data()}, {p.mass.data()}, {p.vx.data()}, {p.vy.data()},
-                    {p.vz.data()}, {p.ax.data()}, {p.ay.data()}, {p.az.data()}, {p.dt_adapt.data()},
-                    cv.x, cv.y, cv.z, cv.k, cv.kf, sid_ptr(p, COLL), G, soft2, e.ff, e.fb, COLL ? e.jerk : 0.0};
-            run_n2(name, i0, ni, j0, nj, k);
-        }
+        DtK<COLL, false, F32> k{{p.x.data()}, {p.y.data()}, {p.z.data()}, {p.mass.data()}, {p.vx.data()}, {p.vy.data()},
+                {p.vz.data()}, {p.ax.data()}, {p.ay.data()}, {p.az.data()}, {p.dt_adapt.data()},
+                cv.k, cv.kf, sid_ptr(p, COLL), G, soft2, e.ff, e.fb, COLL ? e.jerk : 0.0};
+        run_n2(name, i0, ni, j0, nj, k);
     };
     // NBODY_CHECK_DT_FP32=1: rerun without the pre-rejects and abort on any bitwise difference in dt, ax, ay, az
     auto run_dtk = [&](const char* name) {
@@ -439,10 +422,10 @@ static void dt_range(Particles& p, int i0, int ni, int j0, int nj, double G, dou
         // minimum over the pair steps from the tree into dt_adapt; collisional mode then accumulates the partner-free
         // acceleration and jerk over all sources (O(N^2), identical sums) and applies the jerk criterion as DtK does
         tree_min_dt(mode, p, i0, ni, j0, nj, cv, sid_ptr(p, COLL), G, soft2, e.ff, e.fb);
-        if (COLL) {   // sums only: the pair-step velocities are not read (CV = false)
-            DtK<COLL, true, false> ks{{p.x.data()}, {p.y.data()}, {p.z.data()}, {p.mass.data()}, {p.vx.data()}, {p.vy.data()},
+        if (COLL) {   // sums only
+            DtK<COLL, true> ks{{p.x.data()}, {p.y.data()}, {p.z.data()}, {p.mass.data()}, {p.vx.data()}, {p.vy.data()},
                                {p.vz.data()}, {p.ax.data()}, {p.ay.data()}, {p.az.data()}, {p.dt_adapt.data()},
-                               cv.x, cv.y, cv.z, cv.k, cv.kf, sid_ptr(p, COLL), G, soft2, e.ff, e.fb, COLL ? e.jerk : 0.0};
+                               cv.k, cv.kf, sid_ptr(p, COLL), G, soft2, e.ff, e.fb, COLL ? e.jerk : 0.0};
             run_n2("dt_sums", i0, ni, j0, nj, ks);
         }
         if (!check_tree()) return;
@@ -610,10 +593,10 @@ std::vector<int> cc_components(Particles& p, int start, int count, double pivot,
     static bool hook = (Kokkos::push_finalize_hook([] { dmin = Kokkos::View<double*>(); }), true);
     (void)hook;
     if ((int)dmin.extent(0) < count) Kokkos::realloc(dmin, count);
-    // the pair time steps of DtK/AccDtK: with FLYBY_CM_VELOCITY the subsystem c.o.m. velocity of members
-    // (FROST-CLUSTERS II sec. 2.1)
-    PairVel cv = pair_vel(p, p.collisional, start, start + count);
-    PairMinK pm{{p.x.data()}, {p.y.data()}, {p.z.data()}, {p.mass.data()}, cv.x, cv.y, cv.z, cv.k, cv.kf,
+    // the pair time steps of DtK/AccDtK (component velocities, tidal-sampling step)
+    PairTidal cv = pair_tidal(p, p.collisional, start, start + count);
+    PairMinK pm{{p.x.data()}, {p.y.data()}, {p.z.data()}, {p.mass.data()}, {p.vx.data()}, {p.vy.data()},
+                {p.vz.data()}, cv.k, cv.kf,
                 {dmin.data()}, start, sid_ptr(p, p.collisional), G, soft2, e.ff, e.fb};
     run_n2("cc_pair_min", start, count, start, count, pm);
     // NBODY_CHECK_CC: the split must see the pair time steps of the time-step kernel (DtK, over a superset of
@@ -630,7 +613,8 @@ std::vector<int> cc_components(Particles& p, int start, int count, double pivot,
     }
     auto launch = [&](auto coll_tag) {
         constexpr bool COLL = decltype(coll_tag)::value;
-        EdgeK<COLL> k{{p.x.data()}, {p.y.data()}, {p.z.data()}, {p.mass.data()}, cv.x, cv.y, cv.z, cv.k, cv.kf,
+        EdgeK<COLL> k{{p.x.data()}, {p.y.data()}, {p.z.data()}, {p.mass.data()}, {p.vx.data()}, {p.vy.data()},
+                      {p.vz.data()}, cv.k, cv.kf,
                       sid_ptr(p, COLL), cc_buf(0).data(), cc_buf(1).data(), cc_buf(2).data(), max_edges,
                       G, soft2, e.ff, e.fb, pivot, {dmin.data()}, start};
         run_n2("cc_edges", start, count, start, count, k);

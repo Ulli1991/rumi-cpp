@@ -67,7 +67,7 @@ struct SubsystemManager {
     void rebuild_pid_to_idx(const Particles& p);
     void check_pid_to_idx(const Particles& p) const;   // full comparison (NBODY_CHECK_PIDMAP)
     const Particles* map_source_ = nullptr;          // particle set the map was built for
-    Kokkos::View<int*> cm_buf_;                       // member offsets and slots of fill_cm_velocity
+    Kokkos::View<int*> cm_buf_;                       // member offsets and slots of fill_tidal_sampling
     Kokkos::View<int*>::host_mirror_type cm_buf_host_;
     std::vector<int> cm_host_;
     Kokkos::View<int*> flag_buf_;                     // (index, sid) pairs uploaded by update_particle_flags
@@ -128,17 +128,13 @@ struct SubsystemManager {
     // Update subsystem_id field in Particles based on active subsystems
     void update_particle_flags(Particles& p);
 
-    // cvx, cvy, cvz <- velocities on [lo, hi), except that subsystem members get their subsystem's
-    // centre-of-mass velocity (fly-by time-step criterion with FLYBY_CM_VELOCITY, FROST-CLUSTERS II sec. 2.1)
-    // With tol > 0 (FLYBY_CM_EPS x |E0|) also ck <- tidal-sampling constants (PairVelocities::k): 1e30 for
-    // non-members, tol / (2 G R mu v) for members, with R the apocentre separation and v the pericentre relative
-    // speed of a bound pair (else the separation and relative speed), mu its reduced mass; for larger subsystems R
-    // is twice the largest member distance from the c.o.m. and mu v the sum of m |v - v_cm|.
+    // On [lo, hi), with tol > 0 (FLYBY_CM_EPS x |E0|; else nothing is written): ck <- tidal-sampling constants
+    // (TidalSampling::k): 1e30 for non-members, tol / (2 G R mu v) for members, with R the apocentre separation and v
+    // the pericentre relative speed of a bound pair (else the separation and relative speed), mu its reduced mass;
+    // for larger subsystems R is twice the largest member distance from the c.o.m. and mu v the sum of m |v - v_cm|.
     // cf <- floor of the tidal-sampling step: res x P (1 - e)^(3/2) for members of a bound 2-body subsystem, else 0.
-    // cm = false (component velocities, FLYBY_CM_VELOCITY off): only ck, cf are written, cvx, cvy, cvz are not touched
-    void fill_cm_velocity(const Particles& p, int lo, int hi, Kokkos::View<double*> cvx, Kokkos::View<double*> cvy,
-                          Kokkos::View<double*> cvz, Kokkos::View<double*> ck, Kokkos::View<double*> cf, double tol,
-                          double res, bool cm = true);
+    void fill_tidal_sampling(const Particles& p, int lo, int hi, Kokkos::View<double*> ck, Kokkos::View<double*> cf,
+                             double tol, double res);
 
     // Enforce shared timestep: all members of each subsystem get min dt_adapt
     // Call after detection and before partition_by_pivot

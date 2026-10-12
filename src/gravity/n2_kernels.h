@@ -237,8 +237,8 @@ struct NgbK {
     KOKKOS_INLINE_FUNCTION void finish(int, const Sink&, const double*, const double*) const {}
 };
 
-// FLYBY_CM_EPS tidal-sampling step min(k_i / m_j, k_j / m_i) r^3 (PairVelocities::k, 1e30 for non-members), not
-// below max(f_i, f_j) (PairVelocities::kf: TIDAL_STEP_RES x P (1 - e)^(3/2) of a member's binary, 0 otherwise):
+// FLYBY_CM_EPS tidal-sampling step min(k_i / m_j, k_j / m_i) r^3 (TidalSampling::k, 1e30 for non-members), not
+// below max(f_i, f_j) (TidalSampling::kf: TIDAL_STEP_RES x P (1 - e)^(3/2) of a member's binary, 0 otherwise):
 // kicks that resolve the pericentre passage no longer sample the orbit at random phases, so the bound mu |f| v dt
 // does not apply below. Without the floor a perturber drove a 29+29 Msun, 54 yr binary and itself to steps of 4e-9
 // Myr and an interval cost 150-270 s instead of ~15 s (200k, 10 % binaries, old seed-7 ICs); on the CM_TIDE test
@@ -273,30 +273,26 @@ KOKKOS_INLINE_FUNCTION double tidal_sampling_dt_below(double cur, double ki, dou
 // with that acceleration for the v/a, gradient and perturbation criteria that follow.
 // MN_IN (tree path, dt_tree.h): the minimum over the pair steps is already in dt (exact tree search); only the sums
 // are accumulated here, with the same per-pair expressions and order as without MN_IN, so they are bit-identical.
-// CV = false (collisional, cvx..cvz are vx..vz, i.e. component fly-by velocities): the pair-step velocities are taken
-// from the staged vx..vz instead of a second staged copy (13 -> 10 source doubles; same values, bit-identical; -5 %
-// of DtK, AUDIT G row 2b).
+// The pair time steps take the component velocities, the staged vx..vz (the subsystem c.o.m. velocities of
+// FLYBY_CM_VELOCITY, a second staged copy, were deleted 2026-10-12).
 // F32: single-precision pre-rejects of the pair and tidal-sampling steps (pair_dt_reject_f32; bit-identical minimum).
-template <bool COLL, bool MN_IN = false, bool CV = true, bool F32 = true>
+template <bool COLL, bool MN_IN = false, bool F32 = true>
 struct DtK {
-    static constexpr int KI = CV ? 11 : 8;   // source slots of k and kf (collisional)
+    static constexpr int KI = 8;   // source slots of k and kf (collisional)
     static constexpr int NSRC = COLL ? KI + 2 : 7, NS = COLL ? 6 : 0, NM = 1;
     RawView x, y, z, m, vx, vy, vz, ax, ay, az, dt;
-    RawView cvx, cvy, cvz;   // velocities for the pair time step (subsystem CoM velocity or vx, vy, vz)
-    RawView ktid, kfl;       // PairVelocities::k, kf (null: no tidal-sampling step)
+    RawView ktid, kfl;       // TidalSampling::k, kf (null: no tidal-sampling step)
     const int* sid;
     double G, soft2, eta_ff, eta_fb, eta_jerk;
-    struct Sink { double x, y, z, m, vx, vy, vz, cvx, cvy, cvz, k, kf; int sid; };
+    struct Sink { double x, y, z, m, vx, vy, vz, k, kf; int sid; };
     KOKKOS_INLINE_FUNCTION Sink sink(int i) const {
-        return {x(i), y(i), z(i), m(i), vx(i), vy(i), vz(i), (COLL && CV) ? cvx(i) : 0.0, (COLL && CV) ? cvy(i) : 0.0,
-                (COLL && CV) ? cvz(i) : 0.0, (COLL && ktid.ptr) ? ktid(i) : 1e30, (COLL && ktid.ptr) ? kfl(i) : 0.0,
-                COLL ? sid[i] : -1};
+        return {x(i), y(i), z(i), m(i), vx(i), vy(i), vz(i), (COLL && ktid.ptr) ? ktid(i) : 1e30,
+                (COLL && ktid.ptr) ? kfl(i) : 0.0, COLL ? sid[i] : -1};
     }
     KOKKOS_INLINE_FUNCTION void source(int j, double* s) const {
         s[0] = x(j); s[1] = y(j); s[2] = z(j); s[3] = m(j); s[4] = vx(j); s[5] = vy(j); s[6] = vz(j);
         if (COLL) {
             s[7] = static_cast<double>(sid[j]);
-            if (CV) { s[CV ? 8 : 0] = cvx(j); s[CV ? 9 : 0] = cvy(j); s[CV ? 10 : 0] = cvz(j); }
             s[COLL ? KI : 0] = ktid.ptr ? ktid(j) : 1e30;
             s[COLL ? KI + 1 : 0] = ktid.ptr ? kfl(j) : 0.0;
         }
@@ -308,10 +304,8 @@ struct DtK {
         double r2s = w ? dx * dx + dy * dy + dz * dz + soft2 : 1.0;
         double ir = fast_rsqrt(r2s);
         if constexpr (!MN_IN) {
-            // pair-step velocity difference: the c.o.m. velocities (CV), else the same dv as the jerk sum
-            const double cdx = CV ? s[CV ? 8 : 0] - a.cvx : dvx, cdy = CV ? s[CV ? 9 : 0] - a.cvy : dvy,
-                         cdz = CV ? s[CV ? 10 : 0] - a.cvz : dvz;
-            double t = COLL ? Kokkos::fmin(pair_dt_below<F32>(mn[0], r2s, ir, dx, dy, dz, cdx, cdy, cdz, G, a.m + s[3], eta_ff, eta_fb),
+            // pair-step velocity difference: the same dv as the jerk sum
+            double t = COLL ? Kokkos::fmin(pair_dt_below<F32>(mn[0], r2s, ir, dx, dy, dz, dvx, dvy, dvz, G, a.m + s[3], eta_ff, eta_fb),
                                            tidal_sampling_dt_below<F32>(mn[0], a.k, s[COLL ? KI : 0], a.m, s[3], r2s, a.kf, s[COLL ? KI + 1 : 0]))
                             : pair_dt_below<F32>(mn[0], r2s, ir, dx, dy, dz, dvx, dvy, dvz, G, a.m + s[3], eta_ff, eta_fb);
             mn[0] = Kokkos::fmin(mn[0], w ? t : 1e30);
@@ -341,24 +335,22 @@ struct DtK {
 // jerk (Eq. 29) and v/a (Eq. 24) criteria.
 template <bool COLL>
 struct AccDtK {
-    static constexpr int NSRC = COLL ? 13 : 7, NS = COLL ? 6 : 3, NM = 1;
+    static constexpr int NSRC = COLL ? 10 : 7, NS = COLL ? 6 : 3, NM = 1;
     RawView x, y, z, m, vx, vy, vz, ax, ay, az, dt;
-    RawView cvx, cvy, cvz;   // velocities for the pair time step (subsystem CoM velocity or vx, vy, vz)
-    RawView ktid, kfl;       // PairVelocities::k, kf (null: no tidal-sampling step)
+    RawView ktid, kfl;       // TidalSampling::k, kf (null: no tidal-sampling step)
     const int* sid;
     double G, soft2, eta_ff, eta_fb, eta_jerk, eta_va;
-    struct Sink { double x, y, z, m, vx, vy, vz, cvx, cvy, cvz, k, kf; int sid; };
+    struct Sink { double x, y, z, m, vx, vy, vz, k, kf; int sid; };
     KOKKOS_INLINE_FUNCTION Sink sink(int i) const {
-        return {x(i), y(i), z(i), m(i), vx(i), vy(i), vz(i), COLL ? cvx(i) : 0.0, COLL ? cvy(i) : 0.0,
-                COLL ? cvz(i) : 0.0, (COLL && ktid.ptr) ? ktid(i) : 1e30, (COLL && ktid.ptr) ? kfl(i) : 0.0,
-                COLL ? sid[i] : -1};
+        return {x(i), y(i), z(i), m(i), vx(i), vy(i), vz(i), (COLL && ktid.ptr) ? ktid(i) : 1e30,
+                (COLL && ktid.ptr) ? kfl(i) : 0.0, COLL ? sid[i] : -1};
     }
     KOKKOS_INLINE_FUNCTION void source(int j, double* s) const {
         s[0] = x(j); s[1] = y(j); s[2] = z(j); s[3] = m(j); s[4] = vx(j); s[5] = vy(j); s[6] = vz(j);
         if (COLL) {
-            s[7] = static_cast<double>(sid[j]); s[8] = cvx(j); s[9] = cvy(j); s[10] = cvz(j);
-            s[COLL ? 11 : 0] = ktid.ptr ? ktid(j) : 1e30;
-            s[COLL ? 12 : 0] = ktid.ptr ? kfl(j) : 0.0;
+            s[7] = static_cast<double>(sid[j]);
+            s[COLL ? 8 : 0] = ktid.ptr ? ktid(j) : 1e30;
+            s[COLL ? 9 : 0] = ktid.ptr ? kfl(j) : 0.0;
         }
     }
     KOKKOS_INLINE_FUNCTION void pair(const Sink& a, int i, const double* s, int j, double* sum, double* mn) const {
@@ -369,8 +361,8 @@ struct AccDtK {
         double ir = fast_rsqrt(r2s);
         double fac1 = G * (w ? s[3] : 0.0) * ir * ir * ir;
         sum[0] += fac1 * dx; sum[1] += fac1 * dy; sum[2] += fac1 * dz;
-            double t = COLL ? Kokkos::fmin(pair_dt_below(mn[0], r2s, ir, dx, dy, dz, s[8] - a.cvx, s[9] - a.cvy, s[10] - a.cvz, G, a.m + s[3], eta_ff, eta_fb),
-                                       tidal_sampling_dt(a.k, s[COLL ? 11 : 0], a.m, s[3], r2s, a.kf, s[COLL ? 12 : 0]))
+            double t = COLL ? Kokkos::fmin(pair_dt_below(mn[0], r2s, ir, dx, dy, dz, dvx, dvy, dvz, G, a.m + s[3], eta_ff, eta_fb),
+                                       tidal_sampling_dt(a.k, s[COLL ? 8 : 0], a.m, s[3], r2s, a.kf, s[COLL ? 9 : 0]))
                         : pair_dt_below(mn[0], r2s, ir, dx, dy, dz, dvx, dvy, dvz, G, a.m + s[3], eta_ff, eta_fb);
         mn[0] = Kokkos::fmin(mn[0], w ? t : 1e30);
         if (COLL) {
@@ -466,7 +458,7 @@ template <bool COLL>
 struct EdgeK {
     static constexpr int NSRC = COLL ? 11 : 8, NS = 0, NM = 0, DM = NSRC - 1;   // dmin in the last slot
     RawView x, y, z, m, vx, vy, vz;
-    RawView ktid, kfl;   // PairVelocities::k, kf (null: no tidal-sampling step)
+    RawView ktid, kfl;   // TidalSampling::k, kf (null: no tidal-sampling step)
     const int* sid;
     int *ei, *ej, *cnt;
     int max_edges;
@@ -515,7 +507,7 @@ struct EdgeK {
 struct PairMinK {
     static constexpr int NSRC = 10, NS = 0, NM = 1;
     RawView x, y, z, m, vx, vy, vz;
-    RawView ktid, kfl;   // PairVelocities::k, kf (null: no tidal-sampling step)
+    RawView ktid, kfl;   // TidalSampling::k, kf (null: no tidal-sampling step)
     RawView dmin;
     int off;
     const int* sid;   // null: no subsystems

@@ -557,7 +557,6 @@ int main(int argc, char** argv) {
         hhs_cc_min = cfg.get_int("HHS_CC_MIN");
         bool ngb_mass_scaling = false;
         double ngb_mref = 0.0;
-        flyby_cm_velocity = cfg.get_bool("FLYBY_CM_VELOCITY");   // FROST-CLUSTERS II sec. 2.1
         g_eattr.on = std::getenv("NBODY_EATTR") != nullptr;   // per-print energy attribution (diagnostics.h)
         use_integer_positions = cfg.get_bool("INTEGER_POSITIONS");
         double domain_halfsize = cfg.get_double("DOMAIN_HALFSIZE_PC");
@@ -573,12 +572,10 @@ int main(int argc, char** argv) {
         // Exact tree searches for the HHS time steps and neighbours (gravity/dt_tree.h); forces stay direct
         // Exact tree searches on by default above the measured break-even set sizes (AUDIT F7; results are
         // bit-identical to O(N^2), so only speed changes). Host builds: ~1000-1500 for both searches (32 threads).
-        // GPUs (A100): neighbours ~25k, time steps ~30k with component velocities, ~150k with FLYBY_CM_VELOCITY
-        // (fewer prunable pairs). GPU values also serve APUs until measured there. With FLYBY_CM_VELOCITY and the
-        // tidal-sampling step the 200k cluster ran 4.12 s/step with the tree against 3.96 s without (verify-gpuopt,
-        // 2026-10-11), so the c.o.m. threshold sits above 200k.
+        // GPUs (A100): neighbours ~25k, time steps ~30k (with the deleted FLYBY_CM_VELOCITY ~150k). GPU values also
+        // serve APUs until measured there.
         constexpr bool host_build = std::is_same_v<Kokkos::DefaultExecutionSpace, Kokkos::DefaultHostExecutionSpace>;
-        const int dt_default = host_build ? 2048 : (flyby_cm_velocity ? 300000 : 65536);
+        const int dt_default = host_build ? 2048 : 65536;
         tree_dt_min_n = cfg.get_int("TREE_DT_MIN_N");        // -1: the build's default
         if (tree_dt_min_n < 0) tree_dt_min_n = dt_default;
         tree_ngb_min_n = cfg.get_int("TREE_NGB_MIN_N");

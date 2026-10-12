@@ -893,22 +893,18 @@ void SubsystemManager::remap_indices(const Particles& p) {
 // ============================================================================
 
 
-// FROST-CLUSTERS II (Rantala et al. 2025, arXiv:2506.04330) sec. 2.1: "for the fly-by time-steps of binary stars
-// in subsystems, we now use binary centre-of-mass velocities in the BIFROST fly-by time-step criteria instead of
-// the velocities of the binary components". Non-members keep their velocity; members of one subsystem do not pair
-// in the FSI at all. Only [lo, hi) is copied (the kernels' sinks and sources); the member slots are listed on the
-// host (one upload into a persistent buffer) and each subsystem sums its members in particle_ids order on the
-// device, so neither the member state nor an O(N) array crosses to the host.
-void SubsystemManager::fill_cm_velocity(const Particles& p, int lo, int hi, Kokkos::View<double*> cvx,
-                                         Kokkos::View<double*> cvy, Kokkos::View<double*> cvz,
-                                         Kokkos::View<double*> ck, Kokkos::View<double*> cf, double tol,
-                                         double res, bool cm) {
+// Tidal-sampling constants of the pair time steps (FLYBY_CM_EPS). Only [lo, hi) is written (the kernels' sinks and
+// sources); the member slots are listed on the host (one upload into a persistent buffer) and each subsystem sums
+// its members in particle_ids order on the device, so neither the member state nor an O(N) array crosses to the
+// host. (FLYBY_CM_VELOCITY, deleted 2026-10-12, also wrote the subsystem c.o.m. velocity of members here: FROST-
+// CLUSTERS II sec. 2.1; it lost the production A/B on |dE/E|.)
+void SubsystemManager::fill_tidal_sampling(const Particles& p, int lo, int hi, Kokkos::View<double*> ck,
+                                           Kokkos::View<double*> cf, double tol, double res) {
     auto vx = p.vx, vy = p.vy, vz = p.vz;
-    if (!cm && tol <= 0.0) return;
+    if (tol <= 0.0) return;
     if (hi > lo)
-        Kokkos::parallel_for("cm_vel_copy", Kokkos::RangePolicy<>(lo, hi), KOKKOS_LAMBDA(int i) {
-            if (cm) { cvx(i) = vx(i); cvy(i) = vy(i); cvz(i) = vz(i); }
-            if (tol > 0.0) { ck(i) = 1e30; cf(i) = 0.0; }
+        Kokkos::parallel_for("tidal_k_init", Kokkos::RangePolicy<>(lo, hi), KOKKOS_LAMBDA(int i) {
+            ck(i) = 1e30; cf(i) = 0.0;
         });
     if (active.empty()) return;
     rebuild_pid_to_idx(p);   // incremental: partitions since the last build moved slots
@@ -942,7 +938,7 @@ void SubsystemManager::fill_cm_velocity(const Particles& p, int lo, int hi, Kokk
     auto pm = p.mass;
     auto px_ = p.x, py_ = p.y, pz_ = p.z;
     const double G = G_CODE;
-    small_for("cm_vel_members", n_sub, KOKKOS_LAMBDA(int k) {
+    small_for("tidal_k_members", n_sub, KOKKOS_LAMBDA(int k) {
         const int a = base + buf(k), e = base + buf(k + 1);
         double M = 0, px = 0, py = 0, pz = 0, cx = 0, cy = 0, cz = 0;
         for (int q = a; q < e; q++) {
@@ -952,7 +948,7 @@ void SubsystemManager::fill_cm_velocity(const Particles& p, int lo, int hi, Kokk
         }
         if (M <= 0) return;
         double kt = 1e30, kfl = 0.0;
-        if (tol > 0.0) {
+        {
             double ext = 0.0, muv = 0.0;
             if (e - a == 2) {
                 const int i = buf(a), j = buf(a + 1);
@@ -985,8 +981,7 @@ void SubsystemManager::fill_cm_velocity(const Particles& p, int lo, int hi, Kokk
         }
         for (int q = a; q < e; q++) {
             const int i = buf(q);
-            if (cm) { cvx(i) = px / M; cvy(i) = py / M; cvz(i) = pz / M; }
-            if (tol > 0.0) { ck(i) = kt; cf(i) = kfl; }
+            ck(i) = kt; cf(i) = kfl;
         }
     });
 }

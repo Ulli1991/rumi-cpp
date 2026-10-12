@@ -1,7 +1,7 @@
 // Tree vs O(N^2) time-step and neighbour search (gravity/dt_tree.h) on a Plummer cluster with Kroupa masses and
 // primordial binaries: checks that the tree results are bitwise identical and times both.
-//   dt-tree-bench [N ...]     env: BENCH_BIN (binary fraction of particles, default 0.1), BENCH_CM=1 (pair-step velocity
-//   = binary c.o.m. velocity, FLYBY_CM_VELOCITY), BENCH_VC (V_c cap factor, default 0.05), BENCH_REPS, BENCH_RH (pc)
+//   dt-tree-bench [N ...]     env: BENCH_BIN (binary fraction of particles, default 0.1), BENCH_VC (V_c cap factor,
+//   default 0.05), BENCH_REPS, BENCH_RH (pc)
 #include "dt_tree.h"
 #include <Kokkos_Core.hpp>
 #include <algorithm>
@@ -20,13 +20,13 @@ using HostExec = Kokkos::DefaultHostExecutionSpace;
 static double env_d(const char* k, double d) { return std::getenv(k) ? std::atof(std::getenv(k)) : d; }
 
 struct Cluster {
-    std::vector<double> x, y, z, vx, vy, vz, cvx, cvy, cvz, m;
+    std::vector<double> x, y, z, vx, vy, vz, m;
     std::vector<int> sid;
 };
 
-static Cluster make_cluster(int N, double fbin, double rh, bool cm, unsigned seed) {
+static Cluster make_cluster(int N, double fbin, double rh, unsigned seed) {
     Cluster c;
-    for (auto* v : {&c.x, &c.y, &c.z, &c.vx, &c.vy, &c.vz, &c.cvx, &c.cvy, &c.cvz, &c.m}) v->resize(N);
+    for (auto* v : {&c.x, &c.y, &c.z, &c.vx, &c.vy, &c.vz, &c.m}) v->resize(N);
     c.sid.assign(N, -1);
     std::mt19937_64 rng(seed);
     std::uniform_real_distribution<double> U(0.0, 1.0);
@@ -75,10 +75,6 @@ static Cluster make_cluster(int N, double fbin, double rh, bool cm, unsigned see
         c.vx[i] = cvx + fi * vo * px; c.vy[i] = cvy + fi * vo * py; c.vz[i] = cvz + fi * vo * pz;
         c.vx[j] = cvx - fj * vo * px; c.vy[j] = cvy - fj * vo * py; c.vz[j] = cvz - fj * vo * pz;
         c.sid[i] = c.sid[j] = k;
-        if (cm) { c.cvx[i] = c.cvx[j] = cvx; c.cvy[i] = c.cvy[j] = cvy; c.cvz[i] = c.cvz[j] = cvz; }
-    }
-    for (int i = 0; i < N; i++) {
-        if (!(cm && c.sid[i] >= 0)) { c.cvx[i] = c.vx[i]; c.cvy[i] = c.vy[i]; c.cvz[i] = c.vz[i]; }
     }
     // shuffle so binaries are not contiguous in the arrays
     std::vector<int> perm(N);
@@ -88,7 +84,7 @@ static Cluster make_cluster(int N, double fbin, double rh, bool cm, unsigned see
     for (int i = 0; i < N; i++) {
         int k = perm[i];
         s.x[i] = c.x[k]; s.y[i] = c.y[k]; s.z[i] = c.z[k]; s.vx[i] = c.vx[k]; s.vy[i] = c.vy[k]; s.vz[i] = c.vz[k];
-        s.cvx[i] = c.cvx[k]; s.cvy[i] = c.cvy[k]; s.cvz[i] = c.cvz[k]; s.m[i] = c.m[k]; s.sid[i] = c.sid[k];
+        s.m[i] = c.m[k]; s.sid[i] = c.sid[k];
     }
     return s;
 }
@@ -96,7 +92,7 @@ static Cluster make_cluster(int N, double fbin, double rh, bool cm, unsigned see
 template <class Space>
 struct DevArrays {
     using V = Kokkos::View<double*, Space>;
-    V x, y, z, vx, vy, vz, cvx, cvy, cvz, m, ax, ay, az, dt;
+    V x, y, z, vx, vy, vz, m, ax, ay, az, dt;
     Kokkos::View<int*, Space> sid;
     explicit DevArrays(const Cluster& c) {
         const int N = (int)c.x.size();
@@ -108,7 +104,7 @@ struct DevArrays {
             return d;
         };
         x = up(c.x, "x"); y = up(c.y, "y"); z = up(c.z, "z"); vx = up(c.vx, "vx"); vy = up(c.vy, "vy"); vz = up(c.vz, "vz");
-        cvx = up(c.cvx, "cvx"); cvy = up(c.cvy, "cvy"); cvz = up(c.cvz, "cvz"); m = up(c.m, "m");
+        m = up(c.m, "m");
         ax = V("ax", N); ay = V("ay", N); az = V("az", N); dt = V("dt", N);
         sid = Kokkos::View<int*, Space>("sid", N);
         auto hs = Kokkos::create_mirror_view(sid);
@@ -144,15 +140,14 @@ int main(int argc, char** argv) {
         for (int a = 1; a < argc; a++) Ns.push_back(std::atoi(argv[a]));
         if (Ns.empty()) Ns = {16, 64, 256, 1024, 4096, 16384, 65536, 200000};
         const double fbin = env_d("BENCH_BIN", 0.1), rh_fix = env_d("BENCH_RH", 0.0), vc = env_d("BENCH_VC", 30.0);
-        const bool cm = env_d("BENCH_CM", 0) != 0;
         const double G = G_CODE, eta_ff = 0.2, eta_fb = 0.2, eta_jerk = 0.1;
-        std::printf("# exec %s, binary fraction %.2f, cm velocity %d, V_c factor %.3f\n", Exec::name(), fbin, (int)cm, vc);
+        std::printf("# exec %s, binary fraction %.2f, V_c factor %.3f\n", Exec::name(), fbin, vc);
         std::printf("# %8s %9s %9s %9s %9s %9s %9s %9s %9s %9s %7s %7s %9s\n", "N", "n2coll", "n2dt", "build", "query",
                     "sums", "n2ngb", "treengb", "pairs/i", "ngb", "diff", "ndiff", "pairsB/i");
         for (int N : Ns) {
             // density as a 200k cluster with r_h = 3.1 pc scaled to the set size (subsets are denser than the cluster)
             const double rh = rh_fix > 0 ? rh_fix : 3.1 * std::cbrt(N / 200000.0);
-            Cluster c = make_cluster(N, fbin, rh, cm, 12345u + N);
+            Cluster c = make_cluster(N, fbin, rh, 12345u + N);
             DevArrays<Exec::memory_space> d(c);
             if (std::getenv("BENCH_DIAG")) {   // per-pair bound: how many pairs could not be excluded even pair by pair
                 std::mt19937 rs(1);
@@ -166,7 +161,7 @@ int main(int argc, char** argv) {
                         if (j == i || (c.sid[i] >= 0 && c.sid[j] == c.sid[i])) continue;
                         double dx = c.x[j] - c.x[i], dy = c.y[j] - c.y[i], dz = c.z[j] - c.z[i];
                         double r2 = dx * dx + dy * dy + dz * dz, ir = 1 / std::sqrt(r2);
-                        double ux = c.cvx[j] - c.cvx[i], uy = c.cvy[j] - c.cvy[i], uz = c.cvz[j] - c.cvz[i];
+                        double ux = c.vx[j] - c.vx[i], uy = c.vy[j] - c.vy[i], uz = c.vz[j] - c.vz[i];
                         t[j] = pair_dt(r2, ir, dx, dy, dz, ux, uy, uz, G, c.m[i] + c.m[j], eta_ff, eta_fb);
                         double v = std::sqrt(ux * ux + uy * uy + uz * uz);
                         lb[j] = dtt::dt_lower_bound(r2, r2, 0.0, c.m[i] + c.m[j], c.m[i] + c.m[j], v, v, G, eta_ff, eta_fb);
@@ -182,24 +177,24 @@ int main(int argc, char** argv) {
             const int reps = std::getenv("BENCH_REPS") ? std::atoi(std::getenv("BENCH_REPS"))
                                                        : std::max(1, std::min(200, (int)(3e9 / ((double)N * N + 1e6))));
             RawView X{d.x.data()}, Y{d.y.data()}, Z{d.z.data()}, M{d.m.data()}, VX{d.vx.data()}, VY{d.vy.data()},
-                VZ{d.vz.data()}, CX{d.cvx.data()}, CY{d.cvy.data()}, CZ{d.cvz.data()}, AX{d.ax.data()}, AY{d.ay.data()},
+                VZ{d.vz.data()}, AX{d.ax.data()}, AY{d.ay.data()},
                 AZ{d.az.data()}, DT{d.dt.data()};
             const int* sid = d.sid.data();
-            DtK<true> kc{X, Y, Z, M, VX, VY, VZ, AX, AY, AZ, DT, CX, CY, CZ, RawView{nullptr}, RawView{nullptr}, sid, G, 0.0, eta_ff, eta_fb, eta_jerk};
+            DtK<true> kc{X, Y, Z, M, VX, VY, VZ, AX, AY, AZ, DT, RawView{nullptr}, RawView{nullptr}, sid, G, 0.0, eta_ff, eta_fb, eta_jerk};
             const double t_n2c = timeit(reps, [&] { run_n2("dt_n2", 0, N, 0, N, kc); });
             auto dt_ref = to_host(d.dt), ax_ref = to_host(d.ax);
-            DtK<false> kn{X, Y, Z, M, CX, CY, CZ, AX, AY, AZ, DT, CX, CY, CZ, RawView{nullptr}, RawView{nullptr}, nullptr, G, 0.0, eta_ff, eta_fb, 0.0};
+            DtK<false> kn{X, Y, Z, M, VX, VY, VZ, AX, AY, AZ, DT, RawView{nullptr}, RawView{nullptr}, nullptr, G, 0.0, eta_ff, eta_fb, 0.0};
             const double t_n2d = timeit(reps, [&] { run_n2("dt_n2_nocoll", 0, N, 0, N, kn); });
             auto dtn_ref = to_host(d.dt);
 
             dtt::PointTree<Exec> T, V;
             const double t_build = timeit(reps, [&] {
-                T.build(0, N, X.ptr, Y.ptr, Z.ptr, CX.ptr, CY.ptr, CZ.ptr, M.ptr, false, true);
-                V.build(0, N, X.ptr, Y.ptr, Z.ptr, CX.ptr, CY.ptr, CZ.ptr, M.ptr, true);
+                T.build(0, N, X.ptr, Y.ptr, Z.ptr, VX.ptr, VY.ptr, VZ.ptr, M.ptr, false, true);
+                V.build(0, N, X.ptr, Y.ptr, Z.ptr, VX.ptr, VY.ptr, VZ.ptr, M.ptr, true);
             });
             dtt::DtParams prm{G, 0.0, eta_ff, eta_fb, vc};
             long long np = 0, npB = 0;
-            dtt::min_pair_dt(T, V, 0, N, X.ptr, Y.ptr, Z.ptr, CX.ptr, CY.ptr, CZ.ptr, M.ptr, sid, DT.ptr, prm, &np, &npB);
+            dtt::min_pair_dt(T, V, 0, N, X.ptr, Y.ptr, Z.ptr, VX.ptr, VY.ptr, VZ.ptr, M.ptr, sid, DT.ptr, prm, &np, &npB);
             if constexpr (Kokkos::SpaceAccessibility<Kokkos::HostSpace, Exec::memory_space>::accessible) {
                 if (std::getenv("BENCH_DIAG")) {   // leaves of the position tree whose bound fails, by limiting term
                     Kokkos::fence();
@@ -208,7 +203,7 @@ int main(int argc, char** argv) {
                     for (int q = 0; q < ns; q++) {
                         const int i = (int)((long long)q * 7919 % N);
                         const double mn = DT.ptr[i];
-                        const double ux = c.cvx[i] - T.vmean[0], uy = c.cvy[i] - T.vmean[1], uz = c.cvz[i] - T.vmean[2];
+                        const double ux = c.vx[i] - T.vmean[0], uy = c.vy[i] - T.vmean[1], uz = c.vz[i] - T.vmean[2];
                         const double vtyp = std::sqrt(ux * ux + uy * uy + uz * uz) + 2 * T.vsig;
                         const double rc = mn * 2.2 * vtyp / 0.2;
                         const double Vc = std::min(vc * T.vsig, 2 * G * (c.m[i] + T.node(1, 12)) * mn / (rc * rc));
@@ -217,7 +212,7 @@ int main(int argc, char** argv) {
                             if (T.node(nd, 12) < 0) continue;
                             double r2lo, r2hi, v2lo, v2hi;
                             dtt::box_dist2(&T.node(nd, 0), &T.node(nd, 3), c.x[i], c.y[i], c.z[i], r2lo, r2hi);
-                            dtt::box_dist2(&T.node(nd, 6), &T.node(nd, 9), c.cvx[i], c.cvy[i], c.cvz[i], v2lo, v2hi);
+                            dtt::box_dist2(&T.node(nd, 6), &T.node(nd, 9), c.vx[i], c.vy[i], c.vz[i], v2lo, v2hi);
                             double vlo = std::max(std::sqrt(v2lo), Vc), vhi = std::sqrt(v2hi);
                             if (vlo > vhi) continue;
                             double mh = c.m[i] + T.node(nd, 12), ml = c.m[i] + T.node(nd, 13);
@@ -238,15 +233,15 @@ int main(int argc, char** argv) {
                 }
             }
             const double t_q = timeit(reps, [&] {
-                dtt::min_pair_dt(T, V, 0, N, X.ptr, Y.ptr, Z.ptr, CX.ptr, CY.ptr, CZ.ptr, M.ptr, sid, DT.ptr, prm);
+                dtt::min_pair_dt(T, V, 0, N, X.ptr, Y.ptr, Z.ptr, VX.ptr, VY.ptr, VZ.ptr, M.ptr, sid, DT.ptr, prm);
             });
-            DtK<true, true> ks{X, Y, Z, M, VX, VY, VZ, AX, AY, AZ, DT, CX, CY, CZ, RawView{nullptr}, RawView{nullptr}, sid, G, 0.0, eta_ff, eta_fb, eta_jerk};
+            DtK<true, true> ks{X, Y, Z, M, VX, VY, VZ, AX, AY, AZ, DT, RawView{nullptr}, RawView{nullptr}, sid, G, 0.0, eta_ff, eta_fb, eta_jerk};
             const double t_s = timeit(reps, [&] {
-                dtt::min_pair_dt(T, V, 0, N, X.ptr, Y.ptr, Z.ptr, CX.ptr, CY.ptr, CZ.ptr, M.ptr, sid, DT.ptr, prm);
+                dtt::min_pair_dt(T, V, 0, N, X.ptr, Y.ptr, Z.ptr, VX.ptr, VY.ptr, VZ.ptr, M.ptr, sid, DT.ptr, prm);
                 run_n2("dt_sums", 0, N, 0, N, ks);
             }) - t_q;
             int diff = ndiff(to_host(d.dt), dt_ref) + ndiff(to_host(d.ax), ax_ref);
-            dtt::min_pair_dt(T, V, 0, N, X.ptr, Y.ptr, Z.ptr, CX.ptr, CY.ptr, CZ.ptr, M.ptr, nullptr, DT.ptr, prm);
+            dtt::min_pair_dt(T, V, 0, N, X.ptr, Y.ptr, Z.ptr, VX.ptr, VY.ptr, VZ.ptr, M.ptr, nullptr, DT.ptr, prm);
             diff += ndiff(to_host(d.dt), dtn_ref);
 
             // neighbours, r_ngb = 1e-3 pc, r_ngb_max = 0.1 pc, pivot 1e-3 TU
@@ -286,12 +281,11 @@ int main(int argc, char** argv) {
                 dtt::PointTree<HostExec> HT, HV;
                 const double* hx = h.x.data(); const double* hy = h.y.data(); const double* hz = h.z.data();
                 const double* hm = h.m.data();
-                const double* hcx = h.cvx.data(); const double* hcy = h.cvy.data(); const double* hcz = h.cvz.data();
                 const double* hvx = h.vx.data(); const double* hvy = h.vy.data(); const double* hvz = h.vz.data();
                 const double t_hd = timeit(reps, [&] {
-                    HT.build(0, N, hx, hy, hz, hcx, hcy, hcz, hm, false, true);
-                    HV.build(0, N, hx, hy, hz, hcx, hcy, hcz, hm, true);
-                    dtt::min_pair_dt(HT, HV, 0, N, hx, hy, hz, hcx, hcy, hcz, hm, nullptr, h.dt.data(), prm);
+                    HT.build(0, N, hx, hy, hz, hvx, hvy, hvz, hm, false, true);
+                    HV.build(0, N, hx, hy, hz, hvx, hvy, hvz, hm, true);
+                    dtt::min_pair_dt(HT, HV, 0, N, hx, hy, hz, hvx, hvy, hvz, hm, nullptr, h.dt.data(), prm);
                 });
                 std::vector<double> hdt(h.dt.data(), h.dt.data() + N);
                 Kokkos::View<int*, Kokkos::HostSpace> qi("qi", maxp), qj("qj", maxp), qb("qb", maxp), qc("qc", 1);
