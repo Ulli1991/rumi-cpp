@@ -105,17 +105,17 @@ KOKKOS_INLINE_FUNCTION double pair_dt(double r2s, double ir, double dx, double d
 // idles, while most pairs are distant and rejected by the fp64 test of pair_dt_below. The fp32 tests decide the same
 // question and only ever say "reject" when the pair cannot lower the minimum, so skipping its fp64 evaluation leaves
 // the minimum bit-identical:
-//  * Exact inequality (pair_dt_below below): pair_dt >= min over ff, fb of eta t / (2 (1 + |d|)), d = c t eta, taken
-//    on the fp64 inputs (r2s, dx.., dv.., m) as exact numbers.
+//  * Exact inequality (pair_dt_below below): pair_dt >= min over ff, fb of eta t / (1 + d-), d- = max(0, -d),
+//    d = c t eta, taken on the fp64 inputs (r2s, dx.., dv.., m) as exact numbers.
 //  * fp32 inputs: r2s, |dv|^2 and r.dv are formed in fp64 (|dv|^2: rel. error < 4e-16; r.dv: abs. error < 4e-16 r v
 //    by Cauchy-Schwarz, r >= |dx| since r2s = |dx|^2 + soft2) and rounded to fp32 (rel. u = 2^-24); G m_sum is
 //    (float)G ((float)m_i + (float)m_j) (rel. < 4u); cur is rounded to fp32 (rel. u). rsqrtf <= 2 ulp; t_ff, t_fb, r,
 //    v and the factor (1 + G m / (r v^2)) are products/quotients of positive terms, so their relative error is below
-//    ~20 u = 1.2e-6. |r.dv| <= |r.dv|_32 + 1e-6 r v is an upper bound (1e-6 r v > u |r.dv| + 4e-16 r v, with room for
-//    the fp32 r and v).
-//  * The test eta t_32 (1 - 4e-5) >= 3 cur_32 (1 + 4e-5) (1 + |d|_up32 (1 + 4e-5)) for both criteria therefore
-//    implies the exact eta t >= 3 (1 - 1e-5) cur (1 + |d|), i.e. pair_dt >= 1.49 cur: the same premise as the fp64
-//    test below (factor 3, i.e. margin 1.5 over the exact factor 2), whose fp64 evaluation error it already covers.
+//    ~20 u = 1.2e-6. max(0, -r.dv) <= max(0, -(r.dv)_32 + 1e-6 r v) is an upper bound (1e-6 r v > u |r.dv| +
+//    4e-16 r v, with room for the fp32 r and v), and c has the sign of r.dv for both criteria.
+//  * The test eta t_32 (1 - 4e-5) >= M cur_32 (1 + 4e-5) (1 + d-_up32 (1 + 4e-5)) for both criteria therefore
+//    implies the exact eta t >= M (1 - 1e-5) cur (1 + d-), i.e. pair_dt >= 0.9999 M cur, M = N2_DT_REJECT_MARGIN:
+//    the premise of the fp64 test below, whose fp64 evaluation error (~1e-15) the margin covers many times.
 //  * Range: r2s outside [1e-30, 1e30] is not tested (no reject). Overflow on the right side gives inf (< 3e38 fails:
 //    no reject), NaN fails every comparison (no reject); an infinite left side means a true value beyond FLT_MAX,
 //    above any finite right side.
@@ -144,7 +144,11 @@ KOKKOS_INLINE_FUNCTION float rsqrt_f32_normal(float x) {   // x normal, or the r
     return 1.0f / std::sqrt(x);
 #endif
 }
-// cur3 = 3 (1 + 4e-5) cur_32
+// Margin of the pair-step rejects over the exact lower bound eta t / (1 + d-) (DtK, AccDtK, EdgeK-free tree search);
+// any value > 1 keeps the minimum bit-identical, the margin only covers the evaluation errors (fp32 ~1e-6, fp64 ~1e-15)
+constexpr double N2_DT_REJECT_MARGIN = 1.25;
+constexpr float N2_DT_REJECT_MARGIN_F = (float)N2_DT_REJECT_MARGIN * (1.0f + 4e-5f);   // fp32 test: M (1 + 4e-5)
+// cur3 = M (1 + 4e-5) cur_32
 KOKKOS_INLINE_FUNCTION bool pair_dt_reject_f32(float cur3, float r2, float ir, double v2s, double rdvs, float gm,
                                                float eff, float efb) {
 #ifdef N2_DT_F32
@@ -154,8 +158,8 @@ KOKKOS_INLINE_FUNCTION bool pair_dt_reject_f32(float cur3, float r2, float ir, d
     const float r = r2 * ir;
     const float tff = r2 * rsqrt_f32_normal(r * gm);
     const float iv = rsqrt_f32_normal(v2), tfb = r * iv;
-    const float rdv = fabsf((float)rdvs) + 1e-6f * r * v2 * iv;   // >= |r.dv|
-    const float c = rdv * ir * ir;
+    const float rdvn = fmaxf(0.0f, 1e-6f * r * v2 * iv - (float)rdvs);   // >= max(0, -r.dv)
+    const float c = rdvn * ir * ir;                                       // >= max(0, -c_ff / 1.5), max(0, -c_fb / ...)
     const float kff = 1.5f * (1.0f + 4e-5f) * eff, kfb = (1.0f + 4e-5f) * efb;   // launch constants
     const float rff = cur3 * (1.0f + (c * tff) * kff), rfb = cur3 * (1.0f + (c * (1.0f + gm * ir * iv * iv) * tfb) * kfb);
     return rff < 3e38f && rfb < 3e38f && tff * ((1.0f - 4e-5f) * eff) >= rff && tfb * ((1.0f - 4e-5f) * efb) >= rfb;
@@ -166,9 +170,12 @@ KOKKOS_INLINE_FUNCTION bool pair_dt_reject_f32(float cur3, float r2, float ir, d
 }
 
 // pair_dt, skipped (1e30) when it cannot go below `cur`: with d = c t eta (FROST Eq. 49) the symmetrized step is
-// eta t (1 + d / (1 + sqrt(1 + d^2))) >= eta t / (2 (1 + |d|)) for either criterion. Pairs that pass the test (with a
-// further factor 1.5 margin) get the unchanged pair_dt, so the minimum over pairs is bit-identical; most distant
-// pairs skip two reciprocal roots and both divisions.
+// eta t f(d), f(d) = 1 + d / (1 + sqrt(1 + d^2)), for either criterion. f >= 1 for d >= 0; for d = -a < 0, with
+// s = sqrt(1 + a^2) and s - a = 1 / (s + a), f = (1 + 1 / (s + a)) / (1 + s) >= 1 / (1 + a) (equivalent to
+// 1 + a >= 1). So pair_dt >= eta t / (1 + max(0, -d)) (before 2026-10: the looser eta t / (2 (1 + |d|)), i.e. twice
+// or more as many pairs evaluated in full). Pairs that pass the test with the margin N2_DT_REJECT_MARGIN get the
+// unchanged pair_dt, so the minimum over pairs is bit-identical; most distant pairs skip two reciprocal roots and both
+// divisions.
 KOKKOS_INLINE_FUNCTION double pair_dt_below(double cur, double r2s, double ir, double dx, double dy, double dz,
                                             double dvx, double dvy, double dvz, double G, double msum,
                                             double eta_ff, double eta_fb) {
@@ -181,7 +188,8 @@ KOKKOS_INLINE_FUNCTION double pair_dt_below(double cur, double r2s, double ir, d
     const double rdv_ir2 = (dx * dvx + dy * dvy + dz * dvz) * ir * ir;
     const double d_ff = 1.5 * rdv_ir2 * t_ff * eta_ff;
     const double d_fb = rdv_ir2 * (1.0 + Gm * ir * inv_v * inv_v) * t_fb * eta_fb;
-    if (eta_ff * t_ff >= 3.0 * cur * (1.0 + Kokkos::fabs(d_ff)) && eta_fb * t_fb >= 3.0 * cur * (1.0 + Kokkos::fabs(d_fb)))
+    const double mc = N2_DT_REJECT_MARGIN * cur;
+    if (eta_ff * t_ff >= mc * (1.0 + Kokkos::fmax(0.0, -d_ff)) && eta_fb * t_fb >= mc * (1.0 + Kokkos::fmax(0.0, -d_fb)))
         return 1e30;
     return pair_dt(r2s, ir, dx, dy, dz, dvx, dvy, dvz, G, msum, eta_ff, eta_fb);
 }
@@ -286,7 +294,7 @@ KOKKOS_INLINE_FUNCTION bool tidal_dt_reject_f32(float curt, float r2, float r, f
 #endif
 }
 
-// Sink of the time-step kernels. m32, k32, rm32: fp32 m, k, 1/m for the pre-rejects; cur3, curt: 3 (1 + 4e-5) and
+// Sink of the time-step kernels. m32, k32, rm32: fp32 m, k, 1/m for the pre-rejects; cur3, curt: M (1 + 4e-5) and
 // (1 + 4e-5) times the running minimum in fp32 (updated with it, so a pair does not convert it)
 struct DtSink {
     double x, y, z, m, vx, vy, vz, k, kf;
@@ -297,7 +305,7 @@ struct DtSink {
 KOKKOS_INLINE_FUNCTION DtSink dt_sink(double x, double y, double z, double m, double vx, double vy, double vz,
                                       double k, double kf, int sid) {
     const float m32 = (float)m;
-    return {x, y, z, m, vx, vy, vz, k, kf, sid, m32, (float)k, 1.0f / m32, 1e30f * (3.0f * (1.0f + 4e-5f)),
+    return {x, y, z, m, vx, vy, vz, k, kf, sid, m32, (float)k, 1.0f / m32, 1e30f * N2_DT_REJECT_MARGIN_F,
             1e30f * (1.0f + 4e-5f)};
 }
 // fmin(mn[0], t), keeping cur3 and curt
@@ -306,7 +314,7 @@ KOKKOS_INLINE_FUNCTION void dt_min(const DtSink& a, double* mn, double t) {
     if (t < mn[0]) {
         mn[0] = t;
         const float c = (float)t;
-        a.cur3 = c * (3.0f * (1.0f + 4e-5f));
+        a.cur3 = c * N2_DT_REJECT_MARGIN_F;
         a.curt = c * (1.0f + 4e-5f);
     }
 #else
@@ -434,8 +442,8 @@ struct AccDtK {
                 eta_va};
     }
     KOKKOS_INLINE_FUNCTION Sink sink(int i) const {
-        return dt_sink(x(i), y(i), z(i), m(i), vx(i), vy(i), vz(i), (COLL && ktid.ptr) ? ktid(i) : 1e30, (COLL && ktid.ptr) ? kfl(i) : 0.0,
-                       COLL ? sid[i] : -1);
+        return dt_sink(x(i), y(i), z(i), m(i), vx(i), vy(i), vz(i), (COLL && ktid.ptr) ? ktid(i) : 1e30,
+                       (COLL && ktid.ptr) ? kfl(i) : 0.0, COLL ? sid[i] : -1);
     }
     KOKKOS_INLINE_FUNCTION void source(int j, double* s) const {
         s[0] = x(j); s[1] = y(j); s[2] = z(j); s[3] = m(j); s[4] = vx(j); s[5] = vy(j); s[6] = vz(j);
