@@ -106,6 +106,10 @@ if(RSQRT_NEWTON)
     target_compile_definitions(dt-tree-bench PRIVATE RSQRT_NEWTON)
 endif()
 
+# GW recoil formula with spins (tests/recoil_test.cpp; ctest case gw_recoil_unit)
+add_executable(recoil-test ${CMAKE_CURRENT_SOURCE_DIR}/tests/recoil_test.cpp)
+target_include_directories(recoil-test PRIVATE ${SRC_DIR}/collisional)
+target_compile_features(recoil-test PRIVATE cxx_std_17)
 # Two-body drift check (tests/kepler_test.cpp; ctest case kepler_drift_unit)
 if(ENABLE_COLLISIONAL)
     add_executable(kepler-test ${CMAKE_CURRENT_SOURCE_DIR}/tests/kepler_test.cpp ${SRC_DIR}/collisional/kepler.cpp)
@@ -183,6 +187,7 @@ endif()
 
 # Tests: `ctest --test-dir <build>` runs each case through tests/run_case.py
 enable_testing()
+add_test(NAME gw_recoil_unit COMMAND recoil-test)
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 foreach(case kepler_e09 kepler_e0 frost4_e09 frost4_e099 planets_hhs planets_fsi floor_binary_e0 floor_planets
              mergers_gpu_path mergers_cpu_path logh_big_group

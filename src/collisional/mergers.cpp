@@ -4,6 +4,9 @@
 #include "kepler.h"
 #include "constants.h"
 #include "collisional_config.h"
+#include "gw_recoil.h"
+#include <cstdint>
+#include <cstring>
 #include "integrator.h"
 #include "small_for.h"
 #include "device_staging.h"
@@ -79,8 +82,6 @@ double collision_remnant_mass(MergerType type, int kw1, double m1, int kw2, doub
 void bh_bh_remnant(double m1, double m2, const double chi1[3], const double chi2[3],
                    const double L_orb[3], double& m_rem, double chi_rem[3],
                    double v_kick[3], double G, double c_code) {
-    (void)chi1;
-    (void)chi2;
     (void)G;
     (void)c_code;
     double M = m1 + m2;
@@ -108,35 +109,18 @@ void bh_bh_remnant(double m1, double m2, const double chi1[3], const double chi2
         chi_rem[2] = chi_f_mag;
     }
 
-    // GW kick (Campanelli+ 2007, PRL 98, 231102; Lousto+ 2012, PRD 85, 084015)
-    // v_kick ~ A * eta^2 * delta_m * (1 + B * delta_m)
-    // Maximum kick ~5000 km/s for edge cases, typically ~200-500 km/s
-    double A = 12000.0;  // km/s — calibrated from NR simulations (Lousto+ 2012)
-    double B = -0.93;
-    double v_kick_mag = A * eta * eta * delta_m * (1.0 + B * delta_m);
-
-    // Kick direction: in orbital plane, perpendicular to line of separation
-    // Simplified: random direction in orbital plane
-    if (L_mag > 1e-30) {
-        // Find perpendicular direction in orbital plane
-        double e1[3];
-        // e1 = L x z_hat (or x_hat if L || z_hat)
-        double lhat[3] = {L_orb[0]/L_mag, L_orb[1]/L_mag, L_orb[2]/L_mag};
-        if (std::fabs(lhat[2]) < 0.9) {
-            e1[0] = lhat[1]; e1[1] = -lhat[0]; e1[2] = 0.0;
-        } else {
-            e1[0] = 0.0; e1[1] = lhat[2]; e1[2] = -lhat[1];
-        }
-        double e1_mag = std::sqrt(e1[0]*e1[0]+e1[1]*e1[1]+e1[2]*e1[2]);
-        e1[0] /= e1_mag; e1[1] /= e1_mag; e1[2] /= e1_mag;
-
-        v_kick[0] = v_kick_mag * e1[0];
-        v_kick[1] = v_kick_mag * e1[1];
-        v_kick[2] = v_kick_mag * e1[2];
-    } else {
-        v_kick[0] = v_kick_mag;
-        v_kick[1] = v_kick[2] = 0.0;
-    }
+    // GW kick with spins (gw_recoil.h; Lousto et al. 2012). The phase angle and the in-plane orientation, unknown
+    // from the orbit-averaged state, come from a hash of the masses, spins and L: deterministic on every MPI rank
+    // and across restarts. (Before 2026-10-12: spins ignored, and the mass term used 1 + B delta_m instead of
+    // 1 + B eta: 138 instead of 157 km/s at q = 0.5)
+    std::uint64_t hsh = 1469598103934665603ULL;
+    auto mix = [&](double x) { std::uint64_t u; std::memcpy(&u, &x, 8); hsh = (hsh ^ u) * 1099511628211ULL; };
+    mix(m1); mix(m2);
+    for (int k = 0; k < 3; k++) { mix(chi1[k]); mix(chi2[k]); mix(L_orb[k]); }
+    const double u1 = (double)(hsh >> 11) * 0x1.0p-53;
+    hsh = (hsh ^ 0x9e3779b97f4a7c15ULL) * 1099511628211ULL;
+    const double u2 = (double)(hsh >> 11) * 0x1.0p-53;
+    gw_recoil_kick(m1, m2, chi1, chi2, L_orb, u1, u2, v_kick);
 }
 
 // ============================================================================
