@@ -222,6 +222,9 @@ Levels:
 | `NBODY_CHECK_TREE_DT` | =1: check every tree time-step / neighbour search against O(N^2) |
 | `NBODY_DEEP_LOG` | =d: log the particles and pairs that keep HHS sets at depth >= d |
 | `NBODY_FENCE_STATS` | =1/2: count device fences and copies per call site (fence_stats.h; NVTX ranges for nsys) |
+| `NBODY_FORCE_ERR` | =eps: synthetic relative force error before every field kick of HHS sets >= NBODY_FORCE_ERR_MIN (FMM accuracy study; not bit-identical) |
+| `NBODY_FORCE_ERR_MIN` | =n: smallest HHS set that gets NBODY_FORCE_ERR (default 16384) |
+| `NBODY_FORCE_ERR_MODEL` | =random (default; eps \|a_i\| times an isotropic unit vector per particle and call) / smooth (eps a_rms times a random linear field in position over the set) |
 | `NBODY_LEAN_SYNC` | =0: keep every device fence of the original code (default on: lean copies, bit-identical) |
 | `NBODY_OVERLAP` | =1: experimental GPU-idle prototype, field forces of the next kick overlap the host LogH (not bit-identical) |
 | `NBODY_OVERLAP_MIN` | =n: smallest set that uses NBODY_OVERLAP (default 1024) |

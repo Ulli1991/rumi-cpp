@@ -198,7 +198,7 @@ foreach(case kepler_e09 kepler_e0 frost4_e09 frost4_e099 planets_hhs planets_fsi
              pn1_global_single_rank floor_binary_e0_cpu floor_planets_cpu
              binaries_timestep frost4_e09_cpu pn_logh_books
              mergers_sse binaries50_detected triples_detected
-             cc_pn1_wide cc_binaries50 cc_min_binaries50 cc_vs_plain_binaries50 cc_consistent_binaries50 cm_cpu_vs_device cc_cm_consistent
+             cc_pn1_wide cc_binaries50 cc_min_binaries50 cc_vs_plain_binaries50 cc_consistent_binaries50 force_err_injection cm_cpu_vs_device cc_cm_consistent
              cm_eps_tidal_sampling cm_eps_cpu_vs_device dense_core_split triple_id_order secular_triples_off secular_omega0_steps spin_precession spin_j spin_j_pn1 ic_binaries_no_mergers eta_jerk0_fsi va_without_grad restart_halves_va secular_stellar_no_pn secular_bh_tight_steps logh_hierarchy_complete
              sdar_kozai_triple sdar_f3_flyby sdar_pn_kappa1
              cm_eps_tidal_components flyby_member_com ngb_mass_scaling

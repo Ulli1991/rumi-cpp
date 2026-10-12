@@ -34,6 +34,8 @@
 #include <cstring>
 #include <cstdio>
 #include <cstdlib>
+#include <cstdint>
+#include <string>
 #include <chrono>
 
 // Global profiler instance
@@ -93,6 +95,127 @@ static bool g_adv_collided = false;             // the advance changed masses / 
 static void fire_pre_host_hook() {
     if (g_pre_host_hook) { auto h = std::move(g_pre_host_hook); g_pre_host_hook = nullptr; h(); }
 }
+
+// =============================================================================
+// Synthetic force errors (debug, plan I-1): what force accuracy would an FMM for the large HHS sets need?
+// NBODY_FORCE_ERR=eps: before every field kick of an HHS set with at least NBODY_FORCE_ERR_MIN (default 16384)
+// particles (the self kicks of fsi_step / fsi_step_distributed, both cross kicks and the gradient-corrected middle
+// kicks), the complete accelerations of the kicked range (after the allgathers / allreduces, identically on every
+// rank) are perturbed in place; the next force evaluation overwrites them. Subsystem-internal forces are not touched.
+// NBODY_FORCE_ERR_MODEL:
+//   random (default): delta_a_i = eps |a_i| u_i, u_i an isotropic unit vector from a hash of (particle id, force-call
+//     counter): white noise in space and time, the error model of Hernquist, Hut & Makino (1993); breaks momentum
+//     conservation at ~eps |a| m sqrt(N) per call, as a tree code without momentum correction does.
+//   smooth: delta_a_i = eps a_rms M (x_i - x_c) / r_rms, x_c the mass centre and r_rms the mass-weighted rms radius
+//     of the range, a_rms the rms |a| over the range, M a 3x3 matrix of N(0, 1/3) entries drawn per force call (so the
+//     rms |delta_a| is ~eps a_rms): a spatially smooth error field like the truncation error of a low-order multipole
+//     expansion (Dehnen 2014 sec. 2-3: correlated, not white). sum_i m_i delta_a_i = 0 (momentum conserved, as
+//     Dehnen's FMM); the antisymmetric part of M exerts a torque.
+// Off (unset or 0): no code runs, bit-identical.
+// =============================================================================
+namespace {
+struct ForceErr {
+    double eps = 0.0;
+    int nmin = 16384;
+    bool smooth = false;
+    std::uint64_t calls = 0;   // per-run force-call counter: identical on every rank (replicated control flow)
+};
+const ForceErr& force_err_cfg() {
+    static const ForceErr f = [] {
+        ForceErr c;
+        if (const char* v = std::getenv("NBODY_FORCE_ERR")) c.eps = std::atof(v);
+        if (const char* v = std::getenv("NBODY_FORCE_ERR_MIN")) c.nmin = std::atoi(v);
+        if (const char* v = std::getenv("NBODY_FORCE_ERR_MODEL")) {
+            const std::string m(v);
+            if (m == "smooth") c.smooth = true;
+            else if (m != "random" && !m.empty()) {
+                std::fprintf(stderr, "NBODY_FORCE_ERR_MODEL = '%s': random or smooth\n", v);
+                std::exit(1);
+            }
+        }
+        if (c.eps > 0.0 && MPIComm::rank() == 0)
+            std::printf("NBODY_FORCE_ERR: eps %.3e model %s for HHS sets >= %d\n", c.eps,
+                        c.smooth ? "smooth" : "random", c.nmin);
+        return c;
+    }();
+    return f;
+}
+std::uint64_t g_force_err_calls = 0;
+
+KOKKOS_INLINE_FUNCTION std::uint64_t ferr_mix(std::uint64_t z) {   // splitmix64 finaliser
+    z += 0x9e3779b97f4a7c15ULL;
+    z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    z = (z ^ (z >> 27)) * 0x94d049bb133111ebULL;
+    return z ^ (z >> 31);
+}
+KOKKOS_INLINE_FUNCTION double ferr_u01(std::uint64_t h) { return ((double)(h >> 11) + 0.5) * 0x1.0p-53; }
+
+void force_err_inject(Particles& p, int start, int count, int set_count) {
+    const ForceErr& c = force_err_cfg();
+    if (!(c.eps > 0.0) || set_count < c.nmin || count <= 0) return;
+    const std::uint64_t call = ++g_force_err_calls;
+    const double eps = c.eps;
+    auto ax = p.ax, ay = p.ay, az = p.az;
+    if (!c.smooth) {
+        auto pid = p.particle_id;
+        const std::uint64_t key = ferr_mix(call ^ 0x46455252ULL);
+        Kokkos::parallel_for("force_err_random", count, KOKKOS_LAMBDA(int ii) {
+            const int i = start + ii;
+            const std::uint64_t h1 = ferr_mix(key ^ (std::uint64_t)(unsigned)pid(i));
+            const std::uint64_t h2 = ferr_mix(h1);
+            const double cz = 2.0 * ferr_u01(h1) - 1.0, phi = 6.283185307179586 * ferr_u01(h2);
+            const double sz = Kokkos::sqrt(Kokkos::fmax(0.0, 1.0 - cz * cz));
+            const double a = eps * Kokkos::sqrt(ax(i) * ax(i) + ay(i) * ay(i) + az(i) * az(i));
+            ax(i) += a * sz * Kokkos::cos(phi);
+            ay(i) += a * sz * Kokkos::sin(phi);
+            az(i) += a * cz;
+        });
+        return;
+    }
+    // smooth: mass centre, rms radius, rms |a| of the range (rank 0's values broadcast: every rank adds the same field)
+    auto x = p.x, y = p.y, z = p.z, m = p.mass;
+    double s[5] = {0, 0, 0, 0, 0};   // sum m, sum m x, sum m y, sum m z, sum |a|^2
+    Kokkos::parallel_reduce("force_err_moments", count, KOKKOS_LAMBDA(int ii, double& sm, double& sx, double& sy,
+                                                                       double& sz, double& sa) {
+        const int i = start + ii;
+        sm += m(i); sx += m(i) * x(i); sy += m(i) * y(i); sz += m(i) * z(i);
+        sa += ax(i) * ax(i) + ay(i) * ay(i) + az(i) * az(i);
+    }, s[0], s[1], s[2], s[3], s[4]);
+    if (!(s[0] > 0.0)) return;
+    const double xc = s[1] / s[0], yc = s[2] / s[0], zc = s[3] / s[0];
+    double r2 = 0.0;
+    Kokkos::parallel_reduce("force_err_rms", count, KOKKOS_LAMBDA(int ii, double& acc) {
+        const int i = start + ii;
+        const double dx = x(i) - xc, dy = y(i) - yc, dz = z(i) - zc;
+        acc += m(i) * (dx * dx + dy * dy + dz * dz);
+    }, r2);
+    double g[6] = {xc, yc, zc, std::sqrt(r2 / s[0]), std::sqrt(s[4] / count), 0.0};
+#ifdef USE_MPI
+    MPI_CHECK(MPI_Bcast(g, 6, MPI_DOUBLE, 0, MPI_COMM_WORLD));
+#endif
+    if (!(g[3] > 0.0)) return;
+    // M: Box-Muller N(0, 1/3) entries from the call counter
+    double M[9];
+    std::uint64_t h = ferr_mix(call ^ 0x534d4f4fULL);
+    for (int k = 0; k < 9; k += 2) {
+        const double u1 = ferr_u01(h = ferr_mix(h)), u2 = ferr_u01(h = ferr_mix(h));
+        const double r = std::sqrt(-2.0 * std::log(u1) / 3.0);
+        M[k] = r * std::cos(6.283185307179586 * u2);
+        if (k + 1 < 9) M[k + 1] = r * std::sin(6.283185307179586 * u2);
+    }
+    const double f = eps * g[4] / g[3];
+    const double m00 = f * M[0], m01 = f * M[1], m02 = f * M[2], m10 = f * M[3], m11 = f * M[4], m12 = f * M[5],
+                 m20 = f * M[6], m21 = f * M[7], m22 = f * M[8];
+    const double cx = g[0], cy = g[1], cz = g[2];
+    Kokkos::parallel_for("force_err_smooth", count, KOKKOS_LAMBDA(int ii) {
+        const int i = start + ii;
+        const double dx = x(i) - cx, dy = y(i) - cy, dz = z(i) - cz;
+        ax(i) += m00 * dx + m01 * dy + m02 * dz;
+        ay(i) += m10 * dx + m11 * dy + m12 * dz;
+        az(i) += m20 * dx + m21 * dy + m22 * dz;
+    });
+}
+}  // namespace
 
 // TILE_SIZE defined in constants.h
 
@@ -1329,6 +1452,7 @@ void fsi_step(Particles& p, int start, int count,
     // U kick (dt/6)
     if (forces_valid) {
         g_profiler.start();
+        force_err_inject(p, start, count, count);
         kick_velocities(p, start, count, dt * FSI_KICK);
         g_profiler.stop(StepProfiler::DRIFT_KICK);
     } else if (tree_mode) {
@@ -1341,6 +1465,7 @@ void fsi_step(Particles& p, int start, int count,
         tree_built = true;
         g_profiler.stop(StepProfiler::SELF_FORCE);
         g_profiler.start();
+        force_err_inject(p, start, count, count);
         kick_velocities(p, start, count, dt * FSI_KICK);
         g_profiler.stop(StepProfiler::DRIFT_KICK);
     } else {
@@ -1348,6 +1473,7 @@ void fsi_step(Particles& p, int start, int count,
         self_acceleration(p, start, count, G, soft2);
         g_profiler.stop(StepProfiler::SELF_FORCE);
         g_profiler.start();
+        force_err_inject(p, start, count, count);
         kick_velocities(p, start, count, dt * FSI_KICK);
         g_profiler.stop(StepProfiler::DRIFT_KICK);
     }
@@ -1392,6 +1518,7 @@ void fsi_step(Particles& p, int start, int count,
         tree_momentum_correction(p, start, count);
         g_profiler.stop(StepProfiler::SELF_GRAD);
         g_profiler.start();
+        force_err_inject(p, start, count, count);
         kick_velocities(p, start, count, dt * FSI_MOD_KICK);
         g_profiler.stop(StepProfiler::DRIFT_KICK);
     } else {
@@ -1402,6 +1529,7 @@ void fsi_step(Particles& p, int start, int count,
         self_gradient_correction(p, start, count, G, soft2, dt);
         g_profiler.stop(StepProfiler::SELF_GRAD);
         g_profiler.start();
+        force_err_inject(p, start, count, count);
         kick_velocities(p, start, count, dt * FSI_MOD_KICK);
         g_profiler.stop(StepProfiler::DRIFT_KICK);
     }
@@ -1434,6 +1562,7 @@ void fsi_step(Particles& p, int start, int count,
         tree_momentum_correction(p, start, count);
         g_profiler.stop(StepProfiler::SELF_FORCE);
         g_profiler.start();
+        force_err_inject(p, start, count, count);
         kick_velocities(p, start, count, dt * FSI_KICK);
         g_profiler.stop(StepProfiler::DRIFT_KICK);
     } else {
@@ -1441,6 +1570,7 @@ void fsi_step(Particles& p, int start, int count,
         if (!force_done) self_acceleration(p, start, count, G, soft2);
         g_profiler.stop(StepProfiler::SELF_FORCE);
         g_profiler.start();
+        force_err_inject(p, start, count, count);
         kick_velocities(p, start, count, dt * FSI_KICK);
         g_profiler.stop(StepProfiler::DRIFT_KICK);
     }
@@ -1871,6 +2001,7 @@ static void fsi_step_distributed(DistributedParticles& dp, int start, int count,
         // Step 1: force + kick (dt/6)
         if (forces_valid) {
             g_profiler.start();
+            force_err_inject(dp.local, start, count, count);
             kick_velocities(dp.local, start, count, dt * FSI_KICK);
             g_profiler.stop(StepProfiler::DRIFT_KICK);
         } else {
@@ -1879,6 +2010,7 @@ static void fsi_step_distributed(DistributedParticles& dp, int start, int count,
             tree_momentum_correction(dp.local, start, count);
             g_profiler.stop(StepProfiler::SELF_FORCE, self_pairs);
             g_profiler.start();
+            force_err_inject(dp.local, start, count, count);
             kick_velocities(dp.local, start, count, dt * FSI_KICK);
             g_profiler.stop(StepProfiler::DRIFT_KICK);
         }
@@ -1915,6 +2047,7 @@ static void fsi_step_distributed(DistributedParticles& dp, int start, int count,
         tree_momentum_correction(dp.local, start, count);
         g_profiler.stop(StepProfiler::SELF_GRAD, self_pairs);
         g_profiler.start();
+        force_err_inject(dp.local, start, count, count);
         kick_velocities(dp.local, start, count, dt * FSI_MOD_KICK);
         g_profiler.stop(StepProfiler::DRIFT_KICK);
 
@@ -1945,6 +2078,7 @@ static void fsi_step_distributed(DistributedParticles& dp, int start, int count,
         tree_momentum_correction(dp.local, start, count);
         g_profiler.stop(StepProfiler::SELF_FORCE, self_pairs);
         g_profiler.start();
+        force_err_inject(dp.local, start, count, count);
         kick_velocities(dp.local, start, count, dt * FSI_KICK);
         g_profiler.stop(StepProfiler::DRIFT_KICK);
 
@@ -1963,6 +2097,7 @@ static void fsi_step_distributed(DistributedParticles& dp, int start, int count,
     // U kick (dt/6) - force then kick (separate, matching FROST)
     if (forces_valid) {
         g_profiler.start();
+        force_err_inject(dp.local, start, count, count);
         kick_velocities(dp.local, start, count, dt * FSI_KICK);
         g_profiler.stop(StepProfiler::DRIFT_KICK);
     } else if (tree_mode) {
@@ -1981,6 +2116,7 @@ static void fsi_step_distributed(DistributedParticles& dp, int start, int count,
         tree_momentum_correction(dp.local, start, count);
         g_profiler.stop(StepProfiler::SELF_FORCE, self_pairs);
         g_profiler.start();
+        force_err_inject(dp.local, start, count, count);
         kick_velocities(dp.local, start, count, dt * FSI_KICK);
         g_profiler.stop(StepProfiler::DRIFT_KICK);
     } else {
@@ -1988,6 +2124,7 @@ static void fsi_step_distributed(DistributedParticles& dp, int start, int count,
         self_acceleration_distributed(dp, start, count, G, soft2);
         g_profiler.stop(StepProfiler::SELF_FORCE, self_pairs);
         g_profiler.start();
+        force_err_inject(dp.local, start, count, count);
         kick_velocities(dp.local, start, count, dt * FSI_KICK);
         g_profiler.stop(StepProfiler::DRIFT_KICK);
     }
@@ -2047,6 +2184,7 @@ static void fsi_step_distributed(DistributedParticles& dp, int start, int count,
         tree_momentum_correction(dp.local, start, count);
         g_profiler.stop(StepProfiler::SELF_GRAD, self_pairs);
         g_profiler.start();
+        force_err_inject(dp.local, start, count, count);
         kick_velocities(dp.local, start, count, dt * FSI_MOD_KICK);
         g_profiler.stop(StepProfiler::DRIFT_KICK);
     } else {
@@ -2059,6 +2197,7 @@ static void fsi_step_distributed(DistributedParticles& dp, int start, int count,
         self_gradient_correction_distributed(dp, start, count, G, soft2, dt);
         g_profiler.stop(StepProfiler::SELF_GRAD, self_pairs);
         g_profiler.start();
+        force_err_inject(dp.local, start, count, count);
         kick_velocities(dp.local, start, count, dt * FSI_MOD_KICK);
         g_profiler.stop(StepProfiler::DRIFT_KICK);
     }
@@ -2102,6 +2241,7 @@ static void fsi_step_distributed(DistributedParticles& dp, int start, int count,
         tree_momentum_correction(dp.local, start, count);
         g_profiler.stop(StepProfiler::SELF_FORCE, self_pairs);
         g_profiler.start();
+        force_err_inject(dp.local, start, count, count);
         kick_velocities(dp.local, start, count, dt * FSI_KICK);
         g_profiler.stop(StepProfiler::DRIFT_KICK);
     } else {
@@ -2110,6 +2250,7 @@ static void fsi_step_distributed(DistributedParticles& dp, int start, int count,
         else self_acceleration_distributed(dp, start, count, G, soft2);
         g_profiler.stop(StepProfiler::SELF_FORCE, self_pairs);
         g_profiler.start();
+        force_err_inject(dp.local, start, count, count);
         kick_velocities(dp.local, start, count, dt * FSI_KICK);
         g_profiler.stop(StepProfiler::DRIFT_KICK);
     }
@@ -2348,6 +2489,7 @@ static int hhs_cc_step(Particles& p, DistributedParticles* dp, int slow_start, i
     };
     auto kick = [&](double f) {
         g_profiler.start();
+        force_err_inject(p, slow_start, slow_count + fast_count(), slow_count + fast_count());
         kick_velocities(p, slow_start, slow_count, pivot_dt * f);
         kick_velocities(p, fast_start, fast_count(), pivot_dt * f);
         g_profiler.stop(StepProfiler::DRIFT_KICK);
@@ -2889,6 +3031,7 @@ static int hhs_fsi_recursive(
     }
     g_profiler.stop(StepProfiler::CROSS_FORCE, cross_pairs);
     g_profiler.start();
+    force_err_inject(p, slow_start, slow_count + fast_count, slow_count + fast_count);
     kick_velocities(p, slow_start, slow_count, pivot_dt * FSI_KICK);
     kick_velocities(p, fast_start, fast_count, pivot_dt * FSI_KICK);
     g_profiler.stop(StepProfiler::DRIFT_KICK);
@@ -2951,6 +3094,7 @@ static int hhs_fsi_recursive(
     }
     g_profiler.stop(StepProfiler::CROSS_GRAD, cross_pairs * 2);
     g_profiler.start();
+    force_err_inject(p, slow_start, slow_count + fast_count, slow_count + fast_count);
     kick_velocities(p, slow_start, slow_count, pivot_dt * FSI_MOD_KICK);
     kick_velocities(p, fast_start, fast_count, pivot_dt * FSI_MOD_KICK);
     g_profiler.stop(StepProfiler::DRIFT_KICK);
@@ -3012,6 +3156,7 @@ static int hhs_fsi_recursive(
     }
     g_profiler.stop(StepProfiler::CROSS_FORCE, cross_pairs);
     g_profiler.start();
+    force_err_inject(p, slow_start, slow_count + fast_count, slow_count + fast_count);
     kick_velocities(p, slow_start, slow_count, pivot_dt * FSI_KICK);
     kick_velocities(p, fast_start, fast_count, pivot_dt * FSI_KICK);
     g_profiler.stop(StepProfiler::DRIFT_KICK);
