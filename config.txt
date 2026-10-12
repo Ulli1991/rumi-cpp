@@ -1,170 +1,70 @@
-# =============================================================================
-# C++ N-Body Configuration
-# =============================================================================
+# cpp-nbody run configuration: the choices of a run. Every other parameter (accuracy, tuning, test problems,
+# experiments) has its production default in src/core/params.cpp and is listed in docs/CONFIG.md; it can be set
+# here too. An unknown key is an error. Each run writes the effective value of every key to run_params.txt.
 
-# Test case: binary_test, binary_test_peri, triple_test, outer_planets, plummer
-TEST_CASE = plummer
+# ---- Run ----
+TEST_CASE = plummer                     # plummer, or a test: outer_planets / binary_test / binary_test_peri / triple_test
+TOTAL_TIME_MYR = 5.0                    # End time (Myr); BIFROST Fig. 9
+DT_MAX_MYR = 1.0e-3                     # Integration interval (Myr): the level-0 step
 
-# Integrator: fsi (global timestep) or hhs (adaptive HHS-FSI per Algorithm 4 of FROST paper)
-INTEGRATOR = hhs
+# ---- Star cluster (TEST_CASE = plummer) ----
+PLUMMER_N = 200000                      # Number of stars
+PLUMMER_M_TOTAL = 8.1e4                 # Total mass (Msun); not used by kroupa_evolved
+PLUMMER_R_HALF = 3.1                    # Half-mass radius (pc), or mass_size (SCIC mass-size relation)
+PLUMMER_MASS_DIST = kroupa_evolved      # equal / kroupa / kroupa_evolved (Kroupa IMF evolved with SSE)
+PLUMMER_AGE_GYR = 1.0                   # Age for kroupa_evolved (Gyr)
+PLUMMER_METALLICITY = 0.0002            # Z for kroupa_evolved (0.01 Z_sun, BIFROST Fig. 9)
+PLUMMER_SEED = 42                       # Random seed of the initial conditions
+REMOVE_BH = false                       # Strip the black holes from the initial conditions
 
-# =============================================================================
-# Simulation parameters
-# =============================================================================
-TOTAL_TIME_MYR = 5.0                       	# BIFROST Fig. 9: 5 Myr evolved Kroupa cluster
-DT_MAX_MYR = 1.0e-3                       	# BIFROST uses 1e-3 Myr for cluster runs
-DT_MIN_MYR = 1.0e-14                      	# Needs to resolve compact binary encounters
-ETA_FF = 0.2					# Free-fall timestep eta
-ETA_FB = 0.2					# Fly-by timestep eta
-ETA_GRAD = 0.2					# Gradient timestep eta (FROST-CLUSTERS criteria; BIFROST 0.1)
-ETA_JERK = 0					# Jerk timestep eta (0: off, FROST-CLUSTERS; BIFROST 0.1)
-ETA = 0						# Velocity/acceleration timestep eta (0: off, FROST-CLUSTERS; BIFROST 0.2)
-SOFTENING_PC = 1e-3                        	# Softening length in pc (= 206 AU)
-SERIAL_N2_GPU = 16384                      	# Full N² on GPU without MPI or tree below this count
-SERIAL_N2_CPU = 0                          	# Full N² on CPU below this count; 0 on MI300A (200k, 10 % binaries: 13-14 s/step vs 15.3 s at 256)
-INTEGER_POSITIONS = false                  	# Use int64 positions (exact drift, MPI-safe)
-DOMAIN_HALFSIZE_PC = 200                   	# Integer position domain half-size in pc
-MPI_NON_BLOCKING = false                    	# Use MPI_Iallgatherv for overlapped transfers
-MPI_TRANSPORT = auto                        	# Allgathers: nccl (USE_NCCL builds; default there) / host (staged through pinned host
-                                            	# memory; default otherwise) / device (device buffers to a GPU-aware MPI: 2.5-30x slower on raven)
+# ---- Primordial binaries ----
+BINARY_FRAC = 0.0                       # Binary fraction (0-1)
+BINARY_POP = bifrost                    # bifrost (BIFROST App. A pairing) / mass_rank
+BINARY_A_MIN_AU = 0.01                  # Semi-major axes log-uniform between these (AU)
+BINARY_A_MAX_AU = 100.0
+R_BREAK_AU = 1000.0                     # Remove artificial binaries with a < r_break from the ICs (AU; 0: off)
 
+# ---- IMBH binary at the centre ----
+ADD_IMBH = false
+IMBH_M1 = 500.0                         # Masses (Msun)
+IMBH_M2 = 500.0
+IMBH_A_PC = 1e-4                        # Semi-major axis (pc)
+IMBH_E = 0.5                            # Eccentricity
+IMBH_SPIN = 0.0                         # Dimensionless spin of both BHs
 
-# =============================================================================
-# Barnes-Hut tree: O(N log N) force via monopole approximation
-# =============================================================================
-USE_TREE = false                           	# Master switch to enable tree for self-forces
-TREE_THRESHOLD = 100000 	                # Use tree above this count, N² below
-TREE_THETA = 0.7                          	# Opening angle (smaller = more accurate, slower)
-TREE_N_LEAF = 32                          	# Max particles per leaf cell
-TREE_N_GROUP = 64                         	# Particles per traversal group
+# ---- Physics ----
+COLLISIONAL = true                      # Unsoftened N-body with subsystems, PN and mergers (BIFROST)
+PN_ORDER = 31                           # Bitmask: 1 PN1, 2 PN2, 4 PN2.5, 8 PN3, 16 PN3.5, 32 BH spins (63: all)
 
-# Exact tree searches for HHS time steps and neighbours (gravity/dt_tree.h; results bit-identical to O(N^2),
-# forces stay direct; works with COLLISIONAL). 0 = off. NBODY_CHECK_TREE_DT=1 checks every search against O(N^2).
-# Defaults (unset): host builds 2048 / 2048; GPU builds TREE_DT_MIN_N 65536 (300000 with FLYBY_CM_VELOCITY),
-# TREE_NGB_MIN_N 32768 (measured break-even, AUDIT F7)
-# TREE_DT_MIN_N = 65536                    	# Device tree for HHS sets of at least this many particles
-TREE_DT_CPU_MAX = 0                        	# Host-thread tree for sets up to this size (host builds / APUs only)
-# TREE_NGB_MIN_N = 32768                   	# Neighbour search threshold
+# ---- Stellar evolution ----
+SSE_ENABLED = false                     # Stellar evolution during the run
+SSE_METALLICITY = 0.0002                # Z of the runtime SSE
+SSE_WIND_MODEL = VINK                   # HURLEY / HURLEY_LBV / VINK / VINK_NO_BISTAB (also for kroupa_evolved)
+SSE_REMNANT_MODEL = FRYER_RAPID         # HURLEY / BELCZYNSKI02 / BELCZYNSKI08 / FRYER_RAPID / FRYER_DELAYED / ELDRIDGE_TOUT
+SSE_PPISN_MODEL = STRONG                # NONE / STRONG / MODERATE / WEAK
+SSE_ECSN_MODEL = ON                     # OFF / ON
+SSE_MXNS = 2.5                          # Largest NS mass (Msun; -1: 1.8 for HURLEY, 2.5 otherwise)
+SSE_FLBV = 1.5                          # LBV wind scaling
 
-# =============================================================================
-# Collisional dynamics
-# Enable for unsoftened direct N-body with close encounter handling.
-# Forces SOFTENING_PC = 0 when enabled.
-# =============================================================================
-COLLISIONAL = true 				# Master switch to enable proper collional treatment of the Nbody system
-R_NGB = 1e-3                        		# Neighbor search radius (pc) for subsystem detection
-R_NGB_MAX = 0.1                     		# Max distance for orbital element check (pc)
-ETA_PERT = 0.02					# Perturbation timestep eta for subsystems (BIFROST Eq. 30)
-FLYBY_CM_VELOCITY = false			# Fly-by step of subsystem members with the c.o.m. velocity (FROST-CLUSTERS II sec. 2.1)
-FLYBY_CM_EPS = 1e-11				# Tidal-sampling pair step (either fly-by velocity): energy put into a subsystem by a slow
-						#   particle's kicks <= this x |E0| per step (code default 0 = off: in small systems such as
-						#   16 stars, |E0| is tiny and the step collapses). 200k, 10 % binaries, cm off: |dE/E| 1.5e-8 -> 3e-10
-						#   (old seed-7 ICs), 1.2e-9 -> 2e-11 (seed 13), at equal or lower s/step
-TIDAL_STEP_RES = 1.0				# Floor of that step: this x P (1 - e)^(3/2) of the member's binary (0 = none: 5x slower)
-FLYBY_NGB_CM = true				# Distant fly-by neighbour test of a binary member against the binary's c.o.m.
-NGB_MASS_SCALING = true				# Pair neighbour radius r_ngb max(1, m/<m>)^(1/3) (PeTar Eq. 12); pairs found only by the
-						#   larger radius join only as strong perturbers of a binary (tidal ratio > NGB_MASS_GAMMA)
-NGB_MASS_GAMMA = 1e-3
-NGB_WIDE_FAC = 0				# Bound pairs with a < NGB_WIDE_FAC x R_NGB are neighbours (wide binaries -> Kepler subsystems; 0: off, BIFROST)
-ETA_GBS = 1e-10                     		# GBS extrapolation accuracy for LogH integrator
-GBS_SEQUENCE = bulirsch			# bulirsch (2,4,6,8,12,16,...) or deuflhard (2,4,6,8,10,...; MSTAR, FROST-CLUSTERS)
-GBS_KMAX = 10				# GBS extrapolation stages (FROST-CLUSTERS I: 8)
-SDAR = false					# Slow-down of weakly perturbed inner binaries in LogH subsystems (Wang+2020; FROST-CLUSTERS I App. A2)
-SDAR_KREF = 1e-6				#   k_ref of the slow-down factor (W20 Eq. 22)
-SDAR_C = 0.1					#   kappa_max coefficient c (W20 Eq. 28)
-ETA_RESTART = 1e-8				# Per-subsystem LogH restart threshold + step-level restart
-N_ORB_SECULAR = 3                   		# Orbits/timestep threshold for secular evolution
-KEPLER_2BODY = true                 		# Isolated 2-body subsystems without PN: analytic Kepler drift at any orbit count (else LogH below N_ORB_SECULAR)
-M_PN = 5.0                          		# Minimum mass (M_sun) for PN corrections
-PN_ORDER = 31                        		# PN bitmask: 1=PN1, 2=PN2, 4=PN2.5, 8=PN3, 16=PN3.5, 32=BH spin couplings (63=all) — DISABLED for energy test
-R_ESCAPE_RH = 100.0                 		# Escape radius in half-mass radii
-R_ESCAPE_RJ = 2.0                   		# With TIDAL_FIELD: escape radius in Jacobi radii (NBODY6, Baumgardt & Makino 2003); 0 = use R_ESCAPE_RH
-TIDAL_FIELD = none				# Host galaxy tide: none / pointmass / loghalo (cluster on a circular orbit; PeTar-style reference point)
-GALAXY_R_PC = 8000			# Galactocentric orbit radius (pc)
-GALAXY_VC_KMS = 220			# loghalo circular velocity (km/s)
-GALAXY_RC_PC = 0			# loghalo core radius (pc)
-GALAXY_MASS_MSUN = 0			# pointmass galaxy mass (Msun)
-MSTAR_THRESHOLD = 8                 		# N-body threshold: MSTAR (>=) vs LogH (<)
-SSE_ENABLED = false                  		# Runtime single stellar evolution
-SSE_METALLICITY = 0.0002            		# Metallicity Z for SSE (0.01 Z_sun)
+# ---- Collisions and mergers ----
+COLL_MASS_LOSS_C = 0                    # Stellar-collision mass loss C (Glebbeek 2013; FROST-CLUSTERS III: 0.3)
+TDE_ACCRETION_FRACTION = 0.5            # Fraction of a disrupted star the BH accretes
+BH_MERGE_RADIUS = total                 # BH-BH merger at 6 G M/c^2 of the total mass (total) or the larger BH (max_single)
 
-# SSE model prescriptions (also used by IC generator for kroupa_evolved)
-SSE_WIND_MODEL    = VINK			# HURLEY / HURLEY_LBV / VINK / VINK_NO_BISTAB
-SSE_REMNANT_MODEL = FRYER_RAPID		# BIFROST Fig. 9 BH population (339 BHs 5.5-45 Msun vs 357, 5.5-41.6); HURLEY / BELCZYNSKI02 / BELCZYNSKI08 / FRYER_RAPID / FRYER_DELAYED / ELDRIDGE_TOUT
-SSE_PPISN_MODEL   = STRONG			# NONE / STRONG / MODERATE / WEAK
-SSE_ECSN_MODEL    = ON				# OFF / ON
-SSE_MXNS          = 2.5				# Max NS mass (-1 = auto: 1.8 for HURLEY, 2.5 otherwise)
-SSE_FLBV          = 1.5				# LBV scaling factor
+# ---- Host galaxy tide ----
+TIDAL_FIELD = none                      # none / pointmass / loghalo (cluster on a circular orbit)
+GALAXY_R_PC = 8000                      # Galactocentric radius (pc)
+GALAXY_VC_KMS = 220                     # loghalo circular velocity (km/s)
+GALAXY_RC_PC = 0                        # loghalo core radius (pc)
+GALAXY_MASS_MSUN = 0                    # pointmass galaxy mass (Msun)
 
-# =============================================================================
-# Binary test parameters (only used if TEST_CASE = binary_test)
-# BH binary for PN precession test (BIFROST Fig. 2).
-# Period ~ 2.24e-4 yr at 0.01 AU. PN1 precession ~ 2e-3 rad/orbit.
-# =============================================================================
-BINARY_A_PC = 1e-8				# Semi-major axis in pc (= 0.01 AU, 4.848e-8)
-BINARY_E = 0.9					# Eccentricity (high for visible precession)
-BINARY_M1 = 10.0				# Primary mass in M_sun (BH)
-BINARY_M2 = 10.0				# Secondary mass in M_sun (BH)
-
-# =============================================================================
-# Triple test parameters (only used if TEST_CASE = triple_test)
-# Hierarchical triple: inner binary (m1,m2) + outer body m3.
-# Default: 3x10 M_sun BHs, a_out/a_in=20, i=85° for Kozai-Lidov.
-# Kozai-Lidov timescale ~ (M_tot/m3)(a_out/a_in)^3 * P_in / (1-e_out^2)^{3/2}
-# =============================================================================
-TRIPLE_A_IN_PC = 1e-8				# Inner semi-major axis in pc
-TRIPLE_E_IN = 0.1				# Inner eccentricity
-TRIPLE_M1 = 10.0				# Inner primary mass (M_sun)
-TRIPLE_M2 = 10.0				# Inner secondary mass (M_sun)
-TRIPLE_A_OUT_PC = 5e-8				# Outer semi-major axis in pc (a_out/a_in=5)
-TRIPLE_E_OUT = 0.1				# Outer eccentricity
-TRIPLE_M3 = 10.0				# Outer body mass (M_sun)
-TRIPLE_INCL_DEG = 45.0				# Mutual inclination (degrees); >39 for Kozai-Lidov
-
-# =============================================================================
-# Plummer cluster parameters (only used if TEST_CASE = plummer)
-# =============================================================================
-PLUMMER_N = 200000
-PLUMMER_M_TOTAL = 8.1e4            		# Total mass in solar masses (not used when kroupa_evolved)
-PLUMMER_R_HALF = 3.1                		# Half-mass radius in parsecs
-PLUMMER_SEED = 42                               # random seed for the mass sampling (I like 42)
-PLUMMER_MASS_DIST = kroupa_evolved  		# equal, kroupa, or kroupa_evolved
-PLUMMER_AGE_GYR = 1.0               		# Cluster age in Gyr (for kroupa_evolved)
-PLUMMER_METALLICITY = 0.0002        		# Stellar metallicity Z (0.01 Z_sun, BIFROST Fig. 9)
-
-# Plummer binary population
-REMOVE_BH = false                   		# Strip BHs from ICs (for pure stellar cluster)
-R_BREAK_AU = 1000.0                 		# Remove artificial binaries with a < r_break (0=off)
-BINARY_FRAC = 0.0                   		# Primordial binary fraction (0-1)
-BINARY_A_MIN_AU = 0.01              		# Min semi-major axis for binaries (AU)
-BINARY_A_MAX_AU = 100.0             		# Max semi-major axis for binaries (AU)
-BINARY_POP = bifrost                		# bifrost: BIFROST App. A (flat q in [0.1,1) above 5 M_sun, random pairs below); mass_rank: heaviest with next heaviest
-BINARY_PERI_CHECK = true            		# Redraw e (or a) until r_p = a(1-e) > R1+R2 (TDE radius / ISCO with BHs), FROST-CLUSTERS II Sec. 2.3
-
-# IMBH binary injection
-ADD_IMBH = false                    		# Inject IMBH binary at cluster center
-IMBH_M1 = 500.0                    		# Primary IMBH mass (M_sun)
-IMBH_M2 = 500.0                    		# Secondary IMBH mass (M_sun)
-IMBH_A_PC = 1e-4                   		# IMBH binary semi-major axis (pc)
-IMBH_E = 0.5                       		# IMBH binary eccentricity
-IMBH_SPIN = 0.0                    		# Dimensionless spin (both BHs)
-
-# =============================================================================
-# Output
-# =============================================================================
-PRINT_INTERVAL = 1
-PROFILING = true                    		# Print performance breakdown at each print interval
-RESTART_INTERVAL = 0                    	# Restart file every this many steps and at the end (0: off; needs USE_HDF5)
-WALLTIME_LIMIT = 0                      	# Hours: restart file and clean stop before this wall-clock time (0: off)
-RESTART_DIR = .                         	# Directory of restart_<step>.h5 (the newest RESTART_KEEP = 2 are kept)
-RESTART_FILE =                          	# Continue from this file; latest: newest in RESTART_DIR; auto: that or a fresh start
-SNAPSHOT_INTERVAL = 0                   	# LUNA-layout snapshot every this many steps, at step 0 and at the end (0: off)
-SNAPSHOT_DIR = .                        	# snapdir_NNN/snapshot_NNN.0.hdf5 go here
-SNAPSHOT_CLUSTER_DIAG = true            	# Header: density centre, core, Lagrangian radii, binaries (and r_J with TIDAL_FIELD) of each snapshot
-CLUSTER_DIAG_INTERVAL = 0			# Steps between cluster diagnostics (density centre, core, Lagrangian radii, binaries; 0: off)
-CLUSTER_DIAG_FILE = cluster_diag.dat	# Appended by rank 0
-CLUSTER_DIAG_RPAIR_PC = 0.02		# Largest pair separation in the binary census (pc)
-PROFILING_FENCES = true            		# Fence the device at each timer stop (exact per-component times; ~4 % of a 200k step). false: host
-                                    		# wall times only, queued GPU work charged to the next synchronising component
-TDE_ACCRETION_FRACTION = 0.5            # Fraction of a tidally disrupted star the BH accretes (FROST-CLUSTERS I, DRAGON-II)
-COLL_MASS_LOSS_C = 0                     # Stellar-collision mass loss C: m_rem = (m1+m2)(1 - C q/(1+q)^2) (Glebbeek 2013; FROST-CLUSTERS III: 0.3)
+# ---- Output (intervals in steps of DT_MAX_MYR; 0: off) ----
+PRINT_INTERVAL = 1                      # Diagnostics
+PROFILING = true                        # Performance breakdown at each print
+RESTART_INTERVAL = 0                    # Restart file (and one at the end; needs USE_HDF5)
+WALLTIME_LIMIT = 0                      # Hours: restart file and clean stop before this wall time
+RESTART_DIR = .                         # Directory of restart_<step>.h5
+RESTART_FILE =                          # Continue from this file; latest: newest in RESTART_DIR; auto: that or a fresh start
+SNAPSHOT_INTERVAL = 0                   # LUNA-layout snapshots (also at step 0 and at the end)
+SNAPSHOT_DIR = .                        # Directory of snapdir_NNN/
+CLUSTER_DIAG_INTERVAL = 0               # Density centre, core, Lagrangian radii, binaries to cluster_diag.dat

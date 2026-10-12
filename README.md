@@ -67,7 +67,10 @@ cmake --build build-mpi -j$(nproc)
 mpirun -np <ngpus> ./build-mpi/nbody-kokkos
 ```
 
-Single-GPU runs use `mpirun -np 1`. All configuration is read from `config.txt` in the working directory.
+Single-GPU runs use `mpirun -np 1`. All configuration is read from `config.txt` in the working directory
+(or `--config <file>`). `config.txt` holds the choices of a run; every key, its default and level are in
+[docs/CONFIG.md](docs/CONFIG.md), generated from the parameter table `src/core/params.cpp`. An unknown key is an
+error; each run writes the effective value of every key to `run_params.txt`.
 
 ### Restart files and snapshots (HDF5)
 

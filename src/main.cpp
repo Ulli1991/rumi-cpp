@@ -10,6 +10,7 @@
 #include "constants.h"
 #include "mpi_comm.h"
 #include "profiling.h"
+#include "params.h"
 #ifdef USE_HDF5
 #include "restart.h"
 #include "snapshot.h"
@@ -390,88 +391,6 @@ struct TripleTracker {
 #include <cmath>
 
 // ---------------------------------------------------------------------------
-// Config file parser
-// ---------------------------------------------------------------------------
-struct Config {
-    std::map<std::string, std::string> params;
-    mutable std::set<std::string> consumed_keys;
-    std::string text;   // the file as read (echoed into restart files)
-
-    void load(const std::string& filename) {
-        std::ifstream f(filename);
-        if (!f.is_open()) {
-            std::fprintf(stderr, "Cannot open config file: %s\n", filename.c_str());
-            std::exit(1);
-        }
-        std::string line;
-        while (std::getline(f, line)) {
-            text += line + "\n";
-            auto pos = line.find('#');
-            if (pos != std::string::npos) line.erase(pos);
-            pos = line.find('=');
-            if (pos == std::string::npos) continue;
-            std::string key = line.substr(0, pos);
-            std::string val = line.substr(pos + 1);
-            auto trim = [](std::string& s) {
-                s.erase(0, s.find_first_not_of(" \t\r\n"));
-                s.erase(s.find_last_not_of(" \t\r\n") + 1);
-            };
-            trim(key); trim(val);
-            if (!key.empty()) params[key] = val;
-        }
-    }
-
-    std::string get_str(const std::string& key, const std::string& def) const {
-        consumed_keys.insert(key);
-        auto it = params.find(key);
-        return (it != params.end()) ? it->second : def;
-    }
-    double get_double(const std::string& key, double def) const {
-        consumed_keys.insert(key);
-        auto it = params.find(key);
-        if (it == params.end()) return def;
-        try {
-            return std::stod(it->second);
-        } catch (const std::exception& e) {
-            std::fprintf(stderr, "WARNING: Cannot parse '%s' as double for key '%s': %s\n",
-                         it->second.c_str(), key.c_str(), e.what());
-            return def;
-        }
-    }
-    int get_int(const std::string& key, int def) const {
-        consumed_keys.insert(key);
-        auto it = params.find(key);
-        if (it == params.end()) return def;
-        try {
-            return std::stoi(it->second);
-        } catch (const std::exception& e) {
-            std::fprintf(stderr, "WARNING: Cannot parse '%s' as int for key '%s': %s\n",
-                         it->second.c_str(), key.c_str(), e.what());
-            return def;
-        }
-    }
-    bool get_bool(const std::string& key, bool def) const {
-        consumed_keys.insert(key);
-        auto it = params.find(key);
-        if (it == params.end()) return def;
-        const std::string& v = it->second;
-        if (v == "true" || v == "TRUE" || v == "True" || v == "1" || v == "yes") return true;
-        if (v == "false" || v == "FALSE" || v == "False" || v == "0" || v == "no") return false;
-        std::fprintf(stderr, "WARNING: Cannot parse '%s' as bool for key '%s', using default\n",
-                     v.c_str(), key.c_str());
-        return def;
-    }
-    void warn_unknown_keys() const {
-        for (const auto& kv : params) {
-            if (consumed_keys.find(kv.first) == consumed_keys.end()) {
-                std::fprintf(stderr, "WARNING: Unknown config key '%s' (value: '%s')\n",
-                             kv.first.c_str(), kv.second.c_str());
-            }
-        }
-    }
-};
-
-// ---------------------------------------------------------------------------
 // NBODY_DUMP (diagnostics): the particle state at each print, rows (pid m x y z vx vy vz subsystem_id) of doubles
 // after the int N, to dump_<step>.bin in the run directory (step 0: the initial state)
 static void dump_particles(const Particles& p, int step) {
@@ -499,7 +418,7 @@ static void set_binary_spins(Particles& p, const Config& cfg) {
     auto h_spin = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.spin_vec);
     bool any = false;
     for (int b = 0; b < 2; b++) {
-        std::string s = cfg.get_str(b == 0 ? "BINARY_CHI1" : "BINARY_CHI2", "");
+        std::string s = cfg.get_str(b == 0 ? "BINARY_CHI1" : "BINARY_CHI2");
         double c[3] = {0, 0, 0};
         for (char& ch : s) if (ch == ',' || ch == ';') ch = ' ';
         if (s.empty() || std::sscanf(s.c_str(), "%lf %lf %lf", &c[0], &c[1], &c[2]) != 3) continue;
@@ -574,87 +493,88 @@ int main(int argc, char** argv) {
             }
         }
 
+        // Parameters (core/params.h): unknown keys and bad values in the file are errors; every key's effective
+        // value and its source go to run_params.txt (rank 0)
         Config cfg;
-        cfg.load(config_file);
+        cfg.load(config_file, my_rank == 0);
+        if (!test_override.empty()) cfg.set_override("TEST_CASE", test_override);
+        if (!restart_arg.empty()) cfg.set_override("RESTART_FILE", restart_arg);
+        if (my_rank == 0) cfg.write_effective("run_params.txt");
 
-        std::string test = test_override.empty() ? cfg.get_str("TEST_CASE", "outer_planets") : test_override;
-        std::string integrator = cfg.get_str("INTEGRATOR", "hhs");
-        double t_final_myr  = cfg.get_double("TOTAL_TIME_MYR", 0.23);
-        double dt_max_myr   = cfg.get_double("DT_MAX_MYR", 1.6e-3);
-        double dt_min_myr   = cfg.get_double("DT_MIN_MYR", 1.0e-9);
-        double eta          = cfg.get_double("ETA", 0.2);
-        double soft_pc      = cfg.get_double("SOFTENING_PC", 1e-3);
-        int print_interval  = cfg.get_int("PRINT_INTERVAL", 1000);
-        int replica_check_interval = cfg.get_int("REPLICA_CHECK_INTERVAL", 10);  // steps; 0 = off
-        int N_plummer       = cfg.get_int("PLUMMER_N", 1000);
-        double M_total_msun = cfg.get_double("PLUMMER_M_TOTAL", 3.79e2);
+        std::string test = cfg.get_str("TEST_CASE");
+        std::string integrator = cfg.get_str("INTEGRATOR");
+        double t_final_myr  = cfg.get_double("TOTAL_TIME_MYR");
+        double dt_max_myr   = cfg.get_double("DT_MAX_MYR");
+        double dt_min_myr   = cfg.get_double("DT_MIN_MYR");
+        double eta          = cfg.get_double("ETA");
+        double soft_pc      = cfg.get_double("SOFTENING_PC");
+        int print_interval  = cfg.get_int("PRINT_INTERVAL");
+        int replica_check_interval = cfg.get_int("REPLICA_CHECK_INTERVAL");  // steps; 0 = off
+        int N_plummer       = cfg.get_int("PLUMMER_N");
+        double M_total_msun = cfg.get_double("PLUMMER_M_TOTAL");
         // PLUMMER_R_HALF absent or "mass_size": r_h from the SCIC mass-size relation (BIFROST App. A eq. A2-A3)
-        std::string r_half_str = cfg.get_str("PLUMMER_R_HALF", "mass_size");
-        double r_half_pc    = (r_half_str == "mass_size") ? -1.0 : cfg.get_double("PLUMMER_R_HALF", -1.0);
-        int seed            = cfg.get_int("PLUMMER_SEED", 42);
-        std::string mass_dist = cfg.get_str("PLUMMER_MASS_DIST", "equal");
-        double age_gyr      = cfg.get_double("PLUMMER_AGE_GYR", 1.0);
-        double metallicity  = cfg.get_double("PLUMMER_METALLICITY", 0.02);
-        bool remove_bh      = cfg.get_bool("REMOVE_BH", false);
-        double binary_frac  = cfg.get_double("BINARY_FRAC", 0.0);
-        double bin_a_min_au = cfg.get_double("BINARY_A_MIN_AU", 0.01);
-        double bin_a_max_au = cfg.get_double("BINARY_A_MAX_AU", 100.0);
-        std::string binary_pop = cfg.get_str("BINARY_POP", "bifrost");
-        bool binary_peri_check = cfg.get_bool("BINARY_PERI_CHECK", true);
-        bool add_imbh       = cfg.get_bool("ADD_IMBH", false);
-        double imbh_m1      = cfg.get_double("IMBH_M1", 500.0);
-        double imbh_m2      = cfg.get_double("IMBH_M2", 500.0);
-        double imbh_a_pc    = cfg.get_double("IMBH_A_PC", 1e-4);
-        double imbh_e       = cfg.get_double("IMBH_E", 0.5);
-        double imbh_spin    = cfg.get_double("IMBH_SPIN", 0.0);
+        std::string r_half_str = cfg.get_str("PLUMMER_R_HALF");
+        double r_half_pc    = (r_half_str == "mass_size") ? -1.0 : Config::to_double("PLUMMER_R_HALF", r_half_str);
+        int seed            = cfg.get_int("PLUMMER_SEED");
+        std::string mass_dist = cfg.get_str("PLUMMER_MASS_DIST");
+        double age_gyr      = cfg.get_double("PLUMMER_AGE_GYR");
+        double metallicity  = cfg.get_double("PLUMMER_METALLICITY");
+        bool remove_bh      = cfg.get_bool("REMOVE_BH");
+        double binary_frac  = cfg.get_double("BINARY_FRAC");
+        double bin_a_min_au = cfg.get_double("BINARY_A_MIN_AU");
+        double bin_a_max_au = cfg.get_double("BINARY_A_MAX_AU");
+        std::string binary_pop = cfg.get_str("BINARY_POP");
+        bool binary_peri_check = cfg.get_bool("BINARY_PERI_CHECK");
+        bool add_imbh       = cfg.get_bool("ADD_IMBH");
+        double imbh_m1      = cfg.get_double("IMBH_M1");
+        double imbh_m2      = cfg.get_double("IMBH_M2");
+        double imbh_a_pc    = cfg.get_double("IMBH_A_PC");
+        double imbh_e       = cfg.get_double("IMBH_E");
+        double imbh_spin    = cfg.get_double("IMBH_SPIN");
         // Artificial-binary avoidance (BIFROST App. A): IC_R_BREAK = r_break in units of BINARY_A_MAX_AU ("r_break ~ a
         // few times a_max", Table A1); R_BREAK_AU (absolute, AU) takes precedence when > 0
-        double r_break_au   = cfg.get_double("R_BREAK_AU", 0.0);
-        if (r_break_au <= 0.0) r_break_au = cfg.get_double("IC_R_BREAK", 0.0) * bin_a_max_au;
+        double r_break_au   = cfg.get_double("R_BREAK_AU");
+        if (r_break_au <= 0.0) r_break_au = cfg.get_double("IC_R_BREAK") * bin_a_max_au;
         // Binary centre-of-mass velocity: "sampled" (one f(E) draw per binary, SCIC/mcluster) or "average" (old)
-        std::string binary_com_v = cfg.get_str("BINARY_COM_V", "sampled");
-        if (binary_com_v != "sampled" && binary_com_v != "average") {
-            std::fprintf(stderr, "ERROR: BINARY_COM_V must be sampled or average, got '%s'\n", binary_com_v.c_str());
-            std::exit(1);
-        }
+        std::string binary_com_v = cfg.get_str("BINARY_COM_V");
 
         // SSE model config (used by IC generator and runtime SSE)
-        std::string sse_wind_str    = cfg.get_str("SSE_WIND_MODEL", "HURLEY");
-        std::string sse_remnant_str = cfg.get_str("SSE_REMNANT_MODEL", "BELCZYNSKI02");
-        std::string sse_ppisn_str   = cfg.get_str("SSE_PPISN_MODEL", "NONE");
-        std::string sse_ecsn_str    = cfg.get_str("SSE_ECSN_MODEL", "OFF");
-        double sse_mxns_val         = cfg.get_double("SSE_MXNS", -1.0);
-        double sse_flbv_val         = cfg.get_double("SSE_FLBV", 1.5);
+        std::string sse_wind_str    = cfg.get_str("SSE_WIND_MODEL");
+        std::string sse_remnant_str = cfg.get_str("SSE_REMNANT_MODEL");
+        std::string sse_ppisn_str   = cfg.get_str("SSE_PPISN_MODEL");
+        std::string sse_ecsn_str    = cfg.get_str("SSE_ECSN_MODEL");
+        double sse_mxns_val         = cfg.get_double("SSE_MXNS");
+        double sse_flbv_val         = cfg.get_double("SSE_FLBV");
         SSEConfig ic_sse_cfg = make_sse_config(sse_wind_str, sse_remnant_str,
                                                 sse_ppisn_str, sse_ecsn_str,
                                                 sse_mxns_val, sse_flbv_val);
 
-        bool profiling_enabled = cfg.get_bool("PROFILING", true);
+        bool profiling_enabled = cfg.get_bool("PROFILING");
         g_profiler.enabled = profiling_enabled;   // PROFILING = false: no timers and no device fences
-        g_profiler.fence = profiling_enabled && cfg.get_bool("PROFILING_FENCES", true);
-        serial_n2_gpu = cfg.get_int("SERIAL_N2_GPU", 0);
-        serial_n2_cpu = cfg.get_int("SERIAL_N2_CPU", 0);
-        all_slow_split = cfg.get_bool("ALL_SLOW_SPLIT", true);
-        hhs_cc = cfg.get_bool("HHS_CC", false);
-        hhs_cc_max = cfg.get_int("HHS_CC_MAX", -1);
-        hhs_cc_min = cfg.get_int("HHS_CC_MIN", 0);
+        g_profiler.fence = profiling_enabled && cfg.get_bool("PROFILING_FENCES");
+        serial_n2_gpu = cfg.get_int("SERIAL_N2_GPU");
+        serial_n2_cpu = cfg.get_int("SERIAL_N2_CPU");
+        all_slow_split = cfg.get_bool("ALL_SLOW_SPLIT");
+        hhs_cc = cfg.get_bool("HHS_CC");
+        hhs_cc_max = cfg.get_int("HHS_CC_MAX");
+        hhs_cc_min = cfg.get_int("HHS_CC_MIN");
         bool ngb_mass_scaling = false;
         double ngb_mref = 0.0;
-        flyby_cm_velocity = cfg.get_bool("FLYBY_CM_VELOCITY", false);   // FROST-CLUSTERS II sec. 2.1
+        flyby_cm_velocity = cfg.get_bool("FLYBY_CM_VELOCITY");   // FROST-CLUSTERS II sec. 2.1
         g_eattr.on = std::getenv("NBODY_EATTR") != nullptr;   // per-print energy attribution (diagnostics.h)
-        distribute_subsystems = cfg.get_bool("DISTRIBUTE_SUBSYSTEMS", false);   // FROST Algorithm 3
-        distribute_subsystems_min = cfg.get_int("DISTRIBUTE_MIN_SUBSYSTEMS", 256);
-        use_integer_positions = cfg.get_bool("INTEGER_POSITIONS", false);
-        double domain_halfsize = cfg.get_double("DOMAIN_HALFSIZE_PC", 200.0);
-        use_nonblocking_mpi = cfg.get_bool("MPI_NON_BLOCKING", false);
-        mpi_transport = parse_mpi_transport(cfg.get_str("MPI_TRANSPORT", "auto"));   // AUDIT G row 4
+        distribute_subsystems = cfg.get_bool("DISTRIBUTE_SUBSYSTEMS");   // FROST Algorithm 3
+        distribute_subsystems_min = cfg.get_int("DISTRIBUTE_MIN_SUBSYSTEMS");
+        use_integer_positions = cfg.get_bool("INTEGER_POSITIONS");
+        double domain_halfsize = cfg.get_double("DOMAIN_HALFSIZE_PC");
+        use_nonblocking_mpi = cfg.get_bool("MPI_NON_BLOCKING");
+        mpi_transport = parse_mpi_transport(cfg.get_str("MPI_TRANSPORT"));   // AUDIT G row 4
 
         // Barnes-Hut tree configuration
-        use_tree = cfg.get_bool("USE_TREE", false);
-        tree_threshold = cfg.get_int("TREE_THRESHOLD", 10000);
-        tree_theta = cfg.get_double("TREE_THETA", 0.5);
-        tree_n_leaf = cfg.get_int("TREE_N_LEAF", 32);
-        tree_n_group = cfg.get_int("TREE_N_GROUP", 64);
+        use_tree = cfg.get_bool("USE_TREE");
+        tree_threshold = cfg.get_int("TREE_THRESHOLD");
+        tree_theta = cfg.get_double("TREE_THETA");
+        tree_n_leaf = cfg.get_int("TREE_N_LEAF");
+        tree_n_group = cfg.get_int("TREE_N_GROUP");
         // Exact tree searches for the HHS time steps and neighbours (gravity/dt_tree.h); forces stay direct
         // Exact tree searches on by default above the measured break-even set sizes (AUDIT F7; results are
         // bit-identical to O(N^2), so only speed changes). Host builds: ~1000-1500 for both searches (32 threads).
@@ -664,18 +584,20 @@ int main(int argc, char** argv) {
         // 2026-10-11), so the c.o.m. threshold sits above 200k.
         constexpr bool host_build = std::is_same_v<Kokkos::DefaultExecutionSpace, Kokkos::DefaultHostExecutionSpace>;
         const int dt_default = host_build ? 2048 : (flyby_cm_velocity ? 300000 : 65536);
-        tree_dt_min_n = cfg.get_int("TREE_DT_MIN_N", dt_default);
-        tree_ngb_min_n = cfg.get_int("TREE_NGB_MIN_N", host_build ? 2048 : 32768);
-        tree_dt_cpu_max = cfg.get_int("TREE_DT_CPU_MAX", 0);
-        tree_dt_vc_fac = cfg.get_double("TREE_DT_VC_FAC", 30.0);
+        tree_dt_min_n = cfg.get_int("TREE_DT_MIN_N");        // -1: the build's default
+        if (tree_dt_min_n < 0) tree_dt_min_n = dt_default;
+        tree_ngb_min_n = cfg.get_int("TREE_NGB_MIN_N");
+        if (tree_ngb_min_n < 0) tree_ngb_min_n = host_build ? 2048 : 32768;
+        tree_dt_cpu_max = cfg.get_int("TREE_DT_CPU_MAX");
+        tree_dt_vc_fac = cfg.get_double("TREE_DT_VC_FAC");
 
 #ifdef ENABLE_COLLISIONAL
         // ETA_FF/ETA_FB always parsed (used by force kernels even without subsystems)
-        g_collisional.eta_ff          = cfg.get_double("ETA_FF", 0.2);
-        g_collisional.eta_fb          = cfg.get_double("ETA_FB", 0.2);
+        g_collisional.eta_ff          = cfg.get_double("ETA_FF");
+        g_collisional.eta_fb          = cfg.get_double("ETA_FB");
 
         // Collisional (unsoftened direct N-body) configuration
-        g_collisional.enabled = cfg.get_bool("COLLISIONAL", false);
+        g_collisional.enabled = cfg.get_bool("COLLISIONAL");
         if (g_collisional.enabled && use_tree) {
             // Merger compaction re-indexes particles under a built tree, and tree forces lose 4th order and
             // L conservation (force-error floor ~1e-5 at theta 0.5): not supported for collisional runs
@@ -686,45 +608,45 @@ int main(int argc, char** argv) {
             return 1;
         }
         if (g_collisional.enabled) {
-            g_collisional.r_ngb           = cfg.get_double("R_NGB", 1e-3);
-            g_collisional.r_ngb_max       = cfg.get_double("R_NGB_MAX", 0.1);
-            g_collisional.eta_grad        = cfg.get_double("ETA_GRAD", 0.1);
-            g_collisional.eta_jerk        = cfg.get_double("ETA_JERK", 0.1);
+            g_collisional.r_ngb           = cfg.get_double("R_NGB");
+            g_collisional.r_ngb_max       = cfg.get_double("R_NGB_MAX");
+            g_collisional.eta_grad        = cfg.get_double("ETA_GRAD");
+            g_collisional.eta_jerk        = cfg.get_double("ETA_JERK");
             g_collisional.eta_va          = eta;
-            g_collisional.eta_gbs         = cfg.get_double("ETA_GBS", 1e-10);
-            g_collisional.eta_pert        = cfg.get_double("ETA_PERT", 0.02);
-            g_collisional.tidal_gamma     = cfg.get_double("TIDAL_GAMMA", 0.0);
-            g_collisional.weak_perturber_gamma = cfg.get_double("WEAK_PERTURBER_GAMMA", 0.0);
-            g_collisional.flyby_ngb_cm    = cfg.get_bool("FLYBY_NGB_CM", true);
-            ngb_mass_scaling              = cfg.get_bool("NGB_MASS_SCALING", false);
-            ngb_mref                      = cfg.get_double("NGB_MREF", 0.0);   // <m> override [Msun] (tests)
-            g_collisional.ngb_mass_gamma  = cfg.get_double("NGB_MASS_GAMMA", 1e-3);
-            g_collisional.tidal_step_res  = cfg.get_double("TIDAL_STEP_RES", 1.0);
-            g_collisional.secular_triples = cfg.get_bool("SECULAR_TRIPLES", true);
-            g_collisional.sdar            = cfg.get_bool("SDAR", false);
+            g_collisional.eta_gbs         = cfg.get_double("ETA_GBS");
+            g_collisional.eta_pert        = cfg.get_double("ETA_PERT");
+            g_collisional.tidal_gamma     = cfg.get_double("TIDAL_GAMMA");
+            g_collisional.weak_perturber_gamma = cfg.get_double("WEAK_PERTURBER_GAMMA");
+            g_collisional.flyby_ngb_cm    = cfg.get_bool("FLYBY_NGB_CM");
+            ngb_mass_scaling              = cfg.get_bool("NGB_MASS_SCALING");
+            ngb_mref                      = cfg.get_double("NGB_MREF");   // <m> override [Msun] (tests)
+            g_collisional.ngb_mass_gamma  = cfg.get_double("NGB_MASS_GAMMA");
+            g_collisional.tidal_step_res  = cfg.get_double("TIDAL_STEP_RES");
+            g_collisional.secular_triples = cfg.get_bool("SECULAR_TRIPLES");
+            g_collisional.sdar            = cfg.get_bool("SDAR");
             if (const char* e = std::getenv("NBODY_SDAR")) g_collisional.sdar = std::atoi(e) != 0;
-            g_collisional.sdar_kref       = cfg.get_double("SDAR_KREF", 1e-6);
-            g_collisional.sdar_c          = cfg.get_double("SDAR_C", 0.1);
-            g_collisional.subsys_collisions = cfg.get_bool("SUBSYS_COLLISIONS", true);
-            g_collisional.tde_accretion = cfg.get_double("TDE_ACCRETION_FRACTION", 0.5);
-            g_collisional.coll_mass_loss_c = cfg.get_double("COLL_MASS_LOSS_C", 0.0);
-            g_collisional.bh_merge_max_single = cfg.get_str("BH_MERGE_RADIUS", "total") == "max_single";
-            g_collisional.grad_fresh = cfg.get_bool("GRAD_FRESH", false);
-            g_collisional.gbs_deuflhard = cfg.get_str("GBS_SEQUENCE", "bulirsch") == "deuflhard";
-            g_collisional.gbs_kmax = cfg.get_int("GBS_KMAX", 10);
-            g_collisional.r_ngb_wide = cfg.get_double("NGB_WIDE_FAC", 0.0) * g_collisional.r_ngb;
-            g_collisional.tidal_res       = cfg.get_double("TIDAL_RES", 0.05);
-            g_collisional.flyby_cm_eps    = cfg.get_double("FLYBY_CM_EPS", 0.0);
-            g_collisional.eta_restart     = cfg.get_double("ETA_RESTART", 0.0);
-            g_collisional.n_orb_secular   = cfg.get_int("N_ORB_SECULAR", 3);
-            g_collisional.kepler_2body    = cfg.get_bool("KEPLER_2BODY", g_collisional.kepler_2body);
-            g_collisional.m_pn            = cfg.get_double("M_PN", 5.0);
-            g_collisional.pn_order        = cfg.get_int("PN_ORDER", 7);
-            g_collisional.r_escape_rh     = cfg.get_double("R_ESCAPE_RH", 100.0);
-            g_collisional.r_escape_rj     = cfg.get_double("R_ESCAPE_RJ", 2.0);
-            g_collisional.mstar_threshold = cfg.get_int("MSTAR_THRESHOLD", 8);
-            g_collisional.sse_enabled     = cfg.get_bool("SSE_ENABLED", true);
-            g_collisional.sse_metallicity = cfg.get_double("SSE_METALLICITY", 0.02);
+            g_collisional.sdar_kref       = cfg.get_double("SDAR_KREF");
+            g_collisional.sdar_c          = cfg.get_double("SDAR_C");
+            g_collisional.subsys_collisions = cfg.get_bool("SUBSYS_COLLISIONS");
+            g_collisional.tde_accretion = cfg.get_double("TDE_ACCRETION_FRACTION");
+            g_collisional.coll_mass_loss_c = cfg.get_double("COLL_MASS_LOSS_C");
+            g_collisional.bh_merge_max_single = cfg.get_str("BH_MERGE_RADIUS") == "max_single";
+            g_collisional.grad_fresh = cfg.get_bool("GRAD_FRESH");
+            g_collisional.gbs_deuflhard = cfg.get_str("GBS_SEQUENCE") == "deuflhard";
+            g_collisional.gbs_kmax = cfg.get_int("GBS_KMAX");
+            g_collisional.r_ngb_wide = cfg.get_double("NGB_WIDE_FAC") * g_collisional.r_ngb;
+            g_collisional.tidal_res       = cfg.get_double("TIDAL_RES");
+            g_collisional.flyby_cm_eps    = cfg.get_double("FLYBY_CM_EPS");
+            g_collisional.eta_restart     = cfg.get_double("ETA_RESTART");
+            g_collisional.n_orb_secular   = cfg.get_int("N_ORB_SECULAR");
+            g_collisional.kepler_2body    = cfg.get_bool("KEPLER_2BODY");
+            g_collisional.m_pn            = cfg.get_double("M_PN");
+            g_collisional.pn_order        = cfg.get_int("PN_ORDER");
+            g_collisional.r_escape_rh     = cfg.get_double("R_ESCAPE_RH");
+            g_collisional.r_escape_rj     = cfg.get_double("R_ESCAPE_RJ");
+            g_collisional.mstar_threshold = cfg.get_int("MSTAR_THRESHOLD");
+            g_collisional.sse_enabled     = cfg.get_bool("SSE_ENABLED");
+            g_collisional.sse_metallicity = cfg.get_double("SSE_METALLICITY");
             g_collisional.sse_wind        = sse_wind_str;
             g_collisional.sse_remnant     = sse_remnant_str;
             g_collisional.sse_ppisn       = sse_ppisn_str;
@@ -745,18 +667,18 @@ int main(int argc, char** argv) {
         // Restart files and snapshots (io/restart.h, io/snapshot.h). RESTART_INTERVAL / SNAPSHOT_INTERVAL in steps
         // (0: off); a restart file is also written at the end of the run and before WALLTIME_LIMIT (hours) or on
         // SIGUSR1 (both stop the run after the step). RESTART_FILE (or --restart): continue from that file.
-        const int restart_interval = cfg.get_int("RESTART_INTERVAL", 0);
-        const double walltime_limit_s = cfg.get_double("WALLTIME_LIMIT", 0.0) * 3600.0;
-        const int snapshot_interval = cfg.get_int("SNAPSHOT_INTERVAL", 0);
-        if (restart_arg.empty()) restart_arg = cfg.get_str("RESTART_FILE", "");
+        const int restart_interval = cfg.get_int("RESTART_INTERVAL");
+        const double walltime_limit_s = cfg.get_double("WALLTIME_LIMIT") * 3600.0;
+        const int snapshot_interval = cfg.get_int("SNAPSHOT_INTERVAL");
+        restart_arg = cfg.get_str("RESTART_FILE");
 #ifdef USE_HDF5
         RestartOptions restart_opt;
-        restart_opt.dir = cfg.get_str("RESTART_DIR", ".");
-        restart_opt.keep = cfg.get_int("RESTART_KEEP", 2);
+        restart_opt.dir = cfg.get_str("RESTART_DIR");
+        restart_opt.keep = cfg.get_int("RESTART_KEEP");
         SnapshotOptions snap_opt;
-        snap_opt.dir = cfg.get_str("SNAPSHOT_DIR", ".");
-        snap_opt.base = cfg.get_str("SNAPSHOT_BASE", "snapshot");
-        snap_opt.potential = cfg.get_bool("SNAPSHOT_POTENTIAL", true);
+        snap_opt.dir = cfg.get_str("SNAPSHOT_DIR");
+        snap_opt.base = cfg.get_str("SNAPSHOT_BASE");
+        snap_opt.potential = cfg.get_bool("SNAPSHOT_POTENTIAL");
         // "latest": the newest restart file in RESTART_DIR (must exist); "auto": the same, or a fresh start from
         // the initial conditions if there is none (one job script for every job of a chain)
         if (restart_arg == "latest" || restart_arg == "auto") {
@@ -770,8 +692,6 @@ int main(int argc, char** argv) {
         const bool restart_output = restart_interval > 0 || walltime_limit_s > 0.0;
         if (restart_output) install_stop_signals();
 #else
-        for (const char* k : {"RESTART_DIR", "RESTART_KEEP", "SNAPSHOT_DIR", "SNAPSHOT_BASE", "SNAPSHOT_POTENTIAL"})
-            cfg.get_str(k, "");   // known keys, unused without HDF5
         if (restart_interval > 0 || walltime_limit_s > 0.0 || snapshot_interval > 0 || !restart_arg.empty()) {
             if (my_rank == 0)
                 std::fprintf(stderr, "ERROR: restart files and snapshots need a build with HDF5 (USE_HDF5)\n");
@@ -779,9 +699,6 @@ int main(int argc, char** argv) {
         }
 #endif
         const bool resuming = !restart_arg.empty();
-
-        // Warn about unknown config keys (typos, deprecated options)
-        if (my_rank == 0) cfg.warn_unknown_keys();
 
         double G = G_CODE;
         double soft2 = soft_pc * soft_pc;
@@ -809,25 +726,25 @@ int main(int argc, char** argv) {
 
         // Initialize particles on rank 0 (or all ranks for single-GPU)
         // Binary test parameters
-        double binary_a_pc  = cfg.get_double("BINARY_A_PC", 4.848e-5);
-        double binary_e     = cfg.get_double("BINARY_E", 0.0);
-        double binary_m1    = cfg.get_double("BINARY_M1", 10.0);
-        double binary_m2    = cfg.get_double("BINARY_M2", 10.0);
-        double binary_rot   = cfg.get_double("BINARY_ROT_DEG", 0.0);
+        double binary_a_pc  = cfg.get_double("BINARY_A_PC");
+        double binary_e     = cfg.get_double("BINARY_E");
+        double binary_m1    = cfg.get_double("BINARY_M1");
+        double binary_m2    = cfg.get_double("BINARY_M2");
+        double binary_rot   = cfg.get_double("BINARY_ROT_DEG");
 
         // Triple test parameters
-        double triple_a_in  = cfg.get_double("TRIPLE_A_IN_PC", 1e-8);
-        double triple_e_in  = cfg.get_double("TRIPLE_E_IN", 0.1);
-        double triple_m1    = cfg.get_double("TRIPLE_M1", 10.0);
-        double triple_m2    = cfg.get_double("TRIPLE_M2", 10.0);
-        double triple_a_out = cfg.get_double("TRIPLE_A_OUT_PC", 2e-7);
-        double triple_e_out = cfg.get_double("TRIPLE_E_OUT", 0.3);
-        double triple_m3    = cfg.get_double("TRIPLE_M3", 10.0);
-        double triple_incl  = cfg.get_double("TRIPLE_INCL_DEG", 85.0);
-        bool triple_outer_first = cfg.get_bool("TRIPLE_OUTER_FIRST", false);
-        double triple_in_rot = cfg.get_double("TRIPLE_IN_ROT_DEG", 0.0);
-        double triple_in_start_q = cfg.get_double("TRIPLE_IN_START_Q", 5.0);
-        double triple_out_start_q = cfg.get_double("TRIPLE_OUT_START_Q", 5.0);
+        double triple_a_in  = cfg.get_double("TRIPLE_A_IN_PC");
+        double triple_e_in  = cfg.get_double("TRIPLE_E_IN");
+        double triple_m1    = cfg.get_double("TRIPLE_M1");
+        double triple_m2    = cfg.get_double("TRIPLE_M2");
+        double triple_a_out = cfg.get_double("TRIPLE_A_OUT_PC");
+        double triple_e_out = cfg.get_double("TRIPLE_E_OUT");
+        double triple_m3    = cfg.get_double("TRIPLE_M3");
+        double triple_incl  = cfg.get_double("TRIPLE_INCL_DEG");
+        bool triple_outer_first = cfg.get_bool("TRIPLE_OUTER_FIRST");
+        double triple_in_rot = cfg.get_double("TRIPLE_IN_ROT_DEG");
+        double triple_in_start_q = cfg.get_double("TRIPLE_IN_START_Q");
+        double triple_out_start_q = cfg.get_double("TRIPLE_OUT_START_Q");
 
 #ifdef USE_HDF5
         RunState rs;   // run-loop state of a restart (written and read by io/restart.cpp)
@@ -880,7 +797,7 @@ int main(int argc, char** argv) {
 #ifdef ENABLE_COLLISIONAL
         // Test cases (binary_test, triple_test): stellar radius of every non-BH body (collision tests; 0: none)
         {
-            const double r_test = cfg.get_double("TEST_STELLAR_RADIUS_RSUN", 0.0);
+            const double r_test = cfg.get_double("TEST_STELLAR_RADIUS_RSUN");
             if (!resuming && r_test > 0.0 && test != "plummer" && p.collisional && (my_rank == 0 || !use_distributed)) {
                 auto h_st = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.stellar_type);
                 auto h_sr = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.stellar_radius);
@@ -892,7 +809,7 @@ int main(int argc, char** argv) {
         // Test cases: TEST_BOOST_KMS = "vx,vy,vz" adds a uniform velocity to every body (frame-invariance tests, e.g.
         // of the PN terms: KETJU, Mannerkoski et al. 2023, sec. 2.2)
         {
-            const std::string boost = cfg.get_str("TEST_BOOST_KMS", "");
+            const std::string boost = cfg.get_str("TEST_BOOST_KMS");
             if (!resuming && !boost.empty() && test != "plummer" && (my_rank == 0 || !use_distributed)) {
                 double bv[3] = {0, 0, 0};
                 std::sscanf(boost.c_str(), "%lf%*[, ]%lf%*[, ]%lf", &bv[0], &bv[1], &bv[2]);
@@ -1187,14 +1104,14 @@ int main(int argc, char** argv) {
         // TIDAL_FIELD = none | pointmass | loghalo (gravity/tidal_field.h): host galaxy, cluster on a circular orbit
         // at GALAXY_R_PC; GALAXY_MASS_MSUN (point mass) or GALAXY_VC_KMS, GALAXY_RC_PC (logarithmic halo)
         {
-            const std::string tf = cfg.get_str("TIDAL_FIELD", "none");
+            const std::string tf = cfg.get_str("TIDAL_FIELD");
             g_tidal.type = tf == "pointmass" ? TidalField::POINT_MASS : tf == "loghalo" ? TidalField::LOG_HALO
                                                                                        : TidalField::NONE;
             if (tf != "none" && !g_tidal.on()) { std::fprintf(stderr, "Unknown TIDAL_FIELD '%s'\n", tf.c_str()); return 1; }
-            g_tidal.M_gal = cfg.get_double("GALAXY_MASS_MSUN", 0.0);
-            g_tidal.V_c = cfg.get_double("GALAXY_VC_KMS", 220.0);
-            g_tidal.R_c = cfg.get_double("GALAXY_RC_PC", 0.0);
-            if (g_tidal.on() && !resuming) g_tidal.init_circular(cfg.get_double("GALAXY_R_PC", 8000.0), G);
+            g_tidal.M_gal = cfg.get_double("GALAXY_MASS_MSUN");
+            g_tidal.V_c = cfg.get_double("GALAXY_VC_KMS");
+            g_tidal.R_c = cfg.get_double("GALAXY_RC_PC");
+            if (g_tidal.on() && !resuming) g_tidal.init_circular(cfg.get_double("GALAXY_R_PC"), G);
             if (g_tidal.on() && my_rank == 0)
                 std::printf("Tidal field %s: reference at (%.6g, %.6g, %.6g) pc, v = (%.6g, %.6g, %.6g) km/s\n", tf.c_str(),
                             g_tidal.X[0], g_tidal.X[1], g_tidal.X[2], g_tidal.V[0], g_tidal.V[1], g_tidal.V[2]);
@@ -1216,9 +1133,9 @@ int main(int argc, char** argv) {
         int step = 0;
         // CLUSTER_DIAG_INTERVAL (steps, 0: off): density centre, core, Lagrangian radii and bound pairs
         // (io/cluster_diag.h) appended to CLUSTER_DIAG_FILE by rank 0 (the full replica)
-        const int cluster_diag_interval = cfg.get_int("CLUSTER_DIAG_INTERVAL", 0);
-        const std::string cluster_diag_file = cfg.get_str("CLUSTER_DIAG_FILE", "cluster_diag.dat");
-        const double cluster_diag_rpair = cfg.get_double("CLUSTER_DIAG_RPAIR_PC", 0.02);
+        const int cluster_diag_interval = cfg.get_int("CLUSTER_DIAG_INTERVAL");
+        const std::string cluster_diag_file = cfg.get_str("CLUSTER_DIAG_FILE");
+        const double cluster_diag_rpair = cfg.get_double("CLUSTER_DIAG_RPAIR_PC");
         auto cluster_diag_now = [&](double t_now, int step_now) {
             if (cluster_diag_interval <= 0 || step_now % cluster_diag_interval != 0 || my_rank != 0) return;
             append_cluster_diag(cluster_diag_file, step_now,
@@ -1233,7 +1150,7 @@ int main(int argc, char** argv) {
         bool stop_run = false;
         // Snapshot (all ranks enter: the diagnostics are collective) and restart file of the state after step_now
         // SNAPSHOT_CLUSTER_DIAG (default on): density centre, core, Lagrangian radii, binaries in the snapshot Header
-        const bool snapshot_cluster_diag = cfg.get_bool("SNAPSHOT_CLUSTER_DIAG", true);
+        const bool snapshot_cluster_diag = cfg.get_bool("SNAPSHOT_CLUSTER_DIAG");
         auto write_snapshot_now = [&](double t_now, int step_now) {
             if (snapshot_interval <= 0 || last_snapshot_step == step_now) return;
             SnapshotMeta sm;

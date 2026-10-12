@@ -8,6 +8,13 @@ import sys
 import tempfile
 from pathlib import Path
 
+# Code defaults of the keys whose default became the production value of config.txt when the parameter table
+# (src/core/params.cpp) replaced the per-call defaults (2026-10-12). Every case is written over these, so the cases
+# run exactly as before; a case that wants the production value sets it.
+OLD_DEFAULTS = dict(DT_MIN_MYR="1.0e-9", ETA="0.2", ETA_GRAD="0.1", ETA_JERK="0.1", ETA_RESTART="0", FLYBY_CM_EPS="0.0",
+                    NGB_MASS_SCALING="false", SERIAL_N2_GPU="0", TREE_THRESHOLD="10000", TREE_THETA="0.5",
+                    BINARY_A_PC="4.848e-5", BINARY_E="0.0", TRIPLE_A_OUT_PC="2e-7", TRIPLE_E_OUT="0.3",
+                    TRIPLE_INCL_DEG="85.0")
 TIMEOUT_S = int(os.environ.get("NBODY_TEST_TIMEOUT", 120))  # seconds per run on one CPU core; GPUs need more (launch latency)
 # FROST Fig. 4 binary: m1 = m2 = 10 Msun, a = 10 AU, ~1000 orbits; diagnostics every 1e-5 Myr
 KEPLER = dict(TEST_CASE="binary_test", INTEGRATOR="hhs", TOTAL_TIME_MYR="7.0711e-3", DT_MAX_MYR="1.0e-5",
@@ -230,7 +237,7 @@ def run_output(exe, cfg, env=None, dump=False):
             env = {**(env or {}), "NBODY_DUMP": "1"}
         # NBODY_TEST_EXTRA="KEY=value,KEY2=value" overrides keys of every case (A/B comparisons)
         extra = dict(kv.split("=", 1) for kv in os.environ.get("NBODY_TEST_EXTRA", "").split(",") if "=" in kv)
-        Path(d, "config.txt").write_text("".join(f"{k} = {v}\n" for k, v in {**cfg, **extra}.items()))
+        Path(d, "config.txt").write_text("".join(f"{k} = {v}\n" for k, v in {**OLD_DEFAULTS, **cfg, **extra}.items()))
         try:
             launcher = os.environ.get("NBODY_TEST_LAUNCHER", "").split()  # e.g. "mpirun -n 2"
             out = subprocess.run(launcher + [exe], cwd=d, capture_output=True, text=True, timeout=TIMEOUT_S,
@@ -903,7 +910,7 @@ def subsys_collision(exe, label, cfg, kind, bound, min_landings=0, min_kepler2=0
 def run_in(exe, cfg, d, args=(), env=None):
     """stdout of one run in directory d (kept, unlike run_output); raises on a nonzero exit or a timeout."""
     extra = dict(kv.split("=", 1) for kv in os.environ.get("NBODY_TEST_EXTRA", "").split(",") if "=" in kv)
-    Path(d, "config.txt").write_text("".join(f"{k} = {v}\n" for k, v in {**cfg, **extra}.items()))
+    Path(d, "config.txt").write_text("".join(f"{k} = {v}\n" for k, v in {**OLD_DEFAULTS, **cfg, **extra}.items()))
     launcher = os.environ.get("NBODY_TEST_LAUNCHER", "").split()
     try:
         out = subprocess.run(launcher + [exe, *args], cwd=d, capture_output=True, text=True, timeout=TIMEOUT_S,
