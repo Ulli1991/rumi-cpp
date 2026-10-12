@@ -702,6 +702,8 @@ int main(int argc, char** argv) {
             g_collisional.sdar_c          = cfg.get_double("SDAR_C", 0.1);
             g_collisional.subsys_collisions = cfg.get_bool("SUBSYS_COLLISIONS", true);
             g_collisional.tde_accretion = cfg.get_double("TDE_ACCRETION_FRACTION", 0.5);
+            g_collisional.gbs_deuflhard = cfg.get_str("GBS_SEQUENCE", "bulirsch") == "deuflhard";
+            g_collisional.gbs_kmax = cfg.get_int("GBS_KMAX", 10);
             g_collisional.r_ngb_wide = cfg.get_double("NGB_WIDE_FAC", 0.0) * g_collisional.r_ngb;
             g_collisional.tidal_res       = cfg.get_double("TIDAL_RES", 0.05);
             g_collisional.flyby_cm_eps    = cfg.get_double("FLYBY_CM_EPS", 0.0);

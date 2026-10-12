@@ -11,7 +11,12 @@ constexpr int GBS_DIM_MAX = LOGH_MAX_BODIES * 9 + 12 + 2;
 struct GBSIntegrator {
     // Bulirsch-Stoer step sequence (even numbers for symmetric methods)
     static constexpr int STEP_SEQ[] = {2, 4, 6, 8, 12, 16, 24, 32, 48, 64};
+    // Deuflhard (1983) sequence n_k = 2 (k + 1), as in MSTAR (Rantala et al. 2020, sec. 2.3) and FROST-CLUSTERS
+    static constexpr int STEP_SEQ_DEUFLHARD[] = {2, 4, 6, 8, 10, 12, 14, 16, 18, 20};
     static constexpr int MAX_STAGES = 10;
+    // GBS_SEQUENCE (bulirsch | deuflhard) and GBS_KMAX (<= MAX_STAGES; FROST-CLUSTERS I: 8) from g_collisional
+    static const int* seq();
+    static int kmax();
     double eta_gbs;  // accuracy parameter (default 1e-10)
     // SDAR (nullptr: plain LogH): kappa re-evaluated after every accepted GBS step (jumping kappa, Wang+2020
     // sec. 2.4); the caller sets the initial kappa and removes the slow-down at the end (logh_sd_update)

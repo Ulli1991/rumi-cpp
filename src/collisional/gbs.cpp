@@ -1,5 +1,6 @@
 #include "gbs.h"
 #include "kepler.h"
+#include "collisional_config.h"
 #include <limits>
 #include <Kokkos_Core.hpp>
 #include <atomic>
@@ -10,6 +11,9 @@
 #include <cstdlib>
 
 constexpr int GBSIntegrator::STEP_SEQ[];
+constexpr int GBSIntegrator::STEP_SEQ_DEUFLHARD[];
+const int* GBSIntegrator::seq() { return g_collisional.gbs_deuflhard ? STEP_SEQ_DEUFLHARD : STEP_SEQ; }
+int GBSIntegrator::kmax() { return std::max(2, std::min(MAX_STAGES, g_collisional.gbs_kmax)); }
 
 // ============================================================================
 // Pack/unpack LogHState to flat array for extrapolation
@@ -121,8 +125,8 @@ double GBSIntegrator::extrapolate(int stage, int dim) {
     for (int j = 1; j <= stage; j++) {
         // T[i][j] = T[i][j-1] + (T[i][j-1] - T[i-1][j-1]) / ((n_i/n_{i-j})^2 - 1),  i = stage
         const int i = stage;
-        double ratio = (double)(STEP_SEQ[i] * STEP_SEQ[i]) /
-                       (double)(STEP_SEQ[i-j] * STEP_SEQ[i-j]);
+        double ratio = (double)(seq()[i] * seq()[i]) /
+                       (double)(seq()[i-j] * seq()[i-j]);
         double factor = 1.0 / (ratio - 1.0);
 
         double* prev = work[j-1];   // T[stage-1][j-1], replaced by T[stage][j-1] for the next call
@@ -177,7 +181,7 @@ void GBSIntegrator::compute_stages(const LogHState& state, int k0, int k1, doubl
     Kokkos::parallel_for("gbs_stages", Policy(0, k1 - k0 + 1).set_chunk_size(1), [&](int i) {
         const int k = k1 - i;
         LogHState result;   // midpoint copies state into it
-        midpoint(state, result, STEP_SEQ[k], ds, G, c_code, pn_order, start);
+        midpoint(state, result, seq()[k], ds, G, c_code, pn_order, start);
         int d = 0;
         pack_state(result, table[k], d);
     });
@@ -198,19 +202,20 @@ bool GBSIntegrator::step(LogHState& state, double ds, double G, double& ds_next,
     }
 
     int computed = -1;   // table[0..computed] holds the raw midpoint results
-    for (int stage = 0; stage < MAX_STAGES; stage++) {
+    const int k_max = kmax();
+    for (int stage = 0; stage < k_max; stage++) {
         if (stage > computed) {
             if (par_stages) {
                 // Stage-parallel: the substep divisions are independent (Rantala et al. 2020, MSTAR, Sec. 4);
                 // compute stage..k1 at once, k1 = the stage the last step converged at. The extrapolation below
                 // runs in the same order on the same table, so the result is the serial one; unused stages
                 // beyond the converged one are discarded
-                const int k1 = std::min(MAX_STAGES - 1, std::max(stage, par_hint));
+                const int k1 = std::min(k_max - 1, std::max(stage, par_hint));
                 compute_stages(state, stage, k1, ds, G, c_code, pn_order, start);
                 computed = k1;
             } else {
                 LogHState result;   // midpoint copies state into it (masses, B, n_bodies, etc.)
-                midpoint(state, result, STEP_SEQ[stage], ds, G, c_code, pn_order, start);
+                midpoint(state, result, seq()[stage], ds, G, c_code, pn_order, start);
                 pack_state(result, table[stage], dim);
                 computed = stage;
             }

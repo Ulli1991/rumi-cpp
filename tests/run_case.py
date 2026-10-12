@@ -1084,6 +1084,10 @@ CASES = {
     "spin_j": lambda exe: spin_j(exe, "spinning BH binary", SPIN_J, 4.6e-7, 4e-15),
     "spin_j_pn1": lambda exe: spin_j(exe, "spinning BH binary + PN1", SPIN_J_PN1, 6.9e-6, 4e-15),
     "pn_logh_books": lambda exe: pn_books(exe, "PN LogH binary", PN_LOGH, (1e-12, 1e-11)),
+    # GBS_SEQUENCE = deuflhard, GBS_KMAX = 8 (MSTAR / FROST-CLUSTERS I): exact books as with the Bulirsch sequence
+    # (measured 5.3e-16; the sequences differ from stage 4 on, 10 vs 12 substeps)
+    "gbs_deuflhard_pn": lambda exe: pn_books(exe, "PN LogH binary, Deuflhard k_max 8",
+                                             dict(PN_LOGH, GBS_SEQUENCE="deuflhard", GBS_KMAX="8"), (1e-12, 1e-11)),
     # Before: merger remnants kept a progenitor's m_zams, so SSE shrank them back (56.7 M_sun lost in 46
     # mergers). Measured 1.3e-9 M_sun (winds over 5 steps).
     "mergers_sse": lambda exe: sse_mass(exe, "mergers + SSE", dict(MERGERS, SERIAL_N2_CPU="0", SSE_ENABLED="true",

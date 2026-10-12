@@ -182,6 +182,7 @@ void visit_config(CollisionalConfig& c, F&& f) {
     f("sse_mxns", c.sse_mxns); f("sse_flbv", c.sse_flbv); f("r_ngb_sq", c.r_ngb_sq);
     f("r_ngb_max_sq", c.r_ngb_max_sq); f("c_code", c.c_code); f("ngb_inv_mref", c.ngb_inv_mref);
     f("tde_accretion", c.tde_accretion); f("r_ngb_wide", c.r_ngb_wide);
+    f("gbs_deuflhard", c.gbs_deuflhard); f("gbs_kmax", c.gbs_kmax);
 }
 
 void write_config(hid_t parent) {
