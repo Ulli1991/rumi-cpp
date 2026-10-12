@@ -410,7 +410,7 @@ struct NgbOut {
 template <class Exec>
 void ngb_pairs(const PointTree<Exec>& T, int i0, int ni, const double* X, const double* Y, const double* Z,
                const double* VX, const double* VY, const double* VZ, const double* M, double G, double r_ngb,
-               double r_ngb_max_sq, double pivot_dt, const NgbOut& o, double inv_mref = 0.0) {
+               double r_ngb_max_sq, double pivot_dt, const NgbOut& o, double inv_mref = 0.0, double r_wide = 0.0) {
     auto tn = T.node; auto tpx = T.px, tpy = T.py, tpz = T.pz, tvx = T.vx, tvy = T.vy, tvz = T.vz, tm = T.m;
     auto tidx = T.idx;
     const int TP = T.P, Tn = T.n;
@@ -444,7 +444,8 @@ void ngb_pairs(const PointTree<Exec>& T, int i0, int ni, const double* X, const 
                 double a_val, e_val, E_orb;
                 bool is_bound;
                 if (ngb_pair_test(dx, dy, dz, r2, tvx(k) - ui, tvy(k) - vi, tvz(k) - wi, G * (mi + tm(k)),
-                                  ngb_radius(r_ngb, mi, tm(k), inv_mref), pivot_dt, a_val, e_val, E_orb, is_bound)) {
+                                  ngb_radius(r_ngb, mi, tm(k), inv_mref), pivot_dt, a_val, e_val, E_orb, is_bound,
+                                  r_wide)) {
                     int q = Kokkos::atomic_fetch_add(o.cnt, 1);
                     if (q < o.max_ngb) {
                         o.pi[q] = i; o.pj[q] = j; o.pa[q] = a_val; o.pe[q] = e_val; o.pE[q] = E_orb;

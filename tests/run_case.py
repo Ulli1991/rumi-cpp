@@ -707,6 +707,17 @@ def boost_invariance(exe, label, cfg, boosts, bound):
     return check(f"{label} max |dr| / |r| over boosts {boosts}", worst, bound)
 
 
+def wide_pairs(exe, label, cfg, bound):
+    """NGB_WIDE_FAC: wide bound binaries just above r_ngb are subsystems, so no all-fast two-single set recurses to
+    the deepest levels (NBODY_SLOW0_STATS), with the energy error of the plain run or better."""
+    os.environ["NBODY_SLOW0_STATS"] = "1"
+    out = run_output(exe, cfg)
+    del os.environ["NBODY_SLOW0_STATS"]
+    calls = sum(int(m) for m in re.findall(r"SLOW0_STATS: 2 0 2 \| (\d+)", out))
+    ok = check(f"{label} all-fast two-single deep sets", calls, 0)
+    return ok & check(f"{label} max|dE/E|", max(r[0] for r in diagnostics(out)), bound)
+
+
 def tde_accretion(exe, label, cfg):
     """TDE remnant mass: m_BH + TDE_ACCRETION_FRACTION x m_star (FROST-CLUSTERS I, DRAGON-II: 0.5) for f = 0, 0.5, 1."""
     ok = True
@@ -1231,6 +1242,14 @@ CASES = {
     "pn_boost_logh": lambda exe: boost_invariance(exe, "PN LogH binary", PN_LOGH, ["30,0,0", "300,0,0", "0,300,0"], 8e-12),
     "pn_boost_secular": lambda exe: boost_invariance(exe, "PN secular binary", SEC_BH_TIGHT,
                                                      ["30,0,0", "300,0,0", "0,300,0"], 1.2e-7),
+    # AUDIT G row 1a: 1000 binaries of 250-450 AU (just above r_ngb = 206 AU) in 2000 stars. Plain: the pairs are FSI
+    # particles stepped at a fraction of their orbit, 250 all-fast two-single deep sets, 94.5 s, max|dE/E| 9.65e-9.
+    # NGB_WIDE_FAC = 2.5: subsystems on the Kepler drift, 0 such sets, 5.7 s, 9.70e-9 (host, 1 thread)
+    "wide_binaries_ngb": lambda exe: wide_pairs(exe, "wide binaries, NGB_WIDE_FAC = 2.5",
+                                                dict(BINARIES, BINARY_FRAC="1.0", BINARY_A_MIN_AU="250",
+                                                     BINARY_A_MAX_AU="450", TOTAL_TIME_MYR="2e-3", FLYBY_CM_EPS="1e-11",
+                                                     TIDAL_STEP_RES="1", FLYBY_NGB_CM="true", NGB_WIDE_FAC="2.5"),
+                                                1.3e-8),
     "coll_tde_accretion": lambda exe: tde_accretion(exe, "TDE accretion fraction", COLL_TDE),
     "coll_tde_parabolic": lambda exe: subsys_collision(exe, "TDE, parabolic", COLL_TDE, "TDE", 1.5e-12),
     "coll_bh_isco": lambda exe: subsys_collision(exe, "BH binary to ISCO, PN", COLL_ISCO, "ISCO", 1e-14),

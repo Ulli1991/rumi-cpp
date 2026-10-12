@@ -64,6 +64,7 @@ FLYBY_NGB_CM = true				# Distant fly-by neighbour test of a binary member agains
 NGB_MASS_SCALING = true				# Pair neighbour radius r_ngb max(1, m/<m>)^(1/3) (PeTar Eq. 12); pairs found only by the
 						#   larger radius join only as strong perturbers of a binary (tidal ratio > NGB_MASS_GAMMA)
 NGB_MASS_GAMMA = 1e-3
+NGB_WIDE_FAC = 0				# Bound pairs with a < NGB_WIDE_FAC x R_NGB are neighbours (wide binaries -> Kepler subsystems; 0: off, BIFROST)
 ETA_GBS = 1e-10                     		# GBS extrapolation accuracy for LogH integrator
 SDAR = false					# Slow-down of weakly perturbed inner binaries in LogH subsystems (Wang+2020; FROST-CLUSTERS I App. A2)
 SDAR_KREF = 1e-6				#   k_ref of the slow-down factor (W20 Eq. 22)

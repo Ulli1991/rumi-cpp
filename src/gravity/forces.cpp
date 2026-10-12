@@ -393,12 +393,12 @@ static void neighbor_search_kernel(Particles& p, int start, int count, double G,
             auto& T = trees<HostExec>();
             T.pos.build(start, count, X, Y, Z, VX, VY, VZ, M, false);
             dtt::ngb_pairs(T.pos, start, count, X, Y, Z, VX, VY, VZ, M, G, r_ngb, r_ngb_max * r_ngb_max, pivot_dt, o,
-                           g_collisional.ngb_inv_mref);
+                           g_collisional.ngb_inv_mref, g_collisional.r_ngb_wide);
         } else {
             auto& T = trees<DevExec>();
             T.pos.build(start, count, X, Y, Z, VX, VY, VZ, M, false);
             dtt::ngb_pairs(T.pos, start, count, X, Y, Z, VX, VY, VZ, M, G, r_ngb, r_ngb_max * r_ngb_max, pivot_dt, o,
-                           g_collisional.ngb_inv_mref);
+                           g_collisional.ngb_inv_mref, g_collisional.r_ngb_wide);
         }
         Kokkos::fence();
         return;
@@ -406,7 +406,7 @@ static void neighbor_search_kernel(Particles& p, int start, int count, double G,
     NgbK k{{p.x.data()}, {p.y.data()}, {p.z.data()}, {p.mass.data()}, {p.vx.data()}, {p.vy.data()}, {p.vz.data()},
            mgr.ngb_pair_i.data(), mgr.ngb_pair_j.data(), mgr.ngb_pair_bound.data(), mgr.ngb_count.data(),
            mgr.ngb_pair_a.data(), mgr.ngb_pair_e.data(), mgr.ngb_pair_E.data(), mgr.max_ngb_pairs,
-           G, r_ngb, r_ngb_max * r_ngb_max, pivot_dt, g_collisional.ngb_inv_mref};
+           G, r_ngb, r_ngb_max * r_ngb_max, pivot_dt, g_collisional.ngb_inv_mref, g_collisional.r_ngb_wide};
     run_n2("ngb_search", start, count, start, count, k);
     Kokkos::fence();
 }

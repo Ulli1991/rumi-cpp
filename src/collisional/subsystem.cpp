@@ -434,7 +434,7 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
                     double Q[7] = {mm(ib), mx(ib), my(ib), mz(ib), mvx(ib), mvy(ib), mvz(ib)};
                     double r, u2, a, e;
                     orbit(P, Q, r, u2, a, e);
-                    const bool base = (a > 0.0) ? (a < r_ngb || r < r_ngb)
+                    const bool base = (a > 0.0) ? (a < r_ngb || r < r_ngb || a < g_collisional.r_ngb_wide)
                                                 : (r < r_ngb || (std::fabs(a) * (e - 1.0) < r_ngb && u2 > 0.0 &&
                                                                  0.5 * r / std::sqrt(u2) < dt_step));
                     if (!base) {

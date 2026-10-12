@@ -167,7 +167,7 @@ KOKKOS_INLINE_FUNCTION double ngb_radius(double r_ngb, double mi, double mj, dou
 // (Eq. 4). Shared by the O(N^2) kernel and the tree range search (dt_tree.h), so both give bit-identical pairs.
 KOKKOS_INLINE_FUNCTION bool ngb_pair_test(double dx, double dy, double dz, double r2, double dvx, double dvy, double dvz,
                                           double mu, double r_ngb, double pivot_dt, double& a_val, double& e_val,
-                                          double& E_orb, bool& is_bound) {
+                                          double& E_orb, bool& is_bound, double r_wide = 0.0) {
     double v_sq = dvx * dvx + dvy * dvy + dvz * dvz;
     double r_val = Kokkos::sqrt(r2);
     E_orb = 0.5 * v_sq - mu / (r_val + EPS);
@@ -179,7 +179,10 @@ KOKKOS_INLINE_FUNCTION bool ngb_pair_test(double dx, double dy, double dz, doubl
     e_val = Kokkos::sqrt(Kokkos::fmax(is_bound ? 0.0 : 1.0, e_arg));
     bool is_neighbor = false;
     if (is_bound) {
-        is_neighbor = (a_val < r_ngb || r_val < r_ngb);
+        // r_wide (NGB_WIDE_FAC): bound pairs up to a < r_wide too, so wide binaries just above r_ngb become
+        // (Kepler-drift) subsystems instead of FSI pairs stepped at a fraction of their orbit (AUDIT G row 1a:
+        // 39 pairs of 206-500 AU caused 92 % of the deep all-fast calls at 1e5, f_bin = 1); fly-bys keep r_ngb
+        is_neighbor = (a_val < r_ngb || r_val < r_ngb || a_val < r_wide);
     } else if (r_val < r_ngb) {
         is_neighbor = true;
     } else if (Kokkos::fabs(a_val) * (e_val - 1.0) < r_ngb && v_sq > EPS) {   // fly-by, BIFROST Eq. 4
@@ -197,7 +200,7 @@ struct NgbK {
     int *pi, *pj, *pb, *cnt;
     double *pa, *pe, *pE;
     int max_ngb;
-    double G, r_ngb, r_ngb_max_sq, pivot_dt, inv_mref;
+    double G, r_ngb, r_ngb_max_sq, pivot_dt, inv_mref, r_wide = 0.0;
     struct Sink { double x, y, z, m, vx, vy, vz; };
     KOKKOS_INLINE_FUNCTION Sink sink(int i) const { return {x(i), y(i), z(i), m(i), vx(i), vy(i), vz(i)}; }
     KOKKOS_INLINE_FUNCTION void source(int j, double* s) const {
@@ -211,7 +214,8 @@ struct NgbK {
         double a_val, e_val, E_orb;
         bool is_bound;
         bool is_neighbor = ngb_pair_test(dx, dy, dz, r2, s[4] - a.vx, s[5] - a.vy, s[6] - a.vz, G * (a.m + s[3]),
-                                         ngb_radius(r_ngb, a.m, s[3], inv_mref), pivot_dt, a_val, e_val, E_orb, is_bound);
+                                         ngb_radius(r_ngb, a.m, s[3], inv_mref), pivot_dt, a_val, e_val, E_orb, is_bound,
+                                         r_wide);
         if (is_neighbor) {
             int k = Kokkos::atomic_fetch_add(cnt, 1);
             if (k < max_ngb) {   // array indices; detect_from_pairs converts to particle ids
