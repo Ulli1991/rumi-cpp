@@ -875,6 +875,20 @@ int main(int argc, char** argv) {
                 StellarPropsCache::get().invalidate();
             }
         }
+        // Test cases: TEST_BOOST_KMS = "vx,vy,vz" adds a uniform velocity to every body (frame-invariance tests, e.g.
+        // of the PN terms: KETJU, Mannerkoski et al. 2023, sec. 2.2)
+        {
+            const std::string boost = cfg.get_str("TEST_BOOST_KMS", "");
+            if (!resuming && !boost.empty() && test != "plummer" && (my_rank == 0 || !use_distributed)) {
+                double bv[3] = {0, 0, 0};
+                std::sscanf(boost.c_str(), "%lf%*[, ]%lf%*[, ]%lf", &bv[0], &bv[1], &bv[2]);
+                auto hvx = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vx);
+                auto hvy = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vy);
+                auto hvz = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vz);
+                for (int i = 0; i < p.N; i++) { hvx(i) += bv[0]; hvy(i) += bv[1]; hvz(i) += bv[2]; }
+                Kokkos::deep_copy(p.vx, hvx); Kokkos::deep_copy(p.vy, hvy); Kokkos::deep_copy(p.vz, hvz);
+            }
+        }
 #endif
 
         // Convert initial positions to integer representation (before MPI distribution)

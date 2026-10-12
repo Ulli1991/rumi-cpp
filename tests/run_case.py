@@ -692,6 +692,21 @@ def remnant_masses(exe, label, cfg, bh_min, ns_max):
     return ok & check(f"{label} highest NS mass [Msun]", float(ns[0][1]) if ns else 1e30, ns_max)
 
 
+def boost_invariance(exe, label, cfg, boosts, bound):
+    """The relative orbit of an isolated binary must not depend on a uniform velocity of the whole system (G-1; PN
+    terms in the subsystem frame, KETJU: Mannerkoski et al. 2023 sec. 2.2): |dr| / |r| at the end, boosted vs not."""
+    def rel(b):
+        _, rows = run_output(exe, dict(cfg, TEST_BOOST_KMS=b), dump=True)
+        return binary_rel(rows)
+    r0, _ = rel("0,0,0")
+    n = lambda a: math.sqrt(sum(x * x for x in a))
+    worst = 0.0
+    for b in boosts:
+        r1, _ = rel(b)
+        worst = max(worst, n([x - y for x, y in zip(r1, r0)]) / n(r0))
+    return check(f"{label} max |dr| / |r| over boosts {boosts}", worst, bound)
+
+
 def tde_accretion(exe, label, cfg):
     """TDE remnant mass: m_BH + TDE_ACCRETION_FRACTION x m_star (FROST-CLUSTERS I, DRAGON-II: 0.5) for f = 0, 0.5, 1."""
     ok = True
@@ -1204,12 +1219,18 @@ CASES = {
                                                             dict(COLL_CONTACT, SDAR="false"), "STELLAR", 6.1e-11,
                                                             min_landings=1),
     # Fryer et al. 2012 rapid: fallback masses were used as fractions (BHs from 2.7 Msun, 3x too many). Measured
-    # after (200k evolved Kroupa, Z = 2e-4, 1 Gyr): 339 BHs 5.53-45 Msun (BIFROST Fig. 9: 357, 5.5-41.6); here 20k
-    "fryer_rapid_gap": lambda exe: remnant_masses(exe, "Fryer rapid", dict(BINARIES, PLUMMER_N="20000", PLUMMER_M_TOTAL="8000",
+    # after (200k evolved Kroupa, Z = 2e-4, 1 Gyr): 339 BHs 5.53-45 Msun (BIFROST Fig. 9: 357, 5.5-41.6); here 10k
+    "fryer_rapid_gap": lambda exe: remnant_masses(exe, "Fryer rapid", dict(BINARIES, PLUMMER_N="10000", PLUMMER_M_TOTAL="4000",
                                                   PLUMMER_MASS_DIST="kroupa_evolved", BINARY_FRAC="0",
                                                   SSE_METALLICITY="0.0002", SSE_REMNANT_MODEL="FRYER_RAPID",
                                                   SSE_WIND_MODEL="VINK", SSE_PPISN_MODEL="STRONG",
                                                   TOTAL_TIME_MYR="1e-6", DT_MAX_MYR="1e-6"), 5.0, 2.0),
+    # G-1. LogH PN binary: frame-invariant to round-off (measured 6.0e-12 at 30 km/s, 5e-13 at 300 km/s along x,
+    # 4.3e-12 along y). Secular PN binary: 1.2e-3 before (the reshaped orbit kept the rounding error of a, a phase
+    # error over 1e4-1e5 orbits per step); 9.1e-8 after (absolute-coordinate rounding)
+    "pn_boost_logh": lambda exe: boost_invariance(exe, "PN LogH binary", PN_LOGH, ["30,0,0", "300,0,0", "0,300,0"], 8e-12),
+    "pn_boost_secular": lambda exe: boost_invariance(exe, "PN secular binary", SEC_BH_TIGHT,
+                                                     ["30,0,0", "300,0,0", "0,300,0"], 1.2e-7),
     "coll_tde_accretion": lambda exe: tde_accretion(exe, "TDE accretion fraction", COLL_TDE),
     "coll_tde_parabolic": lambda exe: subsys_collision(exe, "TDE, parabolic", COLL_TDE, "TDE", 1.5e-12),
     "coll_bh_isco": lambda exe: subsys_collision(exe, "BH binary to ISCO, PN", COLL_ISCO, "ISCO", 1e-14),

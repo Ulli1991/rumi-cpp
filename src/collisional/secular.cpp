@@ -588,13 +588,16 @@ int integrate_secular_binary(
         pos2[k] = cm_new - (m1 / M_tot) * r[k];
         vel2[k] = cm_vel[k] - (m1 / M_tot) * v[k];
     }
-    // Without PN the two-body energy is exactly conserved, but the members are stored in absolute coordinates: at
+    // The two-body energy is set exactly (without PN: conserved), but the members are stored in absolute coordinates: at
     // |x| / |r| ~ 1e7 (a 0.02 AU binary 1 pc from the centre) rounding the new positions changes E_orb by ~1e-9 of
     // itself, which the energy check sees (043190d booked that change as E_gw, which hid it). Scaling the relative
     // velocity, stored to ~eps of itself, restores the orbit's energy (manifold correction for Kepler energy
     // consistency, Fukushima 2003, AJ 126, 1097); two passes for the rounding of the velocities themselves
-    if (pn_order == 0 && !reshape) {
-        const double E_target = 0.5 * dot3(v_in, v_in) - mu / std::sqrt(dot3(r_in, r_in));
+    // With PN the target is the evolved orbit's energy -mu / (2 a1): without the correction the rounding error of a
+    // (~1e-9 of itself far from the origin) became a phase error ~ (3/2) da/a 2 pi N_orb over the 1e4 - 1e5 orbits of a
+    // secular step (1e-3 of the orbit for a 10 + 10 Msun binary at 0.01 AU boosted by 300 km/s, test pn_boost_secular)
+    {
+        const double E_target = reshape ? -mu / (2.0 * a1) : 0.5 * dot3(v_in, v_in) - mu / std::sqrt(dot3(r_in, r_in));
         for (int pass = 0; pass < 2; pass++) {
             double ro[3], vo[3];
             for (int k = 0; k < 3; k++) { ro[k] = pos1[k] - pos2[k]; vo[k] = vel1[k] - vel2[k]; }
