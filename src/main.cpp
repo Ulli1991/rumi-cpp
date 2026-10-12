@@ -635,6 +635,7 @@ int main(int argc, char** argv) {
         all_slow_split = cfg.get_bool("ALL_SLOW_SPLIT", true);
         hhs_cc = cfg.get_bool("HHS_CC", false);
         hhs_cc_max = cfg.get_int("HHS_CC_MAX", -1);
+        hhs_cc_min = cfg.get_int("HHS_CC_MIN", 0);
         bool ngb_mass_scaling = false;
         double ngb_mref = 0.0;
         flyby_cm_velocity = cfg.get_bool("FLYBY_CM_VELOCITY", false);   // FROST-CLUSTERS II sec. 2.1

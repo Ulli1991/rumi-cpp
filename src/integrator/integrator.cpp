@@ -63,6 +63,7 @@ bool use_tree = false;
 bool all_slow_split = false;
 bool hhs_cc = false;
 int hhs_cc_max = -1;   // -1: SERIAL_N2_GPU
+int hhs_cc_min = 0;
 bool distribute_subsystems = false;
 int distribute_subsystems_min = 256;
 int tree_threshold = 10000;
@@ -2788,7 +2789,7 @@ static int hhs_fsi_recursive(
     // HHS_CC: split the fast set into components when it falls apart (local path only)
     if (cc_set && !tree_eligible && fast_count >= 2) {
         g_profiler.start();
-        std::vector<int> comps = cc_components(p, fast_start, fast_count, pivot_dt, G, soft2, eta);
+        std::vector<int> comps = cc_components(p, fast_start, fast_count, pivot_dt, G, soft2, eta, hhs_cc_min);
         g_profiler.stop(StepProfiler::PARTITION);
         if (depth < HHSCounters::MAX_DEPTH) {
             g_hhs_counters.cc_calls[depth]++;

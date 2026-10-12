@@ -504,7 +504,8 @@ Kokkos::View<int*>& cc_buf(int k) {   // 0: edge i, 1: edge j, 2: counter
 }
 }  // namespace
 
-std::vector<int> cc_components(Particles& p, int start, int count, double pivot, double G, double soft2, double eta) {
+std::vector<int> cc_components(Particles& p, int start, int count, double pivot, double G, double soft2, double eta,
+                               int min_size) {
     std::vector<int> sizes{count};
     if (count < 2) return sizes;
     const int max_edges = 16 * count + 1024;
@@ -566,6 +567,24 @@ std::vector<int> cc_components(Particles& p, int start, int count, double pivot,
         sizes[comp_of_root[root[k]]]++;
     }
     if (sizes.size() == 1) return sizes;
+    // HHS_CC_MIN: the small components (on the GPU each a chain of launch-bound calls) become one group after the
+    // large ones; a union of components is still a valid split (its internal pairs move from this level's kicks
+    // into its own recursion), and the same rule keeps it whole further down
+    if (min_size > 0) {
+        const int nc = (int)sizes.size();
+        int n_small = 0, group = -1;
+        for (int c = 0; c < nc; c++) if (sizes[c] < min_size) n_small++;
+        if (n_small >= 2) {
+            std::vector<int> remap(nc), merged;
+            for (int c = 0; c < nc; c++) if (sizes[c] >= min_size) { remap[c] = (int)merged.size(); merged.push_back(sizes[c]); }
+            group = (int)merged.size();
+            merged.push_back(0);
+            for (int c = 0; c < nc; c++) if (sizes[c] < min_size) { remap[c] = group; merged[group] += sizes[c]; }
+            for (int r = 0; r < count; r++) if (comp_of_root[r] >= 0) comp_of_root[r] = remap[comp_of_root[r]];
+            sizes = std::move(merged);
+            if (sizes.size() == 1) return sizes;
+        }
+    }
     std::vector<int> offs(sizes.size(), 0);
     for (size_t c = 1; c < sizes.size(); c++) offs[c] = offs[c - 1] + sizes[c - 1];
     order.resize(count);

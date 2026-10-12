@@ -379,6 +379,21 @@ def all_binaries(exe, label, cfg, n_bin):
         check(f"{label} max|dE/E|", max(r[0] for r in rows), 1e-8)
 
 
+def cc_min_groups(exe, label, cfg, ratio):
+    """HHS_CC_MIN: components below the size merge into one group, so the components per split drop to a few, and
+    max |dE/E| stays within `ratio` of plain HHS."""
+    def comps(out):
+        line = [l for l in out.splitlines() if "HHS_CC components:" in l][-1]
+        return sum(float(m[0]) * float(m[1]) for m in re.findall(r"d\d+ (\d+) x ([\d.]+)", line))
+    plain = max(r[0] for r in run(exe, dict(cfg, HHS_CC="false")))
+    out_cc, out_min = run_output(exe, dict(cfg, HHS_CC="true")), run_output(exe, dict(cfg, HHS_CC="true", HHS_CC_MIN="64"))
+    n_cc, n_min = comps(out_cc), comps(out_min)
+    dmin = max(r[0] for r in diagnostics(out_min))
+    print(f"   components over the run: HHS_CC {n_cc:.0f}, HHS_CC_MIN = 64 {n_min:.0f}; max|dE/E| plain {plain:.3e}, MIN {dmin:.3e}")
+    ok = check(f"{label} components HHS_CC_MIN / HHS_CC", n_min / n_cc, 0.6)   # measured 0.44
+    return ok & check(f"{label} max|dE/E| HHS_CC_MIN / plain", dmin / plain, ratio)
+
+
 def cc_vs_plain(exe, label, cfg, ratio):
     """HHS_CC against plain HHS on the same run: max |dE/E| at most `ratio` times the plain one."""
     plain = max(r[0] for r in run(exe, dict(cfg, HHS_CC="false")))
@@ -1251,6 +1266,8 @@ CASES = {
     "cc_pn1_wide": lambda exe: precession(exe, "wide PN1 binary, HHS_CC", dict(PN1_WIDE, HHS_CC="true"), 0.1),
     "cc_binaries50": lambda exe: all_binaries(exe, "50 % binaries, HHS_CC", dict(BINARIES50, HHS_CC="true"), 1250),
     # measured 5.0e-11 / 3.8e-11 = 1.3 (10 before binaries kept their perturbers); BIFROST population: 0.76
+    # HHS_CC_MIN = 64: 542 -> 239 components, max|dE/E| 7.7e-11 vs plain 1.0e-10 (GPU 200k: 36.5 -> 10.9 s/step, plain 9.1)
+    "cc_min_binaries50": lambda exe: cc_min_groups(exe, "50 % binaries", BINARIES50, 3.0),
     "cc_vs_plain_binaries50": lambda exe: cc_vs_plain(exe, "50 % binaries", BINARIES50, 3.0),
     # FLYBY_CM_VELOCITY (FROST-CLUSTERS II sec. 2.1): only the device kernels used the subsystem c.o.m. velocity;
     # the CPU small-set path and the HHS_CC split kept the component velocities. Before: CPU 1.255e-10 vs device
