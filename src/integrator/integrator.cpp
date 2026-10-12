@@ -64,8 +64,6 @@ bool use_tree = false;
 bool hhs_cc = false;
 int hhs_cc_max = -1;   // -1: SERIAL_N2_GPU
 int hhs_cc_min = 0;
-bool distribute_subsystems = false;
-int distribute_subsystems_min = 256;
 int tree_threshold = 10000;
 double tree_theta = 0.5;
 int tree_n_leaf = 32;
@@ -203,122 +201,8 @@ void drift_field_only(Particles& p, int start, int count, double dt) {
 
 // =============================================================================
 
-#if defined(ENABLE_COLLISIONAL) && defined(USE_MPI)
-// DISTRIBUTE_SUBSYSTEMS: each rank advanced only the eligible subsystems it owns (position % ranks).
-// Make the replicas identical again: members' state, persistent LogH state, bookkeeping deltas.
-static void exchange_subsystem_results(Particles& p, const std::vector<int>& eligible,
-                                       const EnergyBookkeeping& books_before) {
-    const int nr = MPIComm::size(), me = MPIComm::rank();
-    auto all_gather = [&](const std::vector<double>& mine) {
-        int n = (int)mine.size();
-        std::vector<int> counts(nr), displs(nr, 0);
-        MPI_Allgather(&n, 1, MPI_INT, counts.data(), 1, MPI_INT, MPI_COMM_WORLD);
-        for (int r = 1; r < nr; r++) displs[r] = displs[r - 1] + counts[r - 1];
-        std::vector<double> all(displs[nr - 1] + counts[nr - 1]);
-        MPI_Allgatherv(mine.data(), n, MPI_DOUBLE, all.data(), counts.data(), displs.data(), MPI_DOUBLE,
-                       MPI_COMM_WORLD);
-        return all;
-    };
-    // 1. Members' state from the owner (position, velocity, spin, kick compensation, and mass: the
-    //    LogH unpack writes back m / M * M)
-    constexpr int MS = 14;  // idx, x, y, z, vx, vy, vz, sx, sy, sz, cx, cy, cz, m
-    std::vector<int> mine_idx;
-    for (int k = me; k < (int)eligible.size(); k += nr)
-        for (int pid : g_subsystem_mgr.active[eligible[k]].particle_ids) {
-            int i = g_subsystem_mgr.safe_pid_to_idx(pid);
-            if (i >= 0) mine_idx.push_back(i);
-        }
-    const int nm = (int)mine_idx.size();
-    std::vector<double> mine(nm * (size_t)MS);
-    if (nm > 0) {
-        Kokkos::View<int*> d_idx("xch_idx", nm);
-        Kokkos::View<double*> d_buf("xch_buf", nm * (size_t)MS);
-        auto h_idx = Kokkos::create_mirror_view(d_idx);
-        for (int k = 0; k < nm; k++) h_idx(k) = mine_idx[k];
-        dcopy(d_idx, h_idx);
-        auto px = p.x, py = p.y, pz = p.z, pvx = p.vx, pvy = p.vy, pvz = p.vz;
-        auto pcx = p.cvx, pcy = p.cvy, pcz = p.cvz;
-        auto ps = p.spin_vec;
-        auto pm = p.mass;
-        Kokkos::parallel_for("xch_gather", nm, KOKKOS_LAMBDA(int k) {
-            int i = d_idx(k); double* b = &d_buf(k * MS);
-            b[0] = i; b[1] = px(i); b[2] = py(i); b[3] = pz(i); b[4] = pvx(i); b[5] = pvy(i); b[6] = pvz(i);
-            b[7] = ps(i, 0); b[8] = ps(i, 1); b[9] = ps(i, 2); b[10] = pcx(i); b[11] = pcy(i); b[12] = pcz(i);
-            b[13] = pm(i);
-        });
-        auto h_buf = host_copy(d_buf);
-        std::copy(h_buf.data(), h_buf.data() + nm * (size_t)MS, mine.begin());
-    }
-    std::vector<double> all = all_gather(mine);
-    const int na = (int)(all.size() / MS);
-    if (na > 0) {
-        Kokkos::View<double*> d_all("xch_all", all.size());
-        auto h_all = Kokkos::create_mirror_view(d_all);
-        std::copy(all.begin(), all.end(), h_all.data());
-        dcopy(d_all, h_all);
-        auto px = p.x, py = p.y, pz = p.z, pvx = p.vx, pvy = p.vy, pvz = p.vz;
-        auto pcx = p.cvx, pcy = p.cvy, pcz = p.cvz;
-        auto ps = p.spin_vec;
-        auto pm = p.mass;
-        Kokkos::parallel_for("xch_scatter", na, KOKKOS_LAMBDA(int k) {
-            const double* b = &d_all(k * MS); int i = (int)b[0];
-            px(i) = b[1]; py(i) = b[2]; pz(i) = b[3]; pvx(i) = b[4]; pvy(i) = b[5]; pvz(i) = b[6];
-            ps(i, 0) = b[7]; ps(i, 1) = b[8]; ps(i, 2) = b[9]; pcx(i) = b[10]; pcy(i) = b[11]; pcz(i) = b[12];
-            pm(i) = b[13];
-        });
-    }
-    // 2. Persistent per-subsystem state of the owner (LogH auxiliary velocities, scales)
-    constexpr int SS = 7 + LOGH_MAX_BODIES * 3;  // k, has_aux_vel, scales_set, V, R, T, E, aux_vel_phys
-    std::vector<double> sub_mine;
-    for (int k = me; k < (int)eligible.size(); k += nr) {
-        const auto& sub = g_subsystem_mgr.active[eligible[k]];
-        sub_mine.insert(sub_mine.end(), {(double)k, sub.has_aux_vel ? 1.0 : 0.0, sub.scales_set ? 1.0 : 0.0,
-                                         sub.V_scale, sub.R_scale, sub.T_scale, sub.E_scale});
-        sub_mine.insert(sub_mine.end(), sub.aux_vel_phys, sub.aux_vel_phys + LOGH_MAX_BODIES * 3);
-    }
-    std::vector<double> sub_all = all_gather(sub_mine);
-    for (size_t o = 0; o + SS <= sub_all.size(); o += SS) {
-        auto& sub = g_subsystem_mgr.active[eligible[(int)sub_all[o]]];
-        sub.has_aux_vel = sub_all[o + 1] != 0.0; sub.scales_set = sub_all[o + 2] != 0.0;
-        sub.V_scale = sub_all[o + 3]; sub.R_scale = sub_all[o + 4]; sub.T_scale = sub_all[o + 5];
-        sub.E_scale = sub_all[o + 6];
-        std::copy(&sub_all[o + 7], &sub_all[o + 7] + LOGH_MAX_BODIES * 3, sub.aux_vel_phys);
-    }
-    // 3. Bookkeeping: every rank adds all ranks' deltas in rank order (bitwise the same everywhere)
-    auto pack = [](const EnergyBookkeeping& b) {
-        return std::vector<double>{b.E_escape, b.E_gw, b.E_merge, b.E_sse, b.E_pn, b.P_sink[0], b.P_sink[1],
-                                   b.P_sink[2], b.L_sink[0], b.L_sink[1], b.L_sink[2], b.E_sd};
-    };
-    std::vector<double> now = pack(g_energy_books), before = pack(books_before), delta(now.size());
-    for (size_t c = 0; c < now.size(); c++) delta[c] = now[c] - before[c];
-    std::vector<double> deltas = all_gather(delta);
-    std::vector<double> sum = before;
-    for (int r = 0; r < nr; r++)
-        for (size_t c = 0; c < sum.size(); c++) sum[c] += deltas[r * sum.size() + c];
-    auto& b = g_energy_books;
-    b.E_escape = sum[0]; b.E_gw = sum[1]; b.E_merge = sum[2]; b.E_sse = sum[3]; b.E_pn = sum[4];
-    for (int c = 0; c < 3; c++) { b.P_sink[c] = sum[5 + c]; b.L_sink[c] = sum[8 + c]; }
-    b.E_sd = sum[11];
-}
-#endif
-
 // Collisions decided inside the LogH integrations of the current advance_subsystems_in_range call
 static std::vector<SubsystemCollision> g_pending_collisions;
-
-#ifdef USE_MPI
-// Every rank's collision records, in rank order (trivially copyable)
-static std::vector<SubsystemCollision> allgather_collisions(const std::vector<SubsystemCollision>& mine) {
-    const int nr = MPIComm::size();
-    const int bytes = (int)(mine.size() * sizeof(SubsystemCollision));
-    std::vector<int> counts(nr), displs(nr, 0);
-    MPI_Allgather(&bytes, 1, MPI_INT, counts.data(), 1, MPI_INT, MPI_COMM_WORLD);
-    for (int r = 1; r < nr; r++) displs[r] = displs[r - 1] + counts[r - 1];
-    const int total = displs[nr - 1] + counts[nr - 1];
-    std::vector<SubsystemCollision> all(total / sizeof(SubsystemCollision));
-    MPI_Allgatherv(mine.data(), bytes, MPI_BYTE, all.data(), counts.data(), displs.data(), MPI_BYTE, MPI_COMM_WORLD);
-    return all;
-}
-#endif
 
 // Wall time per phase of advance_subsystems_in_range, summed over a step (printed with the step summary)
 // Phases: mirror = host copy of the range; map+select = pid map, eligibility, classification; logh_prep = sort and
@@ -655,15 +539,8 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
         }
     }
 
-    // Partition eligible subsystems into secular binaries, secular triples, and LogH. With
-    // DISTRIBUTE_SUBSYSTEMS each rank takes the ones at positions rank, rank + ranks, ... when there are
-    // enough of them to pay for the exchange (replicas agree on `eligible`, so all ranks decide alike)
-    bool distributed_subs = false;
-#ifdef USE_MPI
-    distributed_subs = distribute_subsystems && MPIComm::size() > 1 &&
-                       (int)eligible.size() >= distribute_subsystems_min;
-    const EnergyBookkeeping books_before = g_energy_books;
-#endif
+    // Partition eligible subsystems into secular binaries, secular triples, and LogH (every rank advances all of
+    // them: the replicas stay identical without an exchange)
     std::vector<int> secular_idx, secular_triple_idx, logh_idx;
     SubsysAdvanceCheck adv_check;
     adv_check.begin((int)g_subsystem_mgr.active.size(), dt);
@@ -731,9 +608,6 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
     }
     for (int k = 0; k < (int)eligible.size(); k++) {
         const int s = eligible[k];
-#ifdef USE_MPI
-        if (distributed_subs && k % MPIComm::size() != MPIComm::rank()) continue;  // another rank advances it
-#endif
         adv_check.own(s);
         const auto& sub = g_subsystem_mgr.active[s];
         if (to_logh[s]) {
@@ -1378,21 +1252,11 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
         g_subsys_phase.add(SubsystemPhaseTimes::LOGH_RETRY, phase_clock.lap());
         g_logh_prof = LoghBatchProf();   // retry batches are inside logh_post
     }
-#ifdef USE_MPI
-    if (distributed_subs) exchange_subsystem_results(p, eligible, books_before);
-#else
-    (void)distributed_subs;
-#endif
     adv_check.verify(start, count);
 
-    // Collisions decided inside the subsystem integrations: books, remnant physics, placeholders (the ranks of a
-    // distributed advance gather every owner's records first and complete them alike, in rank order)
+    // Collisions decided inside the subsystem integrations: books, remnant physics, placeholders
     std::vector<SubsystemCollision> colls = std::move(g_pending_collisions);
     g_pending_collisions.clear();
-#ifdef USE_MPI
-    if (distributed_subs) colls = allgather_collisions(colls);
-#endif
-    if (distributed_subs) g_adv_collided = true;
     if (!colls.empty()) {
         g_adv_collided = true;
         g_subsystem_mgr.rebuild_pid_to_idx(p);

@@ -221,7 +221,7 @@ if(ENABLE_COLLISIONAL)
              $<TARGET_FILE:kepler-test> kepler_drift_unit)
 endif()
 if(USE_MPI)
-    foreach(case spin_mpi2 mergers_mpi2 mpi_1v2 rankcount_binaries rankcount_mergers rankcount_triples rankcount_natal_kicks mergers_mpi2_dist mpi_1v2_dist)
+    foreach(case spin_mpi2 mergers_mpi2 mpi_1v2 rankcount_binaries rankcount_mergers rankcount_triples rankcount_natal_kicks)
         add_test(NAME ${case} COMMAND Python3::Interpreter ${CMAKE_SOURCE_DIR}/tests/run_case.py
                  $<TARGET_FILE:nbody-kokkos> ${case})
         set_tests_properties(${case} PROPERTIES
@@ -247,7 +247,7 @@ if(USE_HDF5 AND HDF5_FOUND)
             "OMP_NUM_THREADS=1;NBODY_CHECK_PIDMAP=1;NBODY_CHECK_SUBSYS=1;NBODY_CHECK_EIH=1;LUNA_PYTHON=${LUNA_PYTHON}")
     endforeach()
     if(USE_MPI)
-        foreach(case restart_mpi2 restart_mpi2_mergers restart_mpi2_dist)
+        foreach(case restart_mpi2 restart_mpi2_mergers)
             add_test(NAME ${case} COMMAND Python3::Interpreter ${CMAKE_SOURCE_DIR}/tests/run_case.py
                      $<TARGET_FILE:nbody-kokkos> ${case})
             set_tests_properties(${case} PROPERTIES ENVIRONMENT

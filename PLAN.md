@@ -295,6 +295,7 @@ The code before the deletions is tagged archive/pre-step2-deletions.
 | NBODY_DETECT_TOP_ONLY | finished diagnostic (fe207ed): detection at every HHS depth | deleted 2026-10-12 |
 | KEPLER_2BODY | true: isolated non-PN pairs on the Kepler drift at any orbit count (9efdca7: 12-27 % faster); PN pairs stay on LogH; kepler2_* tests keep the Kepler-vs-analytic checks only | deleted 2026-10-12, winner hard-wired |
 | BINARY_COM_V | sampled: one f(E) draw per binary c.o.m. (a8728fb; average gave Q_obj 0.336, cold binaries) | deleted 2026-10-12, winner hard-wired |
+| DISTRIBUTE_SUBSYSTEMS, DISTRIBUTE_MIN_SUBSYSTEMS | off: every rank advances every subsystem (5eb53e1: the exchange was slower; SCALING_DESIGN: retire); tests mergers_mpi2_dist, mpi_1v2_dist, restart_mpi2_dist deleted (duplicates of the non-distributed cases) | deleted 2026-10-12, winner hard-wired |
 
 ## Pending evaluations (agents stopped mid-work)
 - Task runtimes (HPX/Charm++/Legion): literature says tasks must be >= ~100 us; evaluate only at subtree granularity.

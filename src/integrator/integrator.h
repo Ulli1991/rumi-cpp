@@ -22,8 +22,6 @@ extern bool use_nonblocking_mpi;        // MPI_NON_BLOCKING config toggle
 
 // Barnes-Hut tree configuration
 extern bool use_tree;                   // USE_TREE config toggle
-extern bool distribute_subsystems;      // DISTRIBUTE_SUBSYSTEMS: each MPI rank integrates its share of subsystems
-extern int distribute_subsystems_min;    // DISTRIBUTE_MIN_SUBSYSTEMS: fewer eligible subsystems run on every rank
 extern bool hhs_cc;                     // HHS_CC: fast sets split into connected components (Janes et al. 2014)
 extern int hhs_cc_min;                  // HHS_CC_MIN: components smaller than this recurse together as one group (0: off)
 extern int hhs_cc_max;                  // HHS_CC_MAX: largest set split, run locally on every rank (default max(SERIAL_N2_GPU, 16384))

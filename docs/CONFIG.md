@@ -1,6 +1,6 @@
 # Config reference
 
-All 134 keys of the config file (`config.txt`, or `--config <file>`), generated from the parameter table in `src/core/params.cpp` by `scripts/gen_config_md.py`. Every key has one default, in that table; an unknown key in a config file is an error. Each run writes the effective value of every key, and whether it came from the file or the default, to `run_params.txt`.
+All 132 keys of the config file (`config.txt`, or `--config <file>`), generated from the parameter table in `src/core/params.cpp` by `scripts/gen_config_md.py`. Every key has one default, in that table; an unknown key in a config file is an error. Each run writes the effective value of every key, and whether it came from the file or the default, to `run_params.txt`.
 
 Levels:
 
@@ -166,8 +166,6 @@ Levels:
 | `REPLICA_CHECK_INTERVAL` | int | `10` | internal |  | Distributed runs: check every this many steps that the replicas agree (0: off) |
 | `MPI_NON_BLOCKING` | bool | `false` | internal |  | MPI_Iallgatherv for overlapped transfers |
 | `MPI_TRANSPORT` | string | `auto` | internal | auto\|nccl\|host | Allgathers: nccl (USE_NCCL builds; auto there), host (staged through pinned host memory; auto otherwise) |
-| `DISTRIBUTE_SUBSYSTEMS` | bool | `false` | internal |  | Each MPI rank integrates its share of the subsystems (FROST Algorithm 3) |
-| `DISTRIBUTE_MIN_SUBSYSTEMS` | int | `256` | internal |  | Fewer eligible subsystems than this run on every rank |
 | `USE_TREE` | bool | `false` | internal |  | Barnes-Hut tree forces above TREE_THRESHOLD (not with COLLISIONAL) |
 | `TREE_THRESHOLD` | int | `100000` | internal |  | Tree forces above this count |
 | `TREE_THETA` | double | `0.7` | internal |  | Tree opening angle |

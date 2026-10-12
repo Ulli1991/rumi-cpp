@@ -559,8 +559,6 @@ int main(int argc, char** argv) {
         double ngb_mref = 0.0;
         flyby_cm_velocity = cfg.get_bool("FLYBY_CM_VELOCITY");   // FROST-CLUSTERS II sec. 2.1
         g_eattr.on = std::getenv("NBODY_EATTR") != nullptr;   // per-print energy attribution (diagnostics.h)
-        distribute_subsystems = cfg.get_bool("DISTRIBUTE_SUBSYSTEMS");   // FROST Algorithm 3
-        distribute_subsystems_min = cfg.get_int("DISTRIBUTE_MIN_SUBSYSTEMS");
         use_integer_positions = cfg.get_bool("INTEGER_POSITIONS");
         double domain_halfsize = cfg.get_double("DOMAIN_HALFSIZE_PC");
         use_nonblocking_mpi = cfg.get_bool("MPI_NON_BLOCKING");
