@@ -614,7 +614,6 @@ int main(int argc, char** argv) {
             g_collisional.eta_va          = eta;
             g_collisional.eta_gbs         = cfg.get_double("ETA_GBS");
             g_collisional.eta_pert        = cfg.get_double("ETA_PERT");
-            g_collisional.tidal_gamma     = cfg.get_double("TIDAL_GAMMA");
             g_collisional.flyby_ngb_cm    = cfg.get_bool("FLYBY_NGB_CM");
             ngb_mass_scaling              = cfg.get_bool("NGB_MASS_SCALING");
             ngb_mref                      = cfg.get_double("NGB_MREF");   // <m> override [Msun] (tests)
@@ -632,7 +631,6 @@ int main(int argc, char** argv) {
             g_collisional.gbs_deuflhard = cfg.get_str("GBS_SEQUENCE") == "deuflhard";
             g_collisional.gbs_kmax = cfg.get_int("GBS_KMAX");
             g_collisional.r_ngb_wide = cfg.get_double("NGB_WIDE_FAC") * g_collisional.r_ngb;
-            g_collisional.tidal_res       = cfg.get_double("TIDAL_RES");
             g_collisional.flyby_cm_eps    = cfg.get_double("FLYBY_CM_EPS");
             g_collisional.eta_restart     = cfg.get_double("ETA_RESTART");
             g_collisional.n_orb_secular   = cfg.get_int("N_ORB_SECULAR");

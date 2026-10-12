@@ -26,7 +26,6 @@ struct CollisionalConfig {
     double eta_pert = 0.02;            // perturbation timestep for subsystems
     bool secular_triples = true;        // SECULAR_TRIPLES: stable triples with >= N_ORB_SECULAR inner orbits per step use the
                                         // double-averaged secular path; false sends them to LogH (FROST-CLUSTERS I dropped it for SDAR)
-    double tidal_gamma = 0.0;          // TIDAL_GAMMA: binaries with |tidal accel| / |internal accel| above this resolve
     double flyby_cm_eps = 0.0;         // FLYBY_CM_EPS (either fly-by velocity; 0: off): tidal-sampling pair step that bounds the
                                        //   energy a slow particle's kicks put into a subsystem per step by this x |E0|
     double e_ref = 0.0;                //   |E0| of the run
@@ -34,7 +33,6 @@ struct CollisionalConfig {
     bool flyby_ngb_cm = true;
     double ngb_mass_gamma = 1e-3;      // NGB_MASS_GAMMA: tidal ratio above which a mass-scaled neighbour joins a binary
     double ngb_inv_mref = 0.0;         // NGB_MASS_SCALING: 1 / mean particle mass (pair neighbour radius r_ngb max(1, m/<m>)^(1/3)), 0: off          // FLYBY_NGB_CM: distant fly-by neighbour test of a binary member against the binary's c.o.m.
-    double tidal_res = 0.05;           //   their orbit, dt <= TIDAL_RES x period (0 = off; dense cores)
     double eta_restart = 1e-6;         // energy error restart threshold
 
     // SDAR slow-down of weakly perturbed inner binaries in LogH subsystems (Wang, Nitadori & Makino 2020;

@@ -155,9 +155,6 @@ const std::vector<ParamSpec> kParams = {
     {"NGB_MREF", D, "0.0", "Subsystems", TEST, "", "<m> of NGB_MASS_SCALING (Msun) instead of the cluster's (0)"},
     {"NGB_WIDE_FAC", D, "0", "Subsystems", EXPERIMENT, "",
      "Bound pairs with a < NGB_WIDE_FAC x R_NGB are neighbours (wide binaries; 0: off, BIFROST)"},
-    {"TIDAL_GAMMA", D, "0.0", "Subsystems", EXPERIMENT, "",
-     "Binaries with |tidal acceleration| / |internal acceleration| above this resolve their orbit (TIDAL_RES)"},
-    {"TIDAL_RES", D, "0.05", "Subsystems", EXPERIMENT, "", "With TIDAL_GAMMA: dt <= TIDAL_RES x period (0: off)"},
     {"MSTAR_THRESHOLD", I, "8", "Subsystems", EXPERIMENT, "",
      "Subsystems of at least this many bodies for MSTAR (not wired: printed only, every subsystem uses LogH)"},
 
@@ -287,7 +284,6 @@ const std::vector<DebugEnvSpec> kDebugEnv = {
     {"NBODY_SMALL_FOR", "Largest loop run on the host where it can access device memory (default 256; 0: off)"},
     {"NBODY_SMALL_N2", "Largest pair count run on the host where it can access device memory (default 4096)"},
     {"NBODY_STELLAR_CACHE", "=0: device gathers instead of the stellar-property cache"},
-    {"NBODY_TIDAL_DEBUG", "Print the TIDAL_GAMMA step of each resolved binary"},
     {"NBODY_TILE256_MIN", "N^2 kernel: 256-thread tiles from this set size (GPUs; default 131072)"},
 };
 

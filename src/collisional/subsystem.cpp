@@ -1214,22 +1214,6 @@ static bool perturbation_timestep_md(const std::vector<Subsystem>& active, const
                     g_eattr.tid_pid0 = sub.particle_ids[0]; g_eattr.tid_pid1 = sub.particle_ids[1];
                 }
             }
-
-            // Strongly perturbed binaries: the perturbation reaches them as kicks that sample the orbital phase, and
-            // the phase-dependent tidal energy does not converge with the step unless the orbit is resolved
-            // (dense cores, VIPER_NOTES). With TIDAL_GAMMA > 0, such binaries take dt <= TIDAL_RES x period.
-            if (g_collisional.tidal_gamma > 0.0 && a > 0.0) {
-                const double gamma = f_mag * r2 / mu;   // |differential external acceleration| / (G m / r^2)
-                if (gamma > g_collisional.tidal_gamma) {
-                    const double dt_res = g_collisional.tidal_res * 2.0 * M_PI * std::sqrt(a * a * a / mu);
-                    if (std::getenv("NBODY_TIDAL_DEBUG"))
-                        std::printf("TIDAL gamma=%.2e a=%.2e P=%.2e dt_pert=%.2e dt_res=%.2e dt_member=%.2e\n",
-                                    gamma, a, dt_res / g_collisional.tidal_res, dt_pert, dt_res, h_dt(idx_i));
-                    dt_pert = std::min(dt_pert, dt_res);
-                }
-            }
-
-
         } else {
             // --- N>2 body: |E/Ė| and |L/L̇| from tidal perturbation ---
             // Compute subsystem COM position, velocity, acceleration

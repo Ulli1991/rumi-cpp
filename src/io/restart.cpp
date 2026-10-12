@@ -180,8 +180,8 @@ void visit_config(CollisionalConfig& c, F&& f) {
     f("eta_ff", c.eta_ff); f("eta_fb", c.eta_fb); f("eta_grad", c.eta_grad); f("eta_jerk", c.eta_jerk);
     f("eta_va", c.eta_va); f("eta_gbs", c.eta_gbs); f("eta_pert", c.eta_pert);
     f("secular_triples", c.secular_triples);
-    f("tidal_gamma", c.tidal_gamma); f("flyby_cm_eps", c.flyby_cm_eps); f("e_ref", c.e_ref);
-    f("tidal_step_res", c.tidal_step_res); f("flyby_ngb_cm", c.flyby_ngb_cm); f("tidal_res", c.tidal_res);
+    f("flyby_cm_eps", c.flyby_cm_eps); f("e_ref", c.e_ref);
+    f("tidal_step_res", c.tidal_step_res); f("flyby_ngb_cm", c.flyby_ngb_cm);
     f("eta_restart", c.eta_restart); f("sdar", c.sdar); f("sdar_kref", c.sdar_kref); f("sdar_c", c.sdar_c);
     f("n_orb_secular", c.n_orb_secular); f("m_pn", c.m_pn);
     f("pn_order", c.pn_order); f("r_escape_rh", c.r_escape_rh); f("r_escape_rj", c.r_escape_rj); f("mstar_threshold", c.mstar_threshold);

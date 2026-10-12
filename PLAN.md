@@ -288,6 +288,7 @@ The code before the deletions is tagged archive/pre-step2-deletions.
 | ALL_SLOW_SPLIT | true: fsi(S, tau/2) twice (6655494: 16x lower error, same time) | deleted 2026-10-12, winner hard-wired |
 | SUBSYS_COLLISIONS | true: collisions decided inside LogH/GBS at the pericentre, FC-I App. B3 (7de902c, 043190d) | deleted 2026-10-12, winner hard-wired |
 | WEAK_PERTURBER_GAMMA | off: no weak-perturber split (C-1, 7c5b3ca: 3.6x worse energy); test weak_flyby_split deleted | deleted 2026-10-12, winner hard-wired |
+| TIDAL_GAMMA, TIDAL_RES (+ NBODY_TIDAL_DEBUG) | off: no orbit-resolving step for strongly perturbed binaries (fe207ed, 6278068: no benefit) | deleted 2026-10-12, winner hard-wired |
 
 ## Pending evaluations (agents stopped mid-work)
 - Task runtimes (HPX/Charm++/Legion): literature says tasks must be >= ~100 us; evaluate only at subtree granularity.

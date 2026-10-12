@@ -1,6 +1,6 @@
 # Config reference
 
-All 138 keys of the config file (`config.txt`, or `--config <file>`), generated from the parameter table in `src/core/params.cpp` by `scripts/gen_config_md.py`. Every key has one default, in that table; an unknown key in a config file is an error. Each run writes the effective value of every key, and whether it came from the file or the default, to `run_params.txt`.
+All 136 keys of the config file (`config.txt`, or `--config <file>`), generated from the parameter table in `src/core/params.cpp` by `scripts/gen_config_md.py`. Every key has one default, in that table; an unknown key in a config file is an error. Each run writes the effective value of every key, and whether it came from the file or the default, to `run_params.txt`.
 
 Levels:
 
@@ -136,8 +136,6 @@ Levels:
 | `NGB_MASS_GAMMA` | double | `1e-3` | internal |  | Tidal ratio above which a mass-scaled neighbour joins a binary |
 | `NGB_MREF` | double | `0.0` | test |  | <m> of NGB_MASS_SCALING (Msun) instead of the cluster's (0) |
 | `NGB_WIDE_FAC` | double | `0` | **experiment** |  | Bound pairs with a < NGB_WIDE_FAC x R_NGB are neighbours (wide binaries; 0: off, BIFROST) |
-| `TIDAL_GAMMA` | double | `0.0` | **experiment** |  | Binaries with \|tidal acceleration\| / \|internal acceleration\| above this resolve their orbit (TIDAL_RES) |
-| `TIDAL_RES` | double | `0.05` | **experiment** |  | With TIDAL_GAMMA: dt <= TIDAL_RES x period (0: off) |
 | `MSTAR_THRESHOLD` | int | `8` | **experiment** |  | Subsystems of at least this many bodies for MSTAR (not wired: printed only, every subsystem uses LogH) |
 
 ## Output
@@ -249,7 +247,6 @@ Levels:
 | `NBODY_SMALL_FOR` | Largest loop run on the host where it can access device memory (default 256; 0: off) |
 | `NBODY_SMALL_N2` | Largest pair count run on the host where it can access device memory (default 4096) |
 | `NBODY_STELLAR_CACHE` | =0: device gathers instead of the stellar-property cache |
-| `NBODY_TIDAL_DEBUG` | Print the TIDAL_GAMMA step of each resolved binary |
 | `NBODY_TILE256_MIN` | N^2 kernel: 256-thread tiles from this set size (GPUs; default 131072) |
 
 <!-- notes: written by hand below this line; gen_config_md.py keeps them -->
