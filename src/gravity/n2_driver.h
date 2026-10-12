@@ -1,4 +1,5 @@
 #pragma once
+#include "n2_sinkset.h"
 
 // Generic tiled direct-summation driver for all pairwise kernels (forces, gradient correction, time steps).
 //
@@ -40,7 +41,8 @@ inline Kokkos::View<double*>& partial_buffer() {
     (void)hook;
     return buf;
 }
-// Number of source chunks: about 8 teams per compute unit, chunks of at least 4 tiles
+
+// Number of source chunks: about 8 teams per compute unit, chunks of at least 4 tiles (ni: the whole set's sinks)
 inline int chunk_count(int ni, int nj, int TS) {
 #if defined(KOKKOS_ENABLE_CUDA) || defined(KOKKOS_ENABLE_HIP) || defined(KOKKOS_ENABLE_SYCL)
     const int target_teams = std::max(1, Kokkos::DefaultExecutionSpace().concurrency() / (2 * TS));
@@ -71,7 +73,7 @@ void run_tiled(const char* name, int i0, int ni, int j0, int nj, const K& k) {
     constexpr int NSa = NS > 0 ? NS : 1, NMa = NM > 0 ? NM : 1;
     const size_t scratch = TS * NSRC * sizeof(double);
     const int iblocks = (ni + TS - 1) / TS;
-    const int nchunk = nj > 0 ? n2_detail::chunk_count(ni, nj, TS) : 1;
+    const int nchunk = nj > 0 ? n2_detail::chunk_count(n2_detail::set_size(ni), nj, TS) : 1;
     const int chunk = nchunk > 1 ? ((nj + nchunk - 1) / nchunk + TS - 1) / TS * TS : nj;
     const int nc = nchunk > 1 ? (nj + chunk - 1) / chunk : 1;
     constexpr int STRIDE = 2 * NS + NM;   // per sink and chunk: sums, compensations, minima
@@ -155,7 +157,7 @@ template <class K>
 void run_n2(const char* name, int i0, int ni, int j0, int nj, const K& k) {
     if (ni <= 0) return;
     if constexpr (kHostAccessibleDevice) {
-        if ((long long)ni * nj <= n2_host_max()) {   // tiny set: host loops, same accumulation as the kernel
+        if ((long long)n2_detail::set_size(ni) * nj <= n2_host_max()) {   // tiny set: host loops, same accumulation as the kernel
             constexpr int NSa = K::NS > 0 ? K::NS : 1, NMa = K::NM > 0 ? K::NM : 1;
             Kokkos::fence();
             double src[K::NSRC > 0 ? K::NSRC : 1];
@@ -185,7 +187,7 @@ void run_n2(const char* name, int i0, int ni, int j0, int nj, const K& k) {
     // where the source split matters more
 #if defined(KOKKOS_ENABLE_CUDA) || defined(KOKKOS_ENABLE_HIP) || defined(KOKKOS_ENABLE_SYCL)
     static const int big_tile_min = std::getenv("NBODY_TILE256_MIN") ? std::atoi(std::getenv("NBODY_TILE256_MIN")) : 131072;
-    if (ni >= big_tile_min) { n2_detail::run_tiled<256>(name, i0, ni, j0, nj, k); return; }
+    if (n2_detail::set_size(ni) >= big_tile_min) { n2_detail::run_tiled<256>(name, i0, ni, j0, nj, k); return; }
 #endif
     n2_detail::run_tiled<TILE_SIZE>(name, i0, ni, j0, nj, k);
 }

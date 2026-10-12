@@ -1,3 +1,4 @@
+#include "n2_sinkset.h"
 #include "small_for.h"
 #include "integrator.h"
 #include "integrator_cpu.h"
@@ -1804,6 +1805,7 @@ static void self_acceleration_distributed(DistributedParticles& dp, int start, i
 
     int slice_start, slice_count;
     dp.get_force_slice(start, count, slice_start, slice_count);
+    n2_detail::SinkSetScope n2_set_1(count);   // chunking of the whole set (rank-count independent)
     if (slice_count == 0) {
         dp.allgather_accelerations_subset(start, count);
         return;
@@ -1854,6 +1856,7 @@ static void self_gradient_correction_distributed(DistributedParticles& dp, int s
 
     int slice_start, slice_count;
     dp.get_force_slice(start, count, slice_start, slice_count);
+    n2_detail::SinkSetScope n2_set_2(count);   // chunking of the whole set (rank-count independent)
 
     if (slice_count > 0) {
         GradSnapshot snap{ax_save.data(), ay_save.data(), az_save.data(), start};
@@ -2177,9 +2180,11 @@ static void cross_acceleration_distributed(DistributedParticles& dp,
     // Slow particles from fast, fast from slow: each rank its slice of the sinks
     int slice_start, slice_count;
     dp.get_force_slice(slow_start, slow_count, slice_start, slice_count);
+    n2_detail::SinkSetScope n2_set_3(slow_count);   // chunking of the whole set (rank-count independent)
     acceleration_range(dp.local, slice_start, slice_count, fast_start, fast_count, G, soft2);
     int slice_start_f, slice_count_f;
     dp.get_force_slice(fast_start, fast_count, slice_start_f, slice_count_f);
+    n2_detail::SinkSetScope n2_set_4(fast_count);   // chunking of the whole set (rank-count independent)
     acceleration_range(dp.local, slice_start_f, slice_count_f, slow_start, slow_count, G, soft2);
     Kokkos::fence();
 
@@ -2247,12 +2252,14 @@ static void cross_acceleration_and_gradient_distributed(DistributedParticles& dp
     GradSnapshot snap_f{ax_snap_f.data(), ay_snap_f.data(), az_snap_f.data(), fast_start};
     int slice_start, slice_count;
     dp.get_force_slice(slow_start, slow_count, slice_start, slice_count);
+    n2_detail::SinkSetScope n2_set_5(slow_count);   // chunking of the whole set (rank-count independent)
     // grad_mag written as by cross_gradient_correction on one rank (rank-count independence), gathered below
     const bool gm_on = dp.local.collisional;
     gradient_correction_range(dp.local, slice_start, slice_count, fast_start, fast_count, snap_s, snap_f,
                               G, soft2, dt, gm_on);
     int slice_start_f, slice_count_f;
     dp.get_force_slice(fast_start, fast_count, slice_start_f, slice_count_f);
+    n2_detail::SinkSetScope n2_set_6(fast_count);   // chunking of the whole set (rank-count independent)
     gradient_correction_range(dp.local, slice_start_f, slice_count_f, slow_start, slow_count, snap_f, snap_s,
                               G, soft2, dt, gm_on);
     Kokkos::fence();
@@ -2281,6 +2288,7 @@ static void compute_timestep_distributed(DistributedParticles& dp, int start, in
 
     int slice_start, slice_count;
     dp.get_force_slice(start, count, slice_start, slice_count);
+    n2_detail::SinkSetScope n2_set_7(count);   // chunking of the whole set (rank-count independent)
 
     if (slice_count > 0) {
         timestep_range(dp.local, slice_start, slice_count, start, count, G, soft2, eta);
