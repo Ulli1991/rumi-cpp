@@ -1,6 +1,6 @@
 # Config reference
 
-All 139 keys of the config file (`config.txt`, or `--config <file>`), generated from the parameter table in `src/core/params.cpp` by `scripts/gen_config_md.py`. Every key has one default, in that table; an unknown key in a config file is an error. Each run writes the effective value of every key, and whether it came from the file or the default, to `run_params.txt`.
+All 140 keys of the config file (`config.txt`, or `--config <file>`), generated from the parameter table in `src/core/params.cpp` by `scripts/gen_config_md.py`. Every key has one default, in that table; an unknown key in a config file is an error. Each run writes the effective value of every key, and whether it came from the file or the default, to `run_params.txt`.
 
 Levels:
 
@@ -211,6 +211,7 @@ Levels:
 | `TRIPLE_OUTER_FIRST` | bool | `false` | test |  | triple_test: outer body at the lowest particle id |
 | `TRIPLE_IN_ROT_DEG` | double | `0.0` | test |  | triple_test: rotation of the inner orbit (deg) |
 | `TRIPLE_IN_START_Q` | double | `5.0` | test |  | triple_test, unbound inner orbit: start at this many pericentre distances |
+| `TRIPLE_OUT_START_Q` | double | `5.0` | test |  | triple_test, unbound outer orbit: start at this many pericentre distances |
 | `TEST_STELLAR_RADIUS_RSUN` | double | `0.0` | test |  | Few-body tests: stellar radius of every non-BH body (Rsun; 0: none) |
 | `TEST_BOOST_KMS` | string | (empty) | test |  | Few-body tests: uniform velocity "vx,vy,vz" (km/s) added to every body |
 
@@ -228,6 +229,10 @@ Levels:
 | `NBODY_CHECK_SUBSYS` | Check that every subsystem is advanced exactly once per subsystem call |
 | `NBODY_CHECK_TREE_DT` | =1: check every tree time-step / neighbour search against O(N^2) |
 | `NBODY_DEEP_LOG` | =d: log the particles and pairs that keep HHS sets at depth >= d |
+| `NBODY_FENCE_STATS` | =1/2: count device fences and copies per call site (fence_stats.h; NVTX ranges for nsys) |
+| `NBODY_LEAN_SYNC` | =0: keep every device fence of the original code (default on: lean copies, bit-identical) |
+| `NBODY_OVERLAP` | =1: experimental GPU-idle prototype, field forces of the next kick overlap the host LogH (not bit-identical) |
+| `NBODY_OVERLAP_MIN` | =n: smallest set that uses NBODY_OVERLAP (default 1024) |
 | `NBODY_DETECT_TOP_ONLY` | Detect subsystems at depth 0 only and keep them below |
 | `NBODY_DUMP` | Particle state at each print to dump_<step>.bin |
 | `NBODY_DUMP_DT` | =n: pid, dt_adapt, grad_mag, ax of the set after the time-step criteria, first n calls |
