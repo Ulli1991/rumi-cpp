@@ -1,5 +1,6 @@
 #include "n2_sinkset.h"
 #include "small_for.h"
+#include "lean_sync.h"
 #include "integrator.h"
 #include "integrator_cpu.h"
 #include "hhs_counters.h"
@@ -78,6 +79,24 @@ double g_sec_nonpn_gw = 0.0;
 
 void release_integrator_globals() { g_octree = Octree(); }  // before Kokkos::finalize
 
+// gpu-idle prototype NBODY_OVERLAP=1: in the FSI steps, drift the field first and launch the field-source part of
+// the next self force right before the host LogH (or secular) integration, so the GPU computes it while the host
+// integrates; the member-source part is added afterwards. Not bit-identical (summation order).
+#include <functional>
+static bool overlap_on() {
+    static const bool on = [] { const char* v = std::getenv("NBODY_OVERLAP"); return v && v[0] && v[0] != '0'; }();
+    return on;
+}
+static int overlap_min() {   // smallest set that uses the split (the extra pass and readback cost ~30 us)
+    static const int v = std::getenv("NBODY_OVERLAP_MIN") ? std::atoi(std::getenv("NBODY_OVERLAP_MIN")) : 1024;
+    return v;
+}
+static std::function<void()> g_pre_host_hook;   // fired by advance_subsystems_in_range before its host integration
+static bool g_adv_collided = false;             // the advance changed masses / flags: discard the field pass
+static void fire_pre_host_hook() {
+    if (g_pre_host_hook) { auto h = std::move(g_pre_host_hook); g_pre_host_hook = nullptr; h(); }
+}
+
 // TILE_SIZE defined in constants.h
 
 // =============================================================================
@@ -108,7 +127,7 @@ void compute_acceleration_and_timestep_distributed(DistributedParticles& dp,
 
     (void)N;
     acceleration_and_timestep_range(dp.local, my_start, my_count, 0, N, G, soft2, eta);
-    Kokkos::fence();
+    Kokkos::fence("integrator.cpp:104");
 
     // Accelerations and time steps in one collective
     dp.allgather_dt_acc_subset(0, N);
@@ -217,7 +236,7 @@ static void exchange_subsystem_results(Particles& p, const std::vector<int>& eli
         Kokkos::View<double*> d_buf("xch_buf", nm * (size_t)MS);
         auto h_idx = Kokkos::create_mirror_view(d_idx);
         for (int k = 0; k < nm; k++) h_idx(k) = mine_idx[k];
-        Kokkos::deep_copy(d_idx, h_idx);
+        dcopy(d_idx, h_idx);
         auto px = p.x, py = p.y, pz = p.z, pvx = p.vx, pvy = p.vy, pvz = p.vz;
         auto pcx = p.cvx, pcy = p.cvy, pcz = p.cvz;
         auto ps = p.spin_vec;
@@ -228,7 +247,7 @@ static void exchange_subsystem_results(Particles& p, const std::vector<int>& eli
             b[7] = ps(i, 0); b[8] = ps(i, 1); b[9] = ps(i, 2); b[10] = pcx(i); b[11] = pcy(i); b[12] = pcz(i);
             b[13] = pm(i);
         });
-        auto h_buf = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), d_buf);
+        auto h_buf = host_copy(d_buf);
         std::copy(h_buf.data(), h_buf.data() + nm * (size_t)MS, mine.begin());
     }
     std::vector<double> all = all_gather(mine);
@@ -237,7 +256,7 @@ static void exchange_subsystem_results(Particles& p, const std::vector<int>& eli
         Kokkos::View<double*> d_all("xch_all", all.size());
         auto h_all = Kokkos::create_mirror_view(d_all);
         std::copy(all.begin(), all.end(), h_all.data());
-        Kokkos::deep_copy(d_all, h_all);
+        dcopy(d_all, h_all);
         auto px = p.x, py = p.y, pz = p.z, pvx = p.vx, pvy = p.vy, pvz = p.vz;
         auto pcx = p.cvx, pcy = p.cvy, pcz = p.cvz;
         auto ps = p.spin_vec;
@@ -402,12 +421,12 @@ struct RangeMirror {
             if (nf > 6) o(6 * n + ii) = m(i);
         });
         auto rng = Kokkos::make_pair(0, nf * n);
-        Kokkos::deep_copy(Kokkos::subview(hbuf(), rng), Kokkos::subview(d, rng));
+        dcopy(Kokkos::subview(hbuf(), rng), Kokkos::subview(d, rng));
     }
     void push(Particles& p) {   // positions and velocities
         auto d = dbuf();
         auto rng = Kokkos::make_pair(0, 6 * count);
-        Kokkos::deep_copy(Kokkos::subview(d, rng), Kokkos::subview(hbuf(), rng));
+        dcopy(Kokkos::subview(d, rng), Kokkos::subview(hbuf(), rng));
         RawView x{p.x.data()}, y{p.y.data()}, z{p.z.data()}, vx{p.vx.data()}, vy{p.vy.data()}, vz{p.vz.data()};
         RawView o{d.data()};
         const int s0 = start, n = count;
@@ -755,6 +774,7 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
     g_subsys_phase.add(SubsystemPhaseTimes::MAP, phase_clock.lap());
     g_subsys_phase.count(SubsystemPhaseTimes::C_SEC, (long long)secular_idx.size());
 
+    if (logh_idx.empty() && secular_triple_idx.empty()) fire_pre_host_hook();   // overlap with the secular work
     // --- Secular binaries: evolve on host ---
     if (!secular_idx.empty()) {
         // Binaries are independent (disjoint members): evolve them on all host threads. The GW energy is
@@ -1114,6 +1134,7 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
         mirror_src.m = h_m.data();
         g_logh_batch.pack(logh_mgr, p, G, dt, &mirror_src);
         g_subsys_phase.add(SubsystemPhaseTimes::LOGH_PACK, phase_clock.lap());
+        fire_pre_host_hook();   // NBODY_OVERLAP: the GPU computes the field forces during the host LogH run
         logh_integrate_batch_gpu(g_logh_batch, G, g_collisional.eta_gbs);
         g_subsys_phase.add(SubsystemPhaseTimes::LOGH_RUN, phase_clock.lap());
 
@@ -1395,7 +1416,9 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
 #ifdef USE_MPI
     if (distributed_subs) colls = allgather_collisions(colls);
 #endif
+    if (distributed_subs) g_adv_collided = true;
     if (!colls.empty()) {
+        g_adv_collided = true;
         g_subsystem_mgr.rebuild_pid_to_idx(p);
         for (const auto& c : colls)
             finalize_subsystem_collision(c, p, g_subsystem_mgr, g_energy_books, G, g_collisional.c_code);
@@ -1434,12 +1457,34 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
 }
 #endif
 
+#ifdef ENABLE_COLLISIONAL
+// NBODY_OVERLAP: drift the field, then advance the subsystems while the GPU computes the field-source force on the
+// sinks [i0, i0+ni) from [start, start+count) (launched by the advance right before its host integration); the
+// member-source part follows. True when ax, ay, az of the sinks hold the full force.
+static bool advance_drift_force_overlap(Particles& p, int start, int count, int i0, int ni, double G, double soft2,
+                                        double dtd) {
+    drift_field_only(p, start, count, dtd);
+    SplitLists& L = split_lists();
+    build_split_lists(p, i0, ni, start, count, L);
+    g_adv_collided = false;
+    g_pre_host_hook = [&p, &L, G, soft2] { force_split_field(p, L, G, soft2); };
+    advance_subsystems_in_range(p, start, count, G, dtd);
+    fire_pre_host_hook();
+    if (g_adv_collided) return false;
+    force_split_member(p, L, G, soft2);
+    return true;
+}
+#else
+static bool advance_drift_force_overlap(Particles&, int, int, int, int, double, double, double) { return false; }
+#endif
+
 void fsi_step(Particles& p, int start, int count,
               double G, double soft2, double dt, bool forces_valid,
               bool force_direct_n2) {
     g_subset_hist.record(SubsetHistogram::FSI_STEP, count);
     bool tree_mode = !force_direct_n2 && (use_tree && count >= tree_threshold);
     bool tree_built = false;
+    bool force_done = false;   // NBODY_OVERLAP: the self force after the advance is already in ax, ay, az
 
     // U kick (dt/6)
     if (forces_valid) {
@@ -1468,9 +1513,13 @@ void fsi_step(Particles& p, int start, int count,
     }
 
     // H_S (dt/2) then T' drift (dt/2) — BIFROST Algorithm 1 ordering
+    force_done = false;
     g_profiler.start();
 #ifdef ENABLE_COLLISIONAL
-    if (p.collisional && !g_subsystem_mgr.active.empty()) {
+    if (p.collisional && !g_subsystem_mgr.active.empty() && overlap_on() && count >= overlap_min() && !tree_mode) {
+        force_done = advance_drift_force_overlap(p, start, count, start, count, G, soft2, dt * FSI_DRIFT);
+        g_profiler.stop(StepProfiler::SUBSYSTEM_INTEG);
+    } else if (p.collisional && !g_subsystem_mgr.active.empty()) {
         advance_subsystems_in_range(p, start, count, G, dt * FSI_DRIFT);
         g_profiler.stop(StepProfiler::SUBSYSTEM_INTEG);
         g_profiler.start();
@@ -1507,7 +1556,7 @@ void fsi_step(Particles& p, int start, int count,
         g_profiler.stop(StepProfiler::DRIFT_KICK);
     } else {
         g_profiler.start();
-        self_acceleration(p, start, count, G, soft2);
+        if (!force_done) self_acceleration(p, start, count, G, soft2);
         g_profiler.stop(StepProfiler::SELF_FORCE);
         g_profiler.start();
         self_gradient_correction(p, start, count, G, soft2, dt);
@@ -1518,9 +1567,13 @@ void fsi_step(Particles& p, int start, int count,
     }
 
     // H_S (dt/2) then T' drift (dt/2) — BIFROST Algorithm 1 ordering
+    force_done = false;
     g_profiler.start();
 #ifdef ENABLE_COLLISIONAL
-    if (p.collisional && !g_subsystem_mgr.active.empty()) {
+    if (p.collisional && !g_subsystem_mgr.active.empty() && overlap_on() && count >= overlap_min() && !tree_mode) {
+        force_done = advance_drift_force_overlap(p, start, count, start, count, G, soft2, dt * FSI_DRIFT);
+        g_profiler.stop(StepProfiler::SUBSYSTEM_INTEG);
+    } else if (p.collisional && !g_subsystem_mgr.active.empty()) {
         advance_subsystems_in_range(p, start, count, G, dt * FSI_DRIFT);
         g_profiler.stop(StepProfiler::SUBSYSTEM_INTEG);
         g_profiler.start();
@@ -1545,7 +1598,7 @@ void fsi_step(Particles& p, int start, int count,
         g_profiler.stop(StepProfiler::DRIFT_KICK);
     } else {
         g_profiler.start();
-        self_acceleration(p, start, count, G, soft2);
+        if (!force_done) self_acceleration(p, start, count, G, soft2);
         g_profiler.stop(StepProfiler::SELF_FORCE);
         g_profiler.start();
         kick_velocities(p, start, count, dt * FSI_KICK);
@@ -1677,12 +1730,12 @@ static int partition_by_pivot(Particles& p, int start, int count, double pivot) 
             }
             partial_sum += val;
         });
-    Kokkos::fence();
+    lean_fence("integrator.cpp:1514");
 
     // Get total slow count: deep_copy last element instead of launching a kernel
     int last_prefix = 0, last_is_slow = 0;
-    Kokkos::deep_copy(last_prefix, Kokkos::subview(slow_prefix, count - 1));
-    Kokkos::deep_copy(last_is_slow, Kokkos::subview(is_slow, count - 1));
+    dcopy(last_prefix, Kokkos::subview(slow_prefix, count - 1));
+    dcopy(last_is_slow, Kokkos::subview(is_slow, count - 1));
     int slow_count = last_prefix + last_is_slow;
 
     if (slow_count == 0 || slow_count == count) {
@@ -1842,8 +1895,19 @@ static void self_acceleration_distributed(DistributedParticles& dp, int start, i
     }
 
     acceleration_range(dp.local, slice_start, slice_count, start, count, G, soft2);
-    Kokkos::fence();
+    Kokkos::fence("integrator.cpp:1678");
 
+    if (use_nonblocking_mpi) {
+        dp.iallgather_accelerations_subset(start, count, 0);
+        dp.wait_and_unpack_accelerations(start, count, 0);
+    } else {
+        dp.allgather_accelerations_subset(start, count);
+    }
+}
+
+// NBODY_OVERLAP: the slice was computed by advance_drift_force_overlap; only the gather remains
+static void self_acceleration_distributed_gather(DistributedParticles& dp, int start, int count) {
+    Kokkos::fence("integrator.cpp:overlap_gather");
     if (use_nonblocking_mpi) {
         dp.iallgather_accelerations_subset(start, count, 0);
         dp.wait_and_unpack_accelerations(start, count, 0);
@@ -1877,11 +1941,11 @@ static void self_gradient_correction_distributed(DistributedParticles& dp, int s
         Kokkos::realloc(ay_save, count);
         Kokkos::realloc(az_save, count);
     }
-    Kokkos::deep_copy(Kokkos::subview(ax_save, Kokkos::make_pair(0, count)),
+    dcopy(Kokkos::subview(ax_save, Kokkos::make_pair(0, count)),
                       Kokkos::subview(dp.local.ax, Kokkos::make_pair(start, start + count)));
-    Kokkos::deep_copy(Kokkos::subview(ay_save, Kokkos::make_pair(0, count)),
+    dcopy(Kokkos::subview(ay_save, Kokkos::make_pair(0, count)),
                       Kokkos::subview(dp.local.ay, Kokkos::make_pair(start, start + count)));
-    Kokkos::deep_copy(Kokkos::subview(az_save, Kokkos::make_pair(0, count)),
+    dcopy(Kokkos::subview(az_save, Kokkos::make_pair(0, count)),
                       Kokkos::subview(dp.local.az, Kokkos::make_pair(start, start + count)));
 
     int slice_start, slice_count;
@@ -2049,6 +2113,7 @@ static void fsi_step_distributed(DistributedParticles& dp, int start, int count,
 
     bool tree_mode = use_tree && count >= tree_threshold;
     long long self_pairs = (long long)count * count;
+    bool force_done = false;   // NBODY_OVERLAP: this rank's slice of the self force is already in ax, ay, az
 
     // Sync packed positions for vectorized kernel loads
     g_profiler.start();
@@ -2088,9 +2153,15 @@ static void fsi_step_distributed(DistributedParticles& dp, int start, int count,
     }
 
     // H_S (dt/2) then T' drift (dt/2) — BIFROST Algorithm 1 ordering
+    force_done = false;
     g_profiler.start();
 #ifdef ENABLE_COLLISIONAL
-    if (dp.local.collisional && !g_subsystem_mgr.active.empty()) {
+    if (dp.local.collisional && !g_subsystem_mgr.active.empty() && overlap_on() && count >= overlap_min() && !tree_mode) {
+        int ss, sc;
+        dp.get_force_slice(start, count, ss, sc);
+        force_done = advance_drift_force_overlap(dp.local, start, count, ss, sc, G, soft2, dt * FSI_DRIFT);
+        g_profiler.stop(StepProfiler::SUBSYSTEM_INTEG);
+    } else if (dp.local.collisional && !g_subsystem_mgr.active.empty()) {
         advance_subsystems_in_range(dp.local, start, count, G, dt * FSI_DRIFT);
         g_profiler.stop(StepProfiler::SUBSYSTEM_INTEG);
         g_profiler.start();
@@ -2141,7 +2212,8 @@ static void fsi_step_distributed(DistributedParticles& dp, int start, int count,
     } else {
         // Separate: force → allgather → gradient correction → allgather → kick
         g_profiler.start();
-        self_acceleration_distributed(dp, start, count, G, soft2);
+        if (force_done) self_acceleration_distributed_gather(dp, start, count);
+        else self_acceleration_distributed(dp, start, count, G, soft2);
         g_profiler.stop(StepProfiler::SELF_FORCE, self_pairs);
         g_profiler.start();
         self_gradient_correction_distributed(dp, start, count, G, soft2, dt);
@@ -2152,9 +2224,15 @@ static void fsi_step_distributed(DistributedParticles& dp, int start, int count,
     }
 
     // H_S (dt/2) then T' drift (dt/2) — BIFROST Algorithm 1 ordering
+    force_done = false;
     g_profiler.start();
 #ifdef ENABLE_COLLISIONAL
-    if (dp.local.collisional && !g_subsystem_mgr.active.empty()) {
+    if (dp.local.collisional && !g_subsystem_mgr.active.empty() && overlap_on() && count >= overlap_min() && !tree_mode) {
+        int ss, sc;
+        dp.get_force_slice(start, count, ss, sc);
+        force_done = advance_drift_force_overlap(dp.local, start, count, ss, sc, G, soft2, dt * FSI_DRIFT);
+        g_profiler.stop(StepProfiler::SUBSYSTEM_INTEG);
+    } else if (dp.local.collisional && !g_subsystem_mgr.active.empty()) {
         advance_subsystems_in_range(dp.local, start, count, G, dt * FSI_DRIFT);
         g_profiler.stop(StepProfiler::SUBSYSTEM_INTEG);
         g_profiler.start();
@@ -2188,7 +2266,8 @@ static void fsi_step_distributed(DistributedParticles& dp, int start, int count,
         g_profiler.stop(StepProfiler::DRIFT_KICK);
     } else {
         g_profiler.start();
-        self_acceleration_distributed(dp, start, count, G, soft2);
+        if (force_done) self_acceleration_distributed_gather(dp, start, count);
+        else self_acceleration_distributed(dp, start, count, G, soft2);
         g_profiler.stop(StepProfiler::SELF_FORCE, self_pairs);
         g_profiler.start();
         kick_velocities(dp.local, start, count, dt * FSI_KICK);
@@ -2216,7 +2295,7 @@ static void cross_acceleration_distributed(DistributedParticles& dp,
     dp.get_force_slice(fast_start, fast_count, slice_start_f, slice_count_f);
     n2_detail::SinkSetScope n2_set_4(fast_count);   // chunking of the whole set (rank-count independent)
     acceleration_range(dp.local, slice_start_f, slice_count_f, slow_start, slow_count, G, soft2);
-    Kokkos::fence();
+    Kokkos::fence("integrator.cpp:2061");
 
     // Each rank computed its slice of slow and its slice of fast: one gather of both slices (AUDIT G row 5)
     if (use_nonblocking_mpi) {
@@ -2405,7 +2484,7 @@ static int hhs_cc_step(Particles& p, DistributedParticles* dp, int slow_start, i
         for (size_t c = 0; c < comps.size(); c++) h.insert(h.end(), comps[c], (int)c);
         if (h.empty()) return;
         Kokkos::View<int*, Kokkos::HostSpace, Kokkos::MemoryUnmanaged> hv(h.data(), h.size());
-        Kokkos::deep_copy(Kokkos::subview(cid, Kokkos::make_pair(fast_start, fast_start + (int)h.size())), hv);
+        dcopy(Kokkos::subview(cid, Kokkos::make_pair(fast_start, fast_start + (int)h.size())), hv);
     };
     auto cross = [&](bool with_grad) {
         const int nf = fast_count();
@@ -2579,7 +2658,7 @@ static int hhs_fsi_recursive(
             g_subsystem_mgr.reset_ngb_count();
             neighbor_search_subset(p, start, count, G,
                                    g_collisional.r_ngb, g_collisional.r_ngb_max, pivot_dt);
-            Kokkos::fence();
+            lean_fence("integrator.cpp:2421");
             g_subsys_phase.add(SubsystemPhaseTimes::DET_NGB, det_clock.lap());
             g_subsystem_mgr.detect_from_pairs(p, G, pivot_dt,
                                                g_collisional.r_ngb, g_collisional.r_ngb_max,
@@ -2587,7 +2666,7 @@ static int hhs_fsi_recursive(
             g_subsys_phase.add(SubsystemPhaseTimes::DET_PAIRS, det_clock.lap());
             g_subsystem_mgr.update_particle_flags(p);
             g_subsystem_mgr.accumulate_diagnostics();
-            Kokkos::fence();
+            lean_fence("integrator.cpp:2429");
             g_subsys_phase.add(SubsystemPhaseTimes::DET_FLAGS, det_clock.lap());
             if (depth < HHSCounters::MAX_DEPTH)
                 g_hhs_counters.dist_depth_ngb_pairs[depth] += g_subsystem_mgr.last_level_pairs;
@@ -2845,8 +2924,7 @@ static int hhs_fsi_recursive(
         bool one_subsystem = (count == 1);
         if (!one_subsystem) {
             int s0 = -2, same = 1;
-            auto h_sid = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
-                             Kokkos::subview(p.subsystem_id, Kokkos::make_pair(start, start + count)));
+            auto h_sid = host_copy(Kokkos::subview(p.subsystem_id, Kokkos::make_pair(start, start + count)));
             for (int k = 0; k < count; k++) {
                 int sk = h_sid(k);
                 if (sk < 0 || (s0 != -2 && sk != s0)) { same = 0; break; }

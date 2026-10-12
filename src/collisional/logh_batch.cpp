@@ -1,4 +1,5 @@
 #include "small_for.h"
+#include "lean_sync.h"
 #include "device_staging.h"
 #include "logh_batch.h"
 #include "constants.h"
@@ -180,7 +181,7 @@ void SubsystemBatch::pack(const SubsystemManager& mgr, const Particles& p,
         double t_x0 = wall_now();
         st.reserve(n_mem, PACK_STRIDE);
         for (int i = 0; i < n_mem; i++) st.h_idx(i) = member_indices[i];
-        Kokkos::deep_copy(Kokkos::subview(st.d_idx, Kokkos::make_pair(0, n_mem)),
+        dcopy(Kokkos::subview(st.d_idx, Kokkos::make_pair(0, n_mem)),
                           Kokkos::subview(st.h_idx, Kokkos::make_pair(0, n_mem)));
         auto d_idx = st.d_idx;
         auto d_buf = st.d_buf;
@@ -198,7 +199,7 @@ void SubsystemBatch::pack(const SubsystemManager& mgr, const Particles& p,
             d_buf(base + 11) = prad(k);
         });
         auto rng = Kokkos::make_pair((size_t)0, (size_t)n_mem * PACK_STRIDE);
-        Kokkos::deep_copy(Kokkos::subview(st.h_buf, rng), Kokkos::subview(st.d_buf, rng));
+        dcopy(Kokkos::subview(st.h_buf, rng), Kokkos::subview(st.d_buf, rng));
         g_logh_prof.pack_xfer += wall_now() - t_x0;
     }
     auto h_buf = st.h_buf;

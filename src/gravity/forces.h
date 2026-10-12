@@ -52,6 +52,18 @@ void compute_timestep_subset(Particles& p, int start, int count,
 void acceleration_and_timestep_range(Particles& p, int i0, int ni, int j0, int nj, double G, double soft2,
                                      double eta);
 void acceleration_range(Particles& p, int i0, int ni, int j0, int nj, double G, double soft2);
+
+// gpu-idle prototype (NBODY_OVERLAP): self force split by subsystem membership (sinks and sources)
+struct SplitLists {
+    Kokkos::View<int*> fidx, midx;     // sources [j0, j0+nj): field, members
+    Kokkos::View<int*> sfidx, smidx;   // sinks [i0, i0+ni): field, members
+    Kokkos::View<double*> sx, sy, sz;  // field-pass partial sums (by particle index)
+    int i0 = 0, ni = 0, j0 = 0, nj = 0, nf = 0, nm = 0, snf = 0, snm = 0;
+};
+SplitLists& split_lists();
+void build_split_lists(Particles& p, int i0, int ni, int j0, int nj, SplitLists& L);   // two host readbacks
+void force_split_field(Particles& p, const SplitLists& L, double G, double soft2);
+void force_split_member(Particles& p, const SplitLists& L, double G, double soft2);
 void timestep_range(Particles& p, int i0, int ni, int j0, int nj, double G, double soft2, double eta);
 
 // Snapshot of uncorrected accelerations for the gradient correction: element i - offset belongs to particle i

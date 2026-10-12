@@ -6,6 +6,7 @@
 // deep_copy fences, so a buffer may be refilled right after a kernel that read it was launched.
 
 #include <Kokkos_Core.hpp>
+#include "lean_sync.h"
 #include <cstddef>
 
 struct DeviceStaging {
@@ -26,15 +27,15 @@ struct DeviceStaging {
         }
     }
     void upload_idx(int n) {
-        Kokkos::deep_copy(Kokkos::subview(d_idx, Kokkos::make_pair(0, n)),
+        dcopy(Kokkos::subview(d_idx, Kokkos::make_pair(0, n)),
                           Kokkos::subview(h_idx, Kokkos::make_pair(0, n)));
     }
     void upload_buf(size_t n) {
-        Kokkos::deep_copy(Kokkos::subview(d_buf, Kokkos::make_pair((size_t)0, n)),
+        dcopy(Kokkos::subview(d_buf, Kokkos::make_pair((size_t)0, n)),
                           Kokkos::subview(h_buf, Kokkos::make_pair((size_t)0, n)));
     }
     void download_buf(size_t n) {
-        Kokkos::deep_copy(Kokkos::subview(h_buf, Kokkos::make_pair((size_t)0, n)),
+        dcopy(Kokkos::subview(h_buf, Kokkos::make_pair((size_t)0, n)),
                           Kokkos::subview(d_buf, Kokkos::make_pair((size_t)0, n)));
     }
 

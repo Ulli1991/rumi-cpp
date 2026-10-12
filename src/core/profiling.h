@@ -4,10 +4,28 @@
 #include <cstdio>
 #include <cstring>
 #include <Kokkos_Core.hpp>
+#include "lean_sync.h"
 
 #ifdef KOKKOS_ENABLE_CUDA
 #include <cuda_runtime.h>
 #endif
+
+// NBODY_NVTX (gpu-idle prototype): profiler regions become NVTX ranges for nsys idle-time attribution.
+// start() pushes "P"; stop(t) pops it and emits a mark "<timer>@<depth>" at the same instant.
+#if defined(NBODY_NVTX) && defined(KOKKOS_ENABLE_CUDA)
+#include <nvtx3/nvToolsExt.h>
+#define NBODY_NVTX_PUSH(s) nvtxRangePushA(s)
+#define NBODY_NVTX_POP() nvtxRangePop()
+#define NBODY_NVTX_MARK(s) nvtxMarkA(s)
+#else
+#define NBODY_NVTX_PUSH(s) ((void)0)
+#define NBODY_NVTX_POP() ((void)0)
+#define NBODY_NVTX_MARK(s) ((void)0)
+#endif
+struct NvtxScope {
+    explicit NvtxScope(const char* s) { (void)s; NBODY_NVTX_PUSH(s); }
+    ~NvtxScope() { NBODY_NVTX_POP(); }
+};
 
 struct StepProfiler {
     enum Timer {
@@ -104,6 +122,7 @@ struct StepProfiler {
     }
 
     void start(Timer ctx = NUM_TIMERS) {
+        NBODY_NVTX_PUSH("P");
 #ifndef DISABLE_PROFILING_FENCES
         if (!enabled) return;
         t_start = std::chrono::high_resolution_clock::now();
@@ -116,7 +135,7 @@ struct StepProfiler {
     void stop(Timer t, long long n_pairs = 0) {
 #ifndef DISABLE_PROFILING_FENCES
         if (!enabled) return;
-        if (fence) Kokkos::fence();  // ensure GPU work is complete before timing
+        if (fence && !lean_sync()) Kokkos::fence("profiling.h:start");  // ensure GPU work is complete before timing
         auto t_end = std::chrono::high_resolution_clock::now();
         double dt = std::chrono::duration<double>(t_end - t_start).count();
         elapsed[t] += dt;
@@ -133,6 +152,12 @@ struct StepProfiler {
         active_component = NUM_TIMERS;
 #else
         (void)t; (void)n_pairs;
+#endif
+#if defined(NBODY_NVTX) && defined(KOKKOS_ENABLE_CUDA)
+        NBODY_NVTX_POP();
+        char buf[48];
+        std::snprintf(buf, sizeof buf, "%d@%d", (int)t, cur_depth);
+        NBODY_NVTX_MARK(buf);
 #endif
     }
 

@@ -186,7 +186,7 @@ DiagnosticState compute_diagnostics(const Particles& p, double G, double soft2) 
     // Potential energy: tiled GPU kernel + MPI-distributed
     double PE = compute_potential_energy_distributed(p, G, soft2);
 
-    Kokkos::fence();
+    Kokkos::fence("diagnostics.cpp:156");
 
     DiagnosticState d{};
     d.KE = KE; d.PE = PE; d.E_total = KE + PE;

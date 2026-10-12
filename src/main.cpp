@@ -14,6 +14,7 @@
 #include "restart.h"
 #include "snapshot.h"
 #endif
+#include "fence_stats.h"
 #ifdef ENABLE_COLLISIONAL
 #include "collisional_config.h"
 #include "subsystem.h"
@@ -527,6 +528,7 @@ int main(int argc, char** argv) {
 
     Kokkos::initialize(argc, argv);
     const auto prog_start = std::chrono::steady_clock::now();   // WALLTIME_LIMIT counts from here
+    fence_stats::init();
     int exit_code = 0;
     {
         int my_rank = MPIComm::rank();
@@ -1410,6 +1412,8 @@ int main(int argc, char** argv) {
             int E_carry_N = -1;
 #endif
             while (t < t_final) {
+                NBODY_NVTX_PUSH("STEP");
+                fence_stats::report(step, false);   // reset: count only this step
                 auto step_t0 = std::chrono::high_resolution_clock::now();
 #ifdef ENABLE_COLLISIONAL
                 g_sim_time = t;
@@ -1466,13 +1470,15 @@ int main(int argc, char** argv) {
 
                     for (int restart = 0; restart <= max_restarts; restart++) {
                         // Save checkpoint
-                        checkpoint.save(work_p, g_subsystem_mgr, g_energy_books);
+                        { NvtxScope nv_("CKPT"); checkpoint.save(work_p, g_subsystem_mgr, g_energy_books); }
 
                         // Run HHS step
+                        { NvtxScope nv_("HHS");
                         if (use_distributed) {
                             hhs_fsi_step_distributed(dp, dt_max, G, soft2, dt_min, eta, 2);
                         } else {
                             hhs_fsi_step_dynamic(p, 0, p.N, dt_max, G, soft2, dt_min, eta);
+                        }
                         }
 
                         // Per-step error: |E(t) - E(t-τ)| / |E(t₀)|  (BIFROST §3.19)
@@ -1573,12 +1579,14 @@ int main(int argc, char** argv) {
                 g_profiler.step_wall_total += step_wall;
                 g_profiler.step_count++;
 
+                fence_stats::report(step, my_rank == 0);
                 if (my_rank == 0 && step <= 5) {
                     std::printf("Step %d: %.3fs, dt=%.2e Myr\n",
                         step, step_wall, dt_max*TIME_UNIT_MYR);
                     std::fflush(stdout);
                 }
 
+                NBODY_NVTX_PUSH("DIAG");
                 if (step % print_interval == 0) {
                     // Recompute forces + timestep only for diagnostics
                     if (use_distributed) {
@@ -1613,6 +1621,8 @@ int main(int argc, char** argv) {
                     g_profiler.reset();
                     g_subset_hist.reset();
                 }
+                NBODY_NVTX_POP();  // DIAG
+                NBODY_NVTX_POP();  // STEP
                 cluster_diag_now(t, step);
 #ifdef USE_HDF5
                 after_step_io(t, step, step_wall);

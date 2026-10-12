@@ -1,4 +1,5 @@
 #include "particles.h"
+#include "lean_sync.h"
 #include <cstdlib>
 #include <cstring>
 
@@ -30,7 +31,7 @@ void Particles::allocate(int n, bool collisional_mode) {
     {
         auto h = Kokkos::create_mirror_view(orig_index);
         for (int i = 0; i < n; i++) h(i) = i;
-        Kokkos::deep_copy(orig_index, h);
+        dcopy(orig_index, h);
     }
 
     level_start.clear();
@@ -303,15 +304,15 @@ int Particles::compact_remove_zero_mass(int from, int to) {
         h_ix(j) = h_ix(src); h_iy(j) = h_iy(src); h_iz(j) = h_iz(src);
         h_cvx(j) = h_cvx(src); h_cvy(j) = h_cvy(src); h_cvz(j) = h_cvz(src);
     }
-    Kokkos::deep_copy(cvx, h_cvx); Kokkos::deep_copy(cvy, h_cvy); Kokkos::deep_copy(cvz, h_cvz);
+    dcopy(cvx, h_cvx); dcopy(cvy, h_cvy); dcopy(cvz, h_cvz);
 
     // Copy back to device
-    Kokkos::deep_copy(x, h_x); Kokkos::deep_copy(y, h_y); Kokkos::deep_copy(z, h_z);
-    Kokkos::deep_copy(vx, h_vx); Kokkos::deep_copy(vy, h_vy); Kokkos::deep_copy(vz, h_vz);
-    Kokkos::deep_copy(ax, h_ax); Kokkos::deep_copy(ay, h_ay); Kokkos::deep_copy(az, h_az);
-    Kokkos::deep_copy(mass, h_m); Kokkos::deep_copy(dt_adapt, h_dt);
-    Kokkos::deep_copy(level, h_lev); Kokkos::deep_copy(orig_index, h_orig);
-    Kokkos::deep_copy(ix, h_ix); Kokkos::deep_copy(iy, h_iy); Kokkos::deep_copy(iz, h_iz);
+    dcopy(x, h_x); dcopy(y, h_y); dcopy(z, h_z);
+    dcopy(vx, h_vx); dcopy(vy, h_vy); dcopy(vz, h_vz);
+    dcopy(ax, h_ax); dcopy(ay, h_ay); dcopy(az, h_az);
+    dcopy(mass, h_m); dcopy(dt_adapt, h_dt);
+    dcopy(level, h_lev); dcopy(orig_index, h_orig);
+    dcopy(ix, h_ix); dcopy(iy, h_iy); dcopy(iz, h_iz);
 
     // Collisional fields
     if (collisional) {
@@ -343,18 +344,18 @@ int Particles::compact_remove_zero_mass(int from, int to) {
             h_dtl0(j) = h_dtl0(src); h_gmag(j) = h_gmag(src);
         }
 
-        Kokkos::deep_copy(particle_id, h_pid);
-        Kokkos::deep_copy(subsystem_id, h_sid);
-        Kokkos::deep_copy(stellar_type, h_stype);
-        Kokkos::deep_copy(m_zams, h_mzams);
-        Kokkos::deep_copy(stellar_age, h_sage);
-        Kokkos::deep_copy(stellar_radius, h_srad);
-        Kokkos::deep_copy(luminosity, h_lum);
-        Kokkos::deep_copy(core_mass, h_cmass);
-        Kokkos::deep_copy(spin_vec, h_spin);
-        Kokkos::deep_copy(spin_mag, h_smag);
-        Kokkos::deep_copy(dt_level0, h_dtl0);
-        Kokkos::deep_copy(grad_mag, h_gmag);
+        dcopy(particle_id, h_pid);
+        dcopy(subsystem_id, h_sid);
+        dcopy(stellar_type, h_stype);
+        dcopy(m_zams, h_mzams);
+        dcopy(stellar_age, h_sage);
+        dcopy(stellar_radius, h_srad);
+        dcopy(luminosity, h_lum);
+        dcopy(core_mass, h_cmass);
+        dcopy(spin_vec, h_spin);
+        dcopy(spin_mag, h_smag);
+        dcopy(dt_level0, h_dtl0);
+        dcopy(grad_mag, h_gmag);
     }
 
     N = N_new;

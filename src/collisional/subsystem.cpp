@@ -1,4 +1,5 @@
 #include "small_for.h"
+#include "lean_sync.h"
 #include "device_staging.h"
 #include <climits>
 #include "subsystem.h"
@@ -36,8 +37,7 @@ void SubsystemManager::rebuild_pid_to_idx(const Particles& p) {
             if (pid >= 0 && pid < (int)pid_to_idx_.size()) pid_to_idx_[pid] = -1;
         bool ok = true;
         if (lo < hi) {
-            auto h_rng = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
-                             Kokkos::subview(p.particle_id, Kokkos::pair<int,int>(lo, hi)));
+            auto h_rng = host_copy(Kokkos::subview(p.particle_id, Kokkos::pair<int,int>(lo, hi)));
             for (int i = lo; i < hi && ok; i++) {
                 int pid = h_rng(i - lo);
                 if (pid < 0 || pid >= (int)pid_to_idx_.size()) ok = false;
@@ -50,7 +50,7 @@ void SubsystemManager::rebuild_pid_to_idx(const Particles& p) {
             return;
         }
     }
-    auto h_pid = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.particle_id);
+    auto h_pid = host_copy(p.particle_id);
     int max_pid = 0;
     for (int i = 0; i < p.N; i++) max_pid = std::max(max_pid, h_pid(i));
     if ((int)pid_to_idx_.size() < max_pid + 1) {
@@ -65,7 +65,7 @@ void SubsystemManager::rebuild_pid_to_idx(const Particles& p) {
 }
 
 void SubsystemManager::check_pid_to_idx(const Particles& p) const {
-    auto h_pid = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.particle_id);
+    auto h_pid = host_copy(p.particle_id);
     std::vector<int> full(pid_to_idx_.size(), -1);
     for (int i = 0; i < p.N; i++) if (h_pid(i) >= 0 && h_pid(i) < (int)full.size()) full[h_pid(i)] = i;
     for (size_t k = 0; k < full.size(); k++)
@@ -188,7 +188,7 @@ void SubsystemManager::allocate_ngb_buffers(int max_pairs) {
 
 void SubsystemManager::reset_ngb_count() {
     if (ngb_count.extent(0) > 0) {
-        Kokkos::deep_copy(ngb_count, 0);
+        dcopy(ngb_count, 0);
     }
 }
 
@@ -271,7 +271,7 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
     last_level_weak_split = 0;
 
     // Copy neighbor count from device
-    auto h_count = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), ngb_count);
+    auto h_count = host_copy(ngb_count);
     int n_pairs = h_count(0);
     if (n_pairs == 0) {
         // No neighbors at this level — no subsystems
@@ -929,9 +929,8 @@ void SubsystemManager::update_particle_flags(Particles& p) {
     const int n = (int)idx_sid.size() / 2;
     if (n == 0) return;
     if ((int)flag_buf_.extent(0) < 2 * n) flag_buf_ = Kokkos::View<int*>("sid_scatter", 4 * n);
-    auto h_buf = Kokkos::create_mirror_view(flag_buf_);
-    std::copy(idx_sid.begin(), idx_sid.end(), h_buf.data());
-    Kokkos::deep_copy(Kokkos::subview(flag_buf_, Kokkos::pair<int,int>(0, 2 * n)),
+    Kokkos::View<int*, Kokkos::HostSpace, Kokkos::MemoryUnmanaged> h_buf(idx_sid.data(), idx_sid.size());
+    dcopy(Kokkos::subview(flag_buf_, Kokkos::pair<int,int>(0, 2 * n)),
                       Kokkos::subview(h_buf, Kokkos::pair<int,int>(0, 2 * n)));
     auto buf = flag_buf_;
     small_for("scatter_sid", n, KOKKOS_LAMBDA(int k) { sid(buf(2 * k)) = buf(2 * k + 1); });
@@ -995,7 +994,7 @@ void SubsystemManager::fill_cm_velocity(const Particles& p, int lo, int hi, Kokk
         cm_buf_host_ = Kokkos::create_mirror_view(cm_buf_);
     }
     std::copy(h.begin(), h.end(), cm_buf_host_.data());
-    Kokkos::deep_copy(Kokkos::subview(cm_buf_, Kokkos::pair<int,int>(0, n)),
+    dcopy(Kokkos::subview(cm_buf_, Kokkos::pair<int,int>(0, n)),
                       Kokkos::subview(cm_buf_host_, Kokkos::pair<int,int>(0, n)));
     auto buf = cm_buf_;
     auto pm = p.mass;

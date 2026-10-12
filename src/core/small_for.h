@@ -20,7 +20,7 @@ template <class F>
 void small_for(const char* name, int n, const F& f) {
     if constexpr (kHostAccessibleDevice) {
         if (n <= small_for_max()) {
-            Kokkos::fence();   // device work that produced the data
+            Kokkos::fence("small_for.h:23");   // device work that produced the data
             for (int i = 0; i < n; i++) f(i);
             return;
         }

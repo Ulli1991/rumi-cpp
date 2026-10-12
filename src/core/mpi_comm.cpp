@@ -613,7 +613,7 @@ void DistributedParticles::iallgather_accelerations_subset(int start, int count,
         mpi_packed_displs[r] = 3 * mpi_displs[r];
     }
 
-    Kokkos::fence();
+    Kokkos::fence("mpi_comm.cpp:529");
 
 #if EFFECTIVE_GPU_AWARE_MPI
     // GPU-aware: pack on device, issue non-blocking MPI_Iallgatherv
@@ -628,7 +628,7 @@ void DistributedParticles::iallgather_accelerations_subset(int start, int count,
         send(3*ii+1) = lay(i);
         send(3*ii+2) = laz(i);
     });
-    Kokkos::fence();
+    Kokkos::fence("mpi_comm.cpp:544");
 
     // Copy counts/displs to per-slot arrays — MPI reads these asynchronously,
     // so concurrent slots must not share the same underlying memory
@@ -700,7 +700,7 @@ void DistributedParticles::wait_and_unpack_accelerations(int start, int count, i
         lay(i) = recv(3*ii+1);
         laz(i) = recv(3*ii+2);
     });
-    Kokkos::fence();
+    Kokkos::fence("mpi_comm.cpp:615");
 #else
     // Host-staged: blocking allgather already completed in initiate phase, no-op
     (void)start; (void)count; (void)slot;
@@ -728,7 +728,7 @@ void DistributedParticles::allreduce_accelerations_subset(int start, int count) 
 #ifdef USE_MPI
     if (MPIComm::size() == 1 || count == 0) return;
 
-    Kokkos::fence();
+    Kokkos::fence("mpi_comm.cpp:695");
 
 #if EFFECTIVE_GPU_AWARE_MPI
     // GPU-aware: pack ax/ay/az into buffer, allreduce in-place, unpack
@@ -742,7 +742,7 @@ void DistributedParticles::allreduce_accelerations_subset(int start, int count) 
         buf(3*ii+1) = lay(i);
         buf(3*ii+2) = laz(i);
     });
-    Kokkos::fence();
+    Kokkos::fence("mpi_comm.cpp:709");
 
     g_profiler.mpi_start();
     MPI_CHECK(MPI_Allreduce(MPI_IN_PLACE, buf.data(), 3 * count, MPI_DOUBLE,
@@ -755,7 +755,7 @@ void DistributedParticles::allreduce_accelerations_subset(int start, int count) 
         lay(i) = buf(3*ii+1);
         laz(i) = buf(3*ii+2);
     });
-    Kokkos::fence();
+    Kokkos::fence("mpi_comm.cpp:722");
 
 #else
     // Host-staged: copy to host, allreduce, copy back
@@ -796,7 +796,7 @@ void DistributedParticles::allreduce_timestep_subset(int start, int count) {
 #ifdef USE_MPI
     if (MPIComm::size() == 1 || count == 0) return;
 
-    Kokkos::fence();
+    Kokkos::fence("mpi_comm.cpp:763");
 
 #if EFFECTIVE_GPU_AWARE_MPI
     // GPU-aware: allreduce dt_adapt in-place via a contiguous buffer
@@ -808,7 +808,7 @@ void DistributedParticles::allreduce_timestep_subset(int start, int count) {
     Kokkos::parallel_for("pack_dt_allreduce", count, KOKKOS_LAMBDA(int ii) {
         buf(ii) = dt_f(st + ii);
     });
-    Kokkos::fence();
+    Kokkos::fence("mpi_comm.cpp:775");
 
     g_profiler.mpi_start();
     MPI_CHECK(MPI_Allreduce(MPI_IN_PLACE, buf.data(), count, MPI_DOUBLE,
@@ -818,7 +818,7 @@ void DistributedParticles::allreduce_timestep_subset(int start, int count) {
     Kokkos::parallel_for("unpack_dt_allreduce", count, KOKKOS_LAMBDA(int ii) {
         dt_f(st + ii) = buf(ii);
     });
-    Kokkos::fence();
+    Kokkos::fence("mpi_comm.cpp:785");
 
 #else
     // Host-staged

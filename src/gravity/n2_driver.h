@@ -159,7 +159,7 @@ void run_n2(const char* name, int i0, int ni, int j0, int nj, const K& k) {
     if constexpr (kHostAccessibleDevice) {
         if ((long long)n2_detail::set_size(ni) * nj <= n2_host_max()) {   // tiny set: host loops, same accumulation as the kernel
             constexpr int NSa = K::NS > 0 ? K::NS : 1, NMa = K::NM > 0 ? K::NM : 1;
-            Kokkos::fence();
+            Kokkos::fence("n2_driver.h:160");
             double src[K::NSRC > 0 ? K::NSRC : 1];
             for (int ii = 0; ii < ni; ii++) {
                 const int i = i0 + ii;

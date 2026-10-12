@@ -1,4 +1,5 @@
 #include "forces.h"
+#include "lean_sync.h"
 #include "constants.h"
 #include "integrator.h"
 #include "n2_kernels.h"
@@ -155,7 +156,7 @@ void tree_min_dt(TreeMode mode, Particles& p, int i0, int ni, int j0, int nj, co
     g_tree_stats.dt_sinks += ni;
     g_tree_stats.dt_n2_pairs += (long long)ni * nj;
     if (mode == TreeMode::Host) {
-        Kokkos::fence();
+        Kokkos::fence("forces.cpp:145");
         tree_min_dt_on<HostExec>(p, i0, ni, j0, nj, cv, sid, G, soft2, eta_ff, eta_fb);
     } else {
         tree_min_dt_on<DevExec>(p, i0, ni, j0, nj, cv, sid, G, soft2, eta_ff, eta_fb);
@@ -164,7 +165,7 @@ void tree_min_dt(TreeMode mode, Particles& p, int i0, int ni, int j0, int nj, co
 
 std::vector<double> host_range(const Kokkos::View<double*>& v, int i0, int n) {
     std::vector<double> out(n);
-    auto h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Kokkos::subview(v, Kokkos::make_pair(i0, i0 + n)));
+    auto h = host_copy(Kokkos::subview(v, Kokkos::make_pair(i0, i0 + n)));
     std::memcpy(out.data(), h.data(), n * sizeof(double));
     return out;
 }
@@ -230,6 +231,98 @@ void acceleration_range(Particles& p, int i0, int ni, int j0, int nj, double G, 
 
 void self_acceleration(Particles& p, int start, int count, double G, double soft2) {
     acceleration_range(p, start, count, start, count, G, soft2);
+}
+
+// ==========================================================================
+// gpu-idle prototype (NBODY_OVERLAP): the force on sinks [i0, i0+ni) from sources [j0, j0+nj) in passes split by
+// subsystem membership (subsystem_id >= 0). Pass 1 (field sinks <- field sources) needs no member position, so it
+// can run while the host integrates the subsystems. Pass 2: field sinks <- member sources (added to pass 1), member
+// sinks <- all sources. Not bit-identical to force_range (summation order of the field sinks).
+// ==========================================================================
+namespace {
+template <class K>
+struct IdxK {   // sinks and/or sources through index lists (null: identity)
+    static constexpr int NSRC = K::NSRC, NS = K::NS, NM = K::NM;
+    K k;
+    const int* iidx;
+    const int* jidx;
+    RawView bx, by, bz;   // null: no base; else finish(base + sum)
+    using Sink = typename K::Sink;
+    KOKKOS_INLINE_FUNCTION int I(int i) const { return iidx ? iidx[i] : i; }
+    KOKKOS_INLINE_FUNCTION int J(int j) const { return jidx ? jidx[j] : j; }
+    KOKKOS_INLINE_FUNCTION Sink sink(int i) const { return k.sink(I(i)); }
+    KOKKOS_INLINE_FUNCTION void source(int j, double* s) const { k.source(J(j), s); }
+    KOKKOS_INLINE_FUNCTION void pair(const Sink& a, int i, const double* s, int j, double* sum, double* mn) const {
+        k.pair(a, I(i), s, J(j), sum, mn);
+    }
+    KOKKOS_INLINE_FUNCTION void finish(int i, const Sink& a, const double* sum, const double* mn) const {
+        const int ii = I(i);
+        if (bx.ptr) {
+            double o[3] = {bx(ii) + sum[0], by(ii) + sum[1], bz(ii) + sum[2]};
+            k.finish(ii, a, o, mn);
+        } else {
+            k.finish(ii, a, sum, mn);
+        }
+    }
+};
+}  // namespace
+// field indices at the front, member indices at the back of out[0, n); returns the field count
+int split_range_ext(const Particles& p, int r0, int n, Kokkos::View<int*> f, Kokkos::View<int*> m) {
+    auto sid = p.subsystem_id;
+    int nf = 0;
+    Kokkos::parallel_scan("split_lists", n, KOKKOS_LAMBDA(int jj, int& pre, bool fin) {
+        const int j = r0 + jj;
+        const int isf = sid(j) < 0 ? 1 : 0;
+        if (fin) { if (isf) f(pre) = j; else m(jj - pre) = j; }
+        pre += isf;
+    }, nf);
+    return nf;
+}
+
+SplitLists& split_lists() {
+    static SplitLists L;
+    static bool hook = (Kokkos::push_finalize_hook([] { L = SplitLists(); }), true);
+    (void)hook;
+    return L;
+}
+
+void build_split_lists(Particles& p, int i0, int ni, int j0, int nj, SplitLists& L) {
+    if ((int)L.fidx.extent(0) < p.N) {
+        Kokkos::realloc(L.fidx, p.N); Kokkos::realloc(L.midx, p.N);
+        Kokkos::realloc(L.sfidx, p.N); Kokkos::realloc(L.smidx, p.N);
+        Kokkos::realloc(L.sx, p.N); Kokkos::realloc(L.sy, p.N); Kokkos::realloc(L.sz, p.N);
+    }
+    L.i0 = i0; L.ni = ni; L.j0 = j0; L.nj = nj;
+    L.nf = split_range_ext(p, j0, nj, L.fidx, L.midx);
+    L.nm = nj - L.nf;
+    L.snf = ni > 0 ? split_range_ext(p, i0, ni, L.sfidx, L.smidx) : 0;
+    L.snm = ni - L.snf;
+}
+
+static ForceK<true> force_k(Particles& p, double* ax, double* ay, double* az, double G, double soft2) {
+    return ForceK<true>{{p.x.data()}, {p.y.data()}, {p.z.data()}, {p.mass.data()}, {ax}, {ay}, {az},
+                        p.subsystem_id.data(), G, soft2};
+}
+
+void force_split_field(Particles& p, const SplitLists& L, double G, double soft2) {
+    if (L.snf <= 0) return;
+    IdxK<ForceK<true>> k{force_k(p, L.sx.data(), L.sy.data(), L.sz.data(), G, soft2), L.sfidx.data(), L.fidx.data(),
+                         {nullptr}, {nullptr}, {nullptr}};
+    run_n2("force_ff", 0, L.snf, 0, L.nf, k);
+}
+
+void force_split_member(Particles& p, const SplitLists& L, double G, double soft2) {
+    if (L.ni <= 0) return;
+    if (L.snf > 0) {   // field sinks: pass 1 + member sources
+        IdxK<ForceK<true>> k{force_k(p, p.ax.data(), p.ay.data(), p.az.data(), G, soft2), L.sfidx.data(),
+                             L.midx.data(), {L.sx.data()}, {L.sy.data()}, {L.sz.data()}};
+        run_n2("force_fm", 0, L.snf, 0, L.nm, k);
+    }
+    if (L.snm > 0) {   // member sinks: all sources
+        IdxK<ForceK<true>> k{force_k(p, p.ax.data(), p.ay.data(), p.az.data(), G, soft2), L.smidx.data(), nullptr,
+                             {nullptr}, {nullptr}, {nullptr}};
+        run_n2("force_m_all", 0, L.snm, L.j0, L.nj, k);
+    }
 }
 
 // An empty group gives the other one zero acceleration, which callers kick with
@@ -353,11 +446,11 @@ static void dt_range(Particles& p, int i0, int ni, int j0, int nj, double G, dou
             run_n2("dt_sums", i0, ni, j0, nj, ks);
         }
         if (!check_tree()) return;
-        Kokkos::fence();
+        Kokkos::fence("forces.cpp:300");
         std::vector<double> tdt = host_range(p.dt_adapt, i0, ni), tax, tay, taz;
         if (COLL) { tax = host_range(p.ax, i0, ni); tay = host_range(p.ay, i0, ni); taz = host_range(p.az, i0, ni); }
         run_dtk("dt_subset");
-        Kokkos::fence();
+        Kokkos::fence("forces.cpp:dt_subset");
         compare_or_abort("dt", tdt, host_range(p.dt_adapt, i0, ni), i0);
         if (COLL) {
             compare_or_abort("ax", tax, host_range(p.ax, i0, ni), i0);
@@ -400,7 +493,7 @@ static void neighbor_search_kernel(Particles& p, int start, int count, double G,
         const double *X = p.x.data(), *Y = p.y.data(), *Z = p.z.data(), *VX = p.vx.data(), *VY = p.vy.data(),
                      *VZ = p.vz.data(), *M = p.mass.data();
         if (mode == TreeMode::Host) {
-            Kokkos::fence();
+            Kokkos::fence("forces.cpp:353");
             auto& T = trees<HostExec>();
             T.pos.build(start, count, X, Y, Z, VX, VY, VZ, M, false);
             dtt::ngb_pairs(T.pos, start, count, X, Y, Z, VX, VY, VZ, M, G, r_ngb, r_ngb_max * r_ngb_max, pivot_dt, o,
@@ -411,7 +504,7 @@ static void neighbor_search_kernel(Particles& p, int start, int count, double G,
             dtt::ngb_pairs(T.pos, start, count, X, Y, Z, VX, VY, VZ, M, G, r_ngb, r_ngb_max * r_ngb_max, pivot_dt, o,
                            g_collisional.ngb_inv_mref, g_collisional.r_ngb_wide);
         }
-        Kokkos::fence();
+        Kokkos::fence("forces.cpp:362");
         return;
     }
     NgbK k{{p.x.data()}, {p.y.data()}, {p.z.data()}, {p.mass.data()}, {p.vx.data()}, {p.vy.data()}, {p.vz.data()},
@@ -419,7 +512,7 @@ static void neighbor_search_kernel(Particles& p, int start, int count, double G,
            mgr.ngb_pair_a.data(), mgr.ngb_pair_e.data(), mgr.ngb_pair_E.data(), mgr.max_ngb_pairs,
            G, r_ngb, r_ngb_max * r_ngb_max, pivot_dt, g_collisional.ngb_inv_mref, g_collisional.r_ngb_wide};
     run_n2("ngb_search", start, count, start, count, k);
-    Kokkos::fence();
+    lean_fence("forces.cpp:370");
 }
 
 // NBODY_CHECK_TREE_DT: the pairs found by the tree (sorted, with their a, e, E and bound flag) must equal the O(N^2)
@@ -430,10 +523,10 @@ static void check_ngb_against_n2(Particles& p, int start, int count, double G, d
     struct Row { int i, j, b; double a, e, E; };
     auto rows = [&]() {
         int n = 0;
-        Kokkos::deep_copy(n, Kokkos::subview(mgr.ngb_count, 0));
+        dcopy(n, Kokkos::subview(mgr.ngb_count, 0));
         n = std::min(n, mgr.max_ngb_pairs);
         auto cp = [&](auto v) {
-            return Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Kokkos::subview(v, Kokkos::make_pair(0, n)));
+            return host_copy(Kokkos::subview(v, Kokkos::make_pair(0, n)));
         };
         auto hi = cp(mgr.ngb_pair_i), hj = cp(mgr.ngb_pair_j), hb = cp(mgr.ngb_pair_bound);
         auto ha = cp(mgr.ngb_pair_a), he = cp(mgr.ngb_pair_e), hE = cp(mgr.ngb_pair_E);
@@ -443,13 +536,13 @@ static void check_ngb_against_n2(Particles& p, int start, int count, double G, d
         return r;
     };
     int n_before = 0;
-    Kokkos::deep_copy(n_before, Kokkos::subview(mgr.ngb_count, 0));
+    dcopy(n_before, Kokkos::subview(mgr.ngb_count, 0));
     std::vector<Row> tree_rows = rows();
     // the HHS call sites reset the counter before the search, so the buffer holds this search's pairs only
     mgr.reset_ngb_count();
     neighbor_search_kernel(p, start, count, G, r_ngb, r_ngb_max, pivot_dt, false);
     int n_after = 0;
-    Kokkos::deep_copy(n_after, Kokkos::subview(mgr.ngb_count, 0));
+    dcopy(n_after, Kokkos::subview(mgr.ngb_count, 0));
     std::vector<Row> n2_rows = rows();
     bool ok = n_before == n_after && tree_rows.size() == n2_rows.size();
     for (size_t k = 0; ok && k < tree_rows.size(); k++) {
@@ -478,7 +571,7 @@ void neighbor_search_subset(Particles& p, int start, int count,
     // The kernel counts every pair but stores only max_ngb_pairs: an overflow would silently drop pairs
     // (binaries left undetected are then integrated orbit by orbit by the FSI). Grow and search again.
     int n_found = 0;
-    Kokkos::deep_copy(n_found, Kokkos::subview(g_subsystem_mgr.ngb_count, 0));
+    dcopy(n_found, Kokkos::subview(g_subsystem_mgr.ngb_count, 0));
     if (n_found > g_subsystem_mgr.max_ngb_pairs) {
         g_subsystem_mgr.allocate_ngb_buffers(2 * n_found);
         g_subsystem_mgr.reset_ngb_count();
@@ -511,7 +604,7 @@ std::vector<int> cc_components(Particles& p, int start, int count, double pivot,
     const int max_edges = 16 * count + 1024;
     if ((int)cc_buf(0).extent(0) < max_edges) { Kokkos::realloc(cc_buf(0), max_edges); Kokkos::realloc(cc_buf(1), max_edges); }
     if (cc_buf(2).extent(0) < 1) Kokkos::realloc(cc_buf(2), 1);
-    Kokkos::deep_copy(cc_buf(2), 0);
+    dcopy(cc_buf(2), 0);
     Etas e = etas(eta);
     static Kokkos::View<double*> dmin("cc_dmin", 0);
     static bool hook = (Kokkos::push_finalize_hook([] { dmin = Kokkos::View<double*>(); }), true);
@@ -547,10 +640,10 @@ std::vector<int> cc_components(Particles& p, int start, int count, double pivot,
 #endif
     launch(std::false_type{});
     int n_edges = 0;
-    Kokkos::deep_copy(n_edges, Kokkos::subview(cc_buf(2), 0));
+    dcopy(n_edges, Kokkos::subview(cc_buf(2), 0));
     if (n_edges > max_edges) return sizes;   // dense: one component
-    auto hi = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Kokkos::subview(cc_buf(0), Kokkos::make_pair(0, n_edges)));
-    auto hj = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Kokkos::subview(cc_buf(1), Kokkos::make_pair(0, n_edges)));
+    auto hi = host_copy(Kokkos::subview(cc_buf(0), Kokkos::make_pair(0, n_edges)));
+    auto hj = host_copy(Kokkos::subview(cc_buf(1), Kokkos::make_pair(0, n_edges)));
     std::vector<int> parent(count);
     for (int k = 0; k < count; k++) parent[k] = k;
     auto find = [&](int a) { while (parent[a] != a) { parent[a] = parent[parent[a]]; a = parent[a]; } return a; };
@@ -589,10 +682,9 @@ std::vector<int> cc_components(Particles& p, int start, int count, double pivot,
     for (size_t c = 1; c < sizes.size(); c++) offs[c] = offs[c - 1] + sizes[c - 1];
     order.resize(count);
     for (int k = 0; k < count; k++) order[offs[comp_of_root[root[k]]]++] = start + k;
-    auto hs = Kokkos::create_mirror_view(p.scratch_i);
-    Kokkos::deep_copy(hs, p.scratch_i);
+    auto hs = host_copy(p.scratch_i);
     for (int k = 0; k < count; k++) hs(k) = order[k];
-    Kokkos::deep_copy(p.scratch_i, hs);
+    dcopy(p.scratch_i, hs.v);
     p.apply_permutation(start, count);
     return sizes;
 }
