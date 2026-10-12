@@ -268,7 +268,6 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
     // Save existing subsystems for persistent state transfer, then start fresh.
     std::vector<Subsystem> old_active = std::move(active);
     active.clear();
-    last_level_weak_split = 0;
 
     // Copy neighbor count from device
     auto h_count = host_copy(ngb_count);
@@ -769,63 +768,6 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
                     if (a_in > 0) {
                         sub.orb.a = a_in;
                         sub.orb.e = e_in;
-                    }
-
-                    // Weakly perturbed inner binary (Mikkola & Aarseth 1996 tidal ratio at the closest approach
-                    // of the third body in its current two-body orbit): a non-secular triple (fly-by or Mardling-
-                    // unstable) would integrate the binary orbit by orbit in LogH, e.g. 0.01 AU binary + 190 km/s
-                    // star at 0.05 pc: 9e4 orbits, 1.8e6 GBS steps, 1e-6 energy error. Below WEAK_PERTURBER_GAMMA
-                    // the binary is its own subsystem (secular / Kepler) and the third body a field particle: its
-                    // tide enters through the FSI kicks, as for every field star outside r_ngb. SDAR (Wang et al.
-                    // 2020; FROST-CLUSTERS I App. A2) treats such binaries by slow-down instead. Experimental, off:
-                    // 0.02 AU binary + fly-by at 20 AU periapsis (test weak_flyby_split) runs 60x faster but
-                    // |dE/E| 5.3e-9 vs 1.5e-9 (3.6e-8 at periapsis: the FSI samples the tide at one binary phase).
-                    const double gamma_crit = g_collisional.weak_perturber_gamma;
-                    const double r_in3[3] = {h_x(idx_j)-h_x(idx_i), h_y(idx_j)-h_y(idx_i), h_z(idx_j)-h_z(idx_i)};
-                    const double v_in3[3] = {h_vx(idx_j)-h_vx(idx_i), h_vy(idx_j)-h_vy(idx_i), h_vz(idx_j)-h_vz(idx_i)};
-                    if (gamma_crit > 0.0 && a_in > 0.0 && !(a_out > 0.0 &&
-                            mardling_stability(a_in, a_out, e_out, m1, m2, m3,
-                                               mutual_inclination(r_in3, v_in3, r_out, v_out)))) {
-                        const double r_now = std::sqrt(r_out[0]*r_out[0] + r_out[1]*r_out[1] + r_out[2]*r_out[2]);
-                        const double rv = r_out[0]*v_out[0] + r_out[1]*v_out[1] + r_out[2]*v_out[2];
-                        double r_close = r_now;
-                        if (a_out > 0.0) r_close = std::min(r_now, a_out * (1.0 - e_out));   // bound: comes back
-                        else if (rv < 0.0) r_close = std::min(r_now, -a_out * (e_out - 1.0)); // inbound fly-by
-                        const double r_apo_in = a_in * (1.0 + e_in);
-                        const double gamma = 2.0 * m3 / M_in * std::pow(r_apo_in / std::max(r_close, 1e-300), 3);
-                        const double P_in = 2.0 * M_PI * std::sqrt(a_in * a_in * a_in / (G * M_in));
-                        const int n_orb = (int)std::min(dt_step / P_in, 2e9);
-                        if (gamma < gamma_crit && n_orb >= n_orb_secular) {
-                            std::vector<int> pair_ids = {std::min(inner_i, inner_j), std::max(inner_i, inner_j)};
-                            auto old_pair = old_by_pids.find(make_key(pair_ids));
-                            if (old_pair != old_by_pids.end()) {
-                                sub.id = old_pair->second->id;
-                                sub.has_aux_vel = old_pair->second->has_aux_vel;
-                                std::memcpy(sub.aux_vel_phys, old_pair->second->aux_vel_phys, sizeof(sub.aux_vel_phys));
-                                sub.V_scale = old_pair->second->V_scale;
-                                sub.R_scale = old_pair->second->R_scale;
-                                sub.T_scale = old_pair->second->T_scale;
-                                sub.E_scale = old_pair->second->E_scale;
-                                sub.scales_set = old_pair->second->scales_set;
-                            } else {
-                                sub.id = next_id++;
-                                sub.has_aux_vel = false;
-                                sub.scales_set = false;
-                            }
-                            sub.particle_ids = pair_ids;
-                            sub.n_bodies = 2;
-                            sub.type = SubsystemType::BINARY;
-                            sub.orb.a = a_in;
-                            sub.orb.e = e_in;
-                            if (const PairInfo* pr = find_pair(inner_i, inner_j)) sub.orb.E_orb = pr->E_orb;
-                            sub.orb.period = P_in;
-                            sub.n_orb_per_dt = n_orb;
-                            sub.is_secular = true;
-                            sub.dt_sub = min_dt_members(sub);
-                            last_level_weak_split++;
-                            active.push_back(sub);
-                            continue;
-                        }
                     }
 
                     if (a_out > 0) {
@@ -1404,7 +1346,6 @@ void SubsystemManager::reset_step_diagnostics() {
     step_total_bound = 0;
     step_total_subsystems = 0;
     step_n_bin = 0; step_n_fly = 0; step_n_trip_s = 0; step_n_trip_u = 0; step_n_multi = 0;
-    step_weak_split = 0;
     step_flyby_cm_dropped = 0;
     step_flyby_curved = 0;
     step_ngb_mass_kept = 0;
@@ -1436,7 +1377,6 @@ void SubsystemManager::accumulate_diagnostics() {
     // Use pair counts already computed by detect_from_pairs
     step_total_pairs += last_level_pairs;
     step_total_bound += last_level_bound;
-    step_weak_split += last_level_weak_split;
     step_flyby_cm_dropped += last_level_flyby_cm_dropped;
     step_flyby_curved += last_level_flyby_curved;
     step_ngb_mass_kept += last_level_ngb_mass_kept;
@@ -1464,7 +1404,6 @@ void SubsystemManager::print_step_summary() const {
                 step_total_pairs, step_total_bound, step_total_subsystems, step_total_members);
     std::printf("      Types:  bin=%d  fly=%d  tri_s=%d  tri_u=%d  multi=%d",
                 step_n_bin, step_n_fly, step_n_trip_s, step_n_trip_u, step_n_multi);
-    if (step_weak_split > 0) std::printf("  weak_split=%d", step_weak_split);
     if (step_flyby_cm_dropped > 0) std::printf("  flyby_cm_dropped=%d", step_flyby_cm_dropped);
     if (step_flyby_curved > 0) std::printf("  flyby_curved=%d", step_flyby_curved);
     if (step_ngb_mass_kept > 0) std::printf("  ngb_mass_kept=%d", step_ngb_mass_kept);

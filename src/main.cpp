@@ -615,7 +615,6 @@ int main(int argc, char** argv) {
             g_collisional.eta_gbs         = cfg.get_double("ETA_GBS");
             g_collisional.eta_pert        = cfg.get_double("ETA_PERT");
             g_collisional.tidal_gamma     = cfg.get_double("TIDAL_GAMMA");
-            g_collisional.weak_perturber_gamma = cfg.get_double("WEAK_PERTURBER_GAMMA");
             g_collisional.flyby_ngb_cm    = cfg.get_bool("FLYBY_NGB_CM");
             ngb_mass_scaling              = cfg.get_bool("NGB_MASS_SCALING");
             ngb_mref                      = cfg.get_double("NGB_MREF");   // <m> override [Msun] (tests)

@@ -1,6 +1,6 @@
 # Config reference
 
-All 139 keys of the config file (`config.txt`, or `--config <file>`), generated from the parameter table in `src/core/params.cpp` by `scripts/gen_config_md.py`. Every key has one default, in that table; an unknown key in a config file is an error. Each run writes the effective value of every key, and whether it came from the file or the default, to `run_params.txt`.
+All 138 keys of the config file (`config.txt`, or `--config <file>`), generated from the parameter table in `src/core/params.cpp` by `scripts/gen_config_md.py`. Every key has one default, in that table; an unknown key in a config file is an error. Each run writes the effective value of every key, and whether it came from the file or the default, to `run_params.txt`.
 
 Levels:
 
@@ -138,7 +138,6 @@ Levels:
 | `NGB_WIDE_FAC` | double | `0` | **experiment** |  | Bound pairs with a < NGB_WIDE_FAC x R_NGB are neighbours (wide binaries; 0: off, BIFROST) |
 | `TIDAL_GAMMA` | double | `0.0` | **experiment** |  | Binaries with \|tidal acceleration\| / \|internal acceleration\| above this resolve their orbit (TIDAL_RES) |
 | `TIDAL_RES` | double | `0.05` | **experiment** |  | With TIDAL_GAMMA: dt <= TIDAL_RES x period (0: off) |
-| `WEAK_PERTURBER_GAMMA` | double | `0.0` | **experiment** |  | A non-secular triple whose third body perturbs the inner binary below this tidal ratio is split (0: off) |
 | `MSTAR_THRESHOLD` | int | `8` | **experiment** |  | Subsystems of at least this many bodies for MSTAR (not wired: printed only, every subsystem uses LogH) |
 
 ## Output

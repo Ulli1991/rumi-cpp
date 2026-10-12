@@ -158,8 +158,6 @@ const std::vector<ParamSpec> kParams = {
     {"TIDAL_GAMMA", D, "0.0", "Subsystems", EXPERIMENT, "",
      "Binaries with |tidal acceleration| / |internal acceleration| above this resolve their orbit (TIDAL_RES)"},
     {"TIDAL_RES", D, "0.05", "Subsystems", EXPERIMENT, "", "With TIDAL_GAMMA: dt <= TIDAL_RES x period (0: off)"},
-    {"WEAK_PERTURBER_GAMMA", D, "0.0", "Subsystems", EXPERIMENT, "",
-     "A non-secular triple whose third body perturbs the inner binary below this tidal ratio is split (0: off)"},
     {"MSTAR_THRESHOLD", I, "8", "Subsystems", EXPERIMENT, "",
      "Subsystems of at least this many bodies for MSTAR (not wired: printed only, every subsystem uses LogH)"},
 

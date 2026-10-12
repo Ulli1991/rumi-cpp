@@ -26,8 +26,6 @@ struct CollisionalConfig {
     double eta_pert = 0.02;            // perturbation timestep for subsystems
     bool secular_triples = true;        // SECULAR_TRIPLES: stable triples with >= N_ORB_SECULAR inner orbits per step use the
                                         // double-averaged secular path; false sends them to LogH (FROST-CLUSTERS I dropped it for SDAR)
-    double weak_perturber_gamma = 0.0;  // WEAK_PERTURBER_GAMMA (experimental, off): a non-secular triple whose third body perturbs the inner
-                                        // binary below this tidal ratio is split (binary subsystem + field star); 0: off
     double tidal_gamma = 0.0;          // TIDAL_GAMMA: binaries with |tidal accel| / |internal accel| above this resolve
     double flyby_cm_eps = 0.0;         // FLYBY_CM_EPS (either fly-by velocity; 0: off): tidal-sampling pair step that bounds the
                                        //   energy a slow particle's kicks put into a subsystem per step by this x |E0|

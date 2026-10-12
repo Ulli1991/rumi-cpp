@@ -179,7 +179,7 @@ void visit_config(CollisionalConfig& c, F&& f) {
     f("enabled", c.enabled); f("r_ngb", c.r_ngb); f("r_ngb_max", c.r_ngb_max);
     f("eta_ff", c.eta_ff); f("eta_fb", c.eta_fb); f("eta_grad", c.eta_grad); f("eta_jerk", c.eta_jerk);
     f("eta_va", c.eta_va); f("eta_gbs", c.eta_gbs); f("eta_pert", c.eta_pert);
-    f("secular_triples", c.secular_triples); f("weak_perturber_gamma", c.weak_perturber_gamma);
+    f("secular_triples", c.secular_triples);
     f("tidal_gamma", c.tidal_gamma); f("flyby_cm_eps", c.flyby_cm_eps); f("e_ref", c.e_ref);
     f("tidal_step_res", c.tidal_step_res); f("flyby_ngb_cm", c.flyby_ngb_cm); f("tidal_res", c.tidal_res);
     f("eta_restart", c.eta_restart); f("sdar", c.sdar); f("sdar_kref", c.sdar_kref); f("sdar_c", c.sdar_c);

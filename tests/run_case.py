@@ -105,10 +105,6 @@ HIER_LOGH = dict(TEST_CASE="triple_test", INTEGRATOR="hhs", TRIPLE_A_IN_PC="1e-7
                  TOTAL_TIME_MYR="6e-7", DT_MAX_MYR="6e-7", DT_MIN_MYR="1e-16", SOFTENING_PC="0", COLLISIONAL="true",
                  R_NGB="1e-3", R_NGB_MAX="0.1", N_ORB_SECULAR="3", PN_ORDER="0", SSE_ENABLED="false",
                  ETA_RESTART="1e-8", ETA_GBS="1e-10", PRINT_INTERVAL="1", PROFILING="false")
-# The same binary and a hyperbolic fly-by (periapsis 20 AU, e = 5, from 100 AU): tidal ratio ~1e-9, ~2400 binary
-# orbits per half step of 5 yr
-WEAK_FLYBY = dict(HIER_LOGH, TRIPLE_A_OUT_PC="1e-4", TRIPLE_E_OUT="5.0", TOTAL_TIME_MYR="4e-5", DT_MAX_MYR="1e-5",
-                  FLYBY_CM_VELOCITY="true")
 # Wang, Nitadori & Makino 2020 (SDAR) Table 1 B-S triple in physical units: inner 0.9 + 0.1 Msun at 0.02 AU,
 # e = 0.9; outer 2 Msun at 20 AU, e = 0.99; 80 deg; both at apocentre. t_KL ~ 680 yr (their Eq. 53), 2.3e5 inner
 # orbits; kappa ~ 52 at the outer apocentre (as in the paper). LogH path (SECULAR_TRIPLES = false).
@@ -568,15 +564,6 @@ def flyby_member(exe, label, cfg, bound):
     tri = sum(int(c) for c in re.findall(r"tri_u=(\d+)", out))
     logh = sum(int(c) for c in re.findall(r"Integration: LogH=(\d+)", out))
     ok = check(f"{label} unstable triples", tri, 0) & check(f"{label} LogH calls", logh, 0)
-    return ok & check(f"{label} max|dE/E|", max(r[0] for r in diagnostics(out)), bound)
-
-
-def weak_split(exe, label, cfg, bound):
-    """WEAK_PERTURBER_GAMMA: the weakly perturbed binary of a fly-by triple is split off (secular binary)."""
-    out = run_output(exe, cfg)
-    n = sum(int(c) for c in re.findall(r"weak_split=(\d+)", out))
-    gbs = sum(int(c) for c in re.findall(r"\(gbs=(\d+)", out))
-    ok = check(f"{label} triples split", n, 1, lower=True) & check(f"{label} LogH GBS steps", gbs, 0)
     return ok & check(f"{label} max|dE/E|", max(r[0] for r in diagnostics(out)), bound)
 
 
@@ -1426,10 +1413,6 @@ CASES = {
     "ngb_mass_scaling": lambda exe: floor(exe, "black hole passing a wide binary, mass-scaled r_ngb",
                                           dict(BH_FLYBY, NGB_MASS_SCALING="true"), (5.8e-14, 5.8e-14, 1e30, 1e30)),
     "logh_hierarchy_complete": lambda exe: logh_complete(exe, "tight binary in unstable triple", HIER_LOGH, 1.1e-11),
-    # Experimental split (off by default). Without: LogH, 575k GBS steps, 3.7 s, |dE/E| 1.5e-9 (max). With:
-    # 0.06 s, max 3.6e-8 at periapsis, 5.3e-9 at the end
-    "weak_flyby_split": lambda exe: weak_split(exe, "weak fly-by split", dict(WEAK_FLYBY, WEAK_PERTURBER_GAMMA="1e-8"),
-                                               4.7e-8),
     "triple_id_order": lambda exe: triple_order(exe, "secular triple", SEC_TRIPLE, 1e-6),
     # SDAR (M3; Wang, Nitadori & Makino 2020; FROST-CLUSTERS I App. A2). Before (no SDAR key, plain LogH): GBS
     # step ratio 1, no slowed call. B-S triple (W20 Table 1), 0.07 t_KL: kappa_max 51.7 as in W20 sec. 7.1;

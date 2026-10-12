@@ -257,7 +257,7 @@ Only the items below are adopted; everything else in those documents is referenc
 |---|---|---|
 | B-1 | FC criteria set: c.o.m. velocity, jerk off, v/a off, eta_grad 0.2 | c.o.m. part merged (off by default, decision after prod runs); jerk/v-a off ("b1") mixed at 20k -> 200k 3-seed A/B still open |
 | F-1 | secular triples off -> LogH | switch SECULAR_TRIPLES merged (default on); no triples formed at 20k; decide with SDAR on 200k |
-| C-1/C-2 | weak-perturber split; field sees c.o.m. of split binaries | C-1 alone 3.6x worse; C-2 not done (SDAR + collisions removed most stalls; revisit only if stalls return) |
+| C-1/C-2 | weak-perturber split; field sees c.o.m. of split binaries | C-1 alone 3.6x worse (WEAK_PERTURBER_GAMMA deleted 2026-10-12); C-2 not done (SDAR + collisions removed most stalls; revisit only if stalls return) |
 | E-1/E-3 | eta_GBS 1e-8, end-time tol 1e-2 (FC production values) | 20k: no speed gain; repeat at 200k after Kepler path (less LogH work left) |
 | D-1 | SDAR | done, default off (no gain at 200k now; keep for dense/triple-rich runs) |
 | J-1/J-2 | per-depth overhead, host path for small batches | J-1 done (F2/AUDIT G); J-2 = SCALING P2 host-resident subtrees |
@@ -287,6 +287,7 @@ The code before the deletions is tagged archive/pre-step2-deletions.
 |---|---|---|
 | ALL_SLOW_SPLIT | true: fsi(S, tau/2) twice (6655494: 16x lower error, same time) | deleted 2026-10-12, winner hard-wired |
 | SUBSYS_COLLISIONS | true: collisions decided inside LogH/GBS at the pericentre, FC-I App. B3 (7de902c, 043190d) | deleted 2026-10-12, winner hard-wired |
+| WEAK_PERTURBER_GAMMA | off: no weak-perturber split (C-1, 7c5b3ca: 3.6x worse energy); test weak_flyby_split deleted | deleted 2026-10-12, winner hard-wired |
 
 ## Pending evaluations (agents stopped mid-work)
 - Task runtimes (HPX/Charm++/Legion): literature says tasks must be >= ~100 us; evaluate only at subtree granularity.
