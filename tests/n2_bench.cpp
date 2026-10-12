@@ -163,7 +163,7 @@ int main(int argc, char** argv) {
             for (int i = 0; i < N; i++) hs(i) = cl.sid[i];
             Kokkos::deep_copy(sid, hs);
         }
-        Kokkos::deep_copy(kt, 1e30);   // PairVelocities::k: non-members
+        Kokkos::deep_copy(kt, 1e30);   // TidalSampling::k: non-members
         Kokkos::deep_copy(kf, 0.0);
         const double G = G_CODE, eta = 0.2, dtg = 1e-3 / 0.9778;   // gradient kick step of 1e-3 Myr in code units
         RawView X{x.data()}, Y{y.data()}, Z{z.data()}, VX{vx.data()}, VY{vy.data()}, VZ{vz.data()}, M{m.data()};
@@ -242,19 +242,19 @@ int main(int argc, char** argv) {
                               G * dtg * dtg * GRAD_COEFF, 0.0, 1.0 / (dtg * dtg)};
                 bench("grad", [&] { run_n2("bench_grad", 0, c.ni, 0, c.nj, k); }, {ax, ay, az, gm});
             }
-            // production time-step kernel: collisional, component velocities (CV = false), tidal k present
+            // production time-step kernel: collisional, tidal k present
             if (want("dt")) {
-                DtK<true, false, false, true> k{X, Y, Z, M, VX, VY, VZ, AX, AY, AZ, DT, VX, VY, VZ, KT, KF, sid.data(),
+                DtK<true, false, true> k{X, Y, Z, M, VX, VY, VZ, AX, AY, AZ, DT, KT, KF, sid.data(),
                                                 G, 0.0, eta, eta, 0.0};
                 bench("dt", [&] { run_n2("bench_dt", 0, c.ni, 0, c.nj, k); }, {dt, ax, ay, az});
             }
             if (want("dt64")) {   // without the fp32 pre-reject
-                DtK<true, false, false, false> k{X, Y, Z, M, VX, VY, VZ, AX, AY, AZ, DT, VX, VY, VZ, KT, KF, sid.data(),
+                DtK<true, false, false> k{X, Y, Z, M, VX, VY, VZ, AX, AY, AZ, DT, KT, KF, sid.data(),
                                                  G, 0.0, eta, eta, 0.0};
                 bench("dt64", [&] { run_n2("bench_dt64", 0, c.ni, 0, c.nj, k); }, {dt, ax, ay, az});
             }
             if (want("accdt")) {
-                AccDtK<true> k{X, Y, Z, M, VX, VY, VZ, AX, AY, AZ, DT, VX, VY, VZ, KT, KF, sid.data(), G, 0.0, eta, eta,
+                AccDtK<true> k{X, Y, Z, M, VX, VY, VZ, AX, AY, AZ, DT, KT, KF, sid.data(), G, 0.0, eta, eta,
                                0.0, 0.0};
                 bench("accdt", [&] { run_n2("bench_accdt", 0, c.ni, 0, c.nj, k); }, {dt, ax, ay, az});
             }

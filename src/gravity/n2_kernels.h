@@ -18,10 +18,10 @@ struct ForceK {
     KOKKOS_INLINE_FUNCTION Sink sink(int i) const { return {x(i), y(i), z(i), COLL ? sid[i] : -1}; }
     KOKKOS_INLINE_FUNCTION void source(int j, double* s) const {
         s[0] = x(j); s[1] = y(j); s[2] = z(j); s[3] = G * m(j);
-        if (COLL) s[4] = static_cast<double>(sid[j]);
+        if (COLL) s[4] = n2_pack(sid[j]);
     }
     KOKKOS_INLINE_FUNCTION void pair(const Sink& a, int i, const double* s, int j, double* sum, double*) const {
-        const bool w = pair_weight(i, j, a.sid, COLL ? static_cast<int>(s[4]) : -1);
+        const bool w = pair_weight(i, j, a.sid, COLL ? n2_lo(s[4]) : -1);
         double dx = s[0] - a.x, dy = s[1] - a.y, dz = s[2] - a.z;
         double r2 = w ? dx * dx + dy * dy + dz * dz + soft2 : 1.0;
         double ir = fast_rsqrt(r2);
@@ -52,10 +52,10 @@ struct GradK {
     KOKKOS_INLINE_FUNCTION void source(int j, double* s) const {
         s[0] = x(j); s[1] = y(j); s[2] = z(j); s[3] = coeff * m(j);
         s[4] = jsx(j - joff); s[5] = jsy(j - joff); s[6] = jsz(j - joff);
-        if (COLL) s[7] = static_cast<double>(sid[j]);
+        if (COLL) s[7] = n2_pack(sid[j]);
     }
     KOKKOS_INLINE_FUNCTION void pair(const Sink& a, int i, const double* s, int j, double* sum, double*) const {
-        const bool w = pair_weight(i, j, a.sid, COLL ? static_cast<int>(s[7]) : -1);
+        const bool w = pair_weight(i, j, a.sid, COLL ? n2_lo(s[7]) : -1);
         double dx = s[0] - a.x, dy = s[1] - a.y, dz = s[2] - a.z;
         double dax = s[4] - a.ax, day = s[5] - a.ay, daz = s[6] - a.az;
         double r2 = w ? dx * dx + dy * dy + dz * dz + soft2 : 1.0;
@@ -93,49 +93,51 @@ KOKKOS_INLINE_FUNCTION double pair_dt(double r2s, double ir, double dx, double d
     return Kokkos::fmin(eta_ff * tff, eta_fb * tfb);
 }
 
-// Single-precision pre-reject of the pair time step (AUDIT G row 2a; device code with DT_FP32_PREREJECT, default on).
-// DtK is FP64-throughput bound and the FP32 pipe idles, while most pairs are distant and rejected by the fp64 test of
-// pair_dt_below. pair_dt_reject_f32 decides the same question in fp32 and only ever says "reject" when the pair cannot
-// lower the minimum, so skipping its fp64 evaluation leaves the minimum bit-identical:
+// Single-precision pre-rejects of the pair time step (AUDIT G row 2a) and of the tidal-sampling step (device code with
+// DT_FP32_PREREJECT, default on; DtK and AccDtK). The time-step kernels are FP64-throughput bound and the FP32 pipe
+// idles, while most pairs are distant and rejected by the fp64 test of pair_dt_below. The fp32 tests decide the same
+// question and only ever say "reject" when the pair cannot lower the minimum, so skipping its fp64 evaluation leaves
+// the minimum bit-identical:
 //  * Exact inequality (pair_dt_below below): pair_dt >= min over ff, fb of eta t / (2 (1 + |d|)), d = c t eta, taken
 //    on the fp64 inputs (r2s, dx.., dv.., m) as exact numbers.
-//  * fp32 errors: inputs rounded to fp32 (rel. u = 2^-24); rsqrtf <= 2 ulp; t_ff, t_fb, r, v and the factor
-//    (1 + G m / (r v^2)) are products/quotients of positive terms, so their relative error is below ~20 u = 1.2e-6.
-//    r.dv can cancel: its absolute error is <= 5 u sum |x_k| |v_k| <= 5 u r v (Cauchy-Schwarz, r >= |dx| since
-//    r2s = |dx|^2 + soft2), so |r.dv| <= |r.dv|_32 + 1e-6 r v is an upper bound (1e-6 > 5 u with room for the fp32
-//    r and v). cur is rounded to fp32 (rel. u).
+//  * fp32 inputs: r2s, |dv|^2 and r.dv are formed in fp64 (|dv|^2: rel. error < 4e-16; r.dv: abs. error < 4e-16 r v
+//    by Cauchy-Schwarz, r >= |dx| since r2s = |dx|^2 + soft2) and rounded to fp32 (rel. u = 2^-24); G m_sum is
+//    (float)G ((float)m_i + (float)m_j) (rel. < 4u); cur is rounded to fp32 (rel. u). rsqrtf <= 2 ulp; t_ff, t_fb, r,
+//    v and the factor (1 + G m / (r v^2)) are products/quotients of positive terms, so their relative error is below
+//    ~20 u = 1.2e-6. |r.dv| <= |r.dv|_32 + 1e-6 r v is an upper bound (1e-6 r v > u |r.dv| + 4e-16 r v, with room for
+//    the fp32 r and v).
 //  * The test eta t_32 (1 - 4e-5) >= 3 cur_32 (1 + 4e-5) (1 + |d|_up32 (1 + 4e-5)) for both criteria therefore
 //    implies the exact eta t >= 3 (1 - 1e-5) cur (1 + |d|), i.e. pair_dt >= 1.49 cur: the same premise as the fp64
 //    test below (factor 3, i.e. margin 1.5 over the exact factor 2), whose fp64 evaluation error it already covers.
 //  * Range: r2s outside [1e-30, 1e30] is not tested (no reject). Overflow on the right side gives inf (< 3e38 fails:
 //    no reject), NaN fails every comparison (no reject); an infinite left side means a true value beyond FLT_MAX,
 //    above any finite right side.
-// NBODY_CHECK_DT_FP32=1 runs the fp64-only kernel after every time-step kernel and aborts on any bitwise difference
-// (forces.cpp). Measured (one A100, 200k sources, 20 % binary members): DtK x1.27 for 50k sinks, x1.31 at 1e6, x1.15
-// for 1024 sinks, bit-identical, and no rejected pair below the running minimum in a per-pair check.
-KOKKOS_INLINE_FUNCTION bool pair_dt_reject_f32(double cur, double r2s, double dx, double dy, double dz, double dvx,
-                                               double dvy, double dvz, double G, double msum, double eta_ff,
-                                               double eta_fb) {
+// Cost: 64-bit conversions run at half the FP64 rate on A100 (16/clk/SM) and the old version converted ~15 values per
+// pair (positions, velocities, masses, k, cur), as much FP64-pipe time as the fp64 arithmetic of the pair. Now a pair
+// converts three (r2s, |dv|^2, r.dv): m, k and 1/m come as fp32 from the source tile (n2_pack) and the sink, cur from
+// DtSink::curf (refreshed only when the minimum changes).
+// NBODY_CHECK_DT_FP32=1 runs the fp64-only DtK after every time-step kernel and aborts on any bitwise difference
+// (forces.cpp); n2-bench checksums dt against dt64.
 #if (defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)) && defined(DT_FP32_PREREJECT)
-    const float r2 = (float)r2s;
+#define N2_DT_F32 1
+#endif
+KOKKOS_INLINE_FUNCTION bool pair_dt_reject_f32(float cur, float r2, float ir, double v2s, double rdvs, float gm,
+                                               float eff, float efb) {
+#ifdef N2_DT_F32
     if (!(r2 >= 1e-30f && r2 <= 1e30f)) return false;
-    const float x = (float)dx, y = (float)dy, z = (float)dz, u = (float)dvx, v = (float)dvy, w = (float)dvz;
-    const float v2 = u * u + v * v + w * w + 1e-30f;
-    const float ir = rsqrtf(r2), r = r2 * ir;
-    const float gm = (float)G * (float)msum;
+    const float v2 = (float)v2s + 1e-30f;
+    const float r = r2 * ir;
     const float tff = r2 * rsqrtf(r * (gm + 1e-30f));
     const float iv = rsqrtf(v2), tfb = r * iv;
-    const float rdv = fabsf(x * u + y * v + z * w) + 1e-6f * r * v2 * iv;   // >= |r.dv|
+    const float rdv = fabsf((float)rdvs) + 1e-6f * r * v2 * iv;   // >= |r.dv|
     const float c = rdv * ir * ir;
-    const float eff = (float)eta_ff, efb = (float)eta_fb;
     const float dff = 1.5f * c * tff * eff;
     const float dfb = c * (1.0f + gm * ir * iv * iv) * tfb * efb;
-    const float c3 = 3.0f * (float)cur * (1.0f + 4e-5f);
+    const float c3 = 3.0f * cur * (1.0f + 4e-5f);
     const float rff = c3 * (1.0f + dff * (1.0f + 4e-5f)), rfb = c3 * (1.0f + dfb * (1.0f + 4e-5f));
     return rff < 3e38f && rfb < 3e38f && eff * tff * (1.0f - 4e-5f) >= rff && efb * tfb * (1.0f - 4e-5f) >= rfb;
 #else
-    (void)cur; (void)r2s; (void)dx; (void)dy; (void)dz; (void)dvx; (void)dvy; (void)dvz; (void)G; (void)msum;
-    (void)eta_ff; (void)eta_fb;
+    (void)cur; (void)r2; (void)ir; (void)v2s; (void)rdvs; (void)gm; (void)eff; (void)efb;
     return false;
 #endif
 }
@@ -144,12 +146,9 @@ KOKKOS_INLINE_FUNCTION bool pair_dt_reject_f32(double cur, double r2s, double dx
 // eta t (1 + d / (1 + sqrt(1 + d^2))) >= eta t / (2 (1 + |d|)) for either criterion. Pairs that pass the test (with a
 // further factor 1.5 margin) get the unchanged pair_dt, so the minimum over pairs is bit-identical; most distant
 // pairs skip two reciprocal roots and both divisions.
-// F32: try pair_dt_reject_f32 first (DtK).
-template <bool F32 = false>
 KOKKOS_INLINE_FUNCTION double pair_dt_below(double cur, double r2s, double ir, double dx, double dy, double dz,
                                             double dvx, double dvy, double dvz, double G, double msum,
                                             double eta_ff, double eta_fb) {
-    if (F32 && pair_dt_reject_f32(cur, r2s, dx, dy, dz, dvx, dvy, dvz, G, msum, eta_ff, eta_fb)) return 1e30;
     const double Gm = G * msum;
     const double v_sq = dvx * dvx + dvy * dvy + dvz * dvz;
     const double r = r2s * ir;
@@ -248,24 +247,66 @@ KOKKOS_INLINE_FUNCTION double tidal_sampling_dt(double ki, double kj, double mi,
     return Kokkos::fmax(Kokkos::fmin(ki / mj, kj / mi) * r2s * Kokkos::sqrt(r2s), Kokkos::fmax(fi, fj));
 }
 
-// tidal_sampling_dt, or 1e30 when it cannot go below `cur` (F32, device code with DT_FP32_PREREJECT): the step is
-// >= min(k_i / m_j, k_j / m_i) r^3, evaluated in fp32 (inputs rel. u, IEEE division, sqrtf <= 3 ulp: rel. error
-// < 1e-6, covered by the factors 1 -+ 4e-5); an overflow to inf means a true value beyond FLT_MAX > cur, NaN fails.
-// Non-members carry k = 1e30, so almost every pair skips the two fp64 divisions and the square root.
-template <bool F32>
-KOKKOS_INLINE_FUNCTION double tidal_sampling_dt_below(double cur, double ki, double kj, double mi, double mj, double r2s,
-                                                      double fi, double fj) {
-#if (defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)) && defined(DT_FP32_PREREJECT)
-    if (F32) {
-        const float r2 = (float)r2s;
-        if (r2 >= 1e-30f) {
-            const float k1 = (float)ki, k2 = (float)kj, m1 = (float)mi, m2 = (float)mj;
-            const float lb = fminf(k1 / m2, k2 / m1) * r2 * sqrtf(r2) * (1.0f - 4e-5f);
-            if (lb >= (float)cur * (1.0f + 4e-5f)) return 1e30;
-        }
-    }
+// fp32 pre-reject of tidal_sampling_dt (device code with DT_FP32_PREREJECT): the step is >= min(k_i / m_j, k_j / m_i)
+// r^3, evaluated as min(k_i (1/m_j), k_j (1/m_i)) r2 r with fp32 k and 1/m (k rel. u, 1/m = 1 / (float)m rel. 2u) and
+// r = r2 rsqrtf(r2) (rsqrtf <= 2 ulp): rel. error < 1e-6, covered by the factors 1 -+ 4e-5; an overflow to inf means a
+// true value beyond FLT_MAX > cur, NaN fails. Non-members carry k = 1e30, so almost every pair skips the two fp64
+// divisions and the square root.
+KOKKOS_INLINE_FUNCTION bool tidal_dt_reject_f32(float cur, float r2, float r, float ki, float rmj, float kj, float rmi) {
+#ifdef N2_DT_F32
+    if (!(r2 >= 1e-30f)) return false;
+    return fminf(ki * rmj, kj * rmi) * r2 * r * (1.0f - 4e-5f) >= cur * (1.0f + 4e-5f);
+#else
+    (void)cur; (void)r2; (void)r; (void)ki; (void)rmj; (void)kj; (void)rmi;
+    return false;
 #endif
-    return tidal_sampling_dt(ki, kj, mi, mj, r2s, fi, fj);
+}
+
+// Sink of the time-step kernels. m32, k32, rm32: fp32 m, k, 1/m for the pre-rejects; curf: the running minimum in fp32
+// (updated with it, so a pair does not convert it)
+struct DtSink {
+    double x, y, z, m, vx, vy, vz, k, kf;
+    int sid;
+    float m32, k32, rm32;
+    mutable float curf;
+};
+KOKKOS_INLINE_FUNCTION DtSink dt_sink(double x, double y, double z, double m, double vx, double vy, double vz,
+                                      double k, double kf, int sid) {
+    const float m32 = (float)m;
+    return {x, y, z, m, vx, vy, vz, k, kf, sid, m32, (float)k, 1.0f / m32, 1e30f};
+}
+// fmin(mn[0], t), keeping curf = (float)mn[0]
+KOKKOS_INLINE_FUNCTION void dt_min(const DtSink& a, double* mn, double t) {
+#ifdef N2_DT_F32
+    if (t < mn[0]) { mn[0] = t; a.curf = (float)t; }
+#else
+    (void)a;
+    mn[0] = Kokkos::fmin(mn[0], t);
+#endif
+}
+
+// Running-minimum update of the time-step kernels by one pair: the pair step (pair-step velocity difference cd) and,
+// in collisional mode, the tidal-sampling step, each skipped when its fp32 pre-reject (F32) shows that it cannot go
+// below the minimum. Source data: m (fp64), m32, and k, kf, k32, rm32 (collisional)
+template <bool COLL, bool F32>
+KOKKOS_INLINE_FUNCTION void dt_pair_min(const DtSink& a, double* mn, bool w, double r2s, double ir, double dx, double dy,
+                                        double dz, double cdx, double cdy, double cdz, double G, double eta_ff,
+                                        double eta_fb, double mj, float m32j, double kj, double kfj, float k32j,
+                                        float rm32j) {
+    bool rp = false, rt = false;
+#ifdef N2_DT_F32
+    if (F32) {
+        const float r2f = (float)r2s, irf = rsqrtf(r2f);
+        rp = pair_dt_reject_f32(a.curf, r2f, irf, cdx * cdx + cdy * cdy + cdz * cdz, dx * cdx + dy * cdy + dz * cdz,
+                                (float)G * (a.m32 + m32j), (float)eta_ff, (float)eta_fb);
+        if (COLL) rt = tidal_dt_reject_f32(a.curf, r2f, r2f * irf, a.k32, rm32j, k32j, a.rm32);
+    }
+#else
+    (void)m32j; (void)k32j; (void)rm32j;
+#endif
+    double t = rp ? 1e30 : pair_dt_below(mn[0], r2s, ir, dx, dy, dz, cdx, cdy, cdz, G, a.m + mj, eta_ff, eta_fb);
+    if (COLL) t = Kokkos::fmin(t, rt ? 1e30 : tidal_sampling_dt(a.k, kj, a.m, mj, r2s, a.kf, kfj));
+    dt_min(a, mn, w ? t : 1e30);
 }
 
 // Time steps of the sinks from the sources (HHS subset). Collisional mode also accumulates the
@@ -275,54 +316,67 @@ KOKKOS_INLINE_FUNCTION double tidal_sampling_dt_below(double cur, double ki, dou
 // are accumulated here, with the same per-pair expressions and order as without MN_IN, so they are bit-identical.
 // The pair time steps take the component velocities, the staged vx..vz (the subsystem c.o.m. velocities of
 // FLYBY_CM_VELOCITY, a second staged copy, were deleted 2026-10-12).
-// F32: single-precision pre-rejects of the pair and tidal-sampling steps (pair_dt_reject_f32; bit-identical minimum).
-template <bool COLL, bool MN_IN = false, bool F32 = true>
+// F32: single-precision pre-rejects of the pair and tidal-sampling steps (bit-identical minimum, see above).
+// JERK = false: no jerk sums (ETA_JERK = 0, the default; run_n2 below picks it): the acceleration sums and the minimum
+// are the same expressions in the same order, so bit-identical, at ~10 fewer FP64 operations per pair.
+// Source tile: x y z m vx vy vz | (sid, fp32 m) | k kf (fp32 k, fp32 1/m) (collisional)
+template <bool COLL, bool MN_IN = false, bool F32 = true, bool JERK = true>
 struct DtK {
-    static constexpr int KI = 8;   // source slots of k and kf (collisional)
-    static constexpr int NSRC = COLL ? KI + 2 : 7, NS = COLL ? 6 : 0, NM = 1;
+    static constexpr int KI = 8;     // source slots of k, kf and the packed (fp32 k, fp32 1/m) (collisional)
+    static constexpr int NSRC = COLL ? KI + 3 : 8, NS = COLL ? (JERK ? 6 : 3) : 0, NM = 1;
     RawView x, y, z, m, vx, vy, vz, ax, ay, az, dt;
     RawView ktid, kfl;       // TidalSampling::k, kf (null: no tidal-sampling step)
     const int* sid;
     double G, soft2, eta_ff, eta_fb, eta_jerk;
-    struct Sink { double x, y, z, m, vx, vy, vz, k, kf; int sid; };
+    using Sink = DtSink;
+    template <bool J>
+    DtK<COLL, MN_IN, F32, J> with_jerk() const {
+        return {x, y, z, m, vx, vy, vz, ax, ay, az, dt, ktid, kfl, sid, G, soft2, eta_ff, eta_fb, eta_jerk};
+    }
     KOKKOS_INLINE_FUNCTION Sink sink(int i) const {
-        return {x(i), y(i), z(i), m(i), vx(i), vy(i), vz(i), (COLL && ktid.ptr) ? ktid(i) : 1e30,
-                (COLL && ktid.ptr) ? kfl(i) : 0.0, COLL ? sid[i] : -1};
+        return dt_sink(x(i), y(i), z(i), m(i), vx(i), vy(i), vz(i), (COLL && ktid.ptr) ? ktid(i) : 1e30,
+                       (COLL && ktid.ptr) ? kfl(i) : 0.0, COLL ? sid[i] : -1);
     }
     KOKKOS_INLINE_FUNCTION void source(int j, double* s) const {
         s[0] = x(j); s[1] = y(j); s[2] = z(j); s[3] = m(j); s[4] = vx(j); s[5] = vy(j); s[6] = vz(j);
+        const float m32 = (float)s[3];
+        s[7] = n2_pack(COLL ? sid[j] : -1, m32);
         if (COLL) {
-            s[7] = static_cast<double>(sid[j]);
             s[COLL ? KI : 0] = ktid.ptr ? ktid(j) : 1e30;
             s[COLL ? KI + 1 : 0] = ktid.ptr ? kfl(j) : 0.0;
+            s[COLL ? KI + 2 : 0] = n2_pack((float)s[COLL ? KI : 0], 1.0f / m32);
         }
     }
     KOKKOS_INLINE_FUNCTION void pair(const Sink& a, int i, const double* s, int j, double* sum, double* mn) const {
-        const bool w = pair_weight(i, j, a.sid, COLL ? static_cast<int>(s[7]) : -1);
+        const bool w = pair_weight(i, j, a.sid, COLL ? n2_lo(s[7]) : -1);
         double dx = s[0] - a.x, dy = s[1] - a.y, dz = s[2] - a.z;
         double dvx = s[4] - a.vx, dvy = s[5] - a.vy, dvz = s[6] - a.vz;
         double r2s = w ? dx * dx + dy * dy + dz * dz + soft2 : 1.0;
         double ir = fast_rsqrt(r2s);
         if constexpr (!MN_IN) {
             // pair-step velocity difference: the same dv as the jerk sum
-            double t = COLL ? Kokkos::fmin(pair_dt_below<F32>(mn[0], r2s, ir, dx, dy, dz, dvx, dvy, dvz, G, a.m + s[3], eta_ff, eta_fb),
-                                           tidal_sampling_dt_below<F32>(mn[0], a.k, s[COLL ? KI : 0], a.m, s[3], r2s, a.kf, s[COLL ? KI + 1 : 0]))
-                            : pair_dt_below<F32>(mn[0], r2s, ir, dx, dy, dz, dvx, dvy, dvz, G, a.m + s[3], eta_ff, eta_fb);
-            mn[0] = Kokkos::fmin(mn[0], w ? t : 1e30);
+            constexpr int K = COLL ? KI : 0;
+            dt_pair_min<COLL, F32>(a, mn, w, r2s, ir, dx, dy, dz, dvx, dvy, dvz, G, eta_ff, eta_fb, s[3], n2_hi_f(s[7]),
+                                   COLL ? s[K] : 0.0, COLL ? s[K + 1] : 0.0, COLL ? n2_lo_f(s[K + 2]) : 0.0f,
+                                   COLL ? n2_hi_f(s[K + 2]) : 0.0f);
         }
         if (COLL) {
             double fac1 = G * (w ? s[3] : 0.0) * ir * ir * ir;
-            double fac2 = 3.0 * (dx * dvx + dy * dvy + dz * dvz) * ir * ir;
             sum[0] += fac1 * dx; sum[1] += fac1 * dy; sum[2] += fac1 * dz;
-            sum[3] += fac1 * (dvx - fac2 * dx); sum[4] += fac1 * (dvy - fac2 * dy); sum[5] += fac1 * (dvz - fac2 * dz);
+            if (JERK) {
+                double fac2 = 3.0 * (dx * dvx + dy * dvy + dz * dvz) * ir * ir;
+                sum[JERK ? 3 : 0] += fac1 * (dvx - fac2 * dx); sum[JERK ? 4 : 0] += fac1 * (dvy - fac2 * dy);
+                sum[JERK ? 5 : 0] += fac1 * (dvz - fac2 * dz);
+            }
         }
     }
     KOKKOS_INLINE_FUNCTION void finish(int i, const Sink&, const double* sum, const double* mn) const {
         double d = MN_IN ? dt(i) : mn[0];
         if (COLL) {
-            if (eta_jerk > 0.0) {
+            if (JERK && eta_jerk > 0.0) {
                 double a_mag = Kokkos::sqrt(sum[0] * sum[0] + sum[1] * sum[1] + sum[2] * sum[2]);
-                double j_mag = Kokkos::sqrt(sum[3] * sum[3] + sum[4] * sum[4] + sum[5] * sum[5]);
+                double j_mag = Kokkos::sqrt(sum[JERK ? 3 : 0] * sum[JERK ? 3 : 0] + sum[JERK ? 4 : 0] * sum[JERK ? 4 : 0] +
+                                            sum[JERK ? 5 : 0] * sum[JERK ? 5 : 0]);
                 if (j_mag > EPS && a_mag > EPS) d = Kokkos::fmin(d, eta_jerk * a_mag / j_mag);
             }
             ax(i) = sum[0]; ay(i) = sum[1]; az(i) = sum[2];
@@ -332,42 +386,54 @@ struct DtK {
 };
 
 // Accelerations and time steps of all particles (start of a step, diagnostics). Collisional mode adds the
-// jerk (Eq. 29) and v/a (Eq. 24) criteria.
-template <bool COLL>
+// jerk (Eq. 29) and v/a (Eq. 24) criteria. Pre-rejects and JERK as DtK (bit-identical).
+// Source tile: x y z m vx vy vz | (sid, fp32 m) | [k kf (fp32 k, fp32 1/m)] (collisional)
+template <bool COLL, bool JERK = true>
 struct AccDtK {
-    static constexpr int NSRC = COLL ? 10 : 7, NS = COLL ? 6 : 3, NM = 1;
+    static constexpr int NSRC = COLL ? 11 : 8, NS = COLL ? (JERK ? 6 : 3) : 3, NM = 1;
     RawView x, y, z, m, vx, vy, vz, ax, ay, az, dt;
     RawView ktid, kfl;       // TidalSampling::k, kf (null: no tidal-sampling step)
     const int* sid;
     double G, soft2, eta_ff, eta_fb, eta_jerk, eta_va;
-    struct Sink { double x, y, z, m, vx, vy, vz, k, kf; int sid; };
+    using Sink = DtSink;
+    template <bool J>
+    AccDtK<COLL, J> with_jerk() const {
+        return {x, y, z, m, vx, vy, vz, ax, ay, az, dt, ktid, kfl, sid, G, soft2, eta_ff, eta_fb, eta_jerk,
+                eta_va};
+    }
     KOKKOS_INLINE_FUNCTION Sink sink(int i) const {
-        return {x(i), y(i), z(i), m(i), vx(i), vy(i), vz(i), (COLL && ktid.ptr) ? ktid(i) : 1e30,
-                (COLL && ktid.ptr) ? kfl(i) : 0.0, COLL ? sid[i] : -1};
+        return dt_sink(x(i), y(i), z(i), m(i), vx(i), vy(i), vz(i), (COLL && ktid.ptr) ? ktid(i) : 1e30, (COLL && ktid.ptr) ? kfl(i) : 0.0,
+                       COLL ? sid[i] : -1);
     }
     KOKKOS_INLINE_FUNCTION void source(int j, double* s) const {
         s[0] = x(j); s[1] = y(j); s[2] = z(j); s[3] = m(j); s[4] = vx(j); s[5] = vy(j); s[6] = vz(j);
+        const float m32 = (float)s[3];
+        s[7] = n2_pack(COLL ? sid[j] : -1, m32);
         if (COLL) {
-            s[7] = static_cast<double>(sid[j]);
             s[COLL ? 8 : 0] = ktid.ptr ? ktid(j) : 1e30;
             s[COLL ? 9 : 0] = ktid.ptr ? kfl(j) : 0.0;
+            s[COLL ? 10 : 0] = n2_pack((float)s[COLL ? 8 : 0], 1.0f / m32);
         }
     }
     KOKKOS_INLINE_FUNCTION void pair(const Sink& a, int i, const double* s, int j, double* sum, double* mn) const {
-        const bool w = pair_weight(i, j, a.sid, COLL ? static_cast<int>(s[7]) : -1);
+        const bool w = pair_weight(i, j, a.sid, COLL ? n2_lo(s[7]) : -1);
         double dx = s[0] - a.x, dy = s[1] - a.y, dz = s[2] - a.z;
         double dvx = s[4] - a.vx, dvy = s[5] - a.vy, dvz = s[6] - a.vz;
         double r2s = w ? dx * dx + dy * dy + dz * dz + soft2 : 1.0;
         double ir = fast_rsqrt(r2s);
         double fac1 = G * (w ? s[3] : 0.0) * ir * ir * ir;
         sum[0] += fac1 * dx; sum[1] += fac1 * dy; sum[2] += fac1 * dz;
-            double t = COLL ? Kokkos::fmin(pair_dt_below(mn[0], r2s, ir, dx, dy, dz, dvx, dvy, dvz, G, a.m + s[3], eta_ff, eta_fb),
-                                       tidal_sampling_dt(a.k, s[COLL ? 8 : 0], a.m, s[3], r2s, a.kf, s[COLL ? 9 : 0]))
-                        : pair_dt_below(mn[0], r2s, ir, dx, dy, dz, dvx, dvy, dvz, G, a.m + s[3], eta_ff, eta_fb);
-        mn[0] = Kokkos::fmin(mn[0], w ? t : 1e30);
-        if (COLL) {
+        if (COLL)
+            dt_pair_min<true, true>(a, mn, w, r2s, ir, dx, dy, dz, dvx, dvy,
+                                    dvz, G, eta_ff, eta_fb, s[3], n2_hi_f(s[7]), s[COLL ? 8 : 0],
+                                    s[COLL ? 9 : 0], n2_lo_f(s[COLL ? 10 : 0]), n2_hi_f(s[COLL ? 10 : 0]));
+        else
+            dt_pair_min<false, true>(a, mn, w, r2s, ir, dx, dy, dz, dvx, dvy, dvz, G, eta_ff, eta_fb, s[3],
+                                     n2_hi_f(s[7]), 0.0, 0.0, 0.0f, 0.0f);
+        if (COLL && JERK) {
             double fac2 = 3.0 * (dx * dvx + dy * dvy + dz * dvz) * ir * ir;
-            sum[3] += fac1 * (dvx - fac2 * dx); sum[4] += fac1 * (dvy - fac2 * dy); sum[5] += fac1 * (dvz - fac2 * dz);
+            sum[JERK ? 3 : 0] += fac1 * (dvx - fac2 * dx); sum[JERK ? 4 : 0] += fac1 * (dvy - fac2 * dy);
+            sum[JERK ? 5 : 0] += fac1 * (dvz - fac2 * dz);
         }
     }
     KOKKOS_INLINE_FUNCTION void finish(int i, const Sink& a, const double* sum, const double* mn) const {
@@ -375,14 +441,29 @@ struct AccDtK {
         ax(i) = sum[0]; ay(i) = sum[1]; az(i) = sum[2];
         if (COLL) {
             double a_mag = Kokkos::sqrt(sum[0] * sum[0] + sum[1] * sum[1] + sum[2] * sum[2]);
-            double j_mag = Kokkos::sqrt(sum[3] * sum[3] + sum[4] * sum[4] + sum[5] * sum[5]);
-            if (eta_jerk > 0.0 && j_mag > EPS && a_mag > EPS) d = Kokkos::fmin(d, eta_jerk * a_mag / j_mag);
+            if (JERK) {
+                double j_mag = Kokkos::sqrt(sum[JERK ? 3 : 0] * sum[JERK ? 3 : 0] + sum[JERK ? 4 : 0] * sum[JERK ? 4 : 0] +
+                                            sum[JERK ? 5 : 0] * sum[JERK ? 5 : 0]);
+                if (eta_jerk > 0.0 && j_mag > EPS && a_mag > EPS) d = Kokkos::fmin(d, eta_jerk * a_mag / j_mag);
+            }
             double v_mag = Kokkos::sqrt(a.vx * a.vx + a.vy * a.vy + a.vz * a.vz);
             if (eta_va > 0.0 && a_mag > EPS && v_mag > EPS) d = Kokkos::fmin(d, eta_va * v_mag / a_mag);
         }
         dt(i) = d;
     }
 };
+
+// ETA_JERK = 0: the time-step kernels without the jerk sums (bit-identical, see DtK)
+template <bool COLL, bool MN_IN, bool F32>
+void run_n2(const char* name, int i0, int ni, int j0, int nj, const DtK<COLL, MN_IN, F32, true>& k) {
+    if (COLL && !(k.eta_jerk > 0.0)) run_n2<DtK<COLL, MN_IN, F32, false>>(name, i0, ni, j0, nj, k.template with_jerk<false>());
+    else run_n2<DtK<COLL, MN_IN, F32, true>>(name, i0, ni, j0, nj, k);
+}
+template <bool COLL>
+void run_n2(const char* name, int i0, int ni, int j0, int nj, const AccDtK<COLL, true>& k) {
+    if (COLL && !(k.eta_jerk > 0.0)) run_n2<AccDtK<COLL, false>>(name, i0, ni, j0, nj, k.template with_jerk<false>());
+    else run_n2<AccDtK<COLL, true>>(name, i0, ni, j0, nj, k);
+}
 
 // ---------------------------------------------------------------------------------------------------------------
 // HHS with connected components (HHS_CC): the fast set of an HHS call is split into components (particles with a
@@ -392,7 +473,7 @@ struct AccDtK {
 // Acceleration of sinks from sources in other components (and other subsystems), ADDED to ax, ay, az
 template <bool COLL>
 struct ForceCidK {
-    static constexpr int NSRC = 6, NS = 3, NM = 0;
+    static constexpr int NSRC = 5, NS = 3, NM = 0;
     RawView x, y, z, m, ax, ay, az;
     const int* sid;
     const int* cid;
@@ -401,10 +482,10 @@ struct ForceCidK {
     KOKKOS_INLINE_FUNCTION Sink sink(int i) const { return {x(i), y(i), z(i), COLL ? sid[i] : -1, cid[i]}; }
     KOKKOS_INLINE_FUNCTION void source(int j, double* s) const {
         s[0] = x(j); s[1] = y(j); s[2] = z(j); s[3] = G * m(j);
-        s[4] = COLL ? static_cast<double>(sid[j]) : -1.0; s[5] = static_cast<double>(cid[j]);
+        s[4] = n2_pack(COLL ? sid[j] : -1, cid[j]);
     }
     KOKKOS_INLINE_FUNCTION void pair(const Sink& a, int i, const double* s, int j, double* sum, double*) const {
-        const bool w = pair_weight(i, j, a.sid, static_cast<int>(s[4])) & (static_cast<int>(s[5]) != a.cid);
+        const bool w = pair_weight(i, j, a.sid, n2_lo(s[4])) & (n2_hi(s[4]) != a.cid);
         double dx = s[0] - a.x, dy = s[1] - a.y, dz = s[2] - a.z;
         double r2 = w ? dx * dx + dy * dy + dz * dz + soft2 : 1.0;
         double ir = fast_rsqrt(r2);
@@ -419,7 +500,7 @@ struct ForceCidK {
 // Gradient correction from sources in other components, from snapshot accelerations (index i - off), ADDED to ax
 template <bool COLL>
 struct GradCidK {
-    static constexpr int NSRC = 9, NS = 3, NM = 0;
+    static constexpr int NSRC = 8, NS = 3, NM = 0;
     RawView x, y, z, m, ax, ay, az, snx, sny, snz;
     int off;
     const int* sid;
@@ -432,10 +513,10 @@ struct GradCidK {
     KOKKOS_INLINE_FUNCTION void source(int j, double* s) const {
         s[0] = x(j); s[1] = y(j); s[2] = z(j); s[3] = coeff * m(j);
         s[4] = snx(j - off); s[5] = sny(j - off); s[6] = snz(j - off);
-        s[7] = COLL ? static_cast<double>(sid[j]) : -1.0; s[8] = static_cast<double>(cid[j]);
+        s[7] = n2_pack(COLL ? sid[j] : -1, cid[j]);
     }
     KOKKOS_INLINE_FUNCTION void pair(const Sink& a, int i, const double* s, int j, double* sum, double*) const {
-        const bool w = pair_weight(i, j, a.sid, static_cast<int>(s[7])) & (static_cast<int>(s[8]) != a.cid);
+        const bool w = pair_weight(i, j, a.sid, n2_lo(s[7])) & (n2_hi(s[7]) != a.cid);
         double dx = s[0] - a.x, dy = s[1] - a.y, dz = s[2] - a.z;
         double dax = s[4] - a.ax, day = s[5] - a.ay, daz = s[6] - a.az;
         double r2 = w ? dx * dx + dy * dy + dz * dz + soft2 : 1.0;
@@ -474,7 +555,7 @@ struct EdgeK {
         s[0] = x(j); s[1] = y(j); s[2] = z(j); s[3] = m(j); s[4] = vx(j); s[5] = vy(j); s[6] = vz(j);
         s[DM] = dmin(j - off);
         if (COLL) {
-            s[7] = static_cast<double>(sid[j]); s[COLL ? 8 : 0] = ktid.ptr ? ktid(j) : 1e30;
+            s[7] = n2_pack(sid[j]); s[COLL ? 8 : 0] = ktid.ptr ? ktid(j) : 1e30;
             s[COLL ? 9 : 0] = ktid.ptr ? kfl(j) : 0.0;
         }
     }
@@ -483,7 +564,7 @@ struct EdgeK {
     // if both belong to one subsystem
     KOKKOS_INLINE_FUNCTION void pair(const Sink& a, int i, const double* s, int j, double*, double*) const {
         if (j <= i) return;
-        const int sj = COLL ? static_cast<int>(s[7]) : -1;
+        const int sj = COLL ? n2_lo(s[7]) : -1;
         bool edge = (a.sid >= 0) & (sj == a.sid);
         if (!edge) {
             double dx = s[0] - a.x, dy = s[1] - a.y, dz = s[2] - a.z;
@@ -519,12 +600,12 @@ struct PairMinK {
     }
     KOKKOS_INLINE_FUNCTION void source(int j, double* s) const {
         s[0] = x(j); s[1] = y(j); s[2] = z(j); s[3] = m(j); s[4] = vx(j); s[5] = vy(j); s[6] = vz(j);
-        s[7] = sid ? static_cast<double>(sid[j]) : -1.0;
+        s[7] = n2_pack(sid ? sid[j] : -1);
         s[8] = ktid.ptr ? ktid(j) : 1e30;
         s[9] = ktid.ptr ? kfl(j) : 0.0;
     }
     KOKKOS_INLINE_FUNCTION void pair(const Sink& a, int i, const double* s, int j, double*, double* mn) const {
-        if (!pair_weight(i, j, a.sid, static_cast<int>(s[7]))) return;
+        if (!pair_weight(i, j, a.sid, n2_lo(s[7]))) return;
         double dx = s[0] - a.x, dy = s[1] - a.y, dz = s[2] - a.z;
         double r2s = dx * dx + dy * dy + dz * dz + soft2;
         double ir = fast_rsqrt(r2s);

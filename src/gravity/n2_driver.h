@@ -34,6 +34,18 @@ KOKKOS_INLINE_FUNCTION bool pair_weight(int i, int j, int sid_i, int sid_j) {
     return (i != j) & !((sid_i >= 0) & (sid_j == sid_i));
 }
 
+// Integer (and single-precision) source data in a double slot of the source tile, as raw bits: an int read back from
+// a double-valued slot costs a 64-bit conversion per pair (F2I.F64 at half the FP64 rate on A100), a bit move is free
+KOKKOS_INLINE_FUNCTION double n2_pack(int lo, int hi = 0) {
+    return Kokkos::bit_cast<double>((unsigned long long)(unsigned)lo | ((unsigned long long)(unsigned)hi << 32));
+}
+KOKKOS_INLINE_FUNCTION double n2_pack(int lo, float hi) { return n2_pack(lo, Kokkos::bit_cast<int>(hi)); }
+KOKKOS_INLINE_FUNCTION double n2_pack(float lo, float hi) { return n2_pack(Kokkos::bit_cast<int>(lo), Kokkos::bit_cast<int>(hi)); }
+KOKKOS_INLINE_FUNCTION int n2_lo(double d) { return (int)(unsigned)Kokkos::bit_cast<unsigned long long>(d); }
+KOKKOS_INLINE_FUNCTION int n2_hi(double d) { return (int)(unsigned)(Kokkos::bit_cast<unsigned long long>(d) >> 32); }
+KOKKOS_INLINE_FUNCTION float n2_lo_f(double d) { return Kokkos::bit_cast<float>(n2_lo(d)); }
+KOKKOS_INLINE_FUNCTION float n2_hi_f(double d) { return Kokkos::bit_cast<float>(n2_hi(d)); }
+
 namespace n2_detail {
 inline Kokkos::View<double*>& partial_buffer() {
     static Kokkos::View<double*> buf("n2_partials", 0);
