@@ -994,7 +994,37 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
         min_dE = std::numeric_limits<double>::max();
         for (int s = 0; s < n_sub; s++) integrate_one(s, total_gbs_steps, max_dE, min_dE, cap_hit);
     } else {
-        Kokkos::parallel_reduce("logh_batch_host", HostPolicy(0, n_sub).set_chunk_size(1), integrate_one,
+        // Longest first (LPT): with dynamic scheduling a long integration started last leaves the other threads
+        // idle at the end of the batch. Cost estimate: n^2 x orbits per interval of the tightest bound pair (the
+        // GBS steps follow the orbits). Each subsystem's result does not depend on the order
+        std::vector<int> order(n_sub);
+        std::vector<double> cost(n_sub, 0.0);
+        for (int s = 0; s < n_sub; s++) {
+            order[s] = s;
+            const int nb = h_nbod(s), off = h_off(s);
+            double orbits = 1.0;
+            for (int i = 0; i < nb; i++)
+                for (int j = i + 1; j < nb; j++) {
+                    double r2 = 0.0, v2 = 0.0;
+                    for (int c = 0; c < 3; c++) {
+                        const double d = h_pos((off + j) * 3 + c) - h_pos((off + i) * 3 + c);
+                        const double u = h_vel((off + j) * 3 + c) - h_vel((off + i) * 3 + c);
+                        r2 += d * d; v2 += u * u;
+                    }
+                    const double mu = G * (h_mass(off + i) + h_mass(off + j));
+                    if (!(r2 > 0.0) || !(mu > 0.0)) continue;
+                    const double en = 0.5 * v2 - mu / std::sqrt(r2);
+                    if (en >= 0.0) continue;
+                    const double a = -mu / (2.0 * en);
+                    orbits = std::max(orbits, h_dt(s) / (2.0 * M_PI * std::sqrt(a * a * a / mu)));
+                }
+            cost[s] = (double)nb * nb * orbits;
+        }
+        std::stable_sort(order.begin(), order.end(), [&](int x, int y) { return cost[x] > cost[y]; });
+        Kokkos::parallel_reduce("logh_batch_host", HostPolicy(0, n_sub).set_chunk_size(1),
+                                [&](int k, int& gbs, double& mx, double& mn, int& caps) {
+                                    integrate_one(order[k], gbs, mx, mn, caps);
+                                },
                                 Kokkos::Sum<int>(total_gbs_steps), Kokkos::Max<double>(max_dE),
                                 Kokkos::Min<double>(min_dE), Kokkos::Sum<int>(cap_hit));
     }
