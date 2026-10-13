@@ -269,6 +269,8 @@ const std::vector<DebugEnvSpec> kDebugEnv = {
     {"NBODY_SMALL_FOR", "Largest loop run on the host where it can access device memory (default 256; 0: off)"},
     {"NBODY_SMALL_N2", "Largest pair count run on the host where it can access device memory (default 4096)"},
     {"NBODY_TILE256_MIN", "N^2 kernel: 256-thread tiles from this set size (GPUs; default 131072)"},
+    {"NBODY_N2_P", "N^2 kernels: force P = 1, 2, 4 threads per sink (default per kernel, results identical)"},
+    {"NBODY_N2_R", "N^2 kernels: force teams of TS / R threads, R = 1, 2 (default per kernel, results identical)"},
 };
 
 const char* type_name(ParamType t) {
