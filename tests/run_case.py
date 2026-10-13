@@ -113,8 +113,8 @@ KL_TRIPLE = dict(SEC_TRIPLE, SECULAR_TRIPLES="false", TRIPLE_A_IN_PC="1e-7", TRI
                  TOTAL_TIME_MYR="5e-5", DT_MAX_MYR="1e-5", ETA_RESTART="1e-8")
 # AUDIT F3 system (200k cluster): ~1 Msun binary at 0.05 AU and a 0.7 Msun star passing at 0.01 pc with v_inf = 190
 # km/s (e = 31100), starting at 0.05 pc; R_NGB = 0.02 pc keeps it in the subsystem as the fly-by criterion does with
-# long steps. Plain LogH integrates ~3e4 binary orbits per 1e-4 Myr orbit by orbit. (Until 2026-10-12 with the
-# deleted FLYBY_CM_VELOCITY = true; the cases on it measure the same with component velocities.)
+# long steps. Plain LogH integrates ~3e4 binary orbits per 1e-4 Myr orbit by orbit. (Until 2026-10-12 with
+# FLYBY_CM_VELOCITY = true; the cases on it measure the same with component velocities.)
 F3_FLYBY = dict(HIER_LOGH, TRIPLE_A_IN_PC="2.4e-7", TRIPLE_A_OUT_PC="0.01", TRIPLE_E_OUT="31100", TRIPLE_M3="0.7",
                 R_NGB="0.02", TOTAL_TIME_MYR="2e-4", DT_MAX_MYR="1e-4")
 # 10 + 10 Msun BH binary at 0.02 AU with a 1 Msun star at 20 AU (e_out = 0.3), all PN orders: SDAR must keep
@@ -415,6 +415,23 @@ def cc_vs_plain(exe, label, cfg, ratio):
     cc = max(r[0] for r in run(exe, dict(cfg, HHS_CC="true")))
     print(f"   plain {plain:.3e}, HHS_CC {cc:.3e}")
     return check(f"{label} max|dE/E| HHS_CC / plain", cc / plain, ratio)
+
+
+def paths_agree(exe, label, cfg, bound):
+    """The CPU small-set path (SERIAL_N2_CPU covers the whole run) against the device path on the same run: the
+    same LogH calls and GBS steps per step, |dE/E| per step equal to `bound` (relative)."""
+    def stats(out):
+        return [(int(a), int(b)) for a, b in re.findall(r"Integration: LogH=(\d+) \(gbs=(\d+)", out)]
+    dev_out = run_output(exe, dict(cfg, SERIAL_N2_CPU="0"))
+    cpu_out = run_output(exe, dict(cfg, SERIAL_N2_CPU="1000000"))
+    dev, cpu = diagnostics(dev_out), diagnostics(cpu_out)
+    print(f"   LogH calls, GBS steps per step: device {stats(dev_out)}, cpu {stats(cpu_out)}")
+    print(f"   |dE/E| device {[f'{r[0]:.6e}' for r in dev]}, cpu {[f'{r[0]:.6e}' for r in cpu]}")
+    ok = check(f"{label} steps (device vs cpu)", abs(len(dev) - len(cpu)), 0)
+    ok &= check(f"{label} steps with other LogH calls or GBS steps",
+                sum(a != b for a, b in zip(stats(dev_out), stats(cpu_out))), 0)
+    return ok & check(f"{label} max relative |dE/E| difference",
+                      max(abs(a[0] - b[0]) / max(a[0], 1e-300) for a, b in zip(dev, cpu)), bound)
 
 
 def paths_same_steps(exe, label, cfg, min_logh, gbs_rel=0.0):
@@ -1333,13 +1350,28 @@ CASES = {
     # FLYBY_CM_VELOCITY, 331 particles had a pair step in the split below their dt_adapt before the fix; max |dE/E|
     # 4.9e-11 then). Measured with component velocities (host, 2026-10-12): 0 such particles, max |dE/E| 7.75e-11
     "cc_consistent_binaries50": lambda exe: cc_consistent(exe, "50 % binaries, HHS_CC", BINARIES50, 1.01e-10),
+    # FLYBY_CM_VELOCITY (FROST-CLUSTERS II sec. 2.1; deleted 2026-10-12, restored 2026-10-13, off by default): only the
+    # device kernels used the subsystem c.o.m. velocity; the CPU small-set path and the HHS_CC split kept the
+    # component velocities. Before: CPU 1.255e-10 vs device 6.42e-11 after step 1 (relative 0.95), LogH calls 136 vs
+    # 116 (6.4e-6 relative with the component velocities on both paths). Measured after: same LogH calls and GBS
+    # steps, 2.2e-5 relative (9.5e-6 with 2 threads).
+    # HHS_CC: 331 particles had a pair step in the split below their dt_adapt; 0 after (max |dE/E| 5.7e-11)
+    "cm_cpu_vs_device": lambda exe: paths_agree(exe, "c.o.m. fly-by step", dict(BINARIES, FLYBY_CM_VELOCITY="true"),
+                                                2.9e-5),
+    "cc_cm_consistent": lambda exe: cc_consistent(exe, "50 % binaries, HHS_CC, c.o.m. fly-by step",
+                                                  dict(BINARIES50, FLYBY_CM_VELOCITY="true"), 1e-8),
     # FLYBY_CM_EPS: a slow particle's kicks sample a subsystem's orbit at the pair step (the 200k, 10 % binaries seed-7
     # jumps, a 29+29 Msun BH binary at 55 AU and a passing star, 1.2e-8); the tidal-sampling pair step bounds the
     # energy they put in per step. Before: max |dE/E| 1.60e-5, end 9.6e-6 (c.o.m. velocities: 1.0e-5). Measured with
     # FLYBY_CM_EPS = 1e-5 (host, 1 thread): max 1.869e-7, end 9.305e-8 (1e-6: 6.9e-9, 1e-7: 5.1e-10). The c.o.m.-
-    # velocity variant (cm_eps_tidal_sampling, deleted with FLYBY_CM_VELOCITY) gave the same max
+    # velocity variant (cm_eps_tidal_sampling) gives the same max
     "cm_eps_tidal_components": lambda exe: floor(exe, "component fly-by step, tidal sampling",
                                                  dict(CM_TIDE, FLYBY_CM_EPS="1e-5"), (1.2e-7, 2.4e-7, 1e30, 1e30)),
+    # The same with the c.o.m. velocity (FLYBY_CM_VELOCITY): before (c.o.m. velocity alone) max |dE/E| 1.0e-5;
+    # measured with FLYBY_CM_EPS = 1e-5: 1.85e-7
+    "cm_eps_tidal_sampling": lambda exe: floor(exe, "c.o.m. fly-by step, tidal sampling",
+                                               dict(CM_TIDE, FLYBY_CM_VELOCITY="true", FLYBY_CM_EPS="1e-5"),
+                                               (2.4e-7, 2.4e-7, 1e30, 1e30)),
     # The CPU small-set path takes the same tidal-sampling steps: same LogH calls and GBS steps per step as the
     # device (|dE/E| then differs at the level of the GBS errors of these many short LogH advances, ~1e-13 each).
     # Production settings (component velocities, sampled binary c.o.m. velocities, Kepler drift of non-PN pairs) with
@@ -1567,9 +1599,12 @@ CASES = {
     # levels without any TREE_* key (no tree search ran before), bit-identical to the O(N^2) run
     "tree_default_on": lambda exe: tree_exact(exe, "tree default, 50 % binaries", BINARIES50),
     "tree_dt_binaries": lambda exe: tree_exact(exe, "tree, 10 % binaries", dict(BINARIES, TREE_DT_MIN_N="2")),
-    # host-thread tree (TREE_DT_CPU_MAX; with the deleted c.o.m. fly-by velocities until 2026-10-12)
+    # host-thread tree (TREE_DT_CPU_MAX; component velocities; tree_dt_binaries_cm with the c.o.m. ones)
     "tree_dt_binaries_host": lambda exe: tree_exact(exe, "host tree, 10 % binaries",
                                                     dict(BINARIES, TREE_DT_CPU_MAX="1000000", TREE_DT_MIN_N="2")),
+    "tree_dt_binaries_cm": lambda exe: tree_exact(exe, "host tree, 10 % binaries, c.o.m. fly-by velocities",
+                                                  dict(BINARIES, FLYBY_CM_VELOCITY="true", TREE_DT_CPU_MAX="1000000",
+                                                       TREE_DT_MIN_N="2")),
     "tree_dt_binaries50": lambda exe: tree_exact(exe, "tree, 50 % binaries", dict(BINARIES50, TREE_DT_MIN_N="2")),
     "tree_dt_triples": lambda exe: tree_exact(exe, "tree, dense core", dict(TRIPLES, TREE_DT_MIN_N="2")),
     "tree_dt_mergers": lambda exe: tree_exact(exe, "tree, mergers", dict(MERGERS, SERIAL_N2_CPU="0", TREE_DT_MIN_N="2")),
@@ -1580,6 +1615,9 @@ CASES = {
     "tree_dt_tidal_host": lambda exe: tree_exact(exe, "host tree, tidal-sampling step",
                                                  dict(BINARIES, FLYBY_CM_EPS="1e-11", TREE_DT_CPU_MAX="1000000",
                                                       TREE_DT_MIN_N="2"), need_dt=True),
+    "tree_dt_tidal_cm": lambda exe: tree_exact(exe, "host tree, c.o.m. fly-by velocities, tidal-sampling step",
+                                               dict(BINARIES, FLYBY_CM_VELOCITY="true", FLYBY_CM_EPS="1e-11",
+                                                    TREE_DT_CPU_MAX="1000000", TREE_DT_MIN_N="2"), need_dt=True),
     # (the dense-core variant, TRIPLES with FLYBY_CM_EPS = 1e-11, passed with 150991 searches checked but takes ~460 s)
     "tree_dt_softened": lambda exe: tree_exact(exe, "tree, softened collisionless", dict(BINARIES, COLLISIONAL="false",
                                                SOFTENING_PC="1e-3", BINARY_FRAC="0", TREE_DT_MIN_N="2")),
@@ -1634,6 +1672,8 @@ CASES = {
     "restart_sdar": lambda exe: restart_identical(exe, "SDAR triple", dict(KL_TRIPLE, SDAR="true"), 2),
     "restart_tidal_sampling": lambda exe: restart_identical(exe, "tidal-sampling step",
                                                             dict(CM_TIDE, FLYBY_CM_EPS="1e-5"), 5),
+    "restart_cm_velocity": lambda exe: restart_identical(exe, "c.o.m. fly-by velocity, tidal sampling",
+                                                         dict(CM_TIDE, FLYBY_CM_VELOCITY="true", FLYBY_CM_EPS="1e-5"), 5),
     "restart_spin_imbh": lambda exe: restart_identical(exe, "cluster + spinning IMBH binary, all PN", SPIN_IMBH, 5),
     # FSI: the global step is the fastest occupied level, not DT_MAX: the first run stops after step 1
     "restart_fsi": lambda exe: restart_identical(exe, "FSI integrator", dict(FSI_BINARY, DT_MAX_MYR="1e-6"), 5,

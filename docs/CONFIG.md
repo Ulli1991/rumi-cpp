@@ -1,6 +1,6 @@
 # Config reference
 
-All 131 keys of the config file (`config.txt`, or `--config <file>`), generated from the parameter table in `src/core/params.cpp` by `scripts/gen_config_md.py`. Every key has one default, in that table; an unknown key in a config file is an error. Each run writes the effective value of every key, and whether it came from the file or the default, to `run_params.txt`.
+All 132 keys of the config file (`config.txt`, or `--config <file>`), generated from the parameter table in `src/core/params.cpp` by `scripts/gen_config_md.py`. Every key has one default, in that table; an unknown key in a config file is an error. Each run writes the effective value of every key, and whether it came from the file or the default, to `run_params.txt`.
 
 Levels:
 
@@ -126,6 +126,7 @@ Levels:
 | `SDAR_C` | double | `0.1` | **experiment** |  | SDAR kappa_max coefficient c (W20 Eq. 28) |
 | `GBS_SEQUENCE` | string | `bulirsch` | **experiment** | bulirsch\|deuflhard | GBS substep sequence: bulirsch (2, 4, 6, 8, 12, 16, ...) or deuflhard (2, 4, 6, 8, 10, ...; MSTAR) |
 | `GBS_KMAX` | int | `10` | **experiment** |  | GBS extrapolation stages (FROST-CLUSTERS I: 8) |
+| `FLYBY_CM_VELOCITY` | bool | `false` | **experiment** |  | Fly-by step of subsystem members with the c.o.m. velocity (FROST-CLUSTERS II sec. 2.1) |
 | `FLYBY_CM_EPS` | double | `1e-11` | internal |  | Tidal-sampling pair step: energy a slow particle's kicks put into a subsystem per step <= this x \|E0\| (0: off) |
 | `TIDAL_STEP_RES` | double | `1.0` | internal |  | Floor of the FLYBY_CM_EPS step: this x P (1 - e)^(3/2) of the member's binary (0: none) |
 | `FLYBY_NGB_CM` | bool | `true` | internal |  | Distant fly-by neighbour test of a binary member against the binary's c.o.m. |
@@ -170,7 +171,7 @@ Levels:
 | `TREE_THETA` | double | `0.7` | internal |  | Tree opening angle |
 | `TREE_N_LEAF` | int | `32` | internal |  | Largest leaf cell |
 | `TREE_N_GROUP` | int | `64` | internal |  | Particles per tree traversal group |
-| `TREE_DT_MIN_N` | int | `-1` | internal |  | Exact device-tree time-step search for sets of at least this many (0: off; -1: host builds 2048, GPU 65536) |
+| `TREE_DT_MIN_N` | int | `-1` | internal |  | Exact device-tree time-step search for sets of at least this many (0: off; -1: host builds 2048, GPU 65536, 300000 with FLYBY_CM_VELOCITY) |
 | `TREE_NGB_MIN_N` | int | `-1` | internal |  | The same for the neighbour search (-1: host builds 2048, GPU 32768) |
 | `TREE_DT_CPU_MAX` | int | `0` | internal |  | Host-thread tree search for sets up to this size (host builds / APUs; 0: off) |
 | `TREE_DT_VC_FAC` | double | `30.0` | internal |  | Low-speed split of the tree time-step search (multiple of V_c) |

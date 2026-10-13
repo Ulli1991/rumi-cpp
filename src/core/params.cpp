@@ -134,6 +134,8 @@ const std::vector<ParamSpec> kParams = {
     {"GBS_SEQUENCE", S, "bulirsch", "Subsystems", EXPERIMENT, "bulirsch|deuflhard",
      "GBS substep sequence: bulirsch (2, 4, 6, 8, 12, 16, ...) or deuflhard (2, 4, 6, 8, 10, ...; MSTAR)"},
     {"GBS_KMAX", I, "10", "Subsystems", EXPERIMENT, "", "GBS extrapolation stages (FROST-CLUSTERS I: 8)"},
+    {"FLYBY_CM_VELOCITY", B, "false", "Subsystems", EXPERIMENT, "",
+     "Fly-by step of subsystem members with the c.o.m. velocity (FROST-CLUSTERS II sec. 2.1)"},
     {"FLYBY_CM_EPS", D, "1e-11", "Subsystems", INTERNAL, "",
      "Tidal-sampling pair step: energy a slow particle's kicks put into a subsystem per step <= this x |E0| (0: off)"},
     {"TIDAL_STEP_RES", D, "1.0", "Subsystems", INTERNAL, "",
@@ -193,7 +195,8 @@ const std::vector<ParamSpec> kParams = {
     {"TREE_N_LEAF", I, "32", "Performance and parallelism", INTERNAL, "", "Largest leaf cell"},
     {"TREE_N_GROUP", I, "64", "Performance and parallelism", INTERNAL, "", "Particles per tree traversal group"},
     {"TREE_DT_MIN_N", I, "-1", "Performance and parallelism", INTERNAL, "",
-     "Exact device-tree time-step search for sets of at least this many (0: off; -1: host builds 2048, GPU 65536)"},
+     "Exact device-tree time-step search for sets of at least this many (0: off; -1: host builds 2048, GPU 65536, "
+     "300000 with FLYBY_CM_VELOCITY)"},
     {"TREE_NGB_MIN_N", I, "-1", "Performance and parallelism", INTERNAL, "",
      "The same for the neighbour search (-1: host builds 2048, GPU 32768)"},
     {"TREE_DT_CPU_MAX", I, "0", "Performance and parallelism", INTERNAL, "",

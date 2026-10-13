@@ -2,17 +2,19 @@
 
 #include "particles.h"
 
-// Tidal-sampling constants of the pair time steps of slots [lo, hi) (collisional mode with FLYBY_CM_EPS > 0; else
-// null). The pair time steps (fly-by criterion and the time symmetrisation) take the component velocities vx, vy, vz
-// (the subsystem c.o.m. velocity of FROST-CLUSTERS II sec. 2.1, FLYBY_CM_VELOCITY, lost the A/B on |dE/E| and was
-// deleted 2026-10-12). Device pointers, valid until the next call. Used by every path that computes pair time steps
-// (DtK, AccDtK, the HHS_CC split, the CPU small-set path).
-// k: per slot, tidal-sampling constant of FLYBY_CM_EPS: a pair also takes dt <= min(k_i / m_j, k_j / m_i) r^3, so
-// that a slow particle's kicks, which sample a subsystem's internal motion at the pair's step, change its internal
-// energy by at most FLYBY_CM_EPS x |E0| per step (1e30 for non-members)
+// FLYBY_CM_VELOCITY: pair time steps use the subsystem centre-of-mass velocity of members
+// (FROST-CLUSTERS II, Rantala et al. 2025, arXiv:2506.04330, sec. 2.1)
+extern bool flyby_cm_velocity;
+// Velocities that enter the pair time steps (fly-by criterion and the time symmetrisation) of slots [lo, hi):
+// vx, vy, vz, or in collisional mode with FLYBY_CM_VELOCITY the subsystem c.o.m. velocity of the members of
+// g_subsystem_mgr.active. Device pointers, valid until the next call. Used by every path that computes pair
+// time steps (DtK, AccDtK, the HHS_CC split, the CPU small-set path).
+// k: per slot, tidal-sampling constant of FLYBY_CM_EPS (null: none): a pair also takes dt <= min(k_i / m_j,
+// k_j / m_i) r^3, so that a slow particle's kicks, which sample a subsystem's internal motion at the pair's step,
+// change its internal energy by at most FLYBY_CM_EPS x |E0| per step
 // kf: per slot, the floor of that step (TIDAL_STEP_RES x P (1 - e)^(3/2) of a member's binary, 0 otherwise)
-struct TidalSampling { double* k; double* kf; };
-TidalSampling tidal_sampling(Particles& p, int lo, int hi);
+struct PairVelocities { double* x; double* y; double* z; double* k; double* kf; };
+PairVelocities pair_velocities(Particles& p, int lo, int hi);
 // Exact tree time-step / neighbour searches (dt_tree.h): device tree for source sets >= tree_dt_min_n, host tree for
 // sets <= tree_dt_cpu_max (host-accessible memory only); 0 = off. tree_dt_vc_fac: low-speed split (multiplier of V_c, default 30)
 extern int tree_dt_min_n;

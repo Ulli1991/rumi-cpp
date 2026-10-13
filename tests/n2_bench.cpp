@@ -12,8 +12,10 @@
 //      N2_N        particles of the synthetic cluster (default max nj), N2_DUMP=dump_XXXX.bin: load that state instead
 //      N2_REPS     repetitions (default: ~2e11 pairs per kernel and case)
 //      N2_OUT      prefix: write each kernel's outputs to <prefix>_<kernel>_<ni>_<nj>.bin (doubles) for error comparisons
-//      N2_KMEM     TidalSampling::k of binary members (tidal-sampling step; default 1e30 as non-members)
+//      N2_KMEM     PairVelocities::k of binary members (tidal-sampling step; default 1e30 as non-members)
 //      dtcheck     (in N2_KERNELS) safety margin of the fp32 time-step pre-rejects
+//      dtcm, dtcm64, accdtcm, dtcheckcm  (in N2_KERNELS) dt, dt64, accdt, dtcheck with the pair steps taken with the
+//                  subsystem c.o.m. velocities (FLYBY_CM_VELOCITY)
 //      N2_ACC=1    force kernels: relative error against a long-double reference on 200 sample sinks
 #include "n2_kernels.h"
 #include <Kokkos_Core.hpp>
@@ -33,6 +35,23 @@ struct Cluster {
     std::vector<double> x, y, z, vx, vy, vz, m;
     std::vector<int> sid;
 };
+
+// Pair-step velocities of FLYBY_CM_VELOCITY: the mass-weighted c.o.m. velocity of each subsystem for its members,
+// the particle velocity otherwise
+void cm_velocities(const Cluster& c, std::vector<double>& cx, std::vector<double>& cy, std::vector<double>& cz) {
+    const int n = (int)c.x.size();
+    cx = c.vx; cy = c.vy; cz = c.vz;
+    int smax = -1;
+    for (int s : c.sid) smax = std::max(smax, s);
+    std::vector<double> M(smax + 1, 0.0), px(smax + 1, 0.0), py(smax + 1, 0.0), pz(smax + 1, 0.0);
+    for (int i = 0; i < n; i++)
+        if (c.sid[i] >= 0) {
+            M[c.sid[i]] += c.m[i]; px[c.sid[i]] += c.m[i] * c.vx[i]; py[c.sid[i]] += c.m[i] * c.vy[i];
+            pz[c.sid[i]] += c.m[i] * c.vz[i];
+        }
+    for (int i = 0; i < n; i++)
+        if (c.sid[i] >= 0) { cx[i] = px[c.sid[i]] / M[c.sid[i]]; cy[i] = py[c.sid[i]] / M[c.sid[i]]; cz[i] = pz[c.sid[i]] / M[c.sid[i]]; }
+}
 
 // Plummer sphere (r_h = 3.1 pc), Kroupa 0.08-150 Msun, the first 10 % of the particles in circular binaries with a
 // log-uniform in 0.1-100 AU, shuffled (as tests/dt_tree_bench.cpp)
@@ -183,13 +202,19 @@ struct ForceMixK {
 
 // Safety check of the fp32 pre-rejects (dtcheck): every pair evaluated in fp64; for the pairs the pre-rejects would skip,
 // the smallest ratio of the exact step to the running minimum they were tested against (must stay >= 1; the design
-// margin is 1.49 for the pair step, (1 + 4e-5) / (1 - 4e-5) for the tidal-sampling step), per sink in dt and ax
-struct DtCheckK : DtK<true, false, true, false, false> {
+// margin is 1.49 for the pair step, (1 + 4e-5) / (1 - 4e-5) for the tidal-sampling step), per sink in dt and ax.
+// CV: pair-step velocities = the subsystem c.o.m. velocities (FLYBY_CM_VELOCITY), as DtK<..., CV = true>
+template <bool CV>
+struct DtCheckK : DtK<true, false, CV, true, false, false> {
+    using B = DtK<true, false, CV, true, false, false>;
+    using typename B::Sink;
+    using B::KI; using B::G; using B::eta_ff; using B::eta_fb; using B::dt; using B::ax;
     static constexpr int NS = 0, NM = 3;
     KOKKOS_INLINE_FUNCTION void pair(const Sink& a, int i, const double* s, int j, double*, double* mn) const {
         const bool w = pair_weight(i, j, a.sid, n2_lo(s[7]));
         double dx = s[0] - a.x, dy = s[1] - a.y, dz = s[2] - a.z;
         double dvx = s[4] - a.vx, dvy = s[5] - a.vy, dvz = s[6] - a.vz;
+        if constexpr (CV) { dvx = s[8] - a.cvx; dvy = s[9] - a.cvy; dvz = s[10] - a.cvz; }
         double r2s = w ? dx * dx + dy * dy + dz * dz : 1.0;
         double ir = fast_rsqrt(r2s);
         bool rp = false, rt = false;
@@ -266,7 +291,7 @@ int main(int argc, char** argv) {
             for (int i = 0; i < N; i++) hs(i) = cl.sid[i];
             Kokkos::deep_copy(sid, hs);
         }
-        Kokkos::deep_copy(kt, 1e30);   // TidalSampling::k: non-members; N2_KMEM: k of subsystem members (default 1e30)
+        Kokkos::deep_copy(kt, 1e30);   // PairVelocities::k: non-members; N2_KMEM: k of subsystem members (default 1e30)
         if (std::getenv("N2_KMEM")) {
             auto hk = Kokkos::create_mirror_view(kt);
             for (int i = 0; i < N; i++) hk(i) = cl.sid[i] >= 0 ? std::atof(std::getenv("N2_KMEM")) : 1e30;
@@ -277,6 +302,10 @@ int main(int argc, char** argv) {
         RawView X{x.data()}, Y{y.data()}, Z{z.data()}, VX{vx.data()}, VY{vy.data()}, VZ{vz.data()}, M{m.data()};
         RawView AX{ax.data()}, AY{ay.data()}, AZ{az.data()}, DT{dt.data()}, GM{gm.data()}, KT{kt.data()}, KF{kf.data()};
         RawView SX{sx.data()}, SY{sy.data()}, SZ{sz.data()};
+        std::vector<double> hcx, hcy, hcz;
+        cm_velocities(cl, hcx, hcy, hcz);
+        Kokkos::View<double*> cvx = dev("cvx", hcx), cvy = dev("cvy", hcy), cvz = dev("cvz", hcz);
+        RawView CX{cvx.data()}, CY{cvy.data()}, CZ{cvz.data()};
         // snapshot accelerations for the gradient kernel: the forces of all particles
         {
             ForceK<true> k{X, Y, Z, M, SX, SY, SZ, sid.data(), G, 0.0};
@@ -383,29 +412,48 @@ int main(int argc, char** argv) {
             }
             // production time-step kernel: collisional, tidal k present
             if (want("dt")) {
-                DtK<true, false, true> k{X, Y, Z, M, VX, VY, VZ, AX, AY, AZ, DT, KT, KF, sid.data(),
+                DtK<true, false, false, true> k{X, Y, Z, M, VX, VY, VZ, AX, AY, AZ, DT, VX, VY, VZ, KT, KF, sid.data(),
                                                 G, 0.0, eta, eta, 0.0};
                 bench("dt", [&] { run_n2("bench_dt", 0, c.ni, 0, c.nj, k); }, {dt, ax, ay, az});
             }
+            if (want("dtcm")) {   // FLYBY_CM_VELOCITY: pair steps with the subsystem c.o.m. velocities
+                DtK<true, false, true, true> k{X, Y, Z, M, VX, VY, VZ, AX, AY, AZ, DT, CX, CY, CZ, KT, KF, sid.data(),
+                                               G, 0.0, eta, eta, 0.0};
+                bench("dtcm", [&] { run_n2("bench_dtcm", 0, c.ni, 0, c.nj, k); }, {dt, ax, ay, az});
+            }
+            if (want("dtcm64")) {
+                DtK<true, false, true, false> k{X, Y, Z, M, VX, VY, VZ, AX, AY, AZ, DT, CX, CY, CZ, KT, KF, sid.data(),
+                                                G, 0.0, eta, eta, 0.0};
+                bench("dtcm64", [&] { run_n2("bench_dtcm64", 0, c.ni, 0, c.nj, k); }, {dt, ax, ay, az});
+            }
             if (want("dt64")) {   // without the fp32 pre-reject
-                DtK<true, false, false> k{X, Y, Z, M, VX, VY, VZ, AX, AY, AZ, DT, KT, KF, sid.data(),
+                DtK<true, false, false, false> k{X, Y, Z, M, VX, VY, VZ, AX, AY, AZ, DT, VX, VY, VZ, KT, KF, sid.data(),
                                                  G, 0.0, eta, eta, 0.0};
                 bench("dt64", [&] { run_n2("bench_dt64", 0, c.ni, 0, c.nj, k); }, {dt, ax, ay, az});
             }
             if (want("accdt")) {
-                AccDtK<true> k{X, Y, Z, M, VX, VY, VZ, AX, AY, AZ, DT, KT, KF, sid.data(), G, 0.0, eta, eta,
+                AccDtK<true> k{X, Y, Z, M, VX, VY, VZ, AX, AY, AZ, DT, VX, VY, VZ, KT, KF, sid.data(), G, 0.0, eta, eta,
                                0.0, 0.0};
                 bench("accdt", [&] { run_n2("bench_accdt", 0, c.ni, 0, c.nj, k); }, {dt, ax, ay, az});
             }
-            if (want("dtcheck")) {
-                DtCheckK k{DtK<true, false, true, false, false>{X, Y, Z, M, VX, VY, VZ, AX, AY, AZ, DT,
-                                                                       KT, KF, sid.data(), G, 0.0, eta, eta, 0.0}};
-                run_n2("bench_dtcheck", 0, c.ni, 0, c.nj, k);
-                std::vector<double> r = host(dt, c.ni), rt = host(ax, c.ni);
-                std::printf("dtcheck ni=%7d nj=%7d  smallest exact step / running minimum over pre-rejected pairs: "
-                            "pair step %.4f, tidal-sampling step %.6f\n", c.ni, c.nj, *std::min_element(r.begin(), r.end()),
-                            *std::min_element(rt.begin(), rt.end()));
+            if (want("accdtcm")) {
+                AccDtK<true, true, true> k{X, Y, Z, M, VX, VY, VZ, AX, AY, AZ, DT, CX, CY, CZ, KT, KF, sid.data(), G, 0.0,
+                                           eta, eta, 0.0, 0.0};
+                bench("accdtcm", [&] { run_n2("bench_accdtcm", 0, c.ni, 0, c.nj, k); }, {dt, ax, ay, az});
             }
+            auto dtcheck = [&](const char* name, auto k) {
+                run_n2(name, 0, c.ni, 0, c.nj, k);
+                std::vector<double> r = host(dt, c.ni), rt = host(ax, c.ni);
+                std::printf("%s ni=%7d nj=%7d  smallest exact step / running minimum over pre-rejected pairs: "
+                            "pair step %.4f, tidal-sampling step %.6f\n", name + 6, c.ni, c.nj,
+                            *std::min_element(r.begin(), r.end()), *std::min_element(rt.begin(), rt.end()));
+            };
+            if (want("dtcheck"))
+                dtcheck("bench_dtcheck", DtCheckK<false>{DtK<true, false, false, true, false, false>{X, Y, Z, M, VX, VY, VZ, AX,
+                                         AY, AZ, DT, VX, VY, VZ, KT, KF, sid.data(), G, 0.0, eta, eta, 0.0}});
+            if (want("dtcheckcm"))   // the pre-rejects with the c.o.m. pair-step velocities
+                dtcheck("bench_dtcheckcm", DtCheckK<true>{DtK<true, false, true, true, false, false>{X, Y, Z, M, VX, VY, VZ, AX,
+                                           AY, AZ, DT, CX, CY, CZ, KT, KF, sid.data(), G, 0.0, eta, eta, 0.0}});
         }
     }
     Kokkos::finalize();

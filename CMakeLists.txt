@@ -198,13 +198,13 @@ foreach(case kepler_e09 kepler_e0 frost4_e09 frost4_e099 planets_hhs planets_fsi
              pn1_global_single_rank floor_binary_e0_cpu floor_planets_cpu
              binaries_timestep frost4_e09_cpu pn_logh_books
              mergers_sse binaries50_detected triples_detected
-             cc_pn1_wide cc_binaries50 cc_min_binaries50 cc_vs_plain_binaries50 cc_consistent_binaries50
-             cm_eps_cpu_vs_device dense_core_split triple_id_order secular_triples_off secular_omega0_steps spin_precession spin_j spin_j_pn1 ic_binaries_no_mergers eta_jerk0_fsi va_without_grad restart_halves_va secular_stellar_no_pn secular_bh_tight_steps logh_hierarchy_complete
+             cc_pn1_wide cc_binaries50 cc_min_binaries50 cc_vs_plain_binaries50 cc_consistent_binaries50 cm_cpu_vs_device cc_cm_consistent
+             cm_eps_tidal_sampling cm_eps_cpu_vs_device dense_core_split triple_id_order secular_triples_off secular_omega0_steps spin_precession spin_j spin_j_pn1 ic_binaries_no_mergers eta_jerk0_fsi va_without_grad restart_halves_va secular_stellar_no_pn secular_bh_tight_steps logh_hierarchy_complete
              sdar_kozai_triple sdar_f3_flyby sdar_pn_kappa1
              cm_eps_tidal_components flyby_member_com ngb_mass_scaling
              coll_headon_triple coll_contact_flyby coll_contact_flyby_logh coll_tde_parabolic coll_tde_accretion fryer_rapid_gap pn_boost_logh pn_boost_secular wide_binaries_ngb gbs_deuflhard_pn cluster_diag tidal_ref_orbit tidal_energy_books tidal_jacobi_escapers ss_companion_flyby int_pos_flyby grad_only_planets bh_merge_radius_fc bh_merge_radius_total coll_mass_loss coll_bh_isco natal_kicks_ns natal_kicks_fallback
-             tree_dt_binaries tree_dt_binaries_host tree_dt_binaries50 tree_dt_triples tree_dt_mergers tree_dt_softened tree_default_on
-             tree_dt_tidal tree_dt_tidal_host
+             tree_dt_binaries tree_dt_binaries_host tree_dt_binaries_cm tree_dt_binaries50 tree_dt_triples tree_dt_mergers tree_dt_softened tree_default_on
+             tree_dt_tidal tree_dt_tidal_host tree_dt_tidal_cm
              triple_stability ic_mass_size_rh ic_binary_com_virial ic_r_break
              secular_drift_e0 secular_drift_e1e-8
              kepler2_norb05 kepler2_norb2 kepler2_hyperbolic kepler2_contact)
@@ -239,7 +239,7 @@ if(USE_HDF5 AND HDF5_FOUND)
     # LUNA_PYTHON: a Python in which LUNA (/raven/u/uli/LUNA) imports, for the luna_reader case (skipped if empty)
     set(LUNA_PYTHON "" CACHE FILEPATH "Python with LUNA importable (luna_reader test)")
     foreach(case restart_binaries restart_walltime restart_triples restart_mergers restart_ngb_mergers restart_tidal restart_mergers_sse restart_natal_kicks restart_pn_logh
-                 restart_spin restart_secular restart_secular_triple restart_sdar restart_tidal_sampling restart_spin_imbh
+                 restart_spin restart_secular restart_secular_triple restart_sdar restart_tidal_sampling restart_cm_velocity restart_spin_imbh
                  restart_fsi snapshot_roundtrip snapshot_cluster_header luna_reader)
         add_test(NAME ${case} COMMAND Python3::Interpreter ${CMAKE_SOURCE_DIR}/tests/run_case.py
                  $<TARGET_FILE:nbody-kokkos> ${case})

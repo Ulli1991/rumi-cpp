@@ -167,7 +167,7 @@ Tests: head-on star collision, TDE on parabolic orbit, BH binary to ISCO with re
 
 ### M7 — Speed, each change under the energy rule (after M1, measured on M2 cases)
 1. Profile 200k (0 / 10 / 50 % binaries) and 1e5/1e6 Fig 7 cases on 4x A100.
-2. `FLYBY_CM_VELOCITY` on all paths (CPU, HHS_CC) and A/B as default (FC-II). (done; rejected by the production A/B, deleted 2026-10-12)
+2. `FLYBY_CM_VELOCITY` on all paths (CPU, HHS_CC) and A/B as default (FC-II). (done; rejected as default by the production A/B and deleted 2026-10-12; restored 2026-10-13 as an option, off by default, on top of the N^2 kernel speedups)
 3. Omelyan gradient as option (`GRADIENT=omelyan`), A/B accuracy on M2; makes the FMM gradient a
    second force evaluation.
 4. Tree for time-step and neighbour assignment (user requirement): octree on device, exact pruning so
@@ -255,7 +255,7 @@ Only the items below are adopted; everything else in those documents is referenc
 ## Experiment backlog from METHODS_SURVEY (ranked table), with status
 | id | change | status / next |
 |---|---|---|
-| B-1 | FC criteria set: c.o.m. velocity, jerk off, v/a off, eta_grad 0.2 | c.o.m. part rejected (prod runs 2026-10-12, FLYBY_CM_VELOCITY deleted); jerk/v-a off ("b1") mixed at 20k -> 200k 3-seed A/B still open |
+| B-1 | FC criteria set: c.o.m. velocity, jerk off, v/a off, eta_grad 0.2 | c.o.m. part rejected as default (prod runs 2026-10-12), kept as option FLYBY_CM_VELOCITY (off); jerk/v-a off ("b1") mixed at 20k -> 200k 3-seed A/B still open |
 | F-1 | secular triples off -> LogH | switch SECULAR_TRIPLES merged (default on); no triples formed at 20k; decide with SDAR on 200k |
 | C-1/C-2 | weak-perturber split; field sees c.o.m. of split binaries | C-1 alone 3.6x worse (WEAK_PERTURBER_GAMMA deleted 2026-10-12); C-2 not done (SDAR + collisions removed most stalls; revisit only if stalls return) |
 | E-1/E-3 | eta_GBS 1e-8, end-time tol 1e-2 (FC production values) | 20k: no speed gain; repeat at 200k after Kepler path (less LogH work left) |
@@ -296,7 +296,6 @@ The code before the deletions is tagged archive/pre-step2-deletions.
 | KEPLER_2BODY | true: isolated non-PN pairs on the Kepler drift at any orbit count (9efdca7: 12-27 % faster); PN pairs stay on LogH; kepler2_* tests keep the Kepler-vs-analytic checks only | deleted 2026-10-12, winner hard-wired |
 | BINARY_COM_V | sampled: one f(E) draw per binary c.o.m. (a8728fb; average gave Q_obj 0.336, cold binaries) | deleted 2026-10-12, winner hard-wired |
 | DISTRIBUTE_SUBSYSTEMS, DISTRIBUTE_MIN_SUBSYSTEMS | off: every rank advances every subsystem (5eb53e1: the exchange was slower; SCALING_DESIGN: retire); tests mergers_mpi2_dist, mpi_1v2_dist, restart_mpi2_dist deleted (duplicates of the non-distributed cases) | deleted 2026-10-12, winner hard-wired |
-| FLYBY_CM_VELOCITY | false: component velocities in the fly-by pair step (production runs 2026-10-12: |dE/E| worse with the c.o.m. velocity on 3/3 seeds; the commit that made it default is tag archive/cm-default-on-rejected); FLYBY_CM_EPS (tidal-sampling step) and FLYBY_NGB_CM stay; tests cm_cpu_vs_device, cm_eps_tidal_sampling deleted, cc_cm_consistent / tree_dt_*_cm / restart_cm_velocity ported (renamed cc_consistent_binaries50, tree_dt_*_host, restart_tidal_sampling) | deleted 2026-10-12, winner hard-wired |
 
 ## Pending evaluations (agents stopped mid-work)
 - Task runtimes (HPX/Charm++/Legion): literature says tasks must be >= ~100 us; evaluate only at subtree granularity.
