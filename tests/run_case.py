@@ -133,6 +133,12 @@ CM_TIDE = dict(TEST_CASE="triple_test", INTEGRATOR="hhs", TRIPLE_A_IN_PC="2e-4",
 # Hard stellar binary (0.92 + 0.92 Msun, a = 0.011 AU, e = 0.86, ~1e6 orbits per 1e-3 Myr: secular) and a slow star
 # passing at 0.011 pc (e = 22, from 0.057 pc): the 200k, 10 % binaries seed-13 configuration (component velocities).
 # The inner orbit is turned so that at t = 0 a member's velocity points at the star (its pair "pericentre" is ~0)
+# Hard 20 + 20 Msun binary (a = 1 AU, e = 0.5, ~1e4 orbits per 1e-3 Myr: Kepler drift) and a 0.05 Msun body on a
+# 0.01 pc orbit (e = 0.3, one outer orbit): a weak, slowly varying tide (quadrupole energy D ~ 3e-13 |E0|). With
+# c.o.m. fly-by steps the body's kicks span ~3000 binary orbits and sample the quadrupole force at random phases
+WEAK_TIDE = dict(CM_TIDE, TRIPLE_A_IN_PC="5e-6", TRIPLE_E_IN="0.5", TRIPLE_M1="20.0", TRIPLE_M2="20.0",
+                 TRIPLE_A_OUT_PC="0.01", TRIPLE_E_OUT="0.3", TRIPLE_M3="0.05", TOTAL_TIME_MYR="1.5e-2",
+                 FLYBY_CM_VELOCITY="true", FLYBY_CM_EPS="0")
 FLYBY_TRIPLE = dict(TEST_CASE="triple_test", INTEGRATOR="hhs", TRIPLE_A_IN_PC="5.54e-8", TRIPLE_E_IN="0.86",
                     TRIPLE_M1="0.923", TRIPLE_M2="0.923", TRIPLE_A_OUT_PC="0.0113", TRIPLE_E_OUT="22.0",
                     TRIPLE_M3="0.352", TRIPLE_INCL_DEG="0", TRIPLE_IN_ROT_DEG="-170.58", TOTAL_TIME_MYR="2e-3",
@@ -1400,6 +1406,21 @@ CASES = {
     # BINARY_COM_V = average, 17240 calls at 88ed3db, difference 0). The paths differ by 1 ulp in field-star
     # velocities after step 1 (CPU small-set N3L loop vs the tiled device kernel's summation order, traced
     # 2026-10-12), which chaos amplifies
+    # FLYBY_CM_KICK: a weakly perturbed binary interacts with the rest through its c.o.m. (mollified kicks), so the
+    # c.o.m. fly-by steps no longer sample its orbit. Before (c.o.m. steps, no tidal-sampling step): max |dE/E|
+    # 8.7e-9, end 8.6e-9 (component velocities with FLYBY_CM_EPS = 1e-11: 7.9e-11 in 2x the time). Measured with
+    # FLYBY_CM_KICK (host, 1 thread): max 2.06e-12 (outer pericentre, the bound quadrupole energy), end 5.8e-14,
+    # max |dP|/M 4.3e-14 km/s, max |dL/L| 4.0e-15
+    "cm_kick_weak_tide": lambda exe: floor(exe, "c.o.m. kicks, weak tide",
+                                           dict(WEAK_TIDE, FLYBY_CM_KICK="true", FLYBY_CM_KICK_EPS="1e-11"),
+                                           (2e-13, 2.7e-12, 1e-12, 1e-13)),
+    # The same in a cluster: 5000 stars, 50 % binaries, c.o.m. fly-by steps with the tidal-sampling step. Before
+    # (FLYBY_CM_KICK off): max |dE/E| 2.46e-11 (component velocities 7.7e-11). Measured (host, 1 thread): 1224 of
+    # 1250 binaries flagged, max |dE/E| 7.3e-12, |dP|/M 4.3e-15 km/s, |dL/L| 3.3e-15
+    "cm_kick_binaries50": lambda exe: floor(exe, "c.o.m. kicks, 50 % binaries",
+                                            dict(BINARIES50, FLYBY_CM_VELOCITY="true", FLYBY_CM_EPS="1e-11",
+                                                 FLYBY_CM_KICK="true"),
+                                            (1.5e-11, 1.5e-11, 1e-13, 1e-13)),
     "cm_eps_cpu_vs_device": lambda exe: paths_same_steps(exe, "fly-by step with tidal sampling",
                                                          dict(BINARIES, FLYBY_CM_EPS="1e-11", PN_ORDER="31"),
                                                          12000, 2e-4),
