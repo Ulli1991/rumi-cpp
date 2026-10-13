@@ -2882,8 +2882,20 @@ static int hhs_fsi_recursive(
                 for (const auto& ev : mergers) {
                     auto* sub = find_subsystem_for_merger(g_subsystem_mgr, ev);
                     if (sub) g_merger_tree.record(ev, *sub, g_sim_time);
+                    static const bool merge_check = std::getenv("NBODY_MERGE_CHECK") != nullptr;   // debug
+                    double e_chk0 = 0.0;
+                    if (merge_check)
+                        e_chk0 = compute_diagnostics(p, G, soft2).E_total + g_energy_books.total_sink();
                     execute_merger(ev, p, g_subsystem_mgr, g_energy_books,
                                    G, g_collisional.c_code);
+                    if (merge_check && MPIComm::rank() == 0) {
+                        const double e_chk1 = compute_diagnostics(p, G, soft2).E_total + g_energy_books.total_sink();
+                        std::printf("MERGE_CHECK depth %d pids %d %d dE(total+books) %.6e E_merge %.9e E_pn %.9e\n",
+                                    depth, ev.pid1, ev.pid2, e_chk1 - e_chk0, g_energy_books.E_merge,
+                                    g_energy_books.E_pn);
+                    } else if (merge_check) {
+                        compute_diagnostics(p, G, soft2);   // collective under MPI
+                    }
                 }
                 g_subsystem_mgr.step_mergers += (int)mergers.size();
                 if (!mergers.empty()) {
