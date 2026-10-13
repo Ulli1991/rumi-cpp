@@ -2649,6 +2649,9 @@ static int hhs_fsi_recursive(
                                                g_collisional.n_orb_secular);
             g_subsys_phase.add(SubsystemPhaseTimes::DET_PAIRS, det_clock.lap());
             g_subsystem_mgr.update_particle_flags(p);
+            // FLYBY_CM_KICK: once per step, on every particle (the quadrupole energy bound of each binary)
+            if (depth == 0 && g_collisional.flyby_cm_kick)
+                g_subsystem_mgr.update_cm_kick_flags(p, G, g_collisional.flyby_cm_kick_eps * g_collisional.e_ref);
             g_subsystem_mgr.accumulate_diagnostics();
             lean_fence("integrator.cpp:2429");
             g_subsys_phase.add(SubsystemPhaseTimes::DET_FLAGS, det_clock.lap());

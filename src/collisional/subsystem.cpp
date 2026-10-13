@@ -942,6 +942,10 @@ void SubsystemManager::fill_cm_velocity(const Particles& p, int lo, int hi, Kokk
     auto pm = p.mass;
     auto px_ = p.x, py_ = p.y, pz_ = p.z;
     const double G = G_CODE;
+    // FLYBY_CM_KICK: flagged binaries interact through their c.o.m., their kicks sample no orbit (no tidal step)
+    auto psid = p.subsystem_id;
+    auto ctab = cmk_tab_;
+    const int cntab = cmk_nb_ > 0 ? cmk_ntab_ : 0;
     small_for("cm_vel_members", n_sub, KOKKOS_LAMBDA(int k) {
         const int a = base + buf(k), e = base + buf(k + 1);
         double M = 0, px = 0, py = 0, pz = 0, cx = 0, cy = 0, cz = 0;
@@ -982,12 +986,155 @@ void SubsystemManager::fill_cm_velocity(const Particles& p, int lo, int hi, Kokk
                 }
             }
             if (ext > 0.0 && muv > 0.0) kt = tol / (2.0 * G * ext * muv);
+            const int sk = psid(buf(a));
+            if (sk >= 0 && sk < cntab && ctab(sk) >= 0) { kt = 1e30; kfl = 0.0; }
         }
         for (int q = a; q < e; q++) {
             const int i = buf(q);
             if (cm) { cvx(i) = px / M; cvy(i) = py / M; cvz(i) = pz / M; }
             if (tol > 0.0) { ck(i) = kt; cf(i) = kfl; }
         }
+    });
+}
+
+// ============================================================================
+// FLYBY_CM_KICK: mollified c.o.m. kicks of weakly perturbed binaries (subsystem.h). The binary's interaction with
+// every other particle becomes that of a point mass at its c.o.m. (the mollified impulse method, Izaguirre et al.
+// 1999, J. Chem. Phys. 110, 9853, with the c.o.m. projection as the averaging map): the kicks then no longer sample
+// the quadrupole force at random orbital phases, which with c.o.m. fly-by steps (FROST-CLUSTERS II sec. 2.1) span
+// hundreds of orbits. The neglected quadrupole (and higher) interaction is bounded by D = mu r_apo^2 sum G m / d^3;
+// only binaries with D <= tol are flagged, so the measured energy differs from the conserved H_mod by at most the
+// sum of D, and a flag change moves H_mod by at most the binary's D.
+// ============================================================================
+void SubsystemManager::update_cm_kick_flags(const Particles& p, double G, double tol) {
+    cmk_nb_ = 0; cmk_dsum_ = 0.0; cmk_dmax_ = 0.0; cmk_nbound_ = 0;
+    const int ntab = std::max(next_id, 1);
+    if ((int)cmk_tab_.extent(0) < ntab) cmk_tab_ = Kokkos::View<int*>("cmk_tab", 2 * ntab);
+    cmk_ntab_ = ntab;
+    Kokkos::deep_copy(Kokkos::subview(cmk_tab_, Kokkos::pair<int,int>(0, ntab)), -1);
+    if (active.empty() || tol <= 0.0) return;
+    rebuild_pid_to_idx(p);
+    const auto& p2i = pid_to_idx();
+    const int N = p.N;
+    std::vector<int> h;   // (i, j, id) of every 2-body subsystem
+    for (const auto& sub : active) {
+        if (sub.n_bodies != 2 || sub.particle_ids.size() != 2) continue;
+        const int a = sub.particle_ids[0], b = sub.particle_ids[1];
+        const int i = (a >= 0 && a < (int)p2i.size()) ? p2i[a] : -1, j = (b >= 0 && b < (int)p2i.size()) ? p2i[b] : -1;
+        if (i < 0 || j < 0 || i >= N || j >= N || sub.id < 0 || sub.id >= ntab) continue;
+        h.push_back(i); h.push_back(j); h.push_back(sub.id);
+    }
+    const int nb = (int)h.size() / 3;
+    if (nb == 0) return;
+    Kokkos::View<int*> d_idx("cmk_idx", 3 * nb);
+    Kokkos::View<int*, Kokkos::HostSpace, Kokkos::MemoryUnmanaged> h_idx(h.data(), h.size());
+    Kokkos::deep_copy(d_idx, h_idx);
+    Kokkos::View<double*> d_D("cmk_D", nb);
+    auto x = p.x, y = p.y, z = p.z, vx = p.vx, vy = p.vy, vz = p.vz, m = p.mass;
+    using TP = Kokkos::TeamPolicy<>;
+    Kokkos::parallel_for("cmk_tidal_energy", TP(nb, Kokkos::AUTO), KOKKOS_LAMBDA(const TP::member_type& t) {
+        const int b = t.league_rank();
+        const int i = d_idx(3 * b), j = d_idx(3 * b + 1);
+        const double M = m(i) + m(j);
+        const double cx = M > 0.0 ? (m(i) * x(i) + m(j) * x(j)) / M : 0.0;
+        const double cy = M > 0.0 ? (m(i) * y(i) + m(j) * y(j)) / M : 0.0;
+        const double cz = M > 0.0 ? (m(i) * z(i) + m(j) * z(j)) / M : 0.0;
+        double s = 0.0;
+        Kokkos::parallel_reduce(Kokkos::TeamThreadRange(t, N), [&](int k, double& acc) {
+            if (k == i || k == j) return;
+            const double dx = x(k) - cx, dy = y(k) - cy, dz = z(k) - cz;
+            const double d2 = dx * dx + dy * dy + dz * dz;
+            if (d2 > 0.0) acc += m(k) / (d2 * Kokkos::sqrt(d2));
+        }, s);
+        Kokkos::single(Kokkos::PerTeam(t), [&]() {
+            const double rx = x(j) - x(i), ry = y(j) - y(i), rz = z(j) - z(i);
+            const double ux = vx(j) - vx(i), uy = vy(j) - vy(i), uz = vz(j) - vz(i);
+            const double r = Kokkos::sqrt(rx * rx + ry * ry + rz * rz), gm = G * M;
+            const double en = 0.5 * (ux * ux + uy * uy + uz * uz) - gm / r;
+            if (!(M > 0.0) || !(r > 0.0) || !(en < 0.0)) { d_D(b) = -1.0; return; }   // unbound: never flagged
+            const double sa = -gm / (2.0 * en);
+            const double lx = ry * uz - rz * uy, ly = rz * ux - rx * uz, lz = rx * uy - ry * ux;
+            const double e2 = 1.0 - (lx * lx + ly * ly + lz * lz) / (gm * sa);
+            const double ra = sa * (1.0 + Kokkos::sqrt(e2 > 0.0 ? e2 : 0.0));
+            d_D(b) = m(i) * m(j) / M * ra * ra * G * s;
+        });
+    });
+    auto hD = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), d_D);
+    std::vector<int> pairs;   // (id, flagged index)
+    for (int b = 0; b < nb; b++) {
+        if (hD(b) < 0.0) continue;
+        cmk_nbound_++;
+        if (hD(b) > tol) continue;
+        pairs.push_back(h[3 * b + 2]); pairs.push_back(cmk_nb_++);
+        cmk_dsum_ += hD(b); cmk_dmax_ = std::max(cmk_dmax_, hD(b));
+    }
+    if (cmk_nb_ == 0) return;
+    Kokkos::View<int*> d_pairs("cmk_pairs", pairs.size());
+    Kokkos::View<int*, Kokkos::HostSpace, Kokkos::MemoryUnmanaged> h_pairs(pairs.data(), pairs.size());
+    Kokkos::deep_copy(d_pairs, h_pairs);
+    auto tab = cmk_tab_;
+    Kokkos::parallel_for("cmk_tab_fill", cmk_nb_, KOKKOS_LAMBDA(int q) { tab(d_pairs(2 * q)) = d_pairs(2 * q + 1); });
+    if ((int)cmk_cnt_.extent(0) < cmk_nb_) {
+        cmk_sum_ = Kokkos::View<double*>("cmk_sum", 8 * cmk_nb_);
+        cmk_cnt_ = Kokkos::View<int*>("cmk_cnt", 2 * cmk_nb_);
+    }
+    Kokkos::fence();
+}
+
+// Both members of every flagged binary in [lo, hi) to their c.o.m. (true positions saved); nested calls are no-ops.
+// A binary with a member outside [lo, hi) keeps its true positions (members share their time step, so both are in
+// every HHS set, MPI slice union and HHS_CC component that holds one)
+void SubsystemManager::cm_kick_swap(Particles& p, int lo, int hi) {
+    if (cmk_depth_++ > 0) return;
+    cmk_lo_ = lo; cmk_hi_ = hi;
+    if (cmk_nb_ == 0 || hi <= lo) { cmk_hi_ = lo; return; }
+    if ((int)cmk_swapped_.extent(0) < p.N) {
+        cmk_swapped_ = Kokkos::View<int*>("cmk_swapped", p.N);   // zero-initialised
+        cmk_save_ = Kokkos::View<double*>("cmk_save", 3 * (size_t)p.N);
+    }
+    auto sid = p.subsystem_id;
+    auto tab = cmk_tab_;
+    auto sum = cmk_sum_;
+    auto cnt = cmk_cnt_;
+    auto save = cmk_save_;
+    auto sw = cmk_swapped_;
+    auto x = p.x, y = p.y, z = p.z, m = p.mass;
+    const int ntab = cmk_ntab_;
+    auto rng = Kokkos::RangePolicy<>(lo, hi);
+    Kokkos::parallel_for("cmk_zero", rng, KOKKOS_LAMBDA(int i) {
+        const int s = sid(i), b = (s >= 0 && s < ntab) ? tab(s) : -1;
+        if (b < 0) return;
+        sum(4 * b) = 0.0; sum(4 * b + 1) = 0.0; sum(4 * b + 2) = 0.0; sum(4 * b + 3) = 0.0; cnt(b) = 0;
+    });
+    // two members: 0 + a + b == 0 + b + a in IEEE arithmetic, so the order of the atomics does not matter
+    Kokkos::parallel_for("cmk_sum", rng, KOKKOS_LAMBDA(int i) {
+        const int s = sid(i), b = (s >= 0 && s < ntab) ? tab(s) : -1;
+        if (b < 0) return;
+        Kokkos::atomic_add(&sum(4 * b), m(i));
+        Kokkos::atomic_add(&sum(4 * b + 1), m(i) * x(i));
+        Kokkos::atomic_add(&sum(4 * b + 2), m(i) * y(i));
+        Kokkos::atomic_add(&sum(4 * b + 3), m(i) * z(i));
+        Kokkos::atomic_add(&cnt(b), 1);
+    });
+    Kokkos::parallel_for("cmk_swap", rng, KOKKOS_LAMBDA(int i) {
+        const int s = sid(i), b = (s >= 0 && s < ntab) ? tab(s) : -1;
+        if (b < 0 || cnt(b) != 2 || !(sum(4 * b) > 0.0)) return;
+        save(3 * (size_t)i) = x(i); save(3 * (size_t)i + 1) = y(i); save(3 * (size_t)i + 2) = z(i);
+        x(i) = sum(4 * b + 1) / sum(4 * b); y(i) = sum(4 * b + 2) / sum(4 * b); z(i) = sum(4 * b + 3) / sum(4 * b);
+        sw(i) = 1;
+    });
+}
+
+void SubsystemManager::cm_kick_restore(Particles& p) {
+    if (--cmk_depth_ > 0) return;
+    if (cmk_hi_ <= cmk_lo_) return;
+    auto save = cmk_save_;
+    auto sw = cmk_swapped_;
+    auto x = p.x, y = p.y, z = p.z;
+    Kokkos::parallel_for("cmk_restore", Kokkos::RangePolicy<>(cmk_lo_, cmk_hi_), KOKKOS_LAMBDA(int i) {
+        if (!sw(i)) return;
+        x(i) = save(3 * (size_t)i); y(i) = save(3 * (size_t)i + 1); z(i) = save(3 * (size_t)i + 2);
+        sw(i) = 0;
     });
 }
 

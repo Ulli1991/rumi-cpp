@@ -71,6 +71,27 @@ struct SubsystemManager {
     Kokkos::View<int*>::host_mirror_type cm_buf_host_;
     std::vector<int> cm_host_;
     Kokkos::View<int*> flag_buf_;                     // (index, sid) pairs uploaded by update_particle_flags
+
+    // FLYBY_CM_KICK (mollified c.o.m. kicks): bound 2-body subsystems whose quadrupole tidal energy against all
+    // particles, D = mu r_apo^2 sum_j G m_j / d_j^3 (d_j: distance to the c.o.m.), is at most FLYBY_CM_KICK_EPS x |E0|
+    // (update_cm_kick_flags, once per step at HHS depth 0) interact with every other particle through their c.o.m.:
+    // the force and gradient kernels see both members at the c.o.m. (cm_kick_swap / cm_kick_restore around each
+    // launch). Pairwise central forces, so momentum and angular momentum stay exact; the dynamics conserve
+    // H_mod = H - sum_flagged (U_quad + higher), which differs from the measured energy by at most sum D (bounded,
+    // not accumulated). Their members need no tidal-sampling pair step (fill_cm_velocity: k = 1e30, floor 0).
+    Kokkos::View<int*> cmk_tab_;                      // subsystem id -> flagged binary index (-1: not flagged)
+    int cmk_ntab_ = 0, cmk_nb_ = 0;
+    Kokkos::View<double*> cmk_sum_;                   // per flagged binary: m, m x, m y, m z of the swapped members
+    Kokkos::View<int*> cmk_cnt_;                      // per flagged binary: members found in the swap range
+    Kokkos::View<double*> cmk_save_;                  // true x, y, z of swapped particles (3 N)
+    Kokkos::View<int*> cmk_swapped_;                  // 1: particle sits at its c.o.m. now
+    int cmk_depth_ = 0;                               // nesting of cm_kick_swap (only the outermost swaps)
+    int cmk_lo_ = 0, cmk_hi_ = 0;
+    double cmk_dsum_ = 0.0, cmk_dmax_ = 0.0;          // sum and max of D over the flagged binaries (last update)
+    int cmk_nbound_ = 0;                              // bound 2-body subsystems at the last update
+    void update_cm_kick_flags(const Particles& p, double G, double tol);
+    void cm_kick_swap(Particles& p, int lo, int hi);
+    void cm_kick_restore(Particles& p);
     const SubsystemManager* shared_map_ = nullptr;   // local managers read the global map
     const std::vector<int>& pid_to_idx() const { return shared_map_ ? shared_map_->pid_to_idx_ : pid_to_idx_; }
     int pid_to_idx_max() const { return shared_map_ ? shared_map_->pid_to_idx_max_ : pid_to_idx_max_; }

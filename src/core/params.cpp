@@ -136,6 +136,11 @@ const std::vector<ParamSpec> kParams = {
     {"GBS_KMAX", I, "10", "Subsystems", EXPERIMENT, "", "GBS extrapolation stages (FROST-CLUSTERS I: 8)"},
     {"FLYBY_CM_VELOCITY", B, "false", "Subsystems", EXPERIMENT, "",
      "Fly-by step of subsystem members with the c.o.m. velocity (FROST-CLUSTERS II sec. 2.1)"},
+    {"FLYBY_CM_KICK", B, "false", "Subsystems", EXPERIMENT, "",
+     "Bound binaries with quadrupole tidal energy <= FLYBY_CM_KICK_EPS x |E0| interact with all other particles "
+     "through their c.o.m. (mollified kicks: no orbit sampling, no tidal-sampling step; P, L exact)"},
+    {"FLYBY_CM_KICK_EPS", D, "1e-12", "Subsystems", EXPERIMENT, "",
+     "Largest D / |E0| of a FLYBY_CM_KICK binary, D = mu r_apo^2 sum_j G m_j / d_j^3"},
     {"FLYBY_CM_EPS", D, "1e-11", "Subsystems", INTERNAL, "",
      "Tidal-sampling pair step: energy a slow particle's kicks put into a subsystem per step <= this x |E0| (0: off)"},
     {"TIDAL_STEP_RES", D, "1.0", "Subsystems", INTERNAL, "",
