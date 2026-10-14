@@ -21,6 +21,7 @@
 // Global energy bookkeeping instance
 EnergyBookkeeping g_energy_books;
 EnergyAttribution g_eattr;
+int g_step_in_progress = 0;
 
 // ==========================================================================
 // Tiled GPU potential energy computation (shared-memory, TILE_SIZE tiles)

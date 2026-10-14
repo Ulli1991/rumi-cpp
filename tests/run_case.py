@@ -839,13 +839,33 @@ def int_pos_vs_double(exe, label, cfg, ratio):
     return check(f"{label} max|dE/E| integer / double positions", ip / dbl, ratio)
 
 
+def kepler_ae(p, q):
+    """Osculating a (pc), e of two dump rows (pid, m, x, y, z, vx, vy, vz)."""
+    r = [q[2 + k] - p[2 + k] for k in range(3)]
+    v = [q[5 + k] - p[5 + k] for k in range(3)]
+    mu = G_CODE * (p[1] + q[1])
+    eps = 0.5 * sum(x * x for x in v) - mu / math.sqrt(sum(x * x for x in r))
+    h = [r[1] * v[2] - r[2] * v[1], r[2] * v[0] - r[0] * v[2], r[0] * v[1] - r[1] * v[0]]
+    return -mu / (2 * eps), math.sqrt(max(0.0, 1 + 2 * eps * sum(x * x for x in h) / mu ** 2))
+
+
 def quad22_sdar(exe, label, cfg, bound):
     """PLAN item 4c: the 2+2 quadruple of the BIFROST Fig. 11 stall (PN BH binary + a 0.019 AU stellar binary bound to
-    it). With SDAR per pair the stellar binary is slowed although the subsystem has PN members: one step must finish
-    (default 120 s test timeout), without LogH step-limit hits, energy within `bound`."""
-    out = run_output(exe, cfg)
-    ok = check(f"{label} LogH step-limit hits", out.count("LogH step limit"), 0)
-    return ok & check(f"{label} max|dE/E|", max(r[0] for r in diagnostics(out)), bound)
+    it). With SDAR per pair (NBODY_SDAR_PN=1) the stellar binary is slowed although the subsystem has PN members: the
+    step finishes within the test timeout (0.4 s on the login node; without it no step in 120 s), the slow-down is
+    used (kappa_max > 1) and the energy stays within `bound`. Step-limit retries of the eccentric BH binary are allowed
+    (shorter pieces are cheaper than one long call, PLAN item 4 note)."""
+    out, rows = run_output(exe, cfg, env={"NBODY_SDAR_PN": "1"}, dump=True)
+    k = [float(x) for x in re.findall(r"kappa_max=(\S+?)\)", out)]
+    ok = check(f"{label} largest kappa", max(k) if k else 0.0, 1e3, lower=True)
+    ok &= check(f"{label} max|dE/E|", max(r[0] for r in diagnostics(out)), bound)
+    # PN is a ~1e-8 effect here: the PN path with the slowed stellar binary must give its orbit as the Newtonian SDAR
+    # path does. Measured |a / a_N - 1| 1e-7, |e - e_N| 1e-7; with the slowed pair's own PN term at full strength
+    # (its precession x kappa per slowed orbit) a grew by 9 % and e by 0.04
+    _, rows_n = run_output(exe, dict(cfg, PN_ORDER="0"), env={"NBODY_SDAR_PN": "1"}, dump=True)
+    (a, e), (a_n, e_n) = (kepler_ae(r[2], r[3]) for r in (rows, rows_n))
+    ok &= check(f"{label} stellar binary |a / a_Newtonian - 1|", abs(a / a_n - 1), 1e-5)
+    return ok & check(f"{label} stellar binary |e - e_Newtonian|", abs(e - e_n), 1e-5)
 
 
 def tidal_escapers(exe, label, cfg, bound):
@@ -1587,11 +1607,11 @@ CASES = {
         ETA_RESTART="0", DOMAIN_HALFSIZE_PC="1"), 1.3),
     # 2+2 quadruple (quad22_test defaults = the BIFROST Fig. 11 stall, 200k, 50 % binaries): BH binary 20.7 + 14.1 Msun
     # (a = 58 AU) and a 0.79 + 0.105 Msun binary (a = 0.019 AU, ~1500 orbits per 1e-3 Myr, tidal ratio ~4e-12) bound to it
-    # at ~0.003 pc, one PN subsystem. Before item 4c (SDAR off for whole PN subsystems): no step within 900 s on the
-    # login node. Disabled in CMakeLists.txt until 4c; bound provisional, to be set to 1.3x the measured value then
+    # at ~0.003 pc, one PN subsystem. Without item 4c (SDAR off for whole PN subsystems): no step within 900 s on the
+    # login node; with NBODY_SDAR_PN=1: 0.44 s, kappa_max 8.9e4, max|dE/E| 2.1e-16 (bound: round-off floor)
     "quad22_sdar": lambda exe: quad22_sdar(exe, "2+2 quadruple, PN + SDAR", dict(
         HIER_LOGH, TEST_CASE="quad22_test", PN_ORDER="31", M_PN="5.0", SDAR="true", R_NGB="0.01",
-        TOTAL_TIME_MYR="1e-3", DT_MAX_MYR="1e-3", TEST_STELLAR_RADIUS_RSUN="0.4", ETA_RESTART="1e-8"), 1e-8),
+        TOTAL_TIME_MYR="1e-3", DT_MAX_MYR="1e-3", TEST_STELLAR_RADIUS_RSUN="0.4", ETA_RESTART="1e-8"), 1e-14),
     # Same cluster, R_ESCAPE_RJ = 2: r_J 0.708 pc at M = 800 Msun, 623 stars leave over 5 steps, max|dE/E| 9.77e-10
     "tidal_jacobi_escapers": lambda exe: tidal_escapers(exe, "2 r_J", dict(BINARIES, TOTAL_TIME_MYR="5e-3",
                                                                           TIDAL_FIELD="loghalo", GALAXY_VC_KMS="220",

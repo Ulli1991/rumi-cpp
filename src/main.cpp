@@ -1234,12 +1234,14 @@ int main(int argc, char** argv) {
                 if (g_eattr.on) {
                     const double E0 = std::fabs(diag0.E_total);
                     std::printf("EATTR step %d signed_dE %.6e logh %.6e logh_abs %.6e n_logh %d books: gw %.6e pn %.6e "
-                                "merge %.6e esc %.6e | worst %.6e n=%d type=%d pids %d %d a=%.4e e=%.4f dt=%.3e\n",
+                                "merge %.6e esc %.6e | worst %.6e n=%d type=%d pids %d %d a=%.4e e=%.4f dt=%.3e m=%.3f %.3f %.3f %.3f\n",
                                 step_now, (diag.E_total + g_energy_books.total_sink() - diag0.E_total) / E0,
                                 g_eattr.logh / E0, g_eattr.logh_abs / E0, g_eattr.n_logh, g_energy_books.E_gw / E0,
                                 g_energy_books.E_pn / E0, g_energy_books.E_merge / E0, g_energy_books.E_escape / E0,
                                 g_eattr.worst / E0, g_eattr.worst_n, g_eattr.worst_type, g_eattr.worst_pid0,
-                                g_eattr.worst_pid1, g_eattr.worst_a, g_eattr.worst_e, g_eattr.worst_dt * TIME_UNIT_MYR);
+                                g_eattr.worst_pid1, g_eattr.worst_a, g_eattr.worst_e, g_eattr.worst_dt * TIME_UNIT_MYR,
+                                g_eattr.worst_m[0], g_eattr.worst_m[1],
+                                g_eattr.worst_m[2], g_eattr.worst_m[3]);
                     std::printf("EATTR_TID step %d max_est %.6e pids %d %d m %.3f %.3f a=%.4e e=%.4f gamma=%.3e P=%.3e dt=%.3e\n",
                                 step_now, g_eattr.tid_max / E0, g_eattr.tid_pid0, g_eattr.tid_pid1, g_eattr.tid_m1,
                                 g_eattr.tid_m2, g_eattr.tid_a, g_eattr.tid_e, g_eattr.tid_gamma,
@@ -1290,6 +1292,7 @@ int main(int argc, char** argv) {
             rs.dt_global = dt_global;
 #endif
             if (my_rank == 0) std::printf("FSI global step: %.4e Myr\n", dt_global * TIME_UNIT_MYR);
+            g_step_in_progress = step + 1;
             while (t < t_final) {
                 auto step_t0 = std::chrono::high_resolution_clock::now();
                 tidal_kick(work_p, 0.5 * dt_global, G, g_energy_books);
@@ -1308,6 +1311,7 @@ int main(int argc, char** argv) {
 #endif
                 t += dt_global;
                 step++;
+                g_step_in_progress = step + 1;
                 tidal_print(step);
                 auto step_t1 = std::chrono::high_resolution_clock::now();
                 double step_wall = std::chrono::duration<double>(step_t1 - step_t0).count();
@@ -1343,6 +1347,7 @@ int main(int argc, char** argv) {
             double E_carry = 0;
             int E_carry_N = -1;
 #endif
+            g_step_in_progress = step + 1;
             while (t < t_final) {
                 NBODY_NVTX_PUSH("STEP");
                 fence_stats::report(step, false);   // reset: count only this step
@@ -1497,6 +1502,7 @@ int main(int argc, char** argv) {
 
                 t += dt_max;
                 step++;
+                g_step_in_progress = step + 1;
                 tidal_print(step);
 
                 // Replicated MPI state must stay bitwise identical; stop instead of diverging silently

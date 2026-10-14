@@ -196,7 +196,7 @@ bool GBSIntegrator::step(LogHState& state, double ds, double G, double& ds_next,
     // Values at the start of the first substep, the same for every stage (not used by the SDAR steps)
     LogHStepStart start_buf;
     const LogHStepStart* start = nullptr;
-    if ((pn_order > 0 && state.use_aux_vel) || state.n_sd == 0) {
+    if (state.n_sd == 0) {
         logh_step_start(state, G, c_code, pn_order, start_buf);
         start = &start_buf;
     }

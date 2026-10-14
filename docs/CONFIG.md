@@ -252,7 +252,9 @@ Levels:
 | `NBODY_GBS_TTOL` | Relative tolerance of the LogH end time (default 1e-4) |
 | `NBODY_LOGH_SLOW` | =k: name every LogH integration that took at least k GBS steps |
 | `NBODY_SDAR` | =0/1: overrides SDAR |
+| `NBODY_SDAR_PN` | =1: SDAR slow-down of inner binaries without a PN member inside PN subsystems (PLAN item 4c; A/B) |
 | `NBODY_SLOW0_STATS` | Statistics of small all-fast HHS sets, printed at the end |
+| `NBODY_SUBSYS_LOG` | =x: one line per Newtonian subsystem advance with unbooked \|dE\| > x \|E0\|, with the members' initial state |
 | `NBODY_SMALL_FOR` | Largest loop run on the host where it can access device memory (default 256; 0: off) |
 | `NBODY_SMALL_N2` | Largest pair count run on the host where it can access device memory (default 4096) |
 | `NBODY_TILE256_MIN` | N^2 kernel: 256-thread tiles from this set size (GPUs; default 131072) |

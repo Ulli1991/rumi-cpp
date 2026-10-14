@@ -51,6 +51,7 @@ struct EnergyAttribution {
     double worst = 0.0;         // largest |E_post - E_pre| of one advance (signed value)
     int worst_n = 0, worst_pid0 = -1, worst_pid1 = -1, worst_type = -1;
     double worst_a = 0.0, worst_e = 0.0, worst_dt = 0.0;
+    double worst_m[4] = {0.0, 0.0, 0.0, 0.0};   // masses of its first 4 members (Msun)
     int n_logh = 0;
     // tidal kick estimate mu |f| |v| dt of 2-body bound subsystems (subsystem_timesteps), max over the interval
     double dt_cap = 1e30;
@@ -59,6 +60,8 @@ struct EnergyAttribution {
     void reset() { bool o = on; double c = dt_cap; *this = EnergyAttribution(); on = o; dt_cap = c; }
 };
 extern EnergyAttribution g_eattr;
+// Number of the top-level step in progress (main loop; NBODY_SUBSYS_LOG lines)
+extern int g_step_in_progress;
 
 DiagnosticState compute_diagnostics(const Particles& p, double G, double soft2);
 

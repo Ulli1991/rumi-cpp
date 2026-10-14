@@ -52,6 +52,8 @@ struct SdarParams {
     double coll_radius[LOGH_MAX_BODIES] = {};   // collision radius per body (normalized units, 0: none)
     const double* coll_pair = nullptr;          // pair collision distances [i * LOGH_MAX_BODIES + j] (normalised;
                                                 // replaces the per-body sum when set: TDE radii are not additive)
+    double m_pn = 0.0;                      // PN subsystem: pairs with a member of at least this mass keep kappa = 1
+                                            // (normalised; 0: no PN, every pair may be slowed)
     double steps_per_orbit = 0.0;           // GBS step limit per slowed orbit (0: only the caller's max_iter)
 };
 

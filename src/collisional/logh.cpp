@@ -317,6 +317,7 @@ double logh_sd_update(LogHState& state, double G, const SdarParams& par, bool cl
             const double P = 2.0 * M_PI * std::sqrt(a * a * a / (G * mb));
             if (used[i] || used[j]) continue;
             used[i] = used[j] = true;   // the tightest pair of a body is its inner orbit, slowed or not
+            if (par.m_pn > 0.0 && (mi >= par.m_pn || mj >= par.m_pn)) continue;   // PN pair: kappa = 1 (FC-I A2)
             const double r_apo = a * (1.0 + e);
             const double r_coll = par.coll_pair ? par.coll_pair[i * LOGH_MAX_BODIES + j]
                                                 : par.coll_radius[i] + par.coll_radius[j];
@@ -495,6 +496,13 @@ static void compute_pn_all_pairs(const LogHState& state, const double* eval_vel,
     std::memset(pn_out, 0, n * 3 * sizeof(double));
     for (int i = 0; i < n; i++) {
         for (int j = i + 1; j < n; j++) {
+            // Slowed (SDAR) pairs have no member above M_PN: their own PN term is left out. Applied at full strength
+            // to the slowed orbit it acts kappa times longer per orbit (PN1 precession x kappa, ~0.3 rad per slowed
+            // orbit for kappa 9e4 at 0.019 AU), which breaks the slow-down approximation
+            bool slowed = false;
+            for (int k = 0; k < state.n_sd; k++)
+                if (state.sd_a[k] == i && state.sd_b[k] == j) slowed = true;
+            if (slowed) continue;
             // EIH: compute individual PN accelerations directly (both bodies of the pair in one call)
             double a_pn_i[3], a_pn_j[3];
             eih_pn_acceleration_pair(&state.pos[i*3], &eval_vel[i*3], state.mass[i],
@@ -650,8 +658,55 @@ void logh_step_start(const LogHState& state, double G, double c_code, int pn_ord
 // stages of a step) and then carried. The drift and the K_aux / K_phys after it use the Omega of the K_aux
 // before the drift (K_aux and drift change neither v nor B). 5 PN evaluations and 2 kinetic energies per step
 // instead of 6 and 7, with the same operations on the same values as single steps: bit-identical.
+// SDAR in a PN subsystem (PLAN item 4c): slowed inner binaries without a PN member (logh_sd_update) in the auxiliary-
+// velocity step. With the slowed metric <.,.>_sd of T_sd, dH_sd/dt = sum_i m_i xdot_i . g_i = <v, g>_sd, so B evolves
+// as dB/ds = -<v, g>_sd / Omega, and K_phys is k_phys_cubic with every inner product taken in <.,.>_sd; the Newtonian
+// acceleration carries the (1/kappa - 1) a_bin terms and the drift the slowed internal velocities, as in
+// logh_leapfrog_step_sd. g(v), g(w) act on the slowed binaries as perturbations (W20 sec. 2.3).
+static void k_phys_cubic_sd(LogHState& state, const double* accel, const double* pn, double eps, double Omega0) {
+    const int n3 = state.n_bodies * 3;
+    double delta[LOGH_MAX_BODIES * 3];
+    for (int i = 0; i < n3; i++) delta[i] = eps * (accel[i] + pn[i]);
+    const double C = 0.5 * sd_dot(state, state.vel, delta), D = 0.125 * sd_dot(state, delta, delta);
+    const double W_old = sd_dot(state, state.vel, pn), P = sd_dot(state, delta, pn);
+    const double Omega = solve_kick_omega(Omega0, C - 0.5 * eps * W_old, D - 0.25 * eps * P);
+    const double inv_Omega = 1.0 / Omega;
+    for (int i = 0; i < n3; i++) state.vel[i] += delta[i] * inv_Omega;
+    state.B -= eps * (W_old + P / (2.0 * Omega)) * inv_Omega;
+}
+
+static void logh_leapfrog_step_pn_sd(LogHState& state, double ds, double G, double c_code, int pn_order) {
+    const int n3 = state.n_bodies * 3;
+    const double ds_half = 0.5 * ds, ds_quarter = 0.25 * ds;
+    double accel[LOGH_MAX_BODIES * 3], pn_v[LOGH_MAX_BODIES * 3], pn[LOGH_MAX_BODIES * 3], xdot[LOGH_MAX_BODIES * 3];
+    logh_internal_accel(state, G, accel);
+    sd_scale_binary_accel(state, G, accel);
+    for (int half = 0; half < 2; half++) {
+        if (half == 1) {   // drift with the Omega of the K_aux before it, then the forces at the new positions
+            const double inv_Omega = 1.0 / logh_omega(state);
+            sd_drift_velocity(state, xdot);
+            for (int i = 0; i < n3; i++) state.pos[i] += ds * xdot[i] * inv_Omega;
+            state.t += ds * inv_Omega;
+            logh_internal_accel(state, G, accel);
+            sd_scale_binary_accel(state, G, accel);
+        }
+        double Omega = logh_omega(state);
+        compute_pn_all_pairs(state, state.vel, G, c_code, pn_order, pn_v);
+        k_aux(state, accel, pn_v, ds_quarter, Omega, G);
+        compute_pn_all_pairs(state, state.aux_vel, G, c_code, pn_order, pn);
+        k_phys_cubic_sd(state, accel, pn, ds_half, Omega);
+        Omega = logh_omega(state);
+        compute_pn_all_pairs(state, state.vel, G, c_code, pn_order, pn_v);
+        k_aux(state, accel, pn_v, ds_quarter, Omega, G);
+    }
+}
+
 void logh_leapfrog_steps_pn(LogHState& state, double ds, double G, double c_code, int pn_order, int nsteps,
                             const LogHStepStart* start) {
+    if (state.n_sd > 0) {
+        for (int s = 0; s < nsteps; s++) logh_leapfrog_step_pn_sd(state, ds, G, c_code, pn_order);
+        return;
+    }
     const int n3 = state.n_bodies * 3;
     const double ds_half = 0.5 * ds;
     const double ds_quarter = 0.25 * ds;

@@ -1285,7 +1285,39 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
         // Newtonian energy, momentum and angular momentum over this advance (Newtonian LogH conserves
         // them; what changed is the PN dynamics, plus GBS error at its tolerance)
         const bool pn_on = g_collisional.pn_order > 0 && g_collisional.c_code > 0.0;
-        if (pn_on || g_eattr.on) {
+        // NBODY_SUBSYS_LOG=x: one line per Newtonian subsystem advance whose unbooked energy change (integration
+        // error) exceeds x |E0|, with the members' state before the advance (Msun, pc, km/s; to rerun it in
+        // isolation). PN subsystems book their whole change (E_pn), so they cannot show up in dE/E
+        static const double subsys_log = std::getenv("NBODY_SUBSYS_LOG") ? std::atof(std::getenv("NBODY_SUBSYS_LOG")) : 0.0;
+        auto log_subsys = [&](const Subsystem& sub, int nb, const char* kind, double d, int si) {
+            if (subsys_log <= 0.0 || g_collisional.e_ref <= 0.0 || MPIComm::rank() != 0 ||
+                std::fabs(d) <= subsys_log * g_collisional.e_ref) return;
+            std::string msg;
+            char buf[96];
+            std::snprintf(buf, sizeof(buf), "SUBSYS_ERR step %d %s dE/E0 %.3e type %d n %d dt %.3e a %.4e e %.5f m",
+                          g_step_in_progress, kind, d / g_collisional.e_ref, (int)sub.type, nb, dt * TIME_UNIT_MYR,
+                          sub.orb.a, sub.orb.e);
+            msg = buf;
+            for (int b = 0; b < nb; b++) {
+                std::snprintf(buf, sizeof(buf), " %.4g", saved_bodies[si][b].m);
+                msg += buf;
+            }
+            msg += " pids";
+            for (int b = 0; b < nb; b++) {
+                std::snprintf(buf, sizeof(buf), " %d", sub.particle_ids[b]);
+                msg += buf;
+            }
+            msg += " state";
+            for (int b = 0; b < nb; b++) {
+                const auto& q = saved_bodies[si][b];
+                char sb[200];
+                std::snprintf(sb, sizeof(sb), " [%.17g %.17g %.17g %.17g %.17g %.17g %.17g]", q.m, q.x, q.y, q.z, q.vx,
+                              q.vy, q.vz);
+                msg += sb;
+            }
+            std::printf("%s\n", msg.c_str());
+        };
+        if (pn_on || g_eattr.on || subsys_log > 0.0) {
             if (any_retry) mirror.pull(p, 7);   // otherwise the unpack wrote the results (and masses) into the mirror
             for (int si = 0; si < n_sub; si++) {
                 const auto& sub = saved_subs[si];
@@ -1298,7 +1330,7 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
                     if (saved_bodies[si][b].m >= g_collisional.m_pn) pn_active = true;
                 }
                 pn_active = pn_active && pn_on;
-                if (!ok || (!pn_active && !g_eattr.on)) continue;
+                if (!ok || (!pn_active && !g_eattr.on && subsys_log <= 0.0)) continue;
                 double E_pre = 0.0, E_post = 0.0;
                 for (int b = 0; b < nb; b++) {
                     const auto& s0 = saved_bodies[si][b];
@@ -1324,15 +1356,17 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
                 // Collisions in the call: their energy change coll_J goes to E_merge (finalize_subsystem_collision),
                 // their P and L to the P / L books just made here (PN), so the collision books leave them out
                 if (pn_active) {
-                    g_energy_books.E_pn += E_pre - E_post + coll_J[si];
+                    g_energy_books.E_pn += E_pre - E_post + coll_J[si] + sd_J[si];   // slow-down jumps: E_sd
                     for (auto& c : sub_colls[si]) c.pl_booked = true;
                 } else {
                     const double d = E_post - E_pre - sd_J[si] - coll_J[si];   // unbooked part
+                    log_subsys(sub, nb, "unbooked", d, si);
                     g_eattr.logh += d; g_eattr.logh_abs += std::fabs(d); g_eattr.n_logh++;
                     if (std::fabs(d) > std::fabs(g_eattr.worst)) {
                         g_eattr.worst = d; g_eattr.worst_n = nb; g_eattr.worst_type = (int)sub.type;
                         g_eattr.worst_pid0 = sub.particle_ids[0]; g_eattr.worst_pid1 = sub.particle_ids[1];
                         g_eattr.worst_a = sub.orb.a; g_eattr.worst_e = sub.orb.e; g_eattr.worst_dt = dt;
+                        for (int b = 0; b < 4; b++) g_eattr.worst_m[b] = b < nb ? saved_bodies[si][b].m : 0.0;
                     }
                 }
             }

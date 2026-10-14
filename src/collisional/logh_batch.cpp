@@ -674,12 +674,15 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
         double coll0[LOGH_MAX_BODIES * LOGH_MAX_BODIES];
         std::memcpy(coll0, coll, sizeof(coll));
 
-        // SDAR (FROST-CLUSTERS I App. A2): slow-down of weakly perturbed inner binaries; kappa = 1 throughout
-        // for PN subsystems (any member above M_PN with PN on; FC-I sec. A2) and for 2-body subsystems (no
-        // perturber inside the subsystem: the external tide comes from the FSI kicks, which need the true phase);
-        // collision candidates (osculating pericentre inside the collision distance) are not slowed (FC-I App. B3)
-        const bool sd_on = g_collisional.sdar && !state.use_aux_vel && n_live >= 3;
+        // SDAR (FROST-CLUSTERS I App. A2): slow-down of weakly perturbed inner binaries; kappa = 1 for 2-body
+        // subsystems (no perturber inside the subsystem: the external tide comes from the FSI kicks, which need the
+        // true phase) and for collision candidates (osculating pericentre inside the collision distance, FC-I App.
+        // B3). FC-I sets kappa = 1 for whole PN subsystems; NBODY_SDAR_PN=1 (PLAN item 4c) keeps kappa = 1 only for
+        // pairs with a member above M_PN and slows the other inner binaries of PN subsystems
+        static const bool sdar_pn = [] { const char* e = std::getenv("NBODY_SDAR_PN"); return e && std::atoi(e) != 0; }();
+        const bool sd_on = g_collisional.sdar && (sdar_pn || !state.use_aux_vel) && n_live >= 3;
         SdarParams sd_par;
+        if (sd_on && state.use_aux_vel) sd_par.m_pn = g_collisional.m_pn / M_total;
         if (sd_on) {
             sd_par.k_ref = g_collisional.sdar_kref;
             sd_par.c = g_collisional.sdar_c;

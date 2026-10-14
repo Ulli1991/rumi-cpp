@@ -261,8 +261,3 @@ if(USE_HDF5 AND HDF5_FOUND)
     endif()
 endif()
 
-# PLAN item 4c (SDAR per pair inside PN subsystems): enable once implemented (`ctest -R quad22` runs it anyway when
-# enabled by hand: set_tests_properties(quad22_sdar PROPERTIES DISABLED FALSE))
-if(TEST quad22_sdar)
-    set_tests_properties(quad22_sdar PROPERTIES DISABLED TRUE)
-endif()
