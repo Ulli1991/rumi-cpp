@@ -399,25 +399,39 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
         pairs.swap(kept);
     }
     const bool mass_scaled = g_collisional.ngb_inv_mref > 0.0;
+    // Local ids of the pair members: a dense pid -> id array kept between calls (all -1 outside), instead of hash maps
+    if (pid_scratch_.size() < pid_to_idx.size()) pid_scratch_.resize(pid_to_idx.size(), -1);
+    std::vector<int>& lid = pid_scratch_;
+    std::vector<int> lpids;   // local id -> pid
+    auto assign_lids = [&]() {
+        lpids.clear();
+        for (const auto& pr : pairs)
+            for (int q : {pr.pid_lo, pr.pid_hi})
+                if (lid[q] < 0) { lid[q] = (int)lpids.size(); lpids.push_back(q); }
+    };
+    auto clear_lids = [&]() { for (int q : lpids) lid[q] = -1; lpids.clear(); };
     if (g_collisional.flyby_ngb_cm || mass_scaled) {
-        std::unordered_map<int, int> partner;   // pid -> its bound partner, -1 with more than one
+        assign_lids();
+        std::vector<int> partner(lpids.size(), -2);   // local id -> its bound partner's pid, -1 with more than one, -2 none
+        bool any_partner = false;
         for (const auto& pr : pairs) {
             if (!pr.bound) continue;
             for (int s = 0; s < 2; s++) {
                 const int a = s ? pr.pid_hi : pr.pid_lo, b = s ? pr.pid_lo : pr.pid_hi;
-                auto [it, fresh] = partner.emplace(a, b);
-                if (!fresh) it->second = -1;
+                int& t = partner[lid[a]];
+                t = (t == -2) ? b : -1;
+                any_partner = true;
             }
         }
-        if (!partner.empty() || mass_scaled) {
+        if (any_partner || mass_scaled) {
             auto mx = md.col(MemberData::X), my = md.col(MemberData::Y), mz = md.col(MemberData::Z);
             auto mvx = md.col(MemberData::VX), mvy = md.col(MemberData::VY), mvz = md.col(MemberData::VZ);
             auto mm = md.col(MemberData::M);
             // Mass, position and velocity of a particle, or of the c.o.m. of it and its single bound partner
             auto body = [&](int pid, int other, double s[7]) {
                 int ids[2] = {pid, -1};
-                auto it = partner.find(pid);
-                if (it != partner.end() && it->second >= 0 && it->second != other) ids[1] = it->second;
+                const int pp = partner[lid[pid]];
+                if (pp >= 0 && pp != other) ids[1] = pp;
                 for (int k = 0; k < 7; k++) s[k] = 0.0;
                 for (int q = 0; q < 2 && ids[q] >= 0; q++) {
                     const int i = pid_to_idx[ids[q]];
@@ -440,9 +454,9 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
             };
             // Apocentre separation of a particle's bound pair (0 if it has none)
             auto pair_apo = [&](int pid, int other) {
-                auto it = partner.find(pid);
-                if (it == partner.end() || it->second < 0 || it->second == other) return 0.0;
-                const int i = pid_to_idx[pid], j = pid_to_idx[it->second];
+                const int pp = partner[lid[pid]];
+                if (pp < 0 || pp == other) return 0.0;
+                const int i = pid_to_idx[pid], j = pid_to_idx[pp];
                 double P[7] = {mm(i), mx(i), my(i), mz(i), mvx(i), mvy(i), mvz(i)};
                 double Q[7] = {mm(j), mx(j), my(j), mz(j), mvx(j), mvy(j), mvz(j)};
                 double r, u2, a, e;
@@ -454,9 +468,14 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
             // the particle has no bound partner: a star bound to a massive body just beyond r_ngb, next to that body's
             // fly-by partner, dominates the fly-by (tidal ratio ~1e3, 3-body reproduction ss_companion_flyby) and
             // left in the field it forced 1e-14 Myr tidal-sampling steps on the subsystem
-            std::unordered_map<int, std::vector<std::pair<int, double>>> base_scale;   // pid -> (partner, scale)
+            // local id -> (partner, scale), CSR in pair order
+            std::vector<int> bs_off(mass_scaled ? lpids.size() + 1 : 0, 0);
+            std::vector<std::pair<int, double>> bs;
+            std::vector<double> pair_sc;   // per pair: its scale, or -1 if not a base pair
             if (mass_scaled) {
-                for (const auto& pr : pairs) {
+                pair_sc.assign(pairs.size(), -1.0);
+                for (size_t k = 0; k < pairs.size(); k++) {
+                    const auto& pr = pairs[k];
                     const int ia = pid_to_idx[pr.pid_lo], ib = pid_to_idx[pr.pid_hi];
                     double P[7] = {mm(ia), mx(ia), my(ia), mz(ia), mvx(ia), mvy(ia), mvz(ia)};
                     double Q[7] = {mm(ib), mx(ib), my(ib), mz(ib), mvx(ib), mvy(ib), mvz(ib)};
@@ -466,18 +485,28 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
                                                 : (r < r_ngb || (std::fabs(a) * (e - 1.0) < r_ngb && u2 > 0.0 &&
                                                                  0.5 * r / std::sqrt(u2) < dt_step));
                     if (!base) continue;
-                    const double sc = a > 0.0 ? a * (1.0 + e) : r;
-                    base_scale[pr.pid_lo].push_back({pr.pid_hi, sc});
-                    base_scale[pr.pid_hi].push_back({pr.pid_lo, sc});
+                    pair_sc[k] = a > 0.0 ? a * (1.0 + e) : r;
+                    bs_off[lid[pr.pid_lo] + 1]++;
+                    bs_off[lid[pr.pid_hi] + 1]++;
+                }
+                for (size_t q = 1; q < bs_off.size(); q++) bs_off[q] += bs_off[q - 1];
+                bs.resize(bs_off.back());
+                std::vector<int> fill(bs_off.begin(), bs_off.end() - 1);
+                for (size_t k = 0; k < pairs.size(); k++) {
+                    if (pair_sc[k] < 0.0) continue;
+                    const auto& pr = pairs[k];
+                    bs[fill[lid[pr.pid_lo]]++] = {pr.pid_hi, pair_sc[k]};
+                    bs[fill[lid[pr.pid_hi]]++] = {pr.pid_lo, pair_sc[k]};
                 }
             }
             auto scale_of = [&](int pid, int other) {
                 const double apo = pair_apo(pid, other);
                 if (apo > 0.0) return apo;
                 double sc = 0.0;
-                auto it = base_scale.find(pid);
-                if (it != base_scale.end())
-                    for (const auto& ps : it->second) if (ps.first != other) sc = std::max(sc, ps.second);
+                if (mass_scaled) {
+                    const int l = lid[pid];
+                    for (int q = bs_off[l]; q < bs_off[l + 1]; q++) if (bs[q].first != other) sc = std::max(sc, bs[q].second);
+                }
                 return sc;
             };
             std::vector<PairInfo> kept;
@@ -543,39 +572,52 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
             }
             pairs.swap(kept);
         }
+        clear_lids();
     }
 
     // Union-find to identify connected components
     // Merge ALL pairs (bound and unbound fly-bys both form subsystems)
     // Union-find on compact ids (O(pairs), not sized by the largest particle id)
     (void)max_pid;
-    std::unordered_map<int, int> compact;
-    for (auto& pr : pairs) { compact.emplace(pr.pid_lo, (int)compact.size()); compact.emplace(pr.pid_hi, (int)compact.size()); }
-    UnionFind uf((int)compact.size());
+    assign_lids();   // compact ids in first-appearance order over the pairs
+    const int n_lid = (int)lpids.size();
+    UnionFind uf(n_lid);
     for (auto& pr : pairs) {
-        uf.unite(compact[pr.pid_lo], compact[pr.pid_hi]);
+        uf.unite(lid[pr.pid_lo], lid[pr.pid_hi]);
     }
 
     // Components: (root, pid) sorted and unique (members ascending, as before); each component's pairs in their
-    // sorted order, for the triple search below
+    // sorted order (CSR over the roots), for the triple search below
     std::vector<std::pair<int, int>> root_pid;
     root_pid.reserve(2 * pairs.size());
-    std::unordered_map<int, std::vector<int>> pairs_of_root;
+    std::vector<int> por_off(n_lid + 1, 0), por;   // pairs of each root
+    std::vector<int> pair_root(pairs.size());
     for (int k = 0; k < (int)pairs.size(); k++) {
         const auto& pr = pairs[k];
-        int root = uf.find(compact[pr.pid_lo]);
+        int root = uf.find(lid[pr.pid_lo]);
         root_pid.push_back({root, pr.pid_lo});
         root_pid.push_back({root, pr.pid_hi});
-        pairs_of_root[root].push_back(k);
+        pair_root[k] = root;
+        por_off[root + 1]++;
+    }
+    clear_lids();
+    for (int q = 1; q <= n_lid; q++) por_off[q] += por_off[q - 1];
+    por.resize(pairs.size());
+    {
+        std::vector<int> fill(por_off.begin(), por_off.end() - 1);
+        for (int k = 0; k < (int)pairs.size(); k++) por[fill[pair_root[k]]++] = k;
     }
     std::sort(root_pid.begin(), root_pid.end());
     root_pid.erase(std::unique(root_pid.begin(), root_pid.end()), root_pid.end());
-    std::map<int, std::vector<int>> components;
+    // Components in ascending key: roots >= 0; the parts of split oversize groups get keys -1, -2, ... (they come
+    // first, the last made first, as in the ordered map this replaces)
+    struct Component { int key; std::vector<int> members; };
+    std::vector<Component> components;
     for (size_t k = 0; k < root_pid.size();) {
         size_t e = k;
         std::vector<int> members;
         while (e < root_pid.size() && root_pid[e].first == root_pid[k].first) members.push_back(root_pid[e++].second);
-        components.emplace_hint(components.end(), root_pid[k].first, std::move(members));
+        components.push_back({root_pid[k].first, std::move(members)});
         k = e;
     }
     // Pair of two particle ids in the sorted, unique pair list (binary search), or null
@@ -592,14 +634,16 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
     // cores). Split it along its bound pairs only: its binaries and triples still become subsystems
     // instead of the whole group being integrated orbit by orbit by the FSI.
     {
-        std::vector<int> oversize;
-        for (auto& [root, members] : components)
-            if ((int)members.size() > LOGH_MAX_BODIES) oversize.push_back(root);
+        std::vector<Component> split;   // creation order
+        std::vector<Component> kept_c;
         int next_key = -1;
-        for (int root : oversize) {
+        bool any_oversize = false;
+        for (const auto& comp : components) any_oversize |= (int)comp.members.size() > LOGH_MAX_BODIES;
+        for (auto& comp : components) {
+            if (!any_oversize) break;
+            if ((int)comp.members.size() <= LOGH_MAX_BODIES) { kept_c.push_back(std::move(comp)); continue; }
             std::unordered_map<int, int> in_group;
-            for (int pid : components[root]) in_group.emplace(pid, (int)in_group.size());
-            components.erase(root);
+            for (int pid : comp.members) in_group.emplace(pid, (int)in_group.size());
             UnionFind bound_uf((int)in_group.size());
             for (const auto& pr : pairs) {
                 if (!pr.bound) continue;
@@ -611,22 +655,43 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
             for (auto& [r, part] : parts) {
                 if (part.size() < 2) continue;   // a single star: field particle
                 std::sort(part.begin(), part.end());
-                components[next_key--] = part;   // still > LOGH_MAX_BODIES: left to the FSI below
+                split.push_back({next_key--, part});   // still > LOGH_MAX_BODIES: left to the FSI below
             }
+        }
+        if (any_oversize) {
+            components.clear();
+            for (auto it = split.rbegin(); it != split.rend(); ++it) components.push_back(std::move(*it));
+            for (auto& c : kept_c) components.push_back(std::move(c));
         }
     }
 
     // Build lookup from sorted pid set → old subsystem for persistent state transfer
     // (aux_vel, normalization scales carried over for identical member sets)
-    auto make_key = [](const std::vector<int>& pids) -> std::vector<int> {
-        std::vector<int> k = pids;
-        std::sort(k.begin(), k.end());
-        return k;
-    };
-    std::map<std::vector<int>, Subsystem*> old_by_pids;
-    for (auto& old_sub : old_active) {
-        old_by_pids[make_key(old_sub.particle_ids)] = &old_sub;
+    // (members are ascending; the old subsystem with the same member set, the last one if several)
+    std::vector<int> old_next(old_active.size(), -1);   // candidates by smallest member, chained through lid
+    for (int q = 0; q < (int)old_active.size(); q++) {
+        const auto& ids = old_active[q].particle_ids;
+        if (ids.empty()) continue;
+        const int m0 = *std::min_element(ids.begin(), ids.end());
+        if (m0 < 0 || m0 >= (int)lid.size()) continue;
+        if (lid[m0] < 0) lpids.push_back(m0);
+        old_next[q] = lid[m0];
+        lid[m0] = q;
     }
+    auto find_old = [&](const std::vector<int>& members) -> Subsystem* {
+        if (members.empty() || members[0] < 0 || members[0] >= (int)lid.size()) return nullptr;
+        Subsystem* best = nullptr;
+        int best_q = -1;
+        for (int q = lid[members[0]]; q >= 0; q = old_next[q]) {
+            const auto& ids = old_active[q].particle_ids;
+            if (ids.size() != members.size()) continue;
+            bool same;
+            if (std::is_sorted(ids.begin(), ids.end())) same = std::equal(ids.begin(), ids.end(), members.begin());
+            else { std::vector<int> k = ids; std::sort(k.begin(), k.end()); same = (k == members); }
+            if (same && q > best_q) { best_q = q; best = &old_active[q]; }
+        }
+        return best;
+    };
 
     auto h_mass = md.col(MemberData::M);
     auto h_x  = md.col(MemberData::X);
@@ -646,7 +711,10 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
         return dt_min;
     };
 
-    for (auto& [root, members] : components) {
+    active.reserve(components.size());
+    for (auto& comp : components) {
+        const int root = comp.key;
+        const auto& members = comp.members;
         // LogH has fixed storage for LOGH_MAX_BODIES; MSTAR, which BIFROST uses for larger groups, is
         // not wired in. Larger groups stay field particles, integrated by the FSI directly.
         if ((int)members.size() > LOGH_MAX_BODIES) {
@@ -660,21 +728,20 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
         }
 
         // Check if this component exactly matches an existing subsystem
-        auto key = make_key(members);
-        auto it = old_by_pids.find(key);
+        Subsystem* old = find_old(members);
 
         Subsystem sub{};
-        if (it != old_by_pids.end()) {
+        if (old) {
             // Same members — carry over persistent LogH state
-            sub.id = it->second->id;
-            sub.has_aux_vel = it->second->has_aux_vel;
-            std::memcpy(sub.aux_vel_phys, it->second->aux_vel_phys, sizeof(sub.aux_vel_phys));
+            sub.id = old->id;
+            sub.has_aux_vel = old->has_aux_vel;
+            std::memcpy(sub.aux_vel_phys, old->aux_vel_phys, sizeof(sub.aux_vel_phys));
             // Carry over fixed normalization scales
-            sub.V_scale = it->second->V_scale;
-            sub.R_scale = it->second->R_scale;
-            sub.T_scale = it->second->T_scale;
-            sub.E_scale = it->second->E_scale;
-            sub.scales_set = it->second->scales_set;
+            sub.V_scale = old->V_scale;
+            sub.R_scale = old->R_scale;
+            sub.T_scale = old->T_scale;
+            sub.E_scale = old->E_scale;
+            sub.scales_set = old->scales_set;
         } else {
             sub.id = next_id++;
         }
@@ -717,8 +784,8 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
             // Find the tightest pair (inner binary)
             double a_min = 1e30;
             int inner_i = -1, inner_j = -1;
-            for (int k : pairs_of_root[root]) {   // this component's pairs, in the order of the full list
-                const auto& pr = pairs[k];
+            for (int q = root >= 0 ? por_off[root] : 0; q < (root >= 0 ? por_off[root + 1] : 0); q++) {
+                const auto& pr = pairs[por[q]];   // this component's pairs, in the order of the full list
                 if (pr.bound && pr.a > 0 && pr.a < a_min) {
                     a_min = pr.a;
                     inner_i = pr.pid_lo;
@@ -800,8 +867,9 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
             sub.dt_sub = min_dt_members(sub);
         }
 
-        active.push_back(sub);
+        active.push_back(std::move(sub));
     }
+    clear_lids();
 }
 
 // ============================================================================

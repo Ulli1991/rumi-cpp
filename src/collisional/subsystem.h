@@ -71,6 +71,7 @@ struct SubsystemManager {
     Kokkos::View<int*>::host_mirror_type cm_buf_host_;
     std::vector<int> cm_host_;
     Kokkos::View<int*> flag_buf_;                     // (index, sid) pairs uploaded by update_particle_flags
+    std::vector<int> pid_scratch_;                    // pid -> local id inside detect_from_pairs (-1 between calls)
 
     // FLYBY_CM_KICK (mollified c.o.m. kicks): bound 2-body subsystems whose quadrupole tidal energy against all
     // particles, D = mu r_apo^2 sum_j G m_j / d_j^3 (d_j: distance to the c.o.m.), is at most FLYBY_CM_KICK_EPS x |E0|
