@@ -1174,8 +1174,10 @@ void SSEContext::deltat(int kw, double age, double tm, double tn,
 void SSEContext::star(int& kw, double mass, double mt, double& tm, double& tn,
                      double tscls[20], double lums[10], double GB[10]) const {
     const double mch = 1.44;
+    // Hurley et al. (2000) clamp masses above 100 Msun (and set tn = t_HeI); the updated BSE of Banerjee et al. (2020)
+    // and MOBSE comment these out and extrapolate. With them a star above 100 Msun never leaves core helium burning
+    // (kw 4, R ~ 1350 Rsun at any age; evolve() ran out of iterations).
     double mass0 = mass;
-    if (mass0 > 100.0) mass = 100.0;
 
     double tgb = 0.0, tbagb, mcmax, mc1, mc2, mcbagb, dx, lambda;
 
@@ -1334,10 +1336,6 @@ void SSEContext::star(int& kw, double mass, double mt, double& tm, double& tn,
         }
     }
     tscls[13] = std::max(tbagb, tscls[13]);
-    if (mass >= 100.0) {
-        tn = tscls[1];
-        goto label_100;
-    }
 
     // Nuclear timescale
     if (std::abs(mt-mcbagb) < 1.0e-14 && kw < 5) {
@@ -1652,10 +1650,7 @@ void SSEContext::hrdiag(double& mass, double& aj, double& mt, double& tm, double
     const double taumin = 5.0e-08;
     const double lum0 = 7.0e+04, kap = -0.5, ahe = 4.0, aco = 16.0;
 
-    double mass0 = mass;
-    if (mass0 > 100.0) mass = 100.0;
-    double mt0 = mt;
-    if (mt0 > 100.0) mt = 100.0;
+    // No 100 Msun clamp (see star()).
 
     if (kw > 6) goto label_90;
 
@@ -2154,8 +2149,6 @@ label_90:
         }
     }
 
-    if (mass > 99.99) mass = mass0;
-    if (mt > 99.99) mt = mt0;
 }
 
 // =========================================================================

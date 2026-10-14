@@ -741,13 +741,16 @@ def restarts(exe, label, cfg, bound):
         check(f"{label} max|dE/E|", max(r[0] for r in rows), bound)
 
 
-def remnant_masses(exe, label, cfg, bh_min, ns_max):
+def remnant_masses(exe, label, cfg, bh_min, ns_max, m_max):
     """Remnant populations of the IC stellar evolution: lowest BH mass and highest NS mass (Fryer 2012 rapid: the
-    2-5 Msun mass gap)."""
+    2-5 Msun mass gap), and the highest mass of any particle (stars above Hurley's 100 Msun limit stuck in core
+    helium burning at ~R = 1350 Rsun whatever the age)."""
     out = run_output(exe, cfg)
     bh = re.findall(r"BH masses:\s+(\S+) - (\S+)", out)
     ns = re.findall(r"NS masses:\s+(\S+) - (\S+)", out)
+    mr = re.findall(r"Mass range:\s+(\S+) - (\S+)", out)
     ok = check(f"{label} lowest BH mass [Msun]", float(bh[0][0]) if bh else 0.0, bh_min, lower=True)
+    ok &= check(f"{label} highest particle mass [Msun]", float(mr[-1][1]) if mr else 1e30, m_max)
     return ok & check(f"{label} highest NS mass [Msun]", float(ns[0][1]) if ns else 1e30, ns_max)
 
 
@@ -1533,7 +1536,7 @@ CASES = {
                                                   PLUMMER_MASS_DIST="kroupa_evolved", BINARY_FRAC="0",
                                                   SSE_METALLICITY="0.0002", SSE_REMNANT_MODEL="FRYER_RAPID",
                                                   SSE_WIND_MODEL="VINK", SSE_PPISN_MODEL="STRONG",
-                                                  TOTAL_TIME_MYR="1e-6", DT_MAX_MYR="1e-6"), 5.0, 2.0),
+                                                  TOTAL_TIME_MYR="1e-6", DT_MAX_MYR="1e-6"), 5.0, 2.0, 50.0),
     # G-1. LogH PN binary: frame-invariant to round-off (measured 6.0e-12 at 30 km/s, 5e-13 at 300 km/s along x,
     # 4.3e-12 along y). Secular PN binary: 1.2e-3 before (the reshaped orbit kept the rounding error of a, a phase
     # error over 1e4-1e5 orbits per step); 9.1e-8 after (absolute-coordinate rounding)

@@ -362,8 +362,16 @@ void init_plummer(Particles& p, int N, double M_total_msun, double r_half_pc, in
         double age_myr = age_gyr * 1000.0;
         auto m_initial = sample_kroupa_imf(N, rng);
         int n_ms = 0, n_evolved = 0, n_wd = 0, n_ns = 0, n_bh = 0;
+        int n_redrawn = 0;
         for (int i = 0; i < N; i++) {
             SSEResult res = sse.evolve(m_initial[i], age_myr);
+            // No remnant (pair-instability supernova, kw 15): the star is gone by this age, so draw another one
+            // (N stays the number of objects present).
+            while (res.kw == 15) {
+                m_initial[i] = sample_kroupa_imf(1, rng)[0];
+                res = sse.evolve(m_initial[i], age_myr);
+                n_redrawn++;
+            }
             hmass[i]   = res.mass;
             h_kw[i]    = res.kw;
             h_mzams[i] = m_initial[i];
@@ -391,6 +399,7 @@ void init_plummer(Particles& p, int N, double M_total_msun, double r_half_pc, in
         std::printf("    White dwarfs:  %d (%.1f%%)\n", n_wd, 100.0 * n_wd / N);
         std::printf("    Neutron stars: %d (%.1f%%)\n", n_ns, 100.0 * n_ns / N);
         std::printf("    Black holes:   %d (%.1f%%)\n", n_bh, 100.0 * n_bh / N);
+        if (n_redrawn > 0) std::printf("    Redrawn (no remnant): %d\n", n_redrawn);
         double mn = *std::min_element(hmass.begin(), hmass.end());
         double mx = *std::max_element(hmass.begin(), hmass.end());
         std::printf("    Mass range: %.4f - %.4f M_sun\n", mn, mx);
