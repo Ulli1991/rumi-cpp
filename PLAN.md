@@ -253,6 +253,9 @@ Only the items below are adopted; everything else in those documents is referenc
    (a = 58 AU) with a 0.79 + 0.105 Msun binary (a = 0.019 AU, ~1000 orbits per interval, tidal ratio ~4e-12) bound
    to it at 0.003 pc: the whole subsystem has kappa = 1 (FROST-CLUSTERS I App. A2), LogH hits its step limit, steps
    take > 3 min. Check FC-I's reason for kappa = 1 per subsystem first; failing-first test built from this quadruple.
+   Status 701b5a7: implemented behind NBODY_SDAR_PN=1 (default off). FC-I gives no reason for kappa = 1 ("in this
+   study we do not use the slow-down for PN subsystems"). quad22_sdar passes (0.44 s vs no step in 120 s). Open: 200k
+   A/B from a restart of the fixed-IC Fig. 11 runs (bifrost-fixed-2026-10-14) at a PN-subsystem stall, then default.
 5. Physics for A/B: multiplicity ICs (Moe & Di Stefano / Offner, triples, quadruples), spin-dependent recoil
    (Zlochower-Lousto), runtime SSE upgrade (M6), MSTAR for >8 bodies (M4), BSE/SEVN.
 6. Accuracy study for the far field (experiment I-1; statistical equivalence on ensembles) before M8 FMM.
