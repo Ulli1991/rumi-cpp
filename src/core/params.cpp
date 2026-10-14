@@ -263,8 +263,6 @@ const std::vector<DebugEnvSpec> kDebugEnv = {
     {"NBODY_FORCE_ERR_MODEL", "=random (default; eps |a_i| times an isotropic unit vector per particle and call) / frozen (the same vector per particle at every call) / smooth (eps a_rms times a random linear field in position over the set, per call)"},
     {"NBODY_MERGE_CHECK", "=1: total energy and books before and after each per-level merger (merger energy booking check)"},
     {"NBODY_LEAN_SYNC", "=0: keep every device fence of the original code (default on: lean copies, bit-identical)"},
-    {"NBODY_OVERLAP", "=1: experimental GPU-idle prototype, field forces of the next kick overlap the host LogH (not bit-identical)"},
-    {"NBODY_OVERLAP_MIN", "=n: smallest set that uses NBODY_OVERLAP (default 1024)"},
     {"NBODY_DUMP", "Particle state at each print to dump_<step>.bin"},
     {"NBODY_DUMP_DT", "=n: pid, dt_adapt, grad_mag, ax of the set after the time-step criteria, first n calls"},
     {"NBODY_EATTR", "Per-print energy attribution"},

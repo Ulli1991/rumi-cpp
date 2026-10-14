@@ -631,11 +631,10 @@ int main(int argc, char** argv) {
             g_collisional.flyby_cm_kick   = cfg.get_bool("FLYBY_CM_KICK");
             g_collisional.flyby_cm_kick_eps = cfg.get_double("FLYBY_CM_KICK_EPS");
             // The c.o.m. swap wraps the device force launchers (forces.cpp): the CPU small-set path, integer
-            // positions and the overlap prototype bypass it
-            if (g_collisional.flyby_cm_kick && (serial_n2_cpu > 0 || use_integer_positions || std::getenv("NBODY_OVERLAP"))) {
+            // positions bypass it
+            if (g_collisional.flyby_cm_kick && (serial_n2_cpu > 0 || use_integer_positions)) {
                 if (MPIComm::rank() == 0)
-                    std::fprintf(stderr, "ERROR: FLYBY_CM_KICK needs SERIAL_N2_CPU = 0, INTEGER_POSITIONS = false and "
-                                         "no NBODY_OVERLAP\n");
+                    std::fprintf(stderr, "ERROR: FLYBY_CM_KICK needs SERIAL_N2_CPU = 0 and INTEGER_POSITIONS = false\n");
                 Kokkos::finalize();
                 MPIComm::finalize();
                 return 1;
