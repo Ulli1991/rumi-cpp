@@ -19,7 +19,7 @@ constexpr ParamLevel USER = ParamLevel::User, EXPERT = ParamLevel::Expert, TEST 
 
 const std::vector<ParamSpec> kParams = {
     // ---- Run ----
-    {"TEST_CASE", S, "outer_planets", "Run", USER, "plummer|outer_planets|binary_test|binary_test_peri|triple_test",
+    {"TEST_CASE", S, "outer_planets", "Run", USER, "plummer|outer_planets|binary_test|binary_test_peri|triple_test|quad22_test",
      "Initial conditions: a star cluster (plummer) or a few-body test problem (--test overrides)"},
     {"TOTAL_TIME_MYR", D, "0.23", "Run", USER, "", "End time (Myr)"},
     {"DT_MAX_MYR", D, "1.6e-3", "Run", USER, "",
@@ -234,6 +234,17 @@ const std::vector<ParamSpec> kParams = {
     {"TRIPLE_A_OUT_PC", D, "5e-8", "Test problems", TEST, "", "triple_test: outer semi-major axis (pc)"},
     {"TRIPLE_E_OUT", D, "0.1", "Test problems", TEST, "", "triple_test: outer eccentricity"},
     {"TRIPLE_M3", D, "10.0", "Test problems", TEST, "", "triple_test: outer body mass (Msun)"},
+    {"QUAD_M1", D, "20.7", "Test problems", TEST, "", "quad22_test: binary A primary (Msun)"},
+    {"QUAD_M2", D, "14.1", "Test problems", TEST, "", "quad22_test: binary A secondary (Msun)"},
+    {"QUAD_A1_PC", D, "2.82e-4", "Test problems", TEST, "", "quad22_test: binary A semi-major axis (pc)"},
+    {"QUAD_E1", D, "0.853", "Test problems", TEST, "", "quad22_test: binary A eccentricity"},
+    {"QUAD_M3", D, "0.791", "Test problems", TEST, "", "quad22_test: binary B primary (Msun)"},
+    {"QUAD_M4", D, "0.105", "Test problems", TEST, "", "quad22_test: binary B secondary (Msun)"},
+    {"QUAD_A2_PC", D, "9.0e-8", "Test problems", TEST, "", "quad22_test: binary B semi-major axis (pc)"},
+    {"QUAD_E2", D, "0.62", "Test problems", TEST, "", "quad22_test: binary B eccentricity"},
+    {"QUAD_A_OUT_PC", D, "2.7e-3", "Test problems", TEST, "", "quad22_test: outer orbit semi-major axis (pc)"},
+    {"QUAD_E_OUT", D, "0.48", "Test problems", TEST, "", "quad22_test: outer orbit eccentricity"},
+    {"QUAD_INCL_DEG", D, "30.0", "Test problems", TEST, "", "quad22_test: inclination of binary B's plane (deg)"},
     {"TRIPLE_INCL_DEG", D, "45.0", "Test problems", TEST, "", "triple_test: mutual inclination (deg)"},
     {"TRIPLE_OUTER_FIRST", B, "false", "Test problems", TEST, "", "triple_test: outer body at the lowest particle id"},
     {"TRIPLE_IN_ROT_DEG", D, "0.0", "Test problems", TEST, "", "triple_test: rotation of the inner orbit (deg)"},

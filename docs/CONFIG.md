@@ -1,6 +1,6 @@
 # Config reference
 
-All 134 keys of the config file (`config.txt`, or `--config <file>`), generated from the parameter table in `src/core/params.cpp` by `scripts/gen_config_md.py`. Every key has one default, in that table; an unknown key in a config file is an error. Each run writes the effective value of every key, and whether it came from the file or the default, to `run_params.txt`.
+All 145 keys of the config file (`config.txt`, or `--config <file>`), generated from the parameter table in `src/core/params.cpp` by `scripts/gen_config_md.py`. Every key has one default, in that table; an unknown key in a config file is an error. Each run writes the effective value of every key, and whether it came from the file or the default, to `run_params.txt`.
 
 Levels:
 
@@ -14,7 +14,7 @@ Levels:
 
 | key | type | default | level | values | description |
 |---|---|---|---|---|---|
-| `TEST_CASE` | string | `outer_planets` | user | plummer\|outer_planets\|binary_test\|binary_test_peri\|triple_test | Initial conditions: a star cluster (plummer) or a few-body test problem (--test overrides) |
+| `TEST_CASE` | string | `outer_planets` | user | plummer\|outer_planets\|binary_test\|binary_test_peri\|triple_test\|quad22_test | Initial conditions: a star cluster (plummer) or a few-body test problem (--test overrides) |
 | `TOTAL_TIME_MYR` | double | `0.23` | user |  | End time (Myr) |
 | `DT_MAX_MYR` | double | `1.6e-3` | user |  | Integration interval (Myr): the level-0 step; diagnostics, restarts and snapshots count these steps |
 | `DT_MIN_MYR` | double | `1.0e-14` | expert |  | Smallest time step (Myr): the deepest HHS level |
@@ -201,6 +201,17 @@ Levels:
 | `TRIPLE_A_OUT_PC` | double | `5e-8` | test |  | triple_test: outer semi-major axis (pc) |
 | `TRIPLE_E_OUT` | double | `0.1` | test |  | triple_test: outer eccentricity |
 | `TRIPLE_M3` | double | `10.0` | test |  | triple_test: outer body mass (Msun) |
+| `QUAD_M1` | double | `20.7` | test |  | quad22_test: binary A primary (Msun) |
+| `QUAD_M2` | double | `14.1` | test |  | quad22_test: binary A secondary (Msun) |
+| `QUAD_A1_PC` | double | `2.82e-4` | test |  | quad22_test: binary A semi-major axis (pc) |
+| `QUAD_E1` | double | `0.853` | test |  | quad22_test: binary A eccentricity |
+| `QUAD_M3` | double | `0.791` | test |  | quad22_test: binary B primary (Msun) |
+| `QUAD_M4` | double | `0.105` | test |  | quad22_test: binary B secondary (Msun) |
+| `QUAD_A2_PC` | double | `9.0e-8` | test |  | quad22_test: binary B semi-major axis (pc) |
+| `QUAD_E2` | double | `0.62` | test |  | quad22_test: binary B eccentricity |
+| `QUAD_A_OUT_PC` | double | `2.7e-3` | test |  | quad22_test: outer orbit semi-major axis (pc) |
+| `QUAD_E_OUT` | double | `0.48` | test |  | quad22_test: outer orbit eccentricity |
+| `QUAD_INCL_DEG` | double | `30.0` | test |  | quad22_test: inclination of binary B's plane (deg) |
 | `TRIPLE_INCL_DEG` | double | `45.0` | test |  | triple_test: mutual inclination (deg) |
 | `TRIPLE_OUTER_FIRST` | bool | `false` | test |  | triple_test: outer body at the lowest particle id |
 | `TRIPLE_IN_ROT_DEG` | double | `0.0` | test |  | triple_test: rotation of the inner orbit (deg) |

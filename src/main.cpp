@@ -788,6 +788,11 @@ int main(int argc, char** argv) {
                 init_triple_test(p, triple_a_in, triple_e_in, triple_m1, triple_m2,
                                  triple_a_out, triple_e_out, triple_m3, triple_incl, triple_outer_first,
                                  triple_in_rot, triple_in_start_q, triple_out_start_q);
+            } else if (test == "quad22_test") {
+                init_quad22_test(p, cfg.get_double("QUAD_M1"), cfg.get_double("QUAD_M2"), cfg.get_double("QUAD_A1_PC"),
+                                 cfg.get_double("QUAD_E1"), cfg.get_double("QUAD_M3"), cfg.get_double("QUAD_M4"),
+                                 cfg.get_double("QUAD_A2_PC"), cfg.get_double("QUAD_E2"), cfg.get_double("QUAD_A_OUT_PC"),
+                                 cfg.get_double("QUAD_E_OUT"), cfg.get_double("QUAD_INCL_DEG"));
             } else {
                 std::fprintf(stderr, "Unknown test case: %s\n", test.c_str());
                 MPIComm::finalize();

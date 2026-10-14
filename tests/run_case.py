@@ -836,6 +836,15 @@ def int_pos_vs_double(exe, label, cfg, ratio):
     return check(f"{label} max|dE/E| integer / double positions", ip / dbl, ratio)
 
 
+def quad22_sdar(exe, label, cfg, bound):
+    """PLAN item 4c: the 2+2 quadruple of the BIFROST Fig. 11 stall (PN BH binary + a 0.019 AU stellar binary bound to
+    it). With SDAR per pair the stellar binary is slowed although the subsystem has PN members: one step must finish
+    (default 120 s test timeout), without LogH step-limit hits, energy within `bound`."""
+    out = run_output(exe, cfg)
+    ok = check(f"{label} LogH step-limit hits", out.count("LogH step limit"), 0)
+    return ok & check(f"{label} max|dE/E|", max(r[0] for r in diagnostics(out)), bound)
+
+
 def tidal_escapers(exe, label, cfg, bound):
     """TIDAL_FIELD + R_ESCAPE_RJ = 2 (NBODY6, Baumgardt & Makino 2003): stars beyond 2 r_J leave, r_J from the total
     mass at the first removal matches (G M R^2 / 2 V_c^2)^(1/3) (singular logarithmic halo), the energy with the
@@ -1573,6 +1582,13 @@ CASES = {
         HIER_LOGH, TRIPLE_A_IN_PC="1e-4", TRIPLE_E_IN="1.5", TRIPLE_IN_START_Q="5", TRIPLE_M1="1", TRIPLE_M2="1",
         TRIPLE_A_OUT_PC="0.05", TRIPLE_E_OUT="0.3", TRIPLE_M3="1", TOTAL_TIME_MYR="2e-2", DT_MAX_MYR="1e-3",
         ETA_RESTART="0", DOMAIN_HALFSIZE_PC="1"), 1.3),
+    # 2+2 quadruple (quad22_test defaults = the BIFROST Fig. 11 stall, 200k, 50 % binaries): BH binary 20.7 + 14.1 Msun
+    # (a = 58 AU) and a 0.79 + 0.105 Msun binary (a = 0.019 AU, ~1500 orbits per 1e-3 Myr, tidal ratio ~4e-12) bound to it
+    # at ~0.003 pc, one PN subsystem. Before item 4c (SDAR off for whole PN subsystems): no step within 900 s on the
+    # login node. Disabled in CMakeLists.txt until 4c; bound provisional, to be set to 1.3x the measured value then
+    "quad22_sdar": lambda exe: quad22_sdar(exe, "2+2 quadruple, PN + SDAR", dict(
+        HIER_LOGH, TEST_CASE="quad22_test", PN_ORDER="31", M_PN="5.0", SDAR="true", R_NGB="0.01",
+        TOTAL_TIME_MYR="1e-3", DT_MAX_MYR="1e-3", TEST_STELLAR_RADIUS_RSUN="0.4", ETA_RESTART="1e-8"), 1e-8),
     # Same cluster, R_ESCAPE_RJ = 2: r_J 0.708 pc at M = 800 Msun, 623 stars leave over 5 steps, max|dE/E| 9.77e-10
     "tidal_jacobi_escapers": lambda exe: tidal_escapers(exe, "2 r_J", dict(BINARIES, TOTAL_TIME_MYR="5e-3",
                                                                           TIDAL_FIELD="loghalo", GALAXY_VC_KMS="220",

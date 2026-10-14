@@ -1118,3 +1118,52 @@ void init_triple_test(Particles& p,
     std::printf("  Kozai-Lidov timescale ~ %.2f yr (%.4e Myr)\n", T_KL_yr, T_KL_yr / 1e6);
     std::printf("  Starting both orbits at APOAPSIS\n");
 }
+
+// 2+2 hierarchical quadruple (PLAN item 4c): binary A (m1, m2; a1, e1) and binary B (m3, m4; a2, e2) on an outer
+// orbit (a_out, e_out) about each other, every orbit started at apocentre; B's orbital plane is inclined by incl
+// about the x axis. Defaults (params.cpp) are the system that stalled the BIFROST Fig. 11 run: a 20.7 + 14.1 Msun BH
+// binary at 58 AU and a 0.79 + 0.105 Msun binary at 0.019 AU bound to it at ~0.003 pc
+void init_quad22_test(Particles& p, double m1, double m2, double a1, double e1, double m3, double m4, double a2,
+                      double e2, double a_out, double e_out, double incl_deg) {
+    p.allocate(4, COLL_ENABLED);
+    // relative orbit at apocentre: r along +x, v along +y (then rotated by incl about x)
+    auto apo = [](double mu, double a, double e, double inc, double r[3], double v[3]) {
+        const double ra = a * (1.0 + e), va = std::sqrt(mu / a * (1.0 - e) / (1.0 + e));
+        r[0] = ra; r[1] = 0.0; r[2] = 0.0;
+        v[0] = 0.0; v[1] = va * std::cos(inc); v[2] = va * std::sin(inc);
+    };
+    const double inc = incl_deg * M_PI / 180.0;
+    const double MA = m1 + m2, MB = m3 + m4, M = MA + MB;
+    double rA[3], vA[3], rB[3], vB[3], rO[3], vO[3];
+    apo(G_CODE * MA, a1, e1, 0.0, rA, vA);
+    apo(G_CODE * MB, a2, e2, inc, rB, vB);
+    apo(G_CODE * M, a_out, e_out, 0.0, rO, vO);
+    const double m[4] = {m1, m2, m3, m4};
+    double x[4][3], v[4][3];
+    for (int k = 0; k < 3; k++) {
+        const double cA = -MB / M * rO[k], cB = MA / M * rO[k];      // binary c.o.m. positions
+        const double uA = -MB / M * vO[k], uB = MA / M * vO[k];
+        x[0][k] = cA - m2 / MA * rA[k]; x[1][k] = cA + m1 / MA * rA[k];
+        v[0][k] = uA - m2 / MA * vA[k]; v[1][k] = uA + m1 / MA * vA[k];
+        x[2][k] = cB - m4 / MB * rB[k]; x[3][k] = cB + m3 / MB * rB[k];
+        v[2][k] = uB - m4 / MB * vB[k]; v[3][k] = uB + m3 / MB * vB[k];
+    }
+    auto h_x = Kokkos::create_mirror_view(p.x), h_y = Kokkos::create_mirror_view(p.y), h_z = Kokkos::create_mirror_view(p.z);
+    auto h_vx = Kokkos::create_mirror_view(p.vx), h_vy = Kokkos::create_mirror_view(p.vy), h_vz = Kokkos::create_mirror_view(p.vz);
+    auto h_m = Kokkos::create_mirror_view(p.mass);
+    for (int i = 0; i < 4; i++) {
+        h_x(i) = x[i][0]; h_y(i) = x[i][1]; h_z(i) = x[i][2];
+        h_vx(i) = v[i][0]; h_vy(i) = v[i][1]; h_vz(i) = v[i][2];
+        h_m(i) = m[i];
+    }
+    Kokkos::deep_copy(p.x, h_x); Kokkos::deep_copy(p.y, h_y); Kokkos::deep_copy(p.z, h_z);
+    Kokkos::deep_copy(p.vx, h_vx); Kokkos::deep_copy(p.vy, h_vy); Kokkos::deep_copy(p.vz, h_vz);
+    Kokkos::deep_copy(p.mass, h_m);
+    if (p.collisional) {   // BH (type 14) at and above 5 Msun, as the other test generators
+        auto h_st = Kokkos::create_mirror_view(p.stellar_type);
+        for (int i = 0; i < 4; i++) h_st(i) = m[i] >= 5.0 ? 14 : 0;
+        Kokkos::deep_copy(p.stellar_type, h_st);
+    }
+    std::printf("Quadruple 2+2 test: A %.3g+%.3g Msun a=%.3e pc e=%.3f | B %.3g+%.3g Msun a=%.3e pc e=%.3f | "
+                "outer a=%.3e pc e=%.3f incl=%.1f deg\n", m1, m2, a1, e1, m3, m4, a2, e2, a_out, e_out, incl_deg);
+}
