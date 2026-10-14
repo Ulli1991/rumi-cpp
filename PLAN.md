@@ -247,6 +247,12 @@ Only the items below are adopted; everything else in those documents is referenc
    PeTar input), N = 1e4 / 1e5 / 2e5, without and with 10-50 % binaries, isolated and in a tidal field; compare
    |dE/E| per interval and over the run, wall time per Myr on one raven node (PeTar MPI+OpenMP(+CUDA tree)),
    and the physics (Lagrangian radii, core collapse time, escaper rate, binary census) on seed ensembles.
+4c. SDAR per pair inside PN subsystems (2026-10-14): keep kappa = 1 only for pairs with a PN member, allow the
+   slow-down for non-PN inner binaries of PN subsystems (needs SDAR in the PN / auxiliary-velocity LogH variant).
+   Motivation: BIFROST Fig. 11 run (200k, 50 % binaries) stalls on a 2+2 quadruple, BH binary 20.7 + 14.1 Msun
+   (a = 58 AU) with a 0.79 + 0.105 Msun binary (a = 0.019 AU, ~1000 orbits per interval, tidal ratio ~4e-12) bound
+   to it at 0.003 pc: the whole subsystem has kappa = 1 (FROST-CLUSTERS I App. A2), LogH hits its step limit, steps
+   take > 3 min. Check FC-I's reason for kappa = 1 per subsystem first; failing-first test built from this quadruple.
 5. Physics for A/B: multiplicity ICs (Moe & Di Stefano / Offner, triples, quadruples), spin-dependent recoil
    (Zlochower-Lousto), runtime SSE upgrade (M6), MSTAR for >8 bodies (M4), BSE/SEVN.
 6. Accuracy study for the far field (experiment I-1; statistical equivalence on ensembles) before M8 FMM.
