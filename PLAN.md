@@ -319,3 +319,27 @@ The code before the deletions is tagged archive/pre-step2-deletions.
 - SoA->AoS repacking, maxrregcount/launch bounds, splitting DtK, SERIAL_N2_CPU path as is, lower SERIAL_N2_GPU.
 - One process per node for 4 GPUs; MPI RMA on GPU windows; Kokkos Remote Spaces as dependency; managed memory on A100.
 - Device-buffer CUDA-aware Allgatherv on raven (no UCC/hcoll; host staging or NCCL instead).
+
+## Speed plan for the flagship runs A, B, C (2026-10-15)
+
+Baselines, one raven node (4x A100), current main, fixed ICs (ptmp abc-2026-10-14; nsys profiles in prof/):
+- A (1e6, 50 % binaries, evolved 1 Gyr): 210 s/step. GPU-bound, 70 % busy: ForceK 40 %, GradK 24 %, DtK 20 % (5x the
+  force cost per pair), energy-check potential 4.4 %; ~90k syncs + 255k launches/step (2-3 s).
+- B (1.1e5 young dense, r_h 0.6 pc, 10 % binaries): 630 s/step. Launch-bound, GPU 13 % busy: the FLYBY_CM_EPS step
+  of stars near massive binaries keeps ~5000 particles at levels 8-27, ~1M hierarchy calls/step, each ~50 launches
+  + ~35 tiny copies (85 of 150 s in CUDA API calls); host LogH ~25 %. Tidal-tensor mode (branch tidal-tensor) gave
+  68 s/step but energy/L not exact on 200k: parked.
+- C (1e7): the IC generator did not finish in 15 min; direct O(N^2) needs FMM.
+
+Order (gate in brackets; "exact" = bit-identical, host ctest + dump compare):
+1. Fewer launches/copies/syncs per hierarchy call: batched scalar transfers, small-set fused kick/drift, one
+   subsystem pull/unpack pass (exact). B 1.3-2x.
+2. Cheaper energy check (diagnostics only). A, C ~4 %.
+3. Nsight Compute of DtK/ForceK/GradK, FP64 kernel tuning (energy rule, 3 seeds). A 1.2-1.5x.
+4. Multi-node scaling of A, 4 and 10 nodes (throughput).
+5. Host-resident deep subtrees (exact). B 3-5x.
+6. IC generator at 1e7 (same ICs as today's generator).
+7. CPU subsystem work overlapped with GPU kernels (exact). A, B up to 1.2x.
+8. 4c default, GBS Deuflhard / k_max 8 (energy rule). B LogH share.
+9. FMM far field after the force-error study (statistical equivalence + energy). A, C several x.
+10. Mixed precision (double-single) against the 1e-8 force-error limit (energy rule). A, C kernels 3-5x.
