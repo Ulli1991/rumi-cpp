@@ -1679,6 +1679,9 @@ static int partition_by_pivot(Particles& p, int start, int count, double pivot) 
     // is_slow(ii) = 1 if slow, 0 if fast
     // slow_prefix(ii) = number of slow particles with index < ii
     auto slow_prefix = p.scratch_i3;
+    // The scan's total is the slow count: returned by the scan itself (one copy and stream sync instead of two
+    // single-element copies, each with its own sync; integer sums, identical result)
+    int slow_count = 0;
     Kokkos::parallel_scan("mark_prefix_slow", count,
         KOKKOS_LAMBDA(int ii, int& partial_sum, bool is_final) {
             int val = (dt_f(start + ii) >= pivot) ? 1 : 0;
@@ -1687,14 +1690,8 @@ static int partition_by_pivot(Particles& p, int start, int count, double pivot) 
                 slow_prefix(ii) = partial_sum;
             }
             partial_sum += val;
-        });
+        }, slow_count);
     lean_fence("integrator.cpp:1514");
-
-    // Get total slow count: deep_copy last element instead of launching a kernel
-    int last_prefix = 0, last_is_slow = 0;
-    dcopy(last_prefix, Kokkos::subview(slow_prefix, count - 1));
-    dcopy(last_is_slow, Kokkos::subview(is_slow, count - 1));
-    int slow_count = last_prefix + last_is_slow;
 
     if (slow_count == 0 || slow_count == count) {
         return slow_count;

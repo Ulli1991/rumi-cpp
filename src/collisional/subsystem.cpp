@@ -269,9 +269,13 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
     std::vector<Subsystem> old_active = std::move(active);
     active.clear();
 
-    // Copy neighbor count from device
-    auto h_count = host_copy(ngb_count);
-    int n_pairs = h_count(0);
+    // Neighbour count: as neighbor_search_subset read it (same device value; -1: read it here)
+    int n_pairs = ngb_count_host;
+    if (n_pairs < 0) {
+        auto h_count = host_copy(ngb_count);
+        n_pairs = h_count(0);
+    }
+    ngb_count_host = -1;
     if (n_pairs == 0) {
         // No neighbors at this level — no subsystems
         last_level_pairs = 0;

@@ -12,6 +12,8 @@
 #include <Kokkos_Core.hpp>
 #include <cstdlib>
 #include <memory>
+#include <source_location>
+#include <string>
 #include <type_traits>
 #include <vector>
 
@@ -25,21 +27,35 @@ inline void lean_fence(const char* name) {
     if (!lean_sync()) Kokkos::fence(name);
 }
 
+// NBODY_FENCE_STATS: the copy fences carry the caller's file:line (fence_stats.h counts fences by name)
+inline bool lean_site_labels() {
+    static const bool b = [] { const char* v = std::getenv("NBODY_FENCE_STATS"); return v && v[0] && v[0] != '0'; }();
+    return b;
+}
+inline void lean_copy_fence(const Kokkos::DefaultExecutionSpace& ex, const char* what, const std::source_location& loc) {
+    if (!lean_site_labels()) { ex.fence(what); return; }
+    const char* f = loc.file_name();
+    for (const char* c = f; *c; c++) if (*c == '/') f = c + 1;
+    ex.fence(std::string(what) + " @" + f + ":" + std::to_string(loc.line()));
+}
+
 template <class D, class S>
-inline std::enable_if_t<Kokkos::is_view<D>::value && Kokkos::is_view<S>::value> dcopy(const D& dst, const S& src) {
+inline std::enable_if_t<Kokkos::is_view<D>::value && Kokkos::is_view<S>::value> dcopy(
+        const D& dst, const S& src, const std::source_location loc = std::source_location::current()) {
     if (!lean_sync()) { Kokkos::deep_copy(dst, src); return; }
     Kokkos::DefaultExecutionSpace ex;
     Kokkos::deep_copy(ex, dst, src);
     if constexpr (Kokkos::SpaceAccessibility<Kokkos::HostSpace, typename D::memory_space>::accessible)
-        ex.fence("lean_sync: copy to host");
+        lean_copy_fence(ex, "lean_sync: copy to host", loc);
 }
 
 template <class T, class S>
-inline std::enable_if_t<!Kokkos::is_view<T>::value && Kokkos::is_view<S>::value> dcopy(T& dst, const S& src) {
+inline std::enable_if_t<!Kokkos::is_view<T>::value && Kokkos::is_view<S>::value> dcopy(
+        T& dst, const S& src, const std::source_location loc = std::source_location::current()) {
     if (!lean_sync()) { Kokkos::deep_copy(dst, src); return; }
     Kokkos::DefaultExecutionSpace ex;
     Kokkos::deep_copy(ex, dst, src);
-    ex.fence("lean_sync: scalar to host");
+    lean_copy_fence(ex, "lean_sync: scalar to host", loc);
 }
 
 template <class D, class T>
@@ -62,12 +78,13 @@ struct HostCopy {
     size_t size() const { return v.extent(0); }
 };
 template <class V>
-inline HostCopy<typename V::non_const_value_type> host_copy(const V& d) {
+inline HostCopy<typename V::non_const_value_type> host_copy(const V& d,
+                                                             const std::source_location loc = std::source_location::current()) {
     using T = typename V::non_const_value_type;
     HostCopy<T> h;
     h.buf = std::make_shared<std::vector<T>>(d.extent(0));
     h.v = Kokkos::View<T*, Kokkos::HostSpace, Kokkos::MemoryUnmanaged>(h.buf->data(), d.extent(0));
-    dcopy(h.v, d);
+    dcopy(h.v, d, loc);
     if (!lean_sync()) Kokkos::fence("host_copy: stands in for the mirror deallocation fence");
     return h;
 }

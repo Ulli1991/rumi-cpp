@@ -91,6 +91,7 @@ struct SubsystemManager {
     double cmk_dsum_ = 0.0, cmk_dmax_ = 0.0;          // sum and max of D over the flagged binaries (last update)
     int cmk_nbound_ = 0;                              // bound 2-body subsystems at the last update
     void update_cm_kick_flags(const Particles& p, double G, double tol);
+    int ngb_count_host = -1;   // neighbour count of the last neighbor_search_subset, consumed by detect_from_pairs
     void cm_kick_swap(Particles& p, int lo, int hi);
     void cm_kick_restore(Particles& p);
     const SubsystemManager* shared_map_ = nullptr;   // local managers read the global map

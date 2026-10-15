@@ -516,7 +516,9 @@ void neighbor_search_subset(Particles& p, int start, int count,
         g_subsystem_mgr.allocate_ngb_buffers(2 * n_found);
         g_subsystem_mgr.reset_ngb_count();
         neighbor_search_kernel(p, start, count, G, r_ngb, r_ngb_max, pivot_dt);
+        dcopy(n_found, Kokkos::subview(g_subsystem_mgr.ngb_count, 0));
     }
+    g_subsystem_mgr.ngb_count_host = n_found;   // detect_from_pairs reads it instead of copying the count again
     if (check_tree() && tree_mode(count, tree_ngb_min_n) != TreeMode::None)
         check_ngb_against_n2(p, start, count, G, r_ngb, r_ngb_max, pivot_dt);
 }
