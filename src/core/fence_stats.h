@@ -10,6 +10,7 @@
 #include <vector>
 #include <algorithm>
 #include <execinfo.h>
+#include <dlfcn.h>
 
 namespace fence_stats {
 struct Stats {
@@ -29,7 +30,16 @@ inline void begin_fence(const char* name, uint32_t, uint64_t*) {
         int n = backtrace(bt, 10);
         char key[512];
         int len = std::snprintf(key, sizeof key, "%.40s |", name);
-        for (int k = 2; k < n && len < 480; k++) len += std::snprintf(key + len, sizeof key - len, " %p", bt[k]);
+        // offsets in the loaded object (dladdr): addr2line -f -e <binary> <offset> resolves them despite ASLR
+        for (int k = 2; k < n && len < 480; k++) {
+            Dl_info info;
+            if (dladdr(bt[k], &info) && info.dli_fbase)
+                len += std::snprintf(key + len, sizeof key - len, " %s+%#lx", std::strrchr(info.dli_fname, '/') ?
+                                     std::strrchr(info.dli_fname, '/') + 1 : info.dli_fname,
+                                     (unsigned long)((char*)bt[k] - (char*)info.dli_fbase));
+            else
+                len += std::snprintf(key + len, sizeof key - len, " %p", bt[k]);
+        }
         S().sites[key]++;
     }
 }

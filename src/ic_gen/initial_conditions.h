@@ -39,6 +39,7 @@ void init_binary_test_peri(Particles& p, double a_pc, double e,
 // Inner binary (m1, m2) with semi-major axis a_in, eccentricity e_in in x-y plane.
 // Outer body m3 orbits inner COM with semi-major axis a_out, eccentricity e_out,
 // tilted by inclination i_deg (degrees) for Kozai-Lidov oscillations.
+void init_particle_file(Particles& p, const std::string& path);
 void init_quad22_test(Particles& p, double m1, double m2, double a1, double e1, double m3, double m4, double a2,
                       double e2, double a_out, double e_out, double incl_deg);
 void init_triple_test(Particles& p,

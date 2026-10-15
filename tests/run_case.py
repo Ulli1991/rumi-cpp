@@ -839,6 +839,32 @@ def int_pos_vs_double(exe, label, cfg, ratio):
     return check(f"{label} max|dE/E| integer / double positions", ip / dbl, ratio)
 
 
+def particle_file_roundtrip(exe, cfg):
+    """TEST_CASE = particle_file: the initial particles of `cfg` (dump at step 0) written to an IC_FILE and integrated
+    again give the same final state bit for bit (reader, units and particle order)."""
+    def dumps(c, d):
+        Path(d, "config.txt").write_text("".join(f"{k} = {v}\n" for k, v in {**OLD_DEFAULTS, **c}.items()))
+        out = subprocess.run([exe], cwd=d, capture_output=True, text=True, timeout=TIMEOUT_S,
+                             env={**os.environ, "NBODY_DUMP": "1"})
+        if out.returncode != 0:
+            raise SystemExit(f"FAIL: exit {out.returncode}\n{out.stdout[-2000:]}{out.stderr[-2000:]}")
+        rows = []
+        for f in sorted(Path(d).glob("dump_*.bin")):
+            raw = f.read_bytes()
+            n = struct.unpack_from("i", raw)[0]
+            rows.append(sorted(struct.unpack_from("9d", raw, 4 + 72 * i)[:8] for i in range(n)))
+        return rows
+    with tempfile.TemporaryDirectory() as d1, tempfile.TemporaryDirectory() as d2:
+        ref = dumps(cfg, d1)
+        ic = Path(d2, "ic.txt")
+        ic.write_text("".join("%.17g %.17g %.17g %.17g %.17g %.17g %.17g\n" % tuple(r[1:8]) for r in ref[0]))
+        got = dumps(dict(cfg, TEST_CASE="particle_file", IC_FILE=str(ic)), d2)
+    ok = check("particle_file: particles read", len(got[0]), len(ref[0]), lower=True)
+    ok &= check("particle_file: particles read", len(got[0]), len(ref[0]))
+    diff = max(abs(a - b) for ra, rb in zip(ref[-1], got[-1]) for a, b in zip(ra[1:], rb[1:]))
+    return ok & check("particle_file: |final state - reference| (bit-identical)", diff, 0.0)
+
+
 def kepler_ae(p, q):
     """Osculating a (pc), e of two dump rows (pid, m, x, y, z, vx, vy, vz)."""
     r = [q[2 + k] - p[2 + k] for k in range(3)]
@@ -1609,6 +1635,8 @@ CASES = {
     # (a = 58 AU) and a 0.79 + 0.105 Msun binary (a = 0.019 AU, ~1500 orbits per 1e-3 Myr, tidal ratio ~4e-12) bound to it
     # at ~0.003 pc, one PN subsystem. Without item 4c (SDAR off for whole PN subsystems): no step within 900 s on the
     # login node; with NBODY_SDAR_PN=1: 0.44 s, kappa_max 8.9e4, max|dE/E| 2.1e-16 (bound: round-off floor)
+    # TEST_CASE = particle_file reproduces binary_test (Kepler e = 0.9, 10 intervals) bit for bit from its initial dump
+    "particle_file_roundtrip": lambda exe: particle_file_roundtrip(exe, dict(KEPLER, TOTAL_TIME_MYR="1e-4")),
     "quad22_sdar": lambda exe: quad22_sdar(exe, "2+2 quadruple, PN + SDAR", dict(
         HIER_LOGH, TEST_CASE="quad22_test", PN_ORDER="31", M_PN="5.0", SDAR="true", R_NGB="0.01",
         TOTAL_TIME_MYR="1e-3", DT_MAX_MYR="1e-3", TEST_STELLAR_RADIUS_RSUN="0.4", ETA_RESTART="1e-8"), 1e-14),

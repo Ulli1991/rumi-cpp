@@ -1,3 +1,6 @@
+#include <array>
+#include <sstream>
+#include <fstream>
 #include "initial_conditions.h"
 #include "constants.h"
 #ifdef ENABLE_COLLISIONAL
@@ -1175,4 +1178,48 @@ void init_quad22_test(Particles& p, double m1, double m2, double a1, double e1, 
     }
     std::printf("Quadruple 2+2 test: A %.3g+%.3g Msun a=%.3e pc e=%.3f | B %.3g+%.3g Msun a=%.3e pc e=%.3f | "
                 "outer a=%.3e pc e=%.3f incl=%.1f deg\n", m1, m2, a1, e1, m3, m4, a2, e2, a_out, e_out, incl_deg);
+}
+
+// TEST_CASE = particle_file: one particle per line, "m x y z vx vy vz [kw [radius]]" in Msun, pc, km/s (code units),
+// R_sun; '#' starts a comment. For isolated reruns of configurations taken from production runs (energy-jump cases).
+// kw defaults to 14 (BH) at and above 5 Msun, else 1 (main sequence), as the other test generators
+void init_particle_file(Particles& p, const std::string& path) {
+    std::ifstream in(path);
+    if (!in) { std::fprintf(stderr, "IC_FILE: cannot open %s\n", path.c_str()); std::exit(1); }
+    std::vector<std::array<double, 7>> rows;
+    std::vector<int> kw;
+    std::vector<double> rad;
+    std::string line;
+    while (std::getline(in, line)) {
+        const auto hash = line.find('#');
+        if (hash != std::string::npos) line.erase(hash);
+        std::istringstream ss(line);
+        std::array<double, 7> r;
+        if (!(ss >> r[0] >> r[1] >> r[2] >> r[3] >> r[4] >> r[5] >> r[6])) continue;
+        int k = r[0] >= 5.0 ? 14 : 1;
+        double rr = 0.0;
+        if (ss >> k) ss >> rr;
+        rows.push_back(r); kw.push_back(k); rad.push_back(rr);
+    }
+    const int n = (int)rows.size();
+    if (n < 1) { std::fprintf(stderr, "IC_FILE: no particles in %s\n", path.c_str()); std::exit(1); }
+    p.allocate(n, COLL_ENABLED);
+    auto h_x = Kokkos::create_mirror_view(p.x), h_y = Kokkos::create_mirror_view(p.y), h_z = Kokkos::create_mirror_view(p.z);
+    auto h_vx = Kokkos::create_mirror_view(p.vx), h_vy = Kokkos::create_mirror_view(p.vy), h_vz = Kokkos::create_mirror_view(p.vz);
+    auto h_m = Kokkos::create_mirror_view(p.mass);
+    for (int i = 0; i < n; i++) {
+        h_m(i) = rows[i][0]; h_x(i) = rows[i][1]; h_y(i) = rows[i][2]; h_z(i) = rows[i][3];
+        h_vx(i) = rows[i][4]; h_vy(i) = rows[i][5]; h_vz(i) = rows[i][6];
+    }
+    Kokkos::deep_copy(p.x, h_x); Kokkos::deep_copy(p.y, h_y); Kokkos::deep_copy(p.z, h_z);
+    Kokkos::deep_copy(p.vx, h_vx); Kokkos::deep_copy(p.vy, h_vy); Kokkos::deep_copy(p.vz, h_vz);
+    Kokkos::deep_copy(p.mass, h_m);
+    if (p.collisional) {
+        auto h_st = Kokkos::create_mirror_view(p.stellar_type);
+        auto h_r = Kokkos::create_mirror_view(p.stellar_radius);
+        for (int i = 0; i < n; i++) { h_st(i) = kw[i]; h_r(i) = rad[i]; }
+        Kokkos::deep_copy(p.stellar_type, h_st);
+        Kokkos::deep_copy(p.stellar_radius, h_r);
+    }
+    std::printf("Particle file %s: %d particles\n", path.c_str(), n);
 }

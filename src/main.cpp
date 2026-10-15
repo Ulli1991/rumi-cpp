@@ -399,13 +399,16 @@ static void dump_particles(const Particles& p, int step) {
     std::snprintf(fn, sizeof fn, "dump_%04d.bin", step);
     auto h = [](const auto& v) { return Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), v); };
     auto hx = h(p.x), hy = h(p.y), hz = h(p.z), hvx = h(p.vx), hvy = h(p.vy), hvz = h(p.vz), hm = h(p.mass);
+    // particle_id / subsystem_id exist only in collisional runs: the slot index and -1 otherwise
+    const bool ids = p.particle_id.extent(0) >= (size_t)p.N, subs = p.subsystem_id.extent(0) >= (size_t)p.N;
     auto hp = h(p.particle_id), hs = h(p.subsystem_id);
     FILE* f = std::fopen(fn, "wb");
     if (!f) return;
     const int n = p.N;
     std::fwrite(&n, sizeof n, 1, f);
     for (int i = 0; i < n; i++) {
-        const double r[9] = {(double)hp(i), hm(i), hx(i), hy(i), hz(i), hvx(i), hvy(i), hvz(i), (double)hs(i)};
+        const double r[9] = {ids ? (double)hp(i) : (double)i, hm(i), hx(i), hy(i), hz(i), hvx(i), hvy(i), hvz(i),
+                             subs ? (double)hs(i) : -1.0};
         std::fwrite(r, sizeof r, 1, f);
     }
     std::fclose(f);
@@ -788,6 +791,8 @@ int main(int argc, char** argv) {
                 init_triple_test(p, triple_a_in, triple_e_in, triple_m1, triple_m2,
                                  triple_a_out, triple_e_out, triple_m3, triple_incl, triple_outer_first,
                                  triple_in_rot, triple_in_start_q, triple_out_start_q);
+            } else if (test == "particle_file") {
+                init_particle_file(p, cfg.get_str("IC_FILE"));
             } else if (test == "quad22_test") {
                 init_quad22_test(p, cfg.get_double("QUAD_M1"), cfg.get_double("QUAD_M2"), cfg.get_double("QUAD_A1_PC"),
                                  cfg.get_double("QUAD_E1"), cfg.get_double("QUAD_M3"), cfg.get_double("QUAD_M4"),

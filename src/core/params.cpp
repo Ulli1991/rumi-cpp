@@ -19,7 +19,7 @@ constexpr ParamLevel USER = ParamLevel::User, EXPERT = ParamLevel::Expert, TEST 
 
 const std::vector<ParamSpec> kParams = {
     // ---- Run ----
-    {"TEST_CASE", S, "outer_planets", "Run", USER, "plummer|outer_planets|binary_test|binary_test_peri|triple_test|quad22_test",
+    {"TEST_CASE", S, "outer_planets", "Run", USER, "plummer|outer_planets|binary_test|binary_test_peri|triple_test|quad22_test|particle_file",
      "Initial conditions: a star cluster (plummer) or a few-body test problem (--test overrides)"},
     {"TOTAL_TIME_MYR", D, "0.23", "Run", USER, "", "End time (Myr)"},
     {"DT_MAX_MYR", D, "1.6e-3", "Run", USER, "",
@@ -244,6 +244,7 @@ const std::vector<ParamSpec> kParams = {
     {"QUAD_E2", D, "0.62", "Test problems", TEST, "", "quad22_test: binary B eccentricity"},
     {"QUAD_A_OUT_PC", D, "2.7e-3", "Test problems", TEST, "", "quad22_test: outer orbit semi-major axis (pc)"},
     {"QUAD_E_OUT", D, "0.48", "Test problems", TEST, "", "quad22_test: outer orbit eccentricity"},
+    {"IC_FILE", S, "", "Test problems", TEST, "", "particle_file: \"m x y z vx vy vz [kw [R]]\" per line (Msun, pc, km/s, R_sun)"},
     {"QUAD_INCL_DEG", D, "30.0", "Test problems", TEST, "", "quad22_test: inclination of binary B's plane (deg)"},
     {"TRIPLE_INCL_DEG", D, "45.0", "Test problems", TEST, "", "triple_test: mutual inclination (deg)"},
     {"TRIPLE_OUTER_FIRST", B, "false", "Test problems", TEST, "", "triple_test: outer body at the lowest particle id"},
