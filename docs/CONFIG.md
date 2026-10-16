@@ -63,7 +63,7 @@ Levels:
 | `COLLISIONAL` | bool | `false` | user |  | Unsoftened direct N-body with subsystems, PN and mergers (BIFROST); false: softened N-body |
 | `PN_ORDER` | int | `7` | user |  | PN bitmask: 1 PN1, 2 PN2, 4 PN2.5, 8 PN3, 16 PN3.5, 32 BH spin couplings (63 all; 0 off) |
 | `M_PN` | double | `5.0` | expert |  | PN terms only for pairs with a member of at least this mass (Msun) |
-| `PN_BH_ONLY` | bool | `false` | expert |  | PN terms only for black holes (stellar type 14) of at least M_PN: 3-5x faster young clusters, \|dE/E\| per step ~1.2x worse |
+| `PN_BH_ONLY` | bool | `true` | expert |  | PN terms only for black holes (stellar type 14) of at least M_PN (false: every body of at least M_PN, 3-5x slower young clusters) |
 | `SOFTENING_PC` | double | `1e-3` | expert |  | Plummer softening (pc); 0 with COLLISIONAL |
 
 ## Stellar evolution
@@ -131,7 +131,7 @@ Levels:
 | `FLYBY_CM_KICK` | bool | `false` | **experiment** |  | Bound binaries with quadrupole tidal energy <= FLYBY_CM_KICK_EPS x \|E0\| interact with all other particles through their c.o.m. (mollified kicks: no orbit sampling, no tidal-sampling step; P, L exact) |
 | `FLYBY_CM_KICK_EPS` | double | `1e-12` | **experiment** |  | Largest D / \|E0\| of a FLYBY_CM_KICK binary, D = mu r_apo^2 sum_j G m_j / d_j^3 |
 | `FLYBY_CM_EPS` | double | `1e-11` | internal |  | Tidal-sampling pair step: energy a slow particle's kicks put into a subsystem per step <= this x \|E0\| (0: off) |
-| `TIDAL_STEP_RES` | double | `1.0` | internal |  | Floor of the FLYBY_CM_EPS step: this x P (1 - e)^(3/2) of the member's binary (0: none) |
+| `TIDAL_STEP_RES` | double | `1.0` | internal |  | Floor of the FLYBY_CM_EPS step: this x P (1 - e)^(3/2) of a bound binary, this x the shortest pair pericentre passage 2 pi r_p / v_p of an unbound pair or larger subsystem (0: none) |
 | `FLYBY_NGB_CM` | bool | `true` | internal |  | Distant fly-by neighbour test of a binary member against the binary's c.o.m. |
 | `NGB_MASS_SCALING` | bool | `true` | internal |  | Pair neighbour radius r_ngb max(1, m / <m>)^(1/3) (PeTar Eq. 12); the extra pairs join only as strong perturbers of a binary |
 | `NGB_MASS_GAMMA` | double | `1e-3` | internal |  | Tidal ratio above which a mass-scaled neighbour joins a binary |

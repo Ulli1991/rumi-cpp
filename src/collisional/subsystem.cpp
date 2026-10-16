@@ -1008,6 +1008,20 @@ void SubsystemManager::remap_indices(const Particles& p) {
 // ============================================================================
 
 
+// Pericentre passage time 2 pi r_p / v_p = 2 pi r_p^2 / L of a two-body orbit (bound or not) with relative position r,
+// velocity u and mu = G (m1 + m2); 0 for a radial orbit
+KOKKOS_INLINE_FUNCTION double pericentre_passage_time(double rx, double ry, double rz, double ux, double uy, double uz,
+                                                      double mu) {
+    const double r = Kokkos::sqrt(rx * rx + ry * ry + rz * rz), u2 = ux * ux + uy * uy + uz * uz;
+    const double lx = ry * uz - rz * uy, ly = rz * ux - rx * uz, lz = rx * uy - ry * ux;
+    const double l2 = lx * lx + ly * ly + lz * lz;
+    if (!(r > 0.0) || !(l2 > 0.0) || !(mu > 0.0)) return 0.0;
+    const double en = 0.5 * u2 - mu / r;
+    const double ecc = Kokkos::sqrt(Kokkos::fmax(0.0, 1.0 + 2.0 * en * l2 / (mu * mu)));
+    const double rp = l2 / (mu * (1.0 + ecc));
+    return 2.0 * M_PI * rp * rp / Kokkos::sqrt(l2);
+}
+
 // FROST-CLUSTERS II (Rantala et al. 2025, arXiv:2506.04330) sec. 2.1: "for the fly-by time-steps of binary stars
 // in subsystems, we now use binary centre-of-mass velocities in the BIFROST fly-by time-step criteria instead of
 // the velocities of the binary components". Non-members keep their velocity; members of one subsystem do not pair
@@ -1091,6 +1105,8 @@ void SubsystemManager::fill_cm_velocity(const Particles& p, int lo, int hi, Kokk
                     const double rp = sa * (1.0 - ecc);
                     kfl = res * 2.0 * M_PI * Kokkos::sqrt(rp * rp * rp / mu);
                     muv = pm(i) * pm(j) / M * Kokkos::sqrt(mu * (1.0 + ecc) / (sa * (1.0 - ecc)));
+                } else {
+                    kfl = res * pericentre_passage_time(rx, ry, rz, ux, uy, uz, mu);
                 }
             } else {
                 for (int q = a; q < e; q++) {
@@ -1100,6 +1116,17 @@ void SubsystemManager::fill_cm_velocity(const Particles& p, int lo, int hi, Kokk
                     ext = Kokkos::fmax(ext, 2.0 * Kokkos::sqrt(dx * dx + dy * dy + dz * dz));
                     muv += pm(i) * Kokkos::sqrt(ux * ux + uy * uy + uz * uz);
                 }
+                // the fastest internal time scale: the shortest pericentre passage of any member pair
+                double tmin = 1e300;
+                for (int q = a; q < e; q++)
+                    for (int s = q + 1; s < e; s++) {
+                        const int i = buf(q), j = buf(s);
+                        tmin = Kokkos::fmin(tmin, pericentre_passage_time(px_(j) - px_(i), py_(j) - py_(i),
+                                                                          pz_(j) - pz_(i), vx(j) - vx(i),
+                                                                          vy(j) - vy(i), vz(j) - vz(i),
+                                                                          G * (pm(i) + pm(j))));
+                    }
+                kfl = tmin < 1e300 ? res * tmin : 0.0;
             }
             if (ext > 0.0 && muv > 0.0) kt = tol / (2.0 * G * ext * muv);
             const int sk = psid(buf(a));

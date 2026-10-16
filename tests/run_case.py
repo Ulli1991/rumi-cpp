@@ -47,6 +47,8 @@ SPIN_IMBH = dict(TEST_CASE="plummer", INTEGRATOR="hhs", TOTAL_TIME_MYR="2e-3", D
                  ADD_IMBH="true", IMBH_M1="500", IMBH_M2="500", IMBH_A_PC="2e-5", IMBH_E="0.5", IMBH_SPIN="0.9",
                  PRINT_INTERVAL="5", PROFILING="false")
 # 2000 Kroupa stars, 10 % primordial binaries (a = 0.1-100 AU, thermal e), two 1e-3 Myr steps
+FLYBY_GROUP_STEPS = 39400  # flyby_group_floor: 30304 measured (host build)
+FLYBY_GROUP_DE = 5.8e-10   # flyby_group_floor: 4.42e-10 measured (host build)
 PN_BH_ONLY_DE = 7.7e-10   # pn_bh_only: 5.93e-10 measured (host build)
 BINARIES = dict(TEST_CASE="plummer", INTEGRATOR="hhs", TOTAL_TIME_MYR="2e-3", DT_MAX_MYR="1e-3", DT_MIN_MYR="1e-14",
                 ETA_FF="0.2", ETA_FB="0.2", ETA_GRAD="0.1", ETA_JERK="0.1", SOFTENING_PC="0", COLLISIONAL="true",
@@ -494,13 +496,27 @@ def paths_same_steps(exe, label, cfg, min_logh, gbs_rel=0.0):
 
 
 
+def flyby_group_floor(exe):
+    """A star near an unbound fly-by subsystem: the tidal-sampling step of FLYBY_CM_EPS has the pericentre passage
+    time of the subsystem's pairs as floor (without it 7.1M secular steps, 69 s, |dE/E| 6.4e-9 in one interval)."""
+    cfg = dict(TEST_CASE="particle_file", IC_FILE=str(Path(__file__).parent / "data" / "flyby_group_r050.txt"),
+               TOTAL_TIME_MYR="1e-3", DT_MAX_MYR="1e-3", DT_MIN_MYR="1.0e-14", ETA="0", ETA_GRAD="0.2", ETA_JERK="0",
+               ETA_RESTART="1e-8", FLYBY_CM_EPS="1e-11", NGB_MASS_SCALING="true", SERIAL_N2_GPU="16384",
+               TREE_THRESHOLD="100000", TREE_THETA="0.7", SDAR="true", COLLISIONAL="true", PN_ORDER="31",
+               SSE_ENABLED="false", COLL_MASS_LOSS_C="0.3", PRINT_INTERVAL="1", PROFILING="false")
+    out = run_output(exe, cfg)
+    steps = sum(int(a) for a in re.findall(r"Secular=(\d+) \(substeps=", out))
+    ok = check("fly-by group: secular steps", steps, FLYBY_GROUP_STEPS)
+    return ok & check("fly-by group: max|dE/E|", max(r[0] for r in diagnostics(out)), FLYBY_GROUP_DE)
+
+
 def pn_bh_only(exe):
-    """PN_BH_ONLY=true: fewer LogH calls than the mass rule on the same run, energy within bound."""
+    """PN_BH_ONLY (default): fewer LogH calls than the mass rule (false) on the same run, energy within bound."""
     def logh(out):
         return sum(int(a) for a in re.findall(r"Integration: LogH=(\d+) \(gbs=", out))
     cfg = dict(BINARIES, PN_ORDER="31")
-    base = run_output(exe, cfg)
-    bh = run_output(exe, dict(cfg, PN_BH_ONLY="true"))
+    base = run_output(exe, dict(cfg, PN_BH_ONLY="false"))
+    bh = run_output(exe, cfg)
     print(f"   LogH calls: mass rule {logh(base)}, BH only {logh(bh)}")
     ok = check("PN_BH_ONLY LogH calls below the mass rule's", logh(bh), logh(base) - 1)
     return ok & check("PN_BH_ONLY max|dE/E|", max(r[0] for r in diagnostics(bh)), PN_BH_ONLY_DE)
@@ -1502,8 +1518,12 @@ CASES = {
     # PN_BH_ONLY: binaries of massive stars that are not BHs leave the PN (kappa = 1) LogH path for the Kepler drift
     # and SDAR; the BH binaries stay PN
     "pn_bh_only": lambda exe: pn_bh_only(exe),
+    # Tidal-sampling step near unbound fly-by subsystems had no floor (run B, levels to L22; fixed 2026-10-16)
+    "flyby_group_floor": lambda exe: flyby_group_floor(exe),
+    # PN_BH_ONLY false: the PN binaries of massive stars give the LogH calls the two paths are compared on
     "cm_eps_cpu_vs_device": lambda exe: paths_same_steps(exe, "fly-by step with tidal sampling",
-                                                         dict(BINARIES, FLYBY_CM_EPS="1e-11", PN_ORDER="31"),
+                                                         dict(BINARIES, FLYBY_CM_EPS="1e-11", PN_ORDER="31",
+                                                              PN_BH_ONLY="false"),
                                                          12000, 2e-4),
     # Triple branch of detect_from_pairs used a particle id where the union-find wanted a compact id
     # (out of bounds for ids >= the number of pair members; the tests' triples had ids 0-2)

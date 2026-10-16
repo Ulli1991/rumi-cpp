@@ -31,7 +31,8 @@ struct CollisionalConfig {
     double e_ref = 0.0;                //   |E0| of the run
     bool flyby_cm_kick = false;        // FLYBY_CM_KICK: weakly perturbed binaries interact through their c.o.m. (subsystem.h)
     double flyby_cm_kick_eps = 1e-12;  // FLYBY_CM_KICK_EPS: largest quadrupole tidal energy D / |E0| of such a binary
-    double tidal_step_res = 1.0;       // TIDAL_STEP_RES: floor of the FLYBY_CM_EPS step, this x P (1 - e)^(3/2) of the binary (0: none)
+    double tidal_step_res = 1.0;       // TIDAL_STEP_RES: floor of the FLYBY_CM_EPS step, this x P (1 - e)^(3/2) of a bound binary or
+                                       // the shortest pair pericentre passage of other subsystems (0: none)
     bool flyby_ngb_cm = true;
     double ngb_mass_gamma = 1e-3;      // NGB_MASS_GAMMA: tidal ratio above which a mass-scaled neighbour joins a binary
     double ngb_inv_mref = 0.0;         // NGB_MASS_SCALING: 1 / mean particle mass (pair neighbour radius r_ngb max(1, m/<m>)^(1/3)), 0: off          // FLYBY_NGB_CM: distant fly-by neighbour test of a binary member against the binary's c.o.m.
@@ -70,12 +71,12 @@ struct CollisionalConfig {
     // least M_PN. FROST-CLUSTERS I (Rantala et al. 2024, sec. 1, 2) applies the post-Newtonian equations of motion to
     // the BHs; by mass alone every massive main-sequence star of a young cluster is a PN body (no SDAR slow-down, no
     // Kepler drift). Run B, one step, 5 seeds: 240-490 -> 71-96 s/step, |dE/E| median 1.3e-10 -> 1.5e-10 (better on
-    // 1 seed, equal on 1, worse on 3 by 1.4-4.5x), |dL/L| ~1e-14 either way
+    // 1 seed, equal on 1, worse on 3 by 1.4-4.5x), |dL/L| ~1e-14 either way; default since 2026-10-16
     bool pn_body(double m, int kw) const { return m >= m_pn && (!pn_bh_only || kw == 14); }
 
     // Post-Newtonian
     double m_pn = 5.0;                 // minimum mass (M_sun) for global PN1.0
-    bool pn_bh_only = false;           // PN_BH_ONLY: PN terms only for black holes (pn_body)
+    bool pn_bh_only = true;            // PN_BH_ONLY: PN terms only for black holes (pn_body)
     int pn_order = 7;                  // bitmask: 1=PN1, 2=PN2, 4=PN2.5, 8=PN3, 16=PN3.5
 
     // Escaper removal
