@@ -187,6 +187,7 @@ struct SubsystemManager {
     int step_flyby_curved = 0;
     int step_ngb_mass_kept = 0;
     int step_weak_split = 0;
+    int step_sec_triple_unfixed = 0;      // secular triples whose energy difference no radial velocity could take
     int step_n_secular = 0;
     int step_total_members = 0;
 

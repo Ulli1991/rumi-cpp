@@ -497,8 +497,19 @@ struct SubsysAdvanceCheck {
 };
 }  // namespace
 
-void advance_subsystems_in_range(Particles& p, int start, int count,
-                                  double G, double dt) {
+static void advance_subsystems_in_range_impl(Particles& p, int start, int count, double G, double dt);
+// NBODY_ELEDGER: per-path booking residues (members' T + U change from the states + the path's own booking),
+// summed over a step, code units; printed and reset with the ELEDGER lines
+static double g_led_sec2 = 0.0, g_led_sec2_pn = 0.0, g_led_sec3 = 0.0;
+static int g_led_n_sec2 = 0, g_led_n_sec3 = 0;
+static inline double pair_energy(double m1, const double* r1, const double* v1, double m2, const double* r2,
+                                 const double* v2, double G) {
+    const double dx = r2[0] - r1[0], dy = r2[1] - r1[1], dz = r2[2] - r1[2];
+    return 0.5 * m1 * (v1[0] * v1[0] + v1[1] * v1[1] + v1[2] * v1[2]) +
+           0.5 * m2 * (v2[0] * v2[0] + v2[1] * v2[1] + v2[2] * v2[2]) - G * m1 * m2 / std::sqrt(dx * dx + dy * dy + dz * dz);
+}
+void advance_subsystems_in_range_impl(Particles& p, int start, int count,
+                                       double G, double dt) {
     PhaseClock phase_clock;
     if (!p.collisional || g_subsystem_mgr.active.empty()) return;
     g_subsys_phase.calls[std::min(g_profiler.cur_depth, SubsystemPhaseTimes::MAXD - 1)]++;
@@ -750,6 +761,7 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
         // summed afterwards in a fixed order, so every MPI rank books the same value.
         const int n_sec = (int)secular_idx.size();
         std::vector<double> dE_gw(n_sec, 0.0);
+        std::vector<double> sec_res(n_sec, 0.0);   // NBODY_ELEDGER
         std::vector<char> sec_pn(n_sec, 0);
         std::vector<char> evolved(n_sec, 0);
         std::vector<int> substeps(n_sec, 0);
@@ -790,6 +802,8 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
             double v_rel_pre[3] = {v2[0]-v1[0], v2[1]-v1[1], v2[2]-v1[2]};
             const double a_pre = pn_b ? cartesian_to_elements(r_rel_pre, v_rel_pre, mu_sec).a : 0.0;
 
+            static const bool led_sec = std::getenv("NBODY_ELEDGER") != nullptr;
+            const double e_sec0 = led_sec ? pair_energy(m1_sec, p1, v1, m2_sec, p2, v2, G) : 0.0;
             substeps[k] = integrate_secular_binary(p1, v1, m1_sec, p2, v2, m2_sec, G, g_collisional.c_code, pn_b, dt);
 
             if (pn_b) {
@@ -799,6 +813,7 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
                 if (a_post > 0.0 && a_pre > 0.0)
                     dE_gw[k] = -G * m1_sec * m2_sec / (2.0 * a_pre) + G * m1_sec * m2_sec / (2.0 * a_post);
             }
+            if (led_sec) sec_res[k] = pair_energy(m1_sec, p1, v1, m2_sec, p2, v2, G) - e_sec0 + dE_gw[k];
 
             // P and L moved by the evolution (Kepler motion and the CoM drift conserve both)
             {
@@ -827,6 +842,7 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
                 evolve);
         }
         for (int k = 0; k < n_sec; k++) {
+            if (evolved[k]) { g_led_sec2 += sec_res[k]; if (sec_pn[k]) g_led_sec2_pn += sec_res[k]; g_led_n_sec2++; }
             g_energy_books.E_gw += dE_gw[k];
             if (!sec_pn[k]) g_sec_nonpn_gw += dE_gw[k];   // NBODY_EATTR: the part booked for non-PN binaries
             for (int c = 0; c < 3; c++) {
@@ -856,6 +872,8 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
     g_subsys_phase.add(SubsystemPhaseTimes::SECULAR, phase_clock.lap());
 
     // --- Secular triples: Kozai-Lidov + GW dissipation ---
+    struct LedTri { int i0, i1, i2; double e0, booked; };
+    std::vector<LedTri> led_tri_pending;
     if (!secular_triple_idx.empty()) {
         for (int s : secular_triple_idx) {
             g_subsystem_mgr.step_secular_triples++;
@@ -937,6 +955,24 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
                    tri.inner.a, tri.inner.e, tri.a_out, cos_i_mut, dt);
 
             double a_in_pre = tri.inner.a;  // save for GW bookkeeping
+            static const bool led_tri = std::getenv("NBODY_ELEDGER") != nullptr;
+            double booked_tri = 0.0;   // GW energy booked for this triple (E_gw)
+            auto tri_energy = [&]() {
+                const int ii[3] = {idx0 - start, idx1 - start, idx2 - start};
+                double E = 0.0;
+                for (int b = 0; b < 3; b++) {
+                    const int i = ii[b];
+                    E += 0.5 * h_m(i) * (h_vx(i) * h_vx(i) + h_vy(i) * h_vy(i) + h_vz(i) * h_vz(i));
+                    for (int c = b + 1; c < 3; c++) {
+                        const int j = ii[c];
+                        const double dx = h_x(j) - h_x(i), dy = h_y(j) - h_y(i), dz = h_z(j) - h_z(i);
+                        E -= G * h_m(i) * h_m(j) / std::sqrt(dx * dx + dy * dy + dz * dz);
+                    }
+                }
+                return E;
+            };
+            const double E_tri0 = tri_energy();   // T + U of the three members before the secular step
+            if (led_tri) led_tri_pending.push_back({idx0, idx1, idx2, E_tri0, 0.0});
 
             secular_evolve_triple(tri, dt, G, g_collisional.c_code,
                                   g_collisional.pn_body(m1, StellarPropsCache::get().type_of(p, sub.inner_binary_id)) ||
@@ -949,6 +985,8 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
                 double E_orb_pre_tri = -G * m1 * m2 / (2.0 * a_in_pre);
                 double E_orb_post_tri = -G * m1 * m2 / (2.0 * tri.inner.a);
                 g_energy_books.E_gw += E_orb_pre_tri - E_orb_post_tri;
+                booked_tri = E_orb_pre_tri - E_orb_post_tri;
+                if (led_tri && !led_tri_pending.empty()) led_tri_pending.back().booked = E_orb_pre_tri - E_orb_post_tri;
             }
 
             // Update inner orbital plane to reflect changed mutual inclination.
@@ -1050,6 +1088,54 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
             h_vx(idx2 - start) = cm_tot_v[0] + (M12/M_tot)*v_out_new[0];
             h_vy(idx2 - start) = cm_tot_v[1] + (M12/M_tot)*v_out_new[1];
             h_vz(idx2 - start) = cm_tot_v[2] + (M12/M_tot)*v_out_new[2];
+
+            // Energy-exact rebuild: the orbit-averaged step and the rebuild from elements (point-mass outer orbit,
+            // re-placed phases) change the members' true T + U by more than the booked GW energy (200k seed 3,
+            // step 60: -8.0e-10 |E0| unbooked from 2888 secular-triple calls, the whole energy jump of the step).
+            // The difference goes into the radial component of a relative velocity, outer orbit first, else the
+            // inner binary: P (the c.o.m. velocities stay) and L (a change along r leaves r x v alone) stay exact,
+            // the positions and so U do not change, and T changes by exactly the difference
+            {
+                const double dE = (E_tri0 - booked_tri) - tri_energy();
+                auto radial_fix = [&](int ia, int ib, double ma, double mb, int ic, double mc, bool outer) {
+                    // relative coordinate: b against a, or (outer) c against the c.o.m. of a and b
+                    double r[3], u[3];
+                    const double M2 = ma + mb, M3 = M2 + mc;
+                    const double xa[3] = {h_x(ia), h_y(ia), h_z(ia)}, xb[3] = {h_x(ib), h_y(ib), h_z(ib)};
+                    const double va[3] = {h_vx(ia), h_vy(ia), h_vz(ia)}, vb[3] = {h_vx(ib), h_vy(ib), h_vz(ib)};
+                    double mu;
+                    if (outer) {
+                        const double xc[3] = {h_x(ic), h_y(ic), h_z(ic)}, vc[3] = {h_vx(ic), h_vy(ic), h_vz(ic)};
+                        for (int k = 0; k < 3; k++) {
+                            r[k] = xc[k] - (ma * xa[k] + mb * xb[k]) / M2;
+                            u[k] = vc[k] - (ma * va[k] + mb * vb[k]) / M2;
+                        }
+                        mu = mc * M2 / M3;
+                    } else {
+                        for (int k = 0; k < 3; k++) { r[k] = xb[k] - xa[k]; u[k] = vb[k] - va[k]; }
+                        mu = ma * mb / M2;
+                    }
+                    const double rr = std::sqrt(r[0] * r[0] + r[1] * r[1] + r[2] * r[2]);
+                    if (!(rr > 0.0) || !(mu > 0.0)) return false;
+                    const double ur = (r[0] * u[0] + r[1] * u[1] + r[2] * u[2]) / rr;
+                    const double q = ur * ur + 2.0 * dE / mu;
+                    if (q < 0.0) return false;
+                    const double d = (ur >= 0.0 ? 1.0 : -1.0) * std::sqrt(q) - ur;
+                    const double du[3] = {d * r[0] / rr, d * r[1] / rr, d * r[2] / rr};
+                    if (outer) {
+                        h_vx(ic) += (M2 / M3) * du[0]; h_vy(ic) += (M2 / M3) * du[1]; h_vz(ic) += (M2 / M3) * du[2];
+                        h_vx(ia) -= (mc / M3) * du[0]; h_vy(ia) -= (mc / M3) * du[1]; h_vz(ia) -= (mc / M3) * du[2];
+                        h_vx(ib) -= (mc / M3) * du[0]; h_vy(ib) -= (mc / M3) * du[1]; h_vz(ib) -= (mc / M3) * du[2];
+                    } else {
+                        h_vx(ia) -= (mb / M2) * du[0]; h_vy(ia) -= (mb / M2) * du[1]; h_vz(ia) -= (mb / M2) * du[2];
+                        h_vx(ib) += (ma / M2) * du[0]; h_vy(ib) += (ma / M2) * du[1]; h_vz(ib) += (ma / M2) * du[2];
+                    }
+                    return true;
+                };
+                const int i0 = idx0 - start, i1 = idx1 - start, i2 = idx2 - start;
+                if (dE != 0.0 && !radial_fix(i0, i1, m1, m2, i2, m3, true) && !radial_fix(i0, i1, m1, m2, i2, m3, false))
+                    g_subsystem_mgr.step_sec_triple_unfixed++;
+            }
         }
 
         mirror.push(p);
@@ -1062,6 +1148,21 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
 
     g_subsys_phase.add(SubsystemPhaseTimes::SEC_TRIPLE, phase_clock.lap());
 
+    for (const auto& t : led_tri_pending) {   // NBODY_ELEDGER: secular triples' residues
+        const int ii[3] = {t.i0 - start, t.i1 - start, t.i2 - start};
+        double E = 0.0;
+        for (int b = 0; b < 3; b++) {
+            const int i = ii[b];
+            E += 0.5 * h_m(i) * (h_vx(i) * h_vx(i) + h_vy(i) * h_vy(i) + h_vz(i) * h_vz(i));
+            for (int c = b + 1; c < 3; c++) {
+                const int j = ii[c];
+                const double dx = h_x(j) - h_x(i), dy = h_y(j) - h_y(i), dz = h_z(j) - h_z(i);
+                E -= G * h_m(i) * h_m(j) / std::sqrt(dx * dx + dy * dy + dz * dz);
+            }
+        }
+        g_led_sec3 += E - t.e0 + t.booked;
+        g_led_n_sec3++;
+    }
     // --- LogH subsystems: batch integrate with per-subsystem restart (BIFROST §3.19) ---
     if (!logh_idx.empty()) {
         // Most expensive first (longest-processing-time order), so a long integration does not start last
@@ -2803,7 +2904,236 @@ static int hhs_fsi_host_subtree(Particles& p, DistributedParticles* dp, int star
 // Tree operations require dp != nullptr (tree_threshold >> serial_n2_gpu).
 // Sets of at most host_subtree_max particles run as a host subtree (hhs_fsi_host_subtree).
 // =============================================================================
+static int hhs_fsi_recursive_impl(Particles& p, DistributedParticles* dp, int start, int count, double pivot_dt,
+                                  double G, double soft2, double dt_min, double eta, bool dt_valid,
+                                  bool global_tree_available, int depth);
+
+// NBODY_ELEDGER=1 (debug, one rank, no MPI distribution): an energy ledger of the HHS recursion. A call integrates
+// only the Hamiltonian of its own set [start, start + count) (everything outside acts through the parent's kicks), so
+// E_set(after) + books(after) - E_set(before) - books(before) is the integration error made inside the call; minus
+// the errors of its child calls, the error made at its own level (its slow/fast split, kicks, subsystem coupling).
+// After the root call the step's error and the calls with the largest own errors (depth, set size, pivot, ids of
+// sets of up to 32) are printed as ELEDGER lines, in units of |E0| (E_REF). Costs O(count^2) per call: replays only.
+namespace {
+struct EnergyLedger {
+    struct Frame { double child = 0.0; bool valid = true; };
+    struct Rec { int depth = 0, n = 0; double pivot = 0.0, own = 0.0, total = 0.0; std::vector<int> pids; };
+    std::vector<Frame> stack;
+    std::vector<Rec> top;   // largest |own| first
+    double root = 0.0, sum_own = 0.0, eref = 0.0;
+    int calls = 0;
+    // subsystem advances (advance_subsystems_in_range): change of the members' internal energy (T + U among the
+    // members of each subsystem) minus the books' change, summed; the subsystems with the largest internal change
+    double adv_unbooked = 0.0;
+    struct SubRec { double dE = 0.0; int type = -1, n = 0; bool secular = false; std::vector<int> pids; };
+    std::vector<SubRec> sub_top;
+    void note_sub(SubRec r) {
+        if (sub_top.size() >= 8 && std::fabs(r.dE) <= std::fabs(sub_top.back().dE)) return;
+        sub_top.insert(std::upper_bound(sub_top.begin(), sub_top.end(), r, [](const SubRec& a, const SubRec& b) {
+                           return std::fabs(a.dE) > std::fabs(b.dE); }), std::move(r));
+        if (sub_top.size() > 8) sub_top.pop_back();
+    }
+    void note(Rec r) {
+        sum_own += r.own;
+        if (top.size() >= 12 && std::fabs(r.own) <= std::fabs(top.back().own)) return;
+        top.insert(std::upper_bound(top.begin(), top.end(), r, [](const Rec& a, const Rec& b) {
+                       return std::fabs(a.own) > std::fabs(b.own); }), std::move(r));
+        if (top.size() > 12) top.pop_back();
+    }
+};
+EnergyLedger g_ledger;
+
+// KE + PE of the particles [s, s + n) among themselves
+double set_energy(const Particles& p, int s, int n, double G) {
+    if (n <= 0) return 0.0;
+    auto x = p.x, y = p.y, z = p.z, vx = p.vx, vy = p.vy, vz = p.vz, m = p.mass;
+    const int e = s + n;
+    if (host_exec()) {   // host subtree: device-typed views over host memory (raw pointers, as host_exec.h)
+        const double *hx = x.data(), *hy = y.data(), *hz = z.data(), *hvx = vx.data(), *hvy = vy.data(),
+                     *hvz = vz.data(), *hm = m.data();
+        double tot = 0.0;
+        for (int i = s; i < e; i++) {
+            double t = 0.5 * hm[i] * (hvx[i] * hvx[i] + hvy[i] * hvy[i] + hvz[i] * hvz[i]);
+            for (int j = i + 1; j < e; j++) {
+                const double dx = hx[j] - hx[i], dy = hy[j] - hy[i], dz = hz[j] - hz[i];
+                t -= G * hm[i] * hm[j] / std::sqrt(dx * dx + dy * dy + dz * dz);
+            }
+            tot += t;
+        }
+        return tot;
+    }
+    double tot = 0.0;
+    Kokkos::parallel_reduce("ledger_energy", Kokkos::RangePolicy<>(s, e), KOKKOS_LAMBDA(int i, double& acc) {
+        double t = 0.5 * m(i) * (vx(i) * vx(i) + vy(i) * vy(i) + vz(i) * vz(i));
+        for (int j = i + 1; j < e; j++) {
+            const double dx = x(j) - x(i), dy = y(j) - y(i), dz = z(j) - z(i);
+            t -= G * m(i) * m(j) / Kokkos::sqrt(dx * dx + dy * dy + dz * dz);
+        }
+        acc += t;
+    }, tot);
+    return tot;
+}
+
+#ifdef ENABLE_COLLISIONAL
+// T + U among the members of each subsystem fully inside [start, start + count), by subsystem position in active
+std::vector<double> member_energies(const Particles& p, int start, int count, double G) {
+    const auto& subs = g_subsystem_mgr.active;
+    std::vector<double> out(subs.size(), std::nan(""));
+    g_subsystem_mgr.rebuild_pid_to_idx(p);
+    const auto& p2i = g_subsystem_mgr.pid_to_idx();
+    const int e = start + count;
+    std::vector<double> hx, hy, hz, hvx, hvy, hvz, hm;
+    auto get = [&](const auto& v, std::vector<double>& dst) {
+        dst.resize(count);
+        if (host_exec()) { std::copy(v.data() + start, v.data() + e, dst.begin()); return; }
+        auto h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Kokkos::subview(v, Kokkos::make_pair(start, e)));
+        std::copy(h.data(), h.data() + count, dst.begin());
+    };
+    get(p.x, hx); get(p.y, hy); get(p.z, hz); get(p.vx, hvx); get(p.vy, hvy); get(p.vz, hvz); get(p.mass, hm);
+    for (size_t s = 0; s < subs.size(); s++) {
+        int idx[LOGH_MAX_BODIES];
+        const int nb = std::min((int)subs[s].particle_ids.size(), LOGH_MAX_BODIES);
+        bool in = nb >= 2;
+        for (int b = 0; b < nb && in; b++) {
+            const int pid = subs[s].particle_ids[b];
+            const int i = (pid >= 0 && pid < (int)p2i.size()) ? p2i[pid] : -1;
+            in = i >= start && i < e;
+            idx[b] = i - start;
+        }
+        if (!in) continue;
+        double E = 0.0;
+        for (int b = 0; b < nb; b++) {
+            const int i = idx[b];
+            E += 0.5 * hm[i] * (hvx[i] * hvx[i] + hvy[i] * hvy[i] + hvz[i] * hvz[i]);
+            for (int c = b + 1; c < nb; c++) {
+                const int j = idx[c];
+                const double dx = hx[j] - hx[i], dy = hy[j] - hy[i], dz = hz[j] - hz[i];
+                E -= G * hm[i] * hm[j] / std::sqrt(dx * dx + dy * dy + dz * dz);
+            }
+        }
+        out[s] = E;
+    }
+    return out;
+}
+#endif
+}  // namespace
+
+// NBODY_ELEDGER: the subsystem advances with their members' energy change against the books (see EnergyLedger)
+void advance_subsystems_in_range(Particles& p, int start, int count, double G, double dt) {
+    static const bool ledger_on = std::getenv("NBODY_ELEDGER") != nullptr;
+#ifdef ENABLE_COLLISIONAL
+    if (!ledger_on || !p.collisional || g_subsystem_mgr.active.empty() || MPIComm::size() > 1 ||
+        g_ledger.stack.empty()) {
+        advance_subsystems_in_range_impl(p, start, count, G, dt);
+        return;
+    }
+    const std::vector<Subsystem> before_subs = g_subsystem_mgr.active;
+    const std::vector<double> e0 = member_energies(p, start, count, G);
+    const double b0 = g_energy_books.total_sink();
+    advance_subsystems_in_range_impl(p, start, count, G, dt);
+    const double db = g_energy_books.total_sink() - b0;
+    const double eref = g_ledger.eref > 0.0 ? g_ledger.eref : 1.0;
+    // the same subsystems after the advance (by member list; the advance may reclassify, not regroup)
+    const std::vector<double> e1 = member_energies(p, start, count, G);
+    double dsum = 0.0;
+    bool all = g_subsystem_mgr.active.size() == before_subs.size();
+    for (size_t s = 0; s < before_subs.size() && all; s++) {
+        if (std::isnan(e0[s])) continue;
+        if (g_subsystem_mgr.active[s].particle_ids != before_subs[s].particle_ids || std::isnan(e1[s])) { all = false; break; }
+        const double d = (e1[s] - e0[s]) / eref;
+        dsum += d;
+        EnergyLedger::SubRec r;
+        r.dE = d; r.type = (int)before_subs[s].type; r.n = before_subs[s].n_bodies; r.secular = before_subs[s].is_secular;
+        r.pids = before_subs[s].particle_ids;
+        g_ledger.note_sub(std::move(r));
+    }
+    if (all) {
+        g_ledger.adv_unbooked += dsum + db / eref;
+    }
+#else
+    (void)ledger_on;
+    advance_subsystems_in_range_impl(p, start, count, G, dt);
+#endif
+}
+
 static int hhs_fsi_recursive(
+    Particles& p,
+    DistributedParticles* dp,
+    int start, int count,
+    double pivot_dt,
+    double G, double soft2,
+    double dt_min, double eta,
+    bool dt_valid,
+    bool global_tree_available,
+    int depth) {
+    static const bool ledger_on = std::getenv("NBODY_ELEDGER") != nullptr;
+    if (!ledger_on || count == 0 || dp != nullptr || MPIComm::size() > 1)
+        return hhs_fsi_recursive_impl(p, dp, start, count, pivot_dt, G, soft2, dt_min, eta, dt_valid,
+                                      global_tree_available, depth);
+#ifdef ENABLE_COLLISIONAL
+    auto books = [] { return g_energy_books.total_sink(); };
+    const double eref_run = g_collisional.e_ref;
+#else
+    auto books = [] { return 0.0; };
+    const double eref_run = 0.0;
+#endif
+    const double e0 = set_energy(p, start, count, G) + books();
+    if (g_ledger.stack.empty()) g_ledger.eref = eref_run > 0.0 ? eref_run : std::fabs(e0);   // |E0|, else |E| of the root set
+    const double eref = g_ledger.eref > 0.0 ? g_ledger.eref : 1.0;
+    g_ledger.stack.push_back({});
+    const int k = hhs_fsi_recursive_impl(p, dp, start, count, pivot_dt, G, soft2, dt_min, eta, dt_valid,
+                                         global_tree_available, depth);
+    EnergyLedger::Frame fr = g_ledger.stack.back();
+    g_ledger.stack.pop_back();
+    g_ledger.calls++;
+    const double dE = (set_energy(p, start, count - k, G) + books() - e0) / eref;
+    if (k == 0 && fr.valid) {
+        EnergyLedger::Rec r;
+        r.depth = depth; r.n = count; r.pivot = pivot_dt * TIME_UNIT_MYR; r.total = dE; r.own = dE - fr.child;
+        if (count <= 32) {
+            if (host_exec()) {
+                r.pids.assign(p.particle_id.data() + start, p.particle_id.data() + start + count);
+            } else {
+                auto hp = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
+                                                              Kokkos::subview(p.particle_id, Kokkos::make_pair(start, start + count)));
+                r.pids.assign(hp.data(), hp.data() + count);
+            }
+        }
+        g_ledger.note(std::move(r));
+    }
+    if (!g_ledger.stack.empty()) {
+        g_ledger.stack.back().child += dE;
+        if (k != 0 || !fr.valid) g_ledger.stack.back().valid = false;
+    } else {
+        std::printf("ELEDGER root dE/E0 %.6e (sum of own errors %.6e, %d calls%s)\n", dE, g_ledger.sum_own,
+                    g_ledger.calls, fr.valid && k == 0 ? "" : ", merger inside: not attributed");
+        for (const auto& r : g_ledger.top) {
+            std::printf("ELEDGER own %.6e total %.6e depth %d n %d pivot %.3e Myr pids", r.own, r.total, r.depth, r.n,
+                        r.pivot);
+            for (int pid : r.pids) std::printf(" %d", pid);
+            std::printf("\n");
+        }
+        std::printf("ELEDGER subsystem advances: members' energy change + books change %.6e (types: 0 binary, 1 fly-by, "
+                    "2 stable triple, 3 unstable triple, 4 multiple)\n", g_ledger.adv_unbooked);
+        {
+            const double er = g_ledger.eref > 0.0 ? g_ledger.eref : 1.0;
+            std::printf("ELEDGER path residues: secular binaries %.6e (%d calls; PN ones %.6e)  secular triples %.6e (%d calls)\n",
+                        g_led_sec2 / er, g_led_n_sec2, g_led_sec2_pn / er, g_led_sec3 / er, g_led_n_sec3);
+            g_led_sec2 = g_led_sec2_pn = g_led_sec3 = 0.0;
+            g_led_n_sec2 = g_led_n_sec3 = 0;
+        }
+        for (const auto& r : g_ledger.sub_top) {
+            std::printf("ELEDGER sub dE_int %.6e type %d n %d secular %d pids", r.dE, r.type, r.n, (int)r.secular);
+            for (int pid : r.pids) std::printf(" %d", pid);
+            std::printf("\n");
+        }
+        std::fflush(stdout);
+        g_ledger = EnergyLedger{};
+    }
+    return k;
+}
+
+static int hhs_fsi_recursive_impl(
     Particles& p,
     DistributedParticles* dp,
     int start, int count,

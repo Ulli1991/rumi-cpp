@@ -1574,6 +1574,7 @@ void SubsystemManager::reset_step_diagnostics() {
     step_flyby_curved = 0;
     step_ngb_mass_kept = 0;
     step_weak_split = 0;
+    step_sec_triple_unfixed = 0;
     step_n_secular = 0;
     step_total_members = 0;
     last_level_pairs = 0;
@@ -1634,6 +1635,7 @@ void SubsystemManager::print_step_summary() const {
     if (step_flyby_curved > 0) std::printf("  flyby_curved=%d", step_flyby_curved);
     if (step_ngb_mass_kept > 0) std::printf("  ngb_mass_kept=%d", step_ngb_mass_kept);
     if (step_weak_split > 0) std::printf("  weak_split=%d", step_weak_split);
+    if (step_sec_triple_unfixed > 0) std::printf("  sec_triple_unfixed=%d", step_sec_triple_unfixed);
     std::printf("\n");
 
     // Integration summary

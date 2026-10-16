@@ -287,6 +287,7 @@ const std::vector<DebugEnvSpec> kDebugEnv = {
     {"NBODY_DUMP", "Particle state at each print to dump_<step>.bin"},
     {"NBODY_DUMP_DT", "=n: pid, dt_adapt, grad_mag, ax of the set after the time-step criteria, first n calls"},
     {"NBODY_EATTR", "Per-print energy attribution"},
+    {"NBODY_ELEDGER", "=1: energy ledger of the HHS recursion (error per call and level; one rank, replays only)"},
     {"NBODY_ECHECK_CMP", "Energy check: the split sum against the replicated whole-range sum"},
     {"NBODY_ESPLIT", "Total energy and the internal energy of a fixed list of binaries at each print"},
     {"NBODY_GBS_DYNCAP", "Initial LogH step: t_dyn / this (default 3)"},

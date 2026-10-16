@@ -1599,6 +1599,11 @@ CASES = {
     # SECULAR_TRIPLES = false (FROST-CLUSTERS I): the switch was ignored by the per-level re-classification
     # (40 secular calls before). In LogH the triple keeps |dE/E| 2.17e-11 vs 3.4e-5 secular: bound 2.9e-11
     "secular_triples_off": lambda exe: secular_triples_off(exe, "secular triple off", SEC_TRIPLE, 2.9e-11),
+    # Energy-exact rebuild of the secular-triple step: the members' T + U changes by exactly the booked GW energy
+    # (before: max |dE/E| 1.4e-4 on this triple, the -8e-10 jump of the 200k seed-3 step 60). Measured (host):
+    # end 6.19e-16, max 9.28e-16, max |dP|/M 4.34e-15 km/s, max |dL/L| 8.43e-13 (the rebuild rotates the inner orbit)
+    "sec_triple_energy": lambda exe: floor(exe, "secular triple energy", dict(SEC_TRIPLE, ETA_RESTART="0"),
+                                           (8.1e-16, 1.21e-15, 5.7e-15, 1.1e-12)),
     # Measured 9.8e-9 (dense core, at the restart threshold); 2.35e-8 before the pericentre check, 2.68e-8 with
     # it (seed 5): bound 3.5e-8
     "triples_detected": lambda exe: triples(exe, "dense core", TRIPLES, 3.5e-8),
