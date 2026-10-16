@@ -46,6 +46,12 @@ struct StellarPropsCache {
         refreshes++;
     }
     bool has(int pid) const { return pid >= 0 && pid < (int)stype.size() && stype[pid] >= 0; }
+    // Stellar type of a particle, refreshing the cache when it does not know the id (-1: no such particle)
+    int type_of(const Particles& p, int pid) {
+        ensure(p);
+        if (!has(pid)) { invalidate(); ensure(p); }
+        return has(pid) ? stype[pid] : -1;
+    }
     int type_of(int pid) const { return stype[pid]; }
     double radius_of(int pid) const { return radius[pid]; }
 

@@ -317,7 +317,7 @@ double logh_sd_update(LogHState& state, double G, const SdarParams& par, bool cl
             const double P = 2.0 * M_PI * std::sqrt(a * a * a / (G * mb));
             if (used[i] || used[j]) continue;
             used[i] = used[j] = true;   // the tightest pair of a body is its inner orbit, slowed or not
-            if (par.m_pn > 0.0 && (mi >= par.m_pn || mj >= par.m_pn)) continue;   // PN pair: kappa = 1 (FC-I A2)
+            if (par.pn[i] || par.pn[j]) continue;   // PN pair: kappa = 1 (FC-I A2)
             const double r_apo = a * (1.0 + e);
             const double r_coll = par.coll_pair ? par.coll_pair[i * LOGH_MAX_BODIES + j]
                                                 : par.coll_radius[i] + par.coll_radius[j];

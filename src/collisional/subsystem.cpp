@@ -4,6 +4,7 @@
 #include "host_exec.h"
 #include <climits>
 #include "subsystem.h"
+#include "stellar_cache.h"
 #include "collisional_config.h"
 #include "constants.h"
 #include "diagnostics.h"
@@ -818,7 +819,9 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
             }
             // Without PN any isolated pair takes the Kepler drift (advance_subsystems_in_range
             // re-decides it from the current state every call)
-            if (idx_i >= 0 && idx_j >= 0 && g_collisional.kepler_2body_pair(h_mass(idx_i), h_mass(idx_j)))
+            if (idx_i >= 0 && idx_j >= 0 &&
+                g_collisional.kepler_2body_pair(h_mass(idx_i), StellarPropsCache::get().type_of(p, members[0]),
+                                                h_mass(idx_j), StellarPropsCache::get().type_of(p, members[1])))
                 sub.is_secular = true;
 
             sub.type = pair_bound ? SubsystemType::BINARY : SubsystemType::FLYBY;

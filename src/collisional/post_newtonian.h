@@ -59,6 +59,6 @@ void binary_total_angular_momentum(const double x[3], const double v[3],
 // Rotate S about Omega by the angle |Omega| dt (exact solution of dS/dt = Omega × S for constant Omega)
 void rotate_about(double S[3], const double Omega[3], double dt);
 
-// Global PN1.0 velocity kick for compact objects (mass >= m_pn) outside subsystems
+// Global PN1.0 velocity kick for black holes of at least m_pn outside subsystems
 void global_pn1_kick(Particles& p, int start, int count,
                      double G, double c_code, double m_pn, double dt);

@@ -638,13 +638,14 @@ void global_pn1_kick(Particles& p, int start, int count,
     auto h_vz = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vz);
     auto h_m  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.mass);
     auto h_sid = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.subsystem_id);
+    auto h_kw = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.stellar_type);
 
-    // Find compact objects (mass >= m_pn) in [start, start+count)
+    // Find the BHs of at least m_pn (CollisionalConfig::pn_body) in [start, start+count)
     int end = start + count;
     std::vector<int> compact;
     compact.reserve(256);
     for (int i = start; i < end; i++) {
-        if (h_m(i) >= m_pn) compact.push_back(i);
+        if (h_kw(i) == 14 && h_m(i) >= m_pn) compact.push_back(i);
     }
 
     int n_compact = (int)compact.size();

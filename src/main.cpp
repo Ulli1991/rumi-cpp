@@ -645,6 +645,7 @@ int main(int argc, char** argv) {
             g_collisional.eta_restart     = cfg.get_double("ETA_RESTART");
             g_collisional.n_orb_secular   = cfg.get_int("N_ORB_SECULAR");
             g_collisional.m_pn            = cfg.get_double("M_PN");
+            g_collisional.pn_bh_only      = cfg.get_bool("PN_BH_ONLY");
             g_collisional.pn_order        = cfg.get_int("PN_ORDER");
             g_collisional.r_escape_rh     = cfg.get_double("R_ESCAPE_RH");
             g_collisional.r_escape_rj     = cfg.get_double("R_ESCAPE_RJ");

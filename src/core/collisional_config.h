@@ -63,12 +63,19 @@ struct CollisionalConfig {
     // 2003). Stays on LogH: PN pairs (a member >= M_PN with PN on), collision candidates whose pericentre falls in
     // the interval (FROST-CLUSTERS I App. B3, decided there), pairs with a merged-away (massless) member, and
     // every subsystem of 3 or more bodies
-    bool kepler_2body_pair(double m1, double m2) const {
-        return !(pn_order > 0 && c_code > 0.0 && std::max(m1, m2) >= m_pn);
+    bool kepler_2body_pair(double m1, int kw1, double m2, int kw2) const {
+        return !(pn_order > 0 && c_code > 0.0 && (pn_body(m1, kw1) || pn_body(m2, kw2)));
     }
+    // Post-Newtonian bodies: every body of at least M_PN, or with PN_BH_ONLY only black holes (stellar type 14) of at
+    // least M_PN. FROST-CLUSTERS I (Rantala et al. 2024, sec. 1, 2) applies the post-Newtonian equations of motion to
+    // the BHs; by mass alone every massive main-sequence star of a young cluster is a PN body (no SDAR slow-down, no
+    // Kepler drift). Run B, one step, 5 seeds: 240-490 -> 71-96 s/step, |dE/E| median 1.3e-10 -> 1.5e-10 (better on
+    // 1 seed, equal on 1, worse on 3 by 1.4-4.5x), |dL/L| ~1e-14 either way
+    bool pn_body(double m, int kw) const { return m >= m_pn && (!pn_bh_only || kw == 14); }
 
     // Post-Newtonian
     double m_pn = 5.0;                 // minimum mass (M_sun) for global PN1.0
+    bool pn_bh_only = false;           // PN_BH_ONLY: PN terms only for black holes (pn_body)
     int pn_order = 7;                  // bitmask: 1=PN1, 2=PN2, 4=PN2.5, 8=PN3, 16=PN3.5
 
     // Escaper removal

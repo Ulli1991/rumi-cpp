@@ -1,6 +1,6 @@
 # Config reference
 
-All 146 keys of the config file (`config.txt`, or `--config <file>`), generated from the parameter table in `src/core/params.cpp` by `scripts/gen_config_md.py`. Every key has one default, in that table; an unknown key in a config file is an error. Each run writes the effective value of every key, and whether it came from the file or the default, to `run_params.txt`.
+All 147 keys of the config file (`config.txt`, or `--config <file>`), generated from the parameter table in `src/core/params.cpp` by `scripts/gen_config_md.py`. Every key has one default, in that table; an unknown key in a config file is an error. Each run writes the effective value of every key, and whether it came from the file or the default, to `run_params.txt`.
 
 Levels:
 
@@ -63,6 +63,7 @@ Levels:
 | `COLLISIONAL` | bool | `false` | user |  | Unsoftened direct N-body with subsystems, PN and mergers (BIFROST); false: softened N-body |
 | `PN_ORDER` | int | `7` | user |  | PN bitmask: 1 PN1, 2 PN2, 4 PN2.5, 8 PN3, 16 PN3.5, 32 BH spin couplings (63 all; 0 off) |
 | `M_PN` | double | `5.0` | expert |  | PN terms only for pairs with a member of at least this mass (Msun) |
+| `PN_BH_ONLY` | bool | `false` | expert |  | PN terms only for black holes (stellar type 14) of at least M_PN: 3-5x faster young clusters, \|dE/E\| per step ~1.2x worse |
 | `SOFTENING_PC` | double | `1e-3` | expert |  | Plummer softening (pc); 0 with COLLISIONAL |
 
 ## Stellar evolution

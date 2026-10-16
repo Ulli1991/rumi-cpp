@@ -573,7 +573,7 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
             state.vel[k*3+2] = (h_vel((off+b)*3+2) - cm_vz) / V_scale;
             // Masses: normalize to sum = 1
             state.mass[k] = h_mass(off+b) / M_total;
-            if (h_mass(off+b) >= g_collisional.m_pn) any_compact = true;
+            if (g_collisional.pn_body(h_mass(off + b), batch.flat_stype[off + b])) any_compact = true;
         }
 
         // Normalized PN speed of light
@@ -683,7 +683,9 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
         static const bool sdar_pn = [] { const char* e = std::getenv("NBODY_SDAR_PN"); return e && std::atoi(e) != 0; }();
         const bool sd_on = g_collisional.sdar && (sdar_pn || !state.use_aux_vel) && n_live >= 3;
         SdarParams sd_par;
-        if (sd_on && state.use_aux_vel) sd_par.m_pn = g_collisional.m_pn / M_total;
+        if (sd_on && state.use_aux_vel)
+            for (int k = 0; k < n_live; k++)
+                sd_par.pn[k] = g_collisional.pn_body(h_mass(off + live[k]), batch.flat_stype[off + live[k]]);
         if (sd_on) {
             sd_par.k_ref = g_collisional.sdar_kref;
             sd_par.c = g_collisional.sdar_c;

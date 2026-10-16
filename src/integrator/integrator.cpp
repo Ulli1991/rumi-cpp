@@ -565,7 +565,9 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
                 double mu = G * (h_m(idx_i - start) + h_m(idx_j - start));
                 double E_orb = 0.5 * v2 - mu / r_mag;
                 // Without PN the pair is a Kepler problem at any orbit count (collisional_config.h kepler_2body_pair)
-                const bool kep2 = g_collisional.kepler_2body_pair(h_m(idx_i - start), h_m(idx_j - start));
+                StellarPropsCache& kwc = StellarPropsCache::get();
+                const bool kep2 = g_collisional.kepler_2body_pair(h_m(idx_i - start), kwc.type_of(p, sub.particle_ids[0]),
+                                                                  h_m(idx_j - start), kwc.type_of(p, sub.particle_ids[1]));
 
                 // Update orbital elements
                 sub.orb.E_orb = E_orb;
@@ -751,6 +753,12 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
         std::vector<char> evolved(n_sec, 0);
         std::vector<int> substeps(n_sec, 0);
         std::vector<EnergyBookkeeping> sec_books(n_sec);  // P/L the secular evolution moves (PN, GW)
+        std::vector<int> sec_kw(2 * (size_t)n_sec);         // members' stellar types (looked up before the threads)
+        for (int k = 0; k < n_sec; k++) {
+            const auto& sub = g_subsystem_mgr.active[secular_idx[k]];
+            sec_kw[2 * k] = StellarPropsCache::get().type_of(p, sub.particle_ids[0]);
+            sec_kw[2 * k + 1] = StellarPropsCache::get().type_of(p, sub.particle_ids[1]);
+        }
         auto evolve = [&](int k) {
             const auto& sub = g_subsystem_mgr.active[secular_idx[k]];
             int idx0 = g_subsystem_mgr.safe_pid_to_idx(sub.particle_ids[0]);
@@ -764,12 +772,13 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
 
             evolved[k] = 1;
 
-            // PN terms only for compact binaries (a member above m_pn), as in LogH and BIFROST: stellar binaries
+            // PN terms only for BH binaries (CollisionalConfig::pn_body), as in LogH and BIFROST: stellar binaries
             // are a Kepler drift. With PN on, a tight stellar binary took thousands of 1PN-precession sub-steps
             // per evolution (5-7 ms secular calls at depths 3-6 of the 200k cluster)
             double m1_sec = h_m(idx0 - start), m2_sec = h_m(idx1 - start);
             double mu_sec = G * (m1_sec + m2_sec);
-            const bool pn_binary = std::max(m1_sec, m2_sec) >= g_collisional.m_pn;
+            const bool pn_binary = g_collisional.pn_body(m1_sec, sec_kw[2 * k]) ||
+                                   g_collisional.pn_body(m2_sec, sec_kw[2 * k + 1]);
             sec_pn[k] = pn_binary;
             const int pn_b = pn_binary ? g_collisional.pn_order : 0;
 
@@ -929,7 +938,9 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
             double a_in_pre = tri.inner.a;  // save for GW bookkeeping
 
             secular_evolve_triple(tri, dt, G, g_collisional.c_code,
-                                  std::max(m1, m2) >= g_collisional.m_pn ? g_collisional.pn_order : 0);
+                                  g_collisional.pn_body(m1, StellarPropsCache::get().type_of(p, sub.inner_binary_id)) ||
+                                  g_collisional.pn_body(m2, StellarPropsCache::get().type_of(p, inner_j))
+                                      ? g_collisional.pn_order : 0);
             adv_check.advanced(s, dt, "secular triple");
 
             // GW energy bookkeeping for inner binary inspiral
@@ -1334,7 +1345,8 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
                 for (int b = 0; b < nb; b++) {
                     idx[b] = g_subsystem_mgr.safe_pid_to_idx(sub.particle_ids[b]);
                     if (idx[b] < 0) { ok = false; break; }
-                    if (saved_bodies[si][b].m >= g_collisional.m_pn) pn_active = true;
+                    if (g_collisional.pn_body(saved_bodies[si][b].m, StellarPropsCache::get().type_of(p, sub.particle_ids[b])))
+                        pn_active = true;
                 }
                 pn_active = pn_active && pn_on;
                 if (!ok || (!pn_active && !g_eattr.on && subsys_log <= 0.0)) continue;

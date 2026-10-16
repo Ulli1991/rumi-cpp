@@ -68,6 +68,8 @@ const std::vector<ParamSpec> kParams = {
     {"PN_ORDER", I, "7", "Physics", USER, "",
      "PN bitmask: 1 PN1, 2 PN2, 4 PN2.5, 8 PN3, 16 PN3.5, 32 BH spin couplings (63 all; 0 off)"},
     {"M_PN", D, "5.0", "Physics", EXPERT, "", "PN terms only for pairs with a member of at least this mass (Msun)"},
+    {"PN_BH_ONLY", B, "false", "Physics", EXPERT, "",
+     "PN terms only for black holes (stellar type 14) of at least M_PN: 3-5x faster young clusters, |dE/E| per step ~1.2x worse"},
     {"SOFTENING_PC", D, "1e-3", "Physics", EXPERT, "", "Plummer softening (pc); 0 with COLLISIONAL"},
 
     // ---- Stellar evolution ----

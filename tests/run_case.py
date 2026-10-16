@@ -47,6 +47,7 @@ SPIN_IMBH = dict(TEST_CASE="plummer", INTEGRATOR="hhs", TOTAL_TIME_MYR="2e-3", D
                  ADD_IMBH="true", IMBH_M1="500", IMBH_M2="500", IMBH_A_PC="2e-5", IMBH_E="0.5", IMBH_SPIN="0.9",
                  PRINT_INTERVAL="5", PROFILING="false")
 # 2000 Kroupa stars, 10 % primordial binaries (a = 0.1-100 AU, thermal e), two 1e-3 Myr steps
+PN_BH_ONLY_DE = 7.7e-10   # pn_bh_only: 5.93e-10 measured (host build)
 BINARIES = dict(TEST_CASE="plummer", INTEGRATOR="hhs", TOTAL_TIME_MYR="2e-3", DT_MAX_MYR="1e-3", DT_MIN_MYR="1e-14",
                 ETA_FF="0.2", ETA_FB="0.2", ETA_GRAD="0.1", ETA_JERK="0.1", SOFTENING_PC="0", COLLISIONAL="true",
                 R_NGB="1e-3", R_NGB_MAX="0.1", ETA_PERT="0.02", ETA_GBS="1e-10", ETA_RESTART="1e-8",
@@ -491,6 +492,18 @@ def paths_same_steps(exe, label, cfg, min_logh, gbs_rel=0.0):
                 max([abs(a[1] - b[1]) / max(a[1], 1) for a, b in zip(dev, cpu)] + [0.0]), gbs_rel)
     return ok & check(f"{label} LogH calls", sum(a for a, _ in dev), min_logh, lower=True)
 
+
+
+def pn_bh_only(exe):
+    """PN_BH_ONLY=true: fewer LogH calls than the mass rule on the same run, energy within bound."""
+    def logh(out):
+        return sum(int(a) for a in re.findall(r"Integration: LogH=(\d+) \(gbs=", out))
+    cfg = dict(BINARIES, PN_ORDER="31")
+    base = run_output(exe, cfg)
+    bh = run_output(exe, dict(cfg, PN_BH_ONLY="true"))
+    print(f"   LogH calls: mass rule {logh(base)}, BH only {logh(bh)}")
+    ok = check("PN_BH_ONLY LogH calls below the mass rule's", logh(bh), logh(base) - 1)
+    return ok & check("PN_BH_ONLY max|dE/E|", max(r[0] for r in diagnostics(bh)), PN_BH_ONLY_DE)
 
 def cc_consistent(exe, label, cfg, bound):
     """HHS_CC must split the fast set with the pair time steps of the time-step kernel (NBODY_CHECK_CC reports a
@@ -1486,6 +1499,9 @@ CASES = {
                                             dict(BINARIES50, FLYBY_CM_VELOCITY="true", FLYBY_CM_EPS="1e-11",
                                                  FLYBY_CM_KICK="true"),
                                             (1.5e-11, 1.5e-11, 1e-13, 1e-13)),
+    # PN_BH_ONLY: binaries of massive stars that are not BHs leave the PN (kappa = 1) LogH path for the Kepler drift
+    # and SDAR; the BH binaries stay PN
+    "pn_bh_only": lambda exe: pn_bh_only(exe),
     "cm_eps_cpu_vs_device": lambda exe: paths_same_steps(exe, "fly-by step with tidal sampling",
                                                          dict(BINARIES, FLYBY_CM_EPS="1e-11", PN_ORDER="31"),
                                                          12000, 2e-4),
