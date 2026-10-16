@@ -1,6 +1,6 @@
 # Config reference
 
-All 149 keys of the config file (`config.txt`, or `--config <file>`), generated from the parameter table in `src/core/params.cpp` by `scripts/gen_config_md.py`. Every key has one default, in that table; an unknown key in a config file is an error. Each run writes the effective value of every key, and whether it came from the file or the default, to `run_params.txt`.
+All 150 keys of the config file (`config.txt`, or `--config <file>`), generated from the parameter table in `src/core/params.cpp` by `scripts/gen_config_md.py`. Every key has one default, in that table; an unknown key in a config file is an error. Each run writes the effective value of every key, and whether it came from the file or the default, to `run_params.txt`.
 
 Levels:
 
@@ -152,6 +152,7 @@ Levels:
 | `RESTART_FILE` | string | (empty) | user |  | Continue from this file; latest: newest in RESTART_DIR; auto: that or a fresh start (--restart overrides) |
 | `RESTART_KEEP` | int | `2` | expert |  | Restart files kept (the newest) |
 | `STALL_FACTOR` | double | `5` | expert |  | A step slower than this x the median of the previous steps prints STALL lines: the costliest LogH integrations and the deepest set (0: off) |
+| `STALL_DE_FACTOR` | double | `10` | expert |  | A step whose energy change (ETA_RESTART check) exceeds this x the median of the previous steps prints STALL lines (0: off) |
 | `STALL_RESTART` | bool | `false` | expert |  | Restart file before every step (RESTART_DIR/stall_roll), kept as RESTART_DIR/stall_<step>.h5 for a stalled step (scripts/cutout.py) |
 | `SNAPSHOT_INTERVAL` | int | `0` | user |  | LUNA-layout snapshot every this many steps, at step 0 and at the end (0: off) |
 | `SNAPSHOT_DIR` | string | `.` | user |  | Directory of snapdir_NNN/snapshot_NNN.0.hdf5 |

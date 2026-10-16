@@ -3,8 +3,9 @@ parent run's configuration, for reproducing a stall or an energy jump in isolati
 
     python3 scripts/cutout.py RESTART.h5 --pid 5099 [--pid 34915 ...] --radius 0.05 --out DIR [--set KEY=VALUE ...]
 
-Writes DIR/ic.txt ("m x y z vx vy vz kw R" per line, c.o.m. frame, pc and km/s) and DIR/config.txt: every key of the
-parent run (the restart's /config/config_json) with TEST_CASE = particle_file, one interval (TOTAL_TIME_MYR =
+Writes DIR/ic.txt ("m x y z vx vy vz kw R" per line, c.o.m. frame, pc and km/s) and DIR/config.txt: the keys of the
+parent run's config file (the restart's /config/config_json; other keys take their defaults; --set adds or
+replaces keys) with TEST_CASE = particle_file, one interval (TOTAL_TIME_MYR =
 DT_MAX_MYR), no restarts, snapshots or runtime stellar evolution, and the parent's |E0| (E_REF) and neighbour mass
 scale (NGB_MREF), so that the tidal-sampling tolerance and the neighbour radii are those of the cluster. The centre
 is the c.o.m. of the given particles. A stalled step's restart is RESTART_DIR/stall_<step>.h5 (STALL_RESTART), its

@@ -672,6 +672,7 @@ int main(int argc, char** argv) {
         const double walltime_limit_s = cfg.get_double("WALLTIME_LIMIT") * 3600.0;
         const int snapshot_interval = cfg.get_int("SNAPSHOT_INTERVAL");
         const double stall_factor = cfg.get_double("STALL_FACTOR");
+        const double stall_de_factor = cfg.get_double("STALL_DE_FACTOR");
         const bool stall_restart = cfg.get_bool("STALL_RESTART");
         restart_arg = cfg.get_str("RESTART_FILE");
 #ifdef USE_HDF5
@@ -1230,31 +1231,63 @@ int main(int argc, char** argv) {
             MPIComm::barrier();
         };
 #endif
-        // STALL_FACTOR: a step that took longer than this x the median of the previous steps (at least 3, the last
-        // 16) names what made it slow (core/stall.h) and, with STALL_RESTART, keeps the restart file of the state
-        // before it as <RESTART_DIR>/stall_<step>.h5 (scripts/cutout.py cuts the case out of it)
-        std::vector<double> stall_hist;
-        auto stall_check = [&](int step_now, double step_wall) {
-            if (stall_factor <= 0.0) return;
-            if (stall_hist.size() >= 3) {
-                std::vector<double> h(stall_hist.end() - std::min<size_t>(stall_hist.size(), 16), stall_hist.end());
-                std::nth_element(h.begin(), h.begin() + h.size() / 2, h.end());
-                const double med = h[h.size() / 2];
-                if (step_wall > stall_factor * med && my_rank == 0) {
-                    g_stall.print(step_now, step_wall, med);
-#ifdef USE_HDF5
-                    const std::string roll = latest_restart(roll_opt.dir);
-                    if (stall_restart && !roll.empty()) {
-                        const std::string keep = restart_opt.dir + "/stall_" + std::to_string(step_now) + ".h5";
-                        std::error_code ec;
-                        std::filesystem::rename(roll, keep, ec);
-                        std::printf("STALL restart %s%s\n", keep.c_str(), ec ? " (rename failed)" : "");
-                        std::fflush(stdout);
-                    }
-#endif
+        // STALL_FACTOR / STALL_DE_FACTOR: a step that took longer, or whose energy change |E(t) - E(t - dt)| / |E0|
+        // (the ETA_RESTART check, ETA_RESTART > 0) was larger, than this x the median of the previous steps (at
+        // least 3, the last 16; energy changes below 1e-13 never count) names what made it so (core/stall.h, the
+        // subsystems of 3+ bodies at its end) and, with STALL_RESTART, keeps the restart file of the state before it
+        // as <RESTART_DIR>/stall_<step>.h5 (scripts/cutout.py cuts the case out of it)
+        std::vector<double> stall_hist, stall_de_hist;
+        auto median16 = [](const std::vector<double>& v) {
+            std::vector<double> h(v.end() - std::min<size_t>(v.size(), 16), v.end());
+            std::nth_element(h.begin(), h.begin() + h.size() / 2, h.end());
+            return h[h.size() / 2];
+        };
+        auto stall_check = [&](int step_now, double step_wall, double step_de) {
+            char head[200];
+            bool hit = false;
+            if (stall_factor > 0.0 && stall_hist.size() >= 3) {
+                const double med = median16(stall_hist);
+                if (step_wall > stall_factor * med) {
+                    std::snprintf(head, sizeof(head), "STALL step %d: %.3f s (median of the previous steps %.3f s)",
+                                  step_now, step_wall, med);
+                    if (my_rank == 0) g_stall.print(head);
+                    hit = true;
                 }
             }
+            const double ade = std::fabs(step_de);
+            if (stall_de_factor > 0.0 && std::isfinite(ade) && stall_de_hist.size() >= 3) {
+                const double med = median16(stall_de_hist);
+                if (ade > 1e-13 && ade > stall_de_factor * med) {
+                    std::snprintf(head, sizeof(head),
+                                  "STALL energy step %d: dE/E0 %.3e (median of the previous steps %.3e)",
+                                  step_now, step_de, med);
+                    if (my_rank == 0) g_stall.print(head);
+                    hit = true;
+                }
+            }
+#ifdef ENABLE_COLLISIONAL
+            if (hit && my_rank == 0)
+                for (const auto& sub : g_subsystem_mgr.active)
+                    if (sub.n_bodies >= 3) {
+                        std::printf("STALL group n %d pids", sub.n_bodies);
+                        for (int pid : sub.particle_ids) std::printf(" %d", pid);
+                        std::printf("\n");
+                    }
+#endif
+#ifdef USE_HDF5
+            if (hit && my_rank == 0) {
+                const std::string roll = latest_restart(roll_opt.dir);
+                if (stall_restart && !roll.empty()) {
+                    const std::string keep = restart_opt.dir + "/stall_" + std::to_string(step_now) + ".h5";
+                    std::error_code ec;
+                    std::filesystem::rename(roll, keep, ec);
+                    std::printf("STALL restart %s%s\n", keep.c_str(), ec ? " (rename failed)" : "");
+                }
+            }
+#endif
+            if (hit && my_rank == 0) std::fflush(stdout);
             stall_hist.push_back(step_wall);
+            if (std::isfinite(ade)) stall_de_hist.push_back(ade);
         };
 
         auto print_progress = [&](double t_now, int step_now) {
@@ -1387,6 +1420,7 @@ int main(int argc, char** argv) {
                 fence_stats::report(step, false);   // reset: count only this step
                 auto step_t0 = std::chrono::high_resolution_clock::now();
                 g_stall.reset();
+                double step_de = std::nan("");
 #ifdef ENABLE_COLLISIONAL
                 g_sim_time = t;
 #endif
@@ -1511,6 +1545,8 @@ int main(int argc, char** argv) {
                                     restart + 1, dE, g_collisional.r_ngb);
                     }
 
+                    // the accepted step's energy change (STALL_DE_FACTOR)
+                    step_de = (E_carry + g_energy_books.total_sink() - E_step_start) / (std::fabs(diag0.E_total) + 1e-30);
                     // Restore original parameters after step (BIFROST: "original parameters are restored")
                     g_collisional.eta_ff   = eta_ff_orig;
                     g_collisional.eta_fb   = eta_fb_orig;
@@ -1551,7 +1587,7 @@ int main(int argc, char** argv) {
                 double step_wall = std::chrono::duration<double>(step_t1 - step_t0).count();
                 g_profiler.step_wall_total += step_wall;
                 g_profiler.step_count++;
-                stall_check(step, step_wall);
+                stall_check(step, step_wall, step_de);
 
                 fence_stats::report(step, my_rank == 0);
                 if (my_rank == 0 && step <= 5) {

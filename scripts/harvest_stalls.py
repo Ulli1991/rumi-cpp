@@ -3,8 +3,9 @@
     python3 scripts/harvest_stalls.py RUN.log [RUN2.log ...] --out DIR [--radius 0.05] [--exe nbody-kokkos]
                                      [--timeout 600] [--env KEY=VALUE ...]
 
-For every STALL block of a log (STALL_FACTOR) whose restart was kept (STALL_RESTART, "STALL restart <path>"), the
-culprits (the deepest set and each costly LogH integration, by particle ids) are cut out with scripts/cutout.py into
+For every STALL block of a log (STALL_FACTOR: slow step, STALL_DE_FACTOR: energy jump) whose restart was kept (STALL_RESTART, "STALL restart <path>"), the
+culprits (the deepest set, each costly or inaccurate LogH integration, each subsystem of 3+ bodies, by particle
+ids) are cut out with scripts/cutout.py into
 DIR/<run>_s<step>_<k>/. Culprit sets met before (same particle ids) are skipped. With --exe every case is replayed
 in isolation on the host (one interval, OMP_NUM_THREADS=1 unless set) and the table lists wall time, LogH GBS steps
 and |dE/E|, |dL/L|: a case that still takes long reproduces the stall and becomes a test (tests/data/, run_case.py)
@@ -25,9 +26,14 @@ def stall_blocks(log):
     """[(step, wall, median, restart path or None, [(kind, [pids], info)])] of one run log"""
     blocks, cur = [], None
     for line in open(log, errors="replace"):
-        if line.startswith("STALL step "):
-            m = re.match(r"STALL step (\d+): ([\d.]+) s \(median of the previous steps ([\d.]+) s\)", line)
-            cur = [int(m.group(1)), float(m.group(2)), float(m.group(3)), None, []]
+        if line.startswith("STALL step ") or line.startswith("STALL energy step "):
+            m = re.match(r"STALL (?:energy )?step (\d+): (?:dE/E0 )?(\S+?)(?: s)? \(median of the previous steps (\S+?)(?: s)?\)",
+                         line)
+            step = int(m.group(1))
+            if cur is not None and cur[0] == step:   # slow and energy jump in one step: one block
+                cur[1] = f"{cur[1]}, {m.group(2)}"
+                continue
+            cur = [step, m.group(2), m.group(3), None, []]
             blocks.append(cur)
         elif cur is None:
             continue
@@ -39,6 +45,12 @@ def stall_blocks(log):
         elif line.startswith("STALL logh "):
             m = re.match(r"STALL logh gbs (\d+) dt (\S+) Myr pids(.*?) m\[Msun\](.*)", line)
             cur[4].append(("logh", [int(v) for v in m.group(3).split()], f"gbs {m.group(1)} m {m.group(4).strip()}"))
+        elif line.startswith("STALL loghE "):
+            m = re.match(r"STALL loghE dE/E0 (\S+) pids(.*?) m\[Msun\](.*)", line)
+            cur[4].append(("loghE", [int(v) for v in m.group(2).split()], f"dE/E0 {m.group(1)} m {m.group(3).strip()}"))
+        elif line.startswith("STALL group "):
+            m = re.match(r"STALL group n (\d+) pids(.*)", line)
+            cur[4].append(("group", [int(v) for v in m.group(2).split()], f"n {m.group(1)}"))
         elif line.startswith("STALL restart "):
             cur[3] = line.split()[2]
     return blocks
@@ -77,7 +89,7 @@ def main():
         run = Path(log).resolve().parent.name
         for step, wall, med, rst, culprits in stall_blocks(log):
             if rst is None:
-                print(f"{log}: step {step} ({wall:.0f} s vs {med:.1f} s) has no kept restart (STALL_RESTART)")
+                print(f"{log}: step {step} ({wall} vs median {med}) has no kept restart (STALL_RESTART)")
                 continue
             rst_path = Path(rst) if Path(rst).is_absolute() else Path(log).resolve().parent / rst
             for k, (kind, pids, info) in enumerate(culprits):
@@ -93,10 +105,10 @@ def main():
                 subprocess.run(cmd, check=True, capture_output=True)
                 n = sum(1 for line in open(case / "ic.txt") if not line.startswith("#"))
                 res = replay(a.exe, case, a.timeout, env) if a.exe else ("-", "-", "-", "-")
-                rows.append((case.name, f"{wall:.3g}/{med:.3g}", kind, info, n) + res)
-    print(f"{'case':<28} {'step s/median':>13} {'kind':<5} {'n':>5} {'wall':>8} {'gbs':>9} {'dE/E':>10} {'dL/L':>10}  culprit")
+                rows.append((case.name, f"{wall}/{med}", kind, info, n) + res)
+    print(f"{'case':<28} {'step value/median':>22} {'kind':<5} {'n':>5} {'wall':>8} {'gbs':>9} {'dE/E':>10} {'dL/L':>10}  culprit")
     for name, sw, kind, info, n, w, g, de, dl in rows:
-        print(f"{name:<28} {sw:>13} {kind:<5} {n:>5} {w:>8} {g:>9} {de:>10} {dl:>10}  {info}")
+        print(f"{name:<28} {sw:>22} {kind:<5} {n:>5} {w:>8} {g:>9} {de:>10} {dl:>10}  {info}")
 
 
 if __name__ == "__main__":

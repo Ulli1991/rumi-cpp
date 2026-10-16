@@ -1197,19 +1197,22 @@ def restart_identical(exe, label, cfg, n, stop="interval", snapshots=False):
 
 
 def stall_capture(exe, label, cfg, n):
-    """STALL_FACTOR / STALL_RESTART (core/stall.h): with a factor below 1 most steps count as stalled; each one prints
+    """STALL_DE_FACTOR / STALL_RESTART (core/stall.h): with a factor below 1 most steps count as energy jumps (the
+    trigger on the step's energy change is deterministic, the wall-time one of STALL_FACTOR is not); each one prints
     its deepest set and keeps the restart file of the state before it (stall_<step>.h5). A run from that file must
     repeat the step bit for bit (L0 row and NBODY_DUMP particle dump), so a harvested case is the run's own state."""
     import hashlib
     dt = float(cfg["DT_MAX_MYR"])
-    full = dict(cfg, PRINT_INTERVAL="1", TOTAL_TIME_MYR=f"{(n - 0.5) * dt:.17g}", STALL_FACTOR="0.5",
+    full = dict(cfg, PRINT_INTERVAL="1", TOTAL_TIME_MYR=f"{(n - 0.5) * dt:.17g}", STALL_FACTOR="0", STALL_DE_FACTOR="0.5",
                 STALL_RESTART="true")
     env = {"NBODY_DUMP": "1"}
     with tempfile.TemporaryDirectory() as da, tempfile.TemporaryDirectory() as db:
         out = run_in(exe, full, da, env=env)
         kept = [int(k) for k in re.findall(r"^STALL restart \S*stall_(\d+)\.h5$", out, re.M)]
+        jumps = re.findall(r"^STALL energy step \d+: dE/E0 \S+ \(median", out, re.M)
+        ok0 = check(f"{label} STALL energy lines", len(jumps), len(kept), lower=True)
         deep = re.findall(r"^STALL deepest depth \d+ pivot \S+ Myr pids( \d+)+$", out, re.M)
-        ok = check(f"{label} stalled steps with a kept restart", len(kept), 1, lower=True)
+        ok = ok0 & check(f"{label} stalled steps with a kept restart", len(kept), 1, lower=True)
         ok &= check(f"{label} STALL lines naming the deepest set", len(deep), len(kept), lower=True)
         if not kept:
             return False

@@ -173,6 +173,8 @@ const std::vector<ParamSpec> kParams = {
     {"RESTART_KEEP", I, "2", "Output", EXPERT, "", "Restart files kept (the newest)"},
     {"STALL_FACTOR", D, "5", "Output", EXPERT, "",
      "A step slower than this x the median of the previous steps prints STALL lines: the costliest LogH integrations and the deepest set (0: off)"},
+    {"STALL_DE_FACTOR", D, "10", "Output", EXPERT, "",
+     "A step whose energy change (ETA_RESTART check) exceeds this x the median of the previous steps prints STALL lines (0: off)"},
     {"STALL_RESTART", B, "false", "Output", EXPERT, "",
      "Restart file before every step (RESTART_DIR/stall_roll), kept as RESTART_DIR/stall_<step>.h5 for a stalled step (scripts/cutout.py)"},
     {"SNAPSHOT_INTERVAL", I, "0", "Output", USER, "",
