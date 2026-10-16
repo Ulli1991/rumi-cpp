@@ -1165,12 +1165,53 @@ void SubsystemManager::fill_cm_velocity(const Particles& p, int lo, int hi, Kokk
                     kfl = res * pericentre_passage_time(rx, ry, rz, ux, uy, uz, mu);
                 }
             } else {
-                for (int q = a; q < e; q++) {
+                // The energy the tide T of a slow particle puts into the subsystem per unit time is
+                // sum_i m_i dv_i . T dr_i (relative to the c.o.m.), which in the coordinates of a binary tree
+                // (Jacobi: merge two bodies into their c.o.m., repeat) is exactly sum_nodes mu_n u_n . T r_n. So the
+                // bound is sum_nodes mu_n r_n u_n, with r_apo v_p for bound nodes as in the two-body branch. The
+                // tree merges the closest pair first. The bound max_i 2 |dr_i| sum_i m_i |dv_i| used before took the
+                // extent from a distant member and the speed from a tight pair (137 + 135 Msun binary, e = 0.93,
+                // a = 9.5 AU, with a 0.85 Msun member at 1400 AU in run B: 19x the tree bound, nearby stars at L18)
+                // Run B, 4 steps, 3 seeds: 778-1222 -> 88-109 s, |dE/E| 1.9e-9 -> 7.9e-10, 1.9e-10 -> 1.7e-10, 2.84e-10
+                // -> 2.83e-10; 200k, 10 % binaries, 61 steps, 5 seeds: |dE/E| better on 4, equal on 1 (9.0e-12 vs
+                // 9.2e-12); |dP|, |dL/L| unchanged (1e-14 km/s, <= 4e-12)
+                double bm[LOGH_MAX_BODIES], bs[LOGH_MAX_BODIES][6];
+                int nb = 0;
+                for (int q = a; q < e && nb < LOGH_MAX_BODIES; q++, nb++) {   // subsystems have <= LOGH_MAX_BODIES
                     const int i = buf(q);
-                    const double dx = px_(i) - cx / M, dy = py_(i) - cy / M, dz = pz_(i) - cz / M;
-                    const double ux = vx(i) - px / M, uy = vy(i) - py / M, uz = vz(i) - pz / M;
-                    ext = Kokkos::fmax(ext, 2.0 * Kokkos::sqrt(dx * dx + dy * dy + dz * dz));
-                    muv += pm(i) * Kokkos::sqrt(ux * ux + uy * uy + uz * uz);
+                    bm[nb] = pm(i);
+                    bs[nb][0] = px_(i); bs[nb][1] = py_(i); bs[nb][2] = pz_(i);
+                    bs[nb][3] = vx(i); bs[nb][4] = vy(i); bs[nb][5] = vz(i);
+                }
+                ext = 1.0;
+                while (nb > 1) {
+                    int qa = 0, qb = 1;
+                    double best = 1e300;
+                    for (int q = 0; q < nb; q++)
+                        for (int s = q + 1; s < nb; s++) {
+                            const double dx = bs[s][0] - bs[q][0], dy = bs[s][1] - bs[q][1], dz = bs[s][2] - bs[q][2];
+                            const double d2 = dx * dx + dy * dy + dz * dz;
+                            if (d2 < best) { best = d2; qa = q; qb = s; }
+                        }
+                    const double ma = bm[qa], mb = bm[qb], mt = ma + mb, mu = G * mt;
+                    const double rx = bs[qb][0] - bs[qa][0], ry = bs[qb][1] - bs[qa][1], rz = bs[qb][2] - bs[qa][2];
+                    const double ux = bs[qb][3] - bs[qa][3], uy = bs[qb][4] - bs[qa][4], uz = bs[qb][5] - bs[qa][5];
+                    const double r = Kokkos::sqrt(rx * rx + ry * ry + rz * rz), u2 = ux * ux + uy * uy + uz * uz;
+                    const double en = 0.5 * u2 - mu / r;
+                    double rv = r * Kokkos::sqrt(u2);
+                    if (en < 0.0 && r > 0.0) {
+                        const double sa = -mu / (2.0 * en);
+                        const double lx = ry * uz - rz * uy, ly = rz * ux - rx * uz, lz = rx * uy - ry * ux;
+                        const double e2 = 1.0 - (lx * lx + ly * ly + lz * lz) / (mu * sa);
+                        const double ecc = Kokkos::fmin(Kokkos::sqrt(e2 > 0.0 ? e2 : 0.0), 1.0 - 1e-12);
+                        rv = sa * (1.0 + ecc) * Kokkos::sqrt(mu * (1.0 + ecc) / (sa * (1.0 - ecc)));
+                    }
+                    muv += ma * mb / mt * rv;
+                    for (int c = 0; c < 6; c++) bs[qa][c] = (ma * bs[qa][c] + mb * bs[qb][c]) / mt;
+                    bm[qa] = mt;
+                    for (int c = 0; c < 6; c++) bs[qb][c] = bs[nb - 1][c];
+                    bm[qb] = bm[nb - 1];
+                    nb--;
                 }
                 // the fastest internal time scale: the shortest pericentre passage of any member pair
                 double tmin = 1e300;
