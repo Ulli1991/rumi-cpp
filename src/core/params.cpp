@@ -152,6 +152,8 @@ const std::vector<ParamSpec> kParams = {
     {"NGB_MASS_SCALING", B, "true", "Subsystems", INTERNAL, "",
      "Pair neighbour radius r_ngb max(1, m / <m>)^(1/3) (PeTar Eq. 12); the extra pairs join only as strong "
      "perturbers of a binary"},
+    {"WEAK_SPLIT_GAMMA", D, "0", "Subsystems", EXPERT, "",
+     "Fly-by or unstable triple whose third body perturbs the inner binary below this tidal ratio: binary subsystem + field star (0: off; 1e-6: 35x faster stalled steps, |dE/E| per step up to 30x worse)"},
     {"NGB_MASS_GAMMA", D, "1e-3", "Subsystems", INTERNAL, "",
      "Tidal ratio above which a mass-scaled neighbour joins a binary"},
     {"NGB_MREF", D, "0.0", "Subsystems", TEST, "", "<m> of NGB_MASS_SCALING (Msun) instead of the cluster's (0)"},

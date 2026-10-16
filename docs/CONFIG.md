@@ -1,6 +1,6 @@
 # Config reference
 
-All 150 keys of the config file (`config.txt`, or `--config <file>`), generated from the parameter table in `src/core/params.cpp` by `scripts/gen_config_md.py`. Every key has one default, in that table; an unknown key in a config file is an error. Each run writes the effective value of every key, and whether it came from the file or the default, to `run_params.txt`.
+All 151 keys of the config file (`config.txt`, or `--config <file>`), generated from the parameter table in `src/core/params.cpp` by `scripts/gen_config_md.py`. Every key has one default, in that table; an unknown key in a config file is an error. Each run writes the effective value of every key, and whether it came from the file or the default, to `run_params.txt`.
 
 Levels:
 
@@ -134,6 +134,7 @@ Levels:
 | `TIDAL_STEP_RES` | double | `1.0` | internal |  | Floor of the FLYBY_CM_EPS step: this x P (1 - e)^(3/2) of a bound binary, this x the shortest pair pericentre passage 2 pi r_p / v_p of an unbound pair or larger subsystem (0: none) |
 | `FLYBY_NGB_CM` | bool | `true` | internal |  | Distant fly-by neighbour test of a binary member against the binary's c.o.m. |
 | `NGB_MASS_SCALING` | bool | `true` | internal |  | Pair neighbour radius r_ngb max(1, m / <m>)^(1/3) (PeTar Eq. 12); the extra pairs join only as strong perturbers of a binary |
+| `WEAK_SPLIT_GAMMA` | double | `0` | expert |  | Fly-by or unstable triple whose third body perturbs the inner binary below this tidal ratio: binary subsystem + field star (0: off; 1e-6: 35x faster stalled steps, \|dE/E\| per step up to 30x worse) |
 | `NGB_MASS_GAMMA` | double | `1e-3` | internal |  | Tidal ratio above which a mass-scaled neighbour joins a binary |
 | `NGB_MREF` | double | `0.0` | test |  | <m> of NGB_MASS_SCALING (Msun) instead of the cluster's (0) |
 | `E_REF` | double | `0.0` | test |  | \|E0\| of FLYBY_CM_EPS and FLYBY_CM_KICK_EPS (Msun (km/s)^2) instead of the run's (0): a cut-out of a cluster as in the cluster |

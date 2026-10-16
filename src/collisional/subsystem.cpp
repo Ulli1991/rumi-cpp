@@ -411,6 +411,7 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
     // (Rantala et al. 2025, sec. 2.1) takes binary c.o.m. velocities in the fly-by time steps.
     last_level_flyby_cm_dropped = 0;
     last_level_ngb_mass_kept = 0;
+    last_level_weak_split = 0;
     last_level_flyby_curved = 0;
     // A distant fly-by (unbound, r >= r_ngb, accepted by Eq. 4 alone) assumes straight-line motion until pericentre.
     // When the pair's differential acceleration changes its relative velocity by more than that velocity within
@@ -884,12 +885,67 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
                         sub.orb.e = e_in;
                     }
 
+                    const double r_in[3] = {h_x(idx_j)-h_x(idx_i), h_y(idx_j)-h_y(idx_i), h_z(idx_j)-h_z(idx_i)};
+                    const double v_in[3] = {h_vx(idx_j)-h_vx(idx_i), h_vy(idx_j)-h_vy(idx_i),
+                                            h_vz(idx_j)-h_vz(idx_i)};
+                    const bool stable_out = a_out > 0 && mardling_stability(a_in, a_out, e_out, m1, m2, m3,
+                                                                          mutual_inclination(r_in, v_in, r_out, v_out));
+                    // Weakly perturbed inner binary of a fly-by or unstable triple: tidal ratio of the third body
+                    // at its closest approach in the current two-body orbit about the binary's c.o.m.,
+                    // gamma = 2 m3 R_apo^3 / (M_in r_close^3) (Mikkola & Aarseth 1996; NBODY6 integrates a KS pair
+                    // as unperturbed below gamma_min, Aarseth 2003 sec. 8). Below the threshold the binary is its
+                    // own subsystem (Kepler / secular) and the third body a field particle, instead of LogH
+                    // following every orbit of the binary for the whole fly-by (run 200k seed 3: 19.3 + 6.2 Msun BH
+                    // binary, P = 1 h, with a 1.25 Msun star at 600 AU, gamma ~ 1e-15: 6.7M GBS steps, 200 s).
+                    // WEAK_SPLIT_GAMMA, off by default: with 1e-6 that step takes 5.8 s, but its |dE/E| is 3.4e-11
+                    // instead of 1.1e-12 (the field star's tide is sampled by the kicks); test weak_split_bh_binary
+                    const double weak_gamma = g_collisional.weak_split_gamma;
+                    if (weak_gamma > 0.0 && a_in > 0.0 && !stable_out) {
+                        const double r_now = std::sqrt(r_out[0]*r_out[0] + r_out[1]*r_out[1] + r_out[2]*r_out[2]);
+                        const double rv = r_out[0]*v_out[0] + r_out[1]*v_out[1] + r_out[2]*v_out[2];
+                        double r_close = r_now;
+                        if (a_out > 0.0) r_close = std::min(r_now, a_out * (1.0 - e_out));        // comes back
+                        else if (rv < 0.0) r_close = std::min(r_now, -a_out * (e_out - 1.0));     // inbound
+                        const double r_apo_in = a_in * (1.0 + e_in);
+                        const double x = r_apo_in / std::max(r_close, 1e-300);
+                        const double gamma = 2.0 * m3 / M_in * x * x * x;
+                        const double P_in = 2.0 * M_PI * std::sqrt(a_in * a_in * a_in / (G * M_in));
+                        const int n_orb = (int)std::min(dt_step / P_in, 2e9);
+                        if (gamma < weak_gamma && n_orb >= n_orb_secular) {
+                            std::vector<int> pair_ids = {std::min(inner_i, inner_j), std::max(inner_i, inner_j)};
+                            Subsystem bin{};
+                            if (Subsystem* op = find_old(pair_ids)) {
+                                bin.id = op->id;
+                                bin.has_aux_vel = op->has_aux_vel;
+                                std::memcpy(bin.aux_vel_phys, op->aux_vel_phys, sizeof(bin.aux_vel_phys));
+                                bin.V_scale = op->V_scale;
+                                bin.R_scale = op->R_scale;
+                                bin.T_scale = op->T_scale;
+                                bin.E_scale = op->E_scale;
+                                bin.scales_set = op->scales_set;
+                            } else {
+                                bin.id = (old && old->id == sub.id) ? next_id++ : sub.id;
+                            }
+                            bin.particle_ids = pair_ids;
+                            bin.n_bodies = 2;
+                            bin.inner_binary_id = -1;
+                            bin.outer_companion_pid = -1;
+                            bin.type = SubsystemType::BINARY;
+                            bin.orb.a = a_in;
+                            bin.orb.e = e_in;
+                            if (const PairInfo* pr = find_pair(inner_i, inner_j)) bin.orb.E_orb = pr->E_orb;
+                            bin.orb.period = P_in;
+                            bin.n_orb_per_dt = n_orb;
+                            bin.is_secular = true;
+                            bin.dt_sub = min_dt_members(bin);
+                            last_level_weak_split++;
+                            active.push_back(std::move(bin));
+                            continue;
+                        }
+                    }
+
                     if (a_out > 0) {
-                        const double r_in[3] = {h_x(idx_j)-h_x(idx_i), h_y(idx_j)-h_y(idx_i), h_z(idx_j)-h_z(idx_i)};
-                        const double v_in[3] = {h_vx(idx_j)-h_vx(idx_i), h_vy(idx_j)-h_vy(idx_i),
-                                                h_vz(idx_j)-h_vz(idx_i)};
-                        bool stable = mardling_stability(a_in, a_out, e_out, m1, m2, m3,
-                                                         mutual_inclination(r_in, v_in, r_out, v_out));
+                        bool stable = stable_out;
                         sub.type = stable ? SubsystemType::TRIPLE_STABLE : SubsystemType::TRIPLE_UNSTABLE;
                         sub.inner_binary_id = inner_i;  // store inner binary info
                         sub.outer_companion_pid = outer_pid;
@@ -1623,6 +1679,7 @@ void SubsystemManager::reset_step_diagnostics() {
     step_flyby_cm_dropped = 0;
     step_flyby_curved = 0;
     step_ngb_mass_kept = 0;
+    step_weak_split = 0;
     step_n_secular = 0;
     step_total_members = 0;
     last_level_pairs = 0;
@@ -1654,6 +1711,7 @@ void SubsystemManager::accumulate_diagnostics() {
     step_flyby_cm_dropped += last_level_flyby_cm_dropped;
     step_flyby_curved += last_level_flyby_curved;
     step_ngb_mass_kept += last_level_ngb_mass_kept;
+    step_weak_split += last_level_weak_split;
     step_total_subsystems += (int)active.size();
     for (const auto& sub : active) {
         step_total_members += sub.n_bodies;
@@ -1681,6 +1739,7 @@ void SubsystemManager::print_step_summary() const {
     if (step_flyby_cm_dropped > 0) std::printf("  flyby_cm_dropped=%d", step_flyby_cm_dropped);
     if (step_flyby_curved > 0) std::printf("  flyby_curved=%d", step_flyby_curved);
     if (step_ngb_mass_kept > 0) std::printf("  ngb_mass_kept=%d", step_ngb_mass_kept);
+    if (step_weak_split > 0) std::printf("  weak_split=%d", step_weak_split);
     std::printf("\n");
 
     // Integration summary

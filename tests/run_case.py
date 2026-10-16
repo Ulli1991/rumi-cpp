@@ -47,6 +47,9 @@ SPIN_IMBH = dict(TEST_CASE="plummer", INTEGRATOR="hhs", TOTAL_TIME_MYR="2e-3", D
                  ADD_IMBH="true", IMBH_M1="500", IMBH_M2="500", IMBH_A_PC="2e-5", IMBH_E="0.5", IMBH_SPIN="0.9",
                  PRINT_INTERVAL="5", PROFILING="false")
 # 2000 Kroupa stars, 10 % primordial binaries (a = 0.1-100 AU, thermal e), two 1e-3 Myr steps
+WEAK_SPLIT_GBS = 1000     # weak_split_bh_binary: 0 measured (3.3M without the split)
+WEAK_SPLIT_DE = 1.23e-11  # weak_split_bh_binary: 9.43e-12 measured (host build; 1.35e-11 without the split)
+WEAK_SPLIT_DL = 1.7e-14   # weak_split_bh_binary: 1.31e-14 measured
 FLYBY_GROUP_STEPS = 39400  # flyby_group_floor: 30304 measured (host build)
 FLYBY_GROUP_DE = 5.8e-10   # flyby_group_floor: 4.42e-10 measured (host build)
 PN_BH_ONLY_DE = 7.7e-10   # pn_bh_only: 5.93e-10 measured (host build)
@@ -508,6 +511,25 @@ def flyby_group_floor(exe):
     steps = sum(int(a) for a in re.findall(r"Secular=(\d+) \(substeps=", out))
     ok = check("fly-by group: secular steps", steps, FLYBY_GROUP_STEPS)
     return ok & check("fly-by group: max|dE/E|", max(r[0] for r in diagnostics(out)), FLYBY_GROUP_DE)
+
+
+def weak_split_bh_binary(exe):
+    """WEAK_SPLIT_GAMMA = 1e-6: a 1 h BH binary with a star passing at 600 AU (tidal ratio ~1e-15) is split into a
+    binary subsystem and a field star; without the split LogH follows every orbit (3.3M GBS steps, 216 s here)."""
+    cfg = dict(TEST_CASE="particle_file", IC_FILE=str(Path(__file__).parent / "data" / "weak_split_bh_binary.txt"),
+               TOTAL_TIME_MYR="1.0e-3", DT_MAX_MYR="1.0e-3", DT_MIN_MYR="1.0e-14", ETA="0", ETA_GRAD="0.2",
+               ETA_JERK="0", ETA_RESTART="1e-8", FLYBY_CM_EPS="1e-11", NGB_MASS_SCALING="true", SERIAL_N2_GPU="16384",
+               TREE_THRESHOLD="100000", TREE_THETA="0.7", SDAR="true", COLLISIONAL="true", PN_ORDER="31",
+               PN_BH_ONLY="false", SSE_ENABLED="false", PRINT_INTERVAL="1", PROFILING="false",
+               E_REF="388600917.00142527", NGB_MREF="0.4005247838169674", WEAK_SPLIT_GAMMA="1e-6")
+    out = run_output(exe, cfg)
+    gbs = sum(int(a) for a in re.findall(r"LogH=\d+ \(gbs=(\d+)", out))
+    splits = sum(int(a) for a in re.findall(r"weak_split=(\d+)", out))
+    rows = diagnostics(out)
+    ok = check("weak split: binaries split off", splits, 1, lower=True)
+    ok &= check("weak split: LogH GBS steps", gbs, WEAK_SPLIT_GBS)
+    ok &= check("weak split: max|dE/E|", max(r[0] for r in rows), WEAK_SPLIT_DE)
+    return ok & check("weak split: max|dL/L|", max(r[2] for r in rows), WEAK_SPLIT_DL)
 
 
 def pn_bh_only(exe):
@@ -1548,6 +1570,8 @@ CASES = {
     "pn_bh_only": lambda exe: pn_bh_only(exe),
     # Tidal-sampling step near unbound fly-by subsystems had no floor (run B, levels to L22; fixed 2026-10-16)
     "flyby_group_floor": lambda exe: flyby_group_floor(exe),
+    # WEAK_SPLIT_GAMMA: the 200k seed-3 stall (scripts/cutout.py of stall step 48), split binary + field star
+    "weak_split_bh_binary": lambda exe: weak_split_bh_binary(exe),
     # PN_BH_ONLY false: the PN binaries of massive stars give the LogH calls the two paths are compared on
     "cm_eps_cpu_vs_device": lambda exe: paths_same_steps(exe, "fly-by step with tidal sampling",
                                                          dict(BINARIES, FLYBY_CM_EPS="1e-11", PN_ORDER="31",

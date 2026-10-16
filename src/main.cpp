@@ -621,6 +621,7 @@ int main(int argc, char** argv) {
             ngb_mref                      = cfg.get_double("NGB_MREF");   // <m> override [Msun] (tests)
             e_ref_set                     = cfg.get_double("E_REF");      // |E0| override (tests)
             g_collisional.ngb_mass_gamma  = cfg.get_double("NGB_MASS_GAMMA");
+            g_collisional.weak_split_gamma = cfg.get_double("WEAK_SPLIT_GAMMA");
             g_collisional.tidal_step_res  = cfg.get_double("TIDAL_STEP_RES");
             g_collisional.secular_triples = cfg.get_bool("SECULAR_TRIPLES");
             g_collisional.sdar            = cfg.get_bool("SDAR");
