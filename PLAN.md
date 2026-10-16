@@ -297,6 +297,8 @@ The code before the deletions is tagged archive/pre-step2-deletions.
 | ALL_SLOW_SPLIT | true: fsi(S, tau/2) twice (6655494: 16x lower error, same time) | deleted 2026-10-12, winner hard-wired |
 | SUBSYS_COLLISIONS | true: collisions decided inside LogH/GBS at the pericentre, FC-I App. B3 (7de902c, 043190d) | deleted 2026-10-12, winner hard-wired |
 | WEAK_PERTURBER_GAMMA | off: no weak-perturber split (C-1, 7c5b3ca: 3.6x worse energy); test weak_flyby_split deleted | deleted 2026-10-12, winner hard-wired |
+| FLYBY_CM_KICK, FLYBY_CM_KICK_EPS | off: no c.o.m. kicks of weakly perturbed binaries (d83324d; 200k seed-3 stall step: \|dL/L\| 1.4e-9, 15 % faster); tests cm_kick_* deleted | deleted 2026-10-16, winner hard-wired |
+| (weak-perturber split back) | WEAK_SPLIT_GAMMA, default off, 1809570 (option by user decision) | 2026-10-16 |
 | TIDAL_GAMMA, TIDAL_RES (+ NBODY_TIDAL_DEBUG) | off: no orbit-resolving step for strongly perturbed binaries (fe207ed, 6278068: no benefit) | deleted 2026-10-12, winner hard-wired |
 | MPI_TRANSPORT = device | host staging (f24a76b: 3488 vs 1028 us; no UCC/hcoll on raven); key stays for host vs nccl on USE_NCCL builds (auto) | value deleted 2026-10-12; MPI_NON_BLOCKING gathers are now always blocking (the Iallgatherv path was device-only) |
 | NBODY_SECULAR_PREC_STEP | off: no 1/omega-dot limit on the secular step (4ebc740: 100000-step cap per evolution) | deleted 2026-10-12, winner hard-wired |

@@ -29,8 +29,6 @@ struct CollisionalConfig {
     double flyby_cm_eps = 0.0;         // FLYBY_CM_EPS (either fly-by velocity; 0: off): tidal-sampling pair step that bounds the
                                        //   energy a slow particle's kicks put into a subsystem per step by this x |E0|
     double e_ref = 0.0;                //   |E0| of the run
-    bool flyby_cm_kick = false;        // FLYBY_CM_KICK: weakly perturbed binaries interact through their c.o.m. (subsystem.h)
-    double flyby_cm_kick_eps = 1e-12;  // FLYBY_CM_KICK_EPS: largest quadrupole tidal energy D / |E0| of such a binary
     double tidal_step_res = 1.0;       // TIDAL_STEP_RES: floor of the FLYBY_CM_EPS step, this x P (1 - e)^(3/2) of a bound binary or
                                        // the shortest pair pericentre passage of other subsystems (0: none)
     bool flyby_ngb_cm = true;

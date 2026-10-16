@@ -636,17 +636,6 @@ int main(int argc, char** argv) {
             g_collisional.gbs_kmax = cfg.get_int("GBS_KMAX");
             g_collisional.r_ngb_wide = cfg.get_double("NGB_WIDE_FAC") * g_collisional.r_ngb;
             g_collisional.flyby_cm_eps    = cfg.get_double("FLYBY_CM_EPS");
-            g_collisional.flyby_cm_kick   = cfg.get_bool("FLYBY_CM_KICK");
-            g_collisional.flyby_cm_kick_eps = cfg.get_double("FLYBY_CM_KICK_EPS");
-            // The c.o.m. swap wraps the device force launchers (forces.cpp): the CPU small-set path, integer
-            // positions bypass it
-            if (g_collisional.flyby_cm_kick && use_integer_positions) {
-                if (MPIComm::rank() == 0)
-                    std::fprintf(stderr, "ERROR: FLYBY_CM_KICK needs INTEGER_POSITIONS = false\n");
-                Kokkos::finalize();
-                MPIComm::finalize();
-                return 1;
-            }
             g_collisional.eta_restart     = cfg.get_double("ETA_RESTART");
             g_collisional.n_orb_secular   = cfg.get_int("N_ORB_SECULAR");
             g_collisional.m_pn            = cfg.get_double("M_PN");
@@ -1009,7 +998,7 @@ int main(int argc, char** argv) {
 
 #ifdef ENABLE_COLLISIONAL
         // FLYBY_CM_EPS scale: |E0| (the energy the run's |dE/E| refers to)
-        if (!resuming && g_collisional.enabled && (g_collisional.flyby_cm_eps > 0.0 || g_collisional.flyby_cm_kick))   // restarts restore it
+        if (!resuming && g_collisional.enabled && g_collisional.flyby_cm_eps > 0.0)   // restarts restore it
             g_collisional.e_ref = e_ref_set > 0.0 ? e_ref_set : std::fabs(compute_diagnostics(work_p, G, soft2).E_total);
         // NGB_MASS_SCALING: <m> of the initial particles (fixed for the run)
         // (restarts restore it: recomputing it from the evolved particles would change the neighbour radius)
@@ -1302,13 +1291,6 @@ int main(int argc, char** argv) {
                       std::printf("EATTR_SEC step %d nonpn_gw_booked %.6e\n", step_now, g_sec_nonpn_gw / E0); }
                     g_eattr.reset();
                 }
-                // FLYBY_CM_KICK: binaries flagged at the last depth-0 update, of the bound 2-body subsystems; sum and
-                // max of their quadrupole bound D (the measured energy differs from the conserved one by <= sum D)
-                if (g_collisional.enabled && g_collisional.flyby_cm_kick && g_collisional.e_ref > 0.0)
-                    std::printf("CMK step %d flagged %d of %d sumD/E0 %.3e maxD/E0 %.3e\n", step_now,
-                                g_subsystem_mgr.cmk_nb_, g_subsystem_mgr.cmk_nbound_,
-                                g_subsystem_mgr.cmk_dsum_ / g_collisional.e_ref,
-                                g_subsystem_mgr.cmk_dmax_ / g_collisional.e_ref);
 #endif
 #ifdef ENABLE_COLLISIONAL
                 if (bin_tracker.initialized) {

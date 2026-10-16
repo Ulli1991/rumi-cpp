@@ -1,6 +1,6 @@
 # Config reference
 
-All 151 keys of the config file (`config.txt`, or `--config <file>`), generated from the parameter table in `src/core/params.cpp` by `scripts/gen_config_md.py`. Every key has one default, in that table; an unknown key in a config file is an error. Each run writes the effective value of every key, and whether it came from the file or the default, to `run_params.txt`.
+All 149 keys of the config file (`config.txt`, or `--config <file>`), generated from the parameter table in `src/core/params.cpp` by `scripts/gen_config_md.py`. Every key has one default, in that table; an unknown key in a config file is an error. Each run writes the effective value of every key, and whether it came from the file or the default, to `run_params.txt`.
 
 Levels:
 
@@ -128,8 +128,6 @@ Levels:
 | `GBS_SEQUENCE` | string | `bulirsch` | **experiment** | bulirsch\|deuflhard | GBS substep sequence: bulirsch (2, 4, 6, 8, 12, 16, ...) or deuflhard (2, 4, 6, 8, 10, ...; MSTAR) |
 | `GBS_KMAX` | int | `10` | **experiment** |  | GBS extrapolation stages (FROST-CLUSTERS I: 8) |
 | `FLYBY_CM_VELOCITY` | bool | `false` | **experiment** |  | Fly-by step of subsystem members with the c.o.m. velocity (FROST-CLUSTERS II sec. 2.1) |
-| `FLYBY_CM_KICK` | bool | `false` | **experiment** |  | Bound binaries with quadrupole tidal energy <= FLYBY_CM_KICK_EPS x \|E0\| interact with all other particles through their c.o.m. (mollified kicks: no orbit sampling, no tidal-sampling step; P, L exact) |
-| `FLYBY_CM_KICK_EPS` | double | `1e-12` | **experiment** |  | Largest D / \|E0\| of a FLYBY_CM_KICK binary, D = mu r_apo^2 sum_j G m_j / d_j^3 |
 | `FLYBY_CM_EPS` | double | `1e-11` | internal |  | Tidal-sampling pair step: energy a slow particle's kicks put into a subsystem per step <= this x \|E0\| (0: off) |
 | `TIDAL_STEP_RES` | double | `1.0` | internal |  | Floor of the FLYBY_CM_EPS step: this x P (1 - e)^(3/2) of a bound binary, this x the shortest pair pericentre passage 2 pi r_p / v_p of an unbound pair or larger subsystem (0: none) |
 | `FLYBY_NGB_CM` | bool | `true` | internal |  | Distant fly-by neighbour test of a binary member against the binary's c.o.m. |
@@ -137,7 +135,7 @@ Levels:
 | `WEAK_SPLIT_GAMMA` | double | `0` | expert |  | Fly-by or unstable triple whose third body perturbs the inner binary below this tidal ratio: binary subsystem + field star (0: off; 1e-6: 35x faster stalled steps, \|dE/E\| per step up to 30x worse) |
 | `NGB_MASS_GAMMA` | double | `1e-3` | internal |  | Tidal ratio above which a mass-scaled neighbour joins a binary |
 | `NGB_MREF` | double | `0.0` | test |  | <m> of NGB_MASS_SCALING (Msun) instead of the cluster's (0) |
-| `E_REF` | double | `0.0` | test |  | \|E0\| of FLYBY_CM_EPS and FLYBY_CM_KICK_EPS (Msun (km/s)^2) instead of the run's (0): a cut-out of a cluster as in the cluster |
+| `E_REF` | double | `0.0` | test |  | \|E0\| of FLYBY_CM_EPS (Msun (km/s)^2) instead of the run's (0): a cut-out of a cluster as in the cluster |
 | `NGB_WIDE_FAC` | double | `0` | **experiment** |  | Bound pairs with a < NGB_WIDE_FAC x R_NGB are neighbours (wide binaries; 0: off, BIFROST) |
 | `MSTAR_THRESHOLD` | int | `8` | **experiment** |  | Subsystems of at least this many bodies for MSTAR (not wired: printed only, every subsystem uses LogH) |
 

@@ -42,27 +42,6 @@ PairVel pair_vel(Particles& p, bool coll, int lo, int hi) {
 int range_lo(int i0, int ni, int j0, int nj) { return std::min(ni > 0 ? i0 : j0, nj > 0 ? j0 : i0); }
 int range_hi(int i0, int ni, int j0, int nj) { return std::max(i0 + ni, j0 + nj); }
 
-// FLYBY_CM_KICK (subsystem.h): the force and gradient kernels of the kicks see the members of flagged binaries at
-// their c.o.m. for the duration of the launch scope (restored afterwards, bit for bit). Off: no work at all
-struct CmKickScope {
-    Particles& p;
-    bool on = false;
-    CmKickScope(Particles& p_, int lo, int hi) : p(p_) {
-#ifdef ENABLE_COLLISIONAL
-        on = p.collisional && g_collisional.flyby_cm_kick;
-        if (on) g_subsystem_mgr.cm_kick_swap(p, lo, hi);
-#else
-        (void)lo; (void)hi;
-#endif
-    }
-    ~CmKickScope() {
-#ifdef ENABLE_COLLISIONAL
-        if (on) g_subsystem_mgr.cm_kick_restore(p);
-#endif
-    }
-    CmKickScope(const CmKickScope&) = delete;
-    CmKickScope& operator=(const CmKickScope&) = delete;
-};
 }  // namespace
 
 bool flyby_cm_velocity = false;
@@ -217,7 +196,6 @@ template <bool COLL>
 static void acc_dt_range(Particles& p, int i0, int ni, int j0, int nj, double G, double soft2, double eta) {
     Etas e = etas(eta);
     PairVel cv = pair_vel(p, COLL, range_lo(i0, ni, j0, nj), range_hi(i0, ni, j0, nj));
-    CmKickScope cmk(p, range_lo(i0, ni, j0, nj), range_hi(i0, ni, j0, nj));   // the forces may feed a kick
     // component fly-by velocities (cv = v): without the second staged velocity copy (CV = false), as in DtK
     auto run = [&](auto cv_tag) {
         constexpr bool CV = decltype(cv_tag)::value;
@@ -247,7 +225,6 @@ void compute_acceleration_and_timestep(Particles& p, double G, double soft2, dou
 // ==========================================================================
 template <bool COLL>
 static void force_range(Particles& p, int i0, int ni, int j0, int nj, double G, double soft2) {
-    CmKickScope cmk(p, range_lo(i0, ni, j0, nj), range_hi(i0, ni, j0, nj));
     ForceK<COLL> k{{p.x.data()}, {p.y.data()}, {p.z.data()}, {p.mass.data()}, {p.ax.data()}, {p.ay.data()},
                    {p.az.data()}, sid_ptr(p, COLL), G, soft2};
     run_n2("force", i0, ni, j0, nj, k);
@@ -283,7 +260,6 @@ static void grad_range(Particles& p, int i0, int ni, int j0, int nj, const GradS
 #else
     (void)write_gmag;
 #endif
-    CmKickScope cmk(p, range_lo(i0, ni, j0, nj), range_hi(i0, ni, j0, nj));
     GradK<COLL> k{{p.x.data()}, {p.y.data()}, {p.z.data()}, {p.mass.data()}, {p.ax.data()}, {p.ay.data()},
                   {p.az.data()}, {si.x}, {si.y}, {si.z}, {sj.x}, {sj.y}, {sj.z}, si.offset, sj.offset, gm,
                   sid_ptr(p, COLL), G * dt * dt * GRAD_COEFF, soft2, 1.0 / (dt * dt)};
@@ -645,7 +621,6 @@ std::vector<int> cc_components(Particles& p, int start, int count, double pivot,
 }
 
 void cc_inter_acceleration(Particles& p, int start, int count, const int* cid, double G, double soft2) {
-    CmKickScope cmk(p, start, start + count);
     auto launch = [&](auto coll_tag) {
         constexpr bool COLL = decltype(coll_tag)::value;
         ForceCidK<COLL> k{{p.x.data()}, {p.y.data()}, {p.z.data()}, {p.mass.data()}, {p.ax.data()}, {p.ay.data()},
@@ -660,7 +635,6 @@ void cc_inter_acceleration(Particles& p, int start, int count, const int* cid, d
 
 void cc_inter_gradient(Particles& p, int start, int count, const int* cid, const GradSnapshot& s, double G, double soft2,
                        double dt) {
-    CmKickScope cmk(p, start, start + count);
     auto launch = [&](auto coll_tag) {
         constexpr bool COLL = decltype(coll_tag)::value;
         GradCidK<COLL> k{{p.x.data()}, {p.y.data()}, {p.z.data()}, {p.mass.data()}, {p.ax.data()}, {p.ay.data()},

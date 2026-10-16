@@ -2702,12 +2702,11 @@ HostSubtree& host_subtree() {
 }  // namespace
 
 // Whether a set of `count` particles runs as a host subtree here: local path (no MPI distribution, no tree), and
-// none of the experiments the host copy does not carry (FLYBY_CM_KICK swaps, integer positions, HHS_CC buffers)
+// none of the experiments the host copy does not carry (integer positions, HHS_CC buffers)
 static bool host_subtree_eligible(const Particles& p, int count, bool use_mpi, bool tree_eligible) {
     if (host_subtree_max <= 0 || count > host_subtree_max || host_exec() || use_mpi || tree_eligible) return false;
     if (use_integer_positions || hhs_cc) return false;
 #ifdef ENABLE_COLLISIONAL
-    if (p.collisional && g_collisional.flyby_cm_kick) return false;
 #endif
     (void)p;
     return true;
@@ -2902,9 +2901,6 @@ static int hhs_fsi_recursive(
                                                g_collisional.n_orb_secular);
             g_subsys_phase.add(SubsystemPhaseTimes::DET_PAIRS, det_clock.lap());
             g_subsystem_mgr.update_particle_flags(p);
-            // FLYBY_CM_KICK: once per step, on every particle (the quadrupole energy bound of each binary)
-            if (depth == 0 && g_collisional.flyby_cm_kick)
-                g_subsystem_mgr.update_cm_kick_flags(p, G, g_collisional.flyby_cm_kick_eps * g_collisional.e_ref);
             g_subsystem_mgr.accumulate_diagnostics();
             lean_fence("integrator.cpp:2429");
             g_subsys_phase.add(SubsystemPhaseTimes::DET_FLAGS, det_clock.lap());
