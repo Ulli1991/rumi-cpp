@@ -16,6 +16,8 @@
 #include "snapshot.h"
 #endif
 #include "fence_stats.h"
+#include "stall.h"
+#include <filesystem>
 #ifdef ENABLE_COLLISIONAL
 #include "collisional_config.h"
 #include "subsystem.h"
@@ -560,6 +562,7 @@ int main(int argc, char** argv) {
         hhs_cc_min = cfg.get_int("HHS_CC_MIN");
         bool ngb_mass_scaling = false;
         double ngb_mref = 0.0;
+        double e_ref_set = 0.0;
         flyby_cm_velocity = cfg.get_bool("FLYBY_CM_VELOCITY");   // FROST-CLUSTERS II sec. 2.1
         g_eattr.on = std::getenv("NBODY_EATTR") != nullptr;   // per-print energy attribution (diagnostics.h)
         use_integer_positions = cfg.get_bool("INTEGER_POSITIONS");
@@ -616,6 +619,7 @@ int main(int argc, char** argv) {
             g_collisional.flyby_ngb_cm    = cfg.get_bool("FLYBY_NGB_CM");
             ngb_mass_scaling              = cfg.get_bool("NGB_MASS_SCALING");
             ngb_mref                      = cfg.get_double("NGB_MREF");   // <m> override [Msun] (tests)
+            e_ref_set                     = cfg.get_double("E_REF");      // |E0| override (tests)
             g_collisional.ngb_mass_gamma  = cfg.get_double("NGB_MASS_GAMMA");
             g_collisional.tidal_step_res  = cfg.get_double("TIDAL_STEP_RES");
             g_collisional.secular_triples = cfg.get_bool("SECULAR_TRIPLES");
@@ -677,6 +681,8 @@ int main(int argc, char** argv) {
         const int restart_interval = cfg.get_int("RESTART_INTERVAL");
         const double walltime_limit_s = cfg.get_double("WALLTIME_LIMIT") * 3600.0;
         const int snapshot_interval = cfg.get_int("SNAPSHOT_INTERVAL");
+        const double stall_factor = cfg.get_double("STALL_FACTOR");
+        const bool stall_restart = cfg.get_bool("STALL_RESTART");
         restart_arg = cfg.get_str("RESTART_FILE");
 #ifdef USE_HDF5
         RestartOptions restart_opt;
@@ -699,7 +705,7 @@ int main(int argc, char** argv) {
         const bool restart_output = restart_interval > 0 || walltime_limit_s > 0.0;
         if (restart_output) install_stop_signals();
 #else
-        if (restart_interval > 0 || walltime_limit_s > 0.0 || snapshot_interval > 0 || !restart_arg.empty()) {
+        if (restart_interval > 0 || walltime_limit_s > 0.0 || snapshot_interval > 0 || !restart_arg.empty() || stall_restart) {
             if (my_rank == 0)
                 std::fprintf(stderr, "ERROR: restart files and snapshots need a build with HDF5 (USE_HDF5)\n");
             Kokkos::finalize(); MPIComm::finalize(); return 1;
@@ -1003,7 +1009,7 @@ int main(int argc, char** argv) {
 #ifdef ENABLE_COLLISIONAL
         // FLYBY_CM_EPS scale: |E0| (the energy the run's |dE/E| refers to)
         if (!resuming && g_collisional.enabled && (g_collisional.flyby_cm_eps > 0.0 || g_collisional.flyby_cm_kick))   // restarts restore it
-            g_collisional.e_ref = std::fabs(compute_diagnostics(work_p, G, soft2).E_total);
+            g_collisional.e_ref = e_ref_set > 0.0 ? e_ref_set : std::fabs(compute_diagnostics(work_p, G, soft2).E_total);
         // NGB_MASS_SCALING: <m> of the initial particles (fixed for the run)
         // (restarts restore it: recomputing it from the evolved particles would change the neighbour radius)
         if (g_collisional.enabled && ngb_mass_scaling && work_p.N > 0) {
@@ -1220,7 +1226,46 @@ int main(int argc, char** argv) {
             }
         };
         if (!resuming && snapshot_interval > 0) write_snapshot_now(t, step);
+        // STALL_RESTART: the restart file of the state before the current step, in <RESTART_DIR>/stall_roll (one kept)
+        RestartOptions roll_opt;
+        roll_opt.dir = restart_opt.dir + "/stall_roll";
+        roll_opt.keep = 1;
+        auto write_roll = [&](double t_now, int step_now) {
+            if (!stall_restart) return;
+            save_run_state(t_now, step_now);
+            if (my_rank == 0) {
+                std::filesystem::create_directories(roll_opt.dir);
+                write_restart(roll_opt, work_p, rs, cfg.text, cfg.params);
+            }
+            MPIComm::barrier();
+        };
 #endif
+        // STALL_FACTOR: a step that took longer than this x the median of the previous steps (at least 3, the last
+        // 16) names what made it slow (core/stall.h) and, with STALL_RESTART, keeps the restart file of the state
+        // before it as <RESTART_DIR>/stall_<step>.h5 (scripts/cutout.py cuts the case out of it)
+        std::vector<double> stall_hist;
+        auto stall_check = [&](int step_now, double step_wall) {
+            if (stall_factor <= 0.0) return;
+            if (stall_hist.size() >= 3) {
+                std::vector<double> h(stall_hist.end() - std::min<size_t>(stall_hist.size(), 16), stall_hist.end());
+                std::nth_element(h.begin(), h.begin() + h.size() / 2, h.end());
+                const double med = h[h.size() / 2];
+                if (step_wall > stall_factor * med && my_rank == 0) {
+                    g_stall.print(step_now, step_wall, med);
+#ifdef USE_HDF5
+                    const std::string roll = latest_restart(roll_opt.dir);
+                    if (stall_restart && !roll.empty()) {
+                        const std::string keep = restart_opt.dir + "/stall_" + std::to_string(step_now) + ".h5";
+                        std::error_code ec;
+                        std::filesystem::rename(roll, keep, ec);
+                        std::printf("STALL restart %s%s\n", keep.c_str(), ec ? " (rename failed)" : "");
+                        std::fflush(stdout);
+                    }
+#endif
+                }
+            }
+            stall_hist.push_back(step_wall);
+        };
 
         auto print_progress = [&](double t_now, int step_now) {
             auto diag = compute_diagnostics(work_p, G, soft2);
@@ -1358,6 +1403,7 @@ int main(int argc, char** argv) {
                 NBODY_NVTX_PUSH("STEP");
                 fence_stats::report(step, false);   // reset: count only this step
                 auto step_t0 = std::chrono::high_resolution_clock::now();
+                g_stall.reset();
 #ifdef ENABLE_COLLISIONAL
                 g_sim_time = t;
 #endif
@@ -1522,6 +1568,7 @@ int main(int argc, char** argv) {
                 double step_wall = std::chrono::duration<double>(step_t1 - step_t0).count();
                 g_profiler.step_wall_total += step_wall;
                 g_profiler.step_count++;
+                stall_check(step, step_wall);
 
                 fence_stats::report(step, my_rank == 0);
                 if (my_rank == 0 && step <= 5) {
@@ -1571,6 +1618,7 @@ int main(int argc, char** argv) {
 #ifdef USE_HDF5
                 after_step_io(t, step, step_wall);
                 if (stop_run) break;
+                write_roll(t, step);   // the state the next step starts from (as the restart files)
 #endif
             }
         }

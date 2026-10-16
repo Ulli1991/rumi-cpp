@@ -1180,6 +1180,34 @@ def restart_identical(exe, label, cfg, n, stop="interval", snapshots=False):
         return ok
 
 
+def stall_capture(exe, label, cfg, n):
+    """STALL_FACTOR / STALL_RESTART (core/stall.h): with a factor below 1 most steps count as stalled; each one prints
+    its deepest set and keeps the restart file of the state before it (stall_<step>.h5). A run from that file must
+    repeat the step bit for bit (L0 row and NBODY_DUMP particle dump), so a harvested case is the run's own state."""
+    import hashlib
+    dt = float(cfg["DT_MAX_MYR"])
+    full = dict(cfg, PRINT_INTERVAL="1", TOTAL_TIME_MYR=f"{(n - 0.5) * dt:.17g}", STALL_FACTOR="0.5",
+                STALL_RESTART="true")
+    env = {"NBODY_DUMP": "1"}
+    with tempfile.TemporaryDirectory() as da, tempfile.TemporaryDirectory() as db:
+        out = run_in(exe, full, da, env=env)
+        kept = [int(k) for k in re.findall(r"^STALL restart \S*stall_(\d+)\.h5$", out, re.M)]
+        deep = re.findall(r"^STALL deepest depth \d+ pivot \S+ Myr pids( \d+)+$", out, re.M)
+        ok = check(f"{label} stalled steps with a kept restart", len(kept), 1, lower=True)
+        ok &= check(f"{label} STALL lines naming the deepest set", len(deep), len(kept), lower=True)
+        if not kept:
+            return False
+        k = kept[0]
+        rep = run_in(exe, dict(full, TOTAL_TIME_MYR=f"{(k - 0.5) * dt:.17g}", STALL_RESTART="false"), db,
+                     args=("--restart", str(Path(da, f"stall_{k}.h5"))), env=env)
+        ra, rb = l0_by_step(out), l0_by_step(rep)
+        ok &= check(f"{label} step {k} from stall_{k}.h5: L0 row differs (0 = identical)", int(ra.get(k) != rb.get(k)), 0)
+        dig = lambda d: hashlib.sha256(Path(d, f"dump_{k:04d}.bin").read_bytes()).hexdigest() \
+            if Path(d, f"dump_{k:04d}.bin").exists() else None
+        return ok & check(f"{label} step {k} particle dump differs (0 = identical)",
+                          int(dig(da) is None or dig(da) != dig(db)), 0)
+
+
 def snapshot_roundtrip(exe, label, cfg):
     """Snapshot and restart file of the same state (the end of the run), read back by h5-roundtrip
     (tests/h5_roundtrip.cpp): positions, velocities, masses, ids, stellar types, radii and spins in the snapshot
@@ -1809,6 +1837,8 @@ CASES = {
     "restart_walltime": lambda exe: restart_identical(exe, "10 % binaries, WALLTIME_LIMIT stop", BINARIES, 2,
                                                       stop="walltime"),
     "restart_triples": lambda exe: restart_identical(exe, "dense core, triples", TRIPLES, 1),
+    # STALL_RESTART keeps the state before a slow step; the case harvested from it (scripts/harvest_stalls.py) is exact
+    "stall_capture": lambda exe: stall_capture(exe, "10 % binaries", BINARIES, 6),
     "restart_mergers": lambda exe: restart_identical(exe, "mergers, step restarts", dict(MERGERS, HOST_SUBTREE_MAX="0"), 5),
     "restart_mergers_sse": lambda exe: restart_identical(exe, "mergers + SSE", dict(MERGERS, HOST_SUBTREE_MAX="0",
                                                                                    SSE_ENABLED="true"), 3),

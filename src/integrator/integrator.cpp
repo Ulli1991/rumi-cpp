@@ -22,6 +22,7 @@
 #include "kepler.h"
 #include "stellar_cache.h"
 #include "device_staging.h"
+#include "stall.h"
 #endif
 #include <Kokkos_Core.hpp>
 #include <vector>
@@ -3004,6 +3005,13 @@ static int hhs_fsi_recursive(
                 }
             }
             dump_calls++;
+        }
+        // STALL_FACTOR: the first set at the deepest depth of the step (named if the step stalls)
+        if (g_stall.deeper(depth) && count <= StallRecorder::MAX_DEEP && MPIComm::rank() == 0 &&
+            (int)p.particle_id.extent(0) >= start + count) {
+            auto hp = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
+                                                          Kokkos::subview(p.particle_id, Kokkos::make_pair(start, start + count)));
+            g_stall.note_deep(depth, pivot_dt * TIME_UNIT_MYR, std::vector<int>(hp.data(), hp.data() + count));
         }
         // NBODY_DEEP_LOG=d (debug), at depth 0: every particle with dt below the depth-d pivot and its 4 nearest
         // neighbours (pid, mass, subsystem id, separation, relative speed): the pairs that set the level-0 steps

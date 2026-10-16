@@ -9,6 +9,7 @@
 #include "collisional_config.h"
 #include "post_newtonian.h"
 #include "profiling.h"
+#include "stall.h"
 #include <Kokkos_Core.hpp>
 #include <algorithm>
 #include <cstring>
@@ -948,6 +949,12 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
                           colls.size(), nb);
             std::printf("%s\n", describe(head).c_str());
             std::fflush(stdout);
+        }
+        // STALL_FACTOR: the costliest integrations of the step (named if the step stalls)
+        if (n_gbs_steps >= 1000) {
+            double ms[LOGH_MAX_BODIES];
+            for (int b = 0; b < nb; b++) ms[b] = h_mass(off + b);
+            g_stall.note_logh(n_gbs_steps, dt_norm * T_scale * TIME_UNIT_MYR, &batch.flat_pid[off], ms, nb);
         }
         // SDAR: name the integrations that fail the energy check (members, slowed binaries, steps)
         if (sd_on && converged && g_collisional.eta_restart > 0.0 && dE_rel > g_collisional.eta_restart) {

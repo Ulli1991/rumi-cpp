@@ -1,0 +1,103 @@
+"""Harvest stalled steps from production runs as isolated cases (candidates for hard tests).
+
+    python3 scripts/harvest_stalls.py RUN.log [RUN2.log ...] --out DIR [--radius 0.05] [--exe nbody-kokkos]
+                                     [--timeout 600] [--env KEY=VALUE ...]
+
+For every STALL block of a log (STALL_FACTOR) whose restart was kept (STALL_RESTART, "STALL restart <path>"), the
+culprits (the deepest set and each costly LogH integration, by particle ids) are cut out with scripts/cutout.py into
+DIR/<run>_s<step>_<k>/. Culprit sets met before (same particle ids) are skipped. With --exe every case is replayed
+in isolation on the host (one interval, OMP_NUM_THREADS=1 unless set) and the table lists wall time, LogH GBS steps
+and |dE/E|, |dL/L|: a case that still takes long reproduces the stall and becomes a test (tests/data/, run_case.py)
+with the fix that makes it fast at equal or better energy. Pure Python.
+"""
+import argparse
+import os
+import re
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+
+
+def stall_blocks(log):
+    """[(step, wall, median, restart path or None, [(kind, [pids], info)])] of one run log"""
+    blocks, cur = [], None
+    for line in open(log, errors="replace"):
+        if line.startswith("STALL step "):
+            m = re.match(r"STALL step (\d+): ([\d.]+) s \(median of the previous steps ([\d.]+) s\)", line)
+            cur = [int(m.group(1)), float(m.group(2)), float(m.group(3)), None, []]
+            blocks.append(cur)
+        elif cur is None:
+            continue
+        elif line.startswith("STALL deepest "):
+            m = re.match(r"STALL deepest depth (-?\d+) pivot (\S+) Myr pids(.*)", line)
+            pids = [int(v) for v in m.group(3).split()]
+            if pids:
+                cur[4].append(("deep", pids, f"depth {m.group(1)}"))
+        elif line.startswith("STALL logh "):
+            m = re.match(r"STALL logh gbs (\d+) dt (\S+) Myr pids(.*?) m\[Msun\](.*)", line)
+            cur[4].append(("logh", [int(v) for v in m.group(3).split()], f"gbs {m.group(1)} m {m.group(4).strip()}"))
+        elif line.startswith("STALL restart "):
+            cur[3] = line.split()[2]
+    return blocks
+
+
+def replay(exe, case, timeout, env):
+    e = {**os.environ, "OMP_NUM_THREADS": os.environ.get("OMP_NUM_THREADS", "1"), **env}
+    t0 = time.time()
+    try:
+        out = subprocess.run([exe, "--config", "config.txt"], cwd=case, capture_output=True, text=True,
+                             timeout=timeout, env=e).stdout
+    except subprocess.TimeoutExpired:
+        return f">{timeout}", "-", "-", "-"
+    wall = time.time() - t0
+    (case / "run.log").write_text(out)
+    gbs = sum(int(v) for v in re.findall(r"LogH=\d+ \(gbs=(\d+)", out))
+    de = re.findall(r"^\|dE/E0\| = (\S+)", out, re.M)
+    dl = re.findall(r"^\|dL/L0\| = (\S+)", out, re.M)
+    return f"{wall:.2f}", str(gbs), f"{float(de[-1]):.2e}" if de else "-", f"{float(dl[-1]):.2e}" if dl else "-"
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    ap.add_argument("logs", nargs="+")
+    ap.add_argument("--out", required=True)
+    ap.add_argument("--radius", type=float, default=0.05, help="pc")
+    ap.add_argument("--exe", help="host binary for the isolated replay")
+    ap.add_argument("--timeout", type=int, default=600)
+    ap.add_argument("--env", action="append", default=[], help="KEY=VALUE for the replay (repeatable)")
+    a = ap.parse_args()
+    env = dict(kv.split("=", 1) for kv in a.env)
+    out = Path(a.out)
+    out.mkdir(parents=True, exist_ok=True)
+    seen, rows = set(), []
+    for log in a.logs:
+        run = Path(log).resolve().parent.name
+        for step, wall, med, rst, culprits in stall_blocks(log):
+            if rst is None:
+                print(f"{log}: step {step} ({wall:.0f} s vs {med:.1f} s) has no kept restart (STALL_RESTART)")
+                continue
+            rst_path = Path(rst) if Path(rst).is_absolute() else Path(log).resolve().parent / rst
+            for k, (kind, pids, info) in enumerate(culprits):
+                key = tuple(sorted(pids))
+                if key in seen:
+                    continue
+                seen.add(key)
+                case = out / f"{run}_s{step}_{k}"
+                cmd = [sys.executable, str(HERE / "cutout.py"), str(rst_path), "--radius", str(a.radius),
+                       "--out", str(case)]
+                for p in pids[:8]:
+                    cmd += ["--pid", str(p)]
+                subprocess.run(cmd, check=True, capture_output=True)
+                n = sum(1 for line in open(case / "ic.txt") if not line.startswith("#"))
+                res = replay(a.exe, case, a.timeout, env) if a.exe else ("-", "-", "-", "-")
+                rows.append((case.name, f"{wall:.3g}/{med:.3g}", kind, info, n) + res)
+    print(f"{'case':<28} {'step s/median':>13} {'kind':<5} {'n':>5} {'wall':>8} {'gbs':>9} {'dE/E':>10} {'dL/L':>10}  culprit")
+    for name, sw, kind, info, n, w, g, de, dl in rows:
+        print(f"{name:<28} {sw:>13} {kind:<5} {n:>5} {w:>8} {g:>9} {de:>10} {dl:>10}  {info}")
+
+
+if __name__ == "__main__":
+    sys.exit(main())

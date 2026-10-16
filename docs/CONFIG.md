@@ -1,6 +1,6 @@
 # Config reference
 
-All 147 keys of the config file (`config.txt`, or `--config <file>`), generated from the parameter table in `src/core/params.cpp` by `scripts/gen_config_md.py`. Every key has one default, in that table; an unknown key in a config file is an error. Each run writes the effective value of every key, and whether it came from the file or the default, to `run_params.txt`.
+All 150 keys of the config file (`config.txt`, or `--config <file>`), generated from the parameter table in `src/core/params.cpp` by `scripts/gen_config_md.py`. Every key has one default, in that table; an unknown key in a config file is an error. Each run writes the effective value of every key, and whether it came from the file or the default, to `run_params.txt`.
 
 Levels:
 
@@ -136,6 +136,7 @@ Levels:
 | `NGB_MASS_SCALING` | bool | `true` | internal |  | Pair neighbour radius r_ngb max(1, m / <m>)^(1/3) (PeTar Eq. 12); the extra pairs join only as strong perturbers of a binary |
 | `NGB_MASS_GAMMA` | double | `1e-3` | internal |  | Tidal ratio above which a mass-scaled neighbour joins a binary |
 | `NGB_MREF` | double | `0.0` | test |  | <m> of NGB_MASS_SCALING (Msun) instead of the cluster's (0) |
+| `E_REF` | double | `0.0` | test |  | \|E0\| of FLYBY_CM_EPS and FLYBY_CM_KICK_EPS (Msun (km/s)^2) instead of the run's (0): a cut-out of a cluster as in the cluster |
 | `NGB_WIDE_FAC` | double | `0` | **experiment** |  | Bound pairs with a < NGB_WIDE_FAC x R_NGB are neighbours (wide binaries; 0: off, BIFROST) |
 | `MSTAR_THRESHOLD` | int | `8` | **experiment** |  | Subsystems of at least this many bodies for MSTAR (not wired: printed only, every subsystem uses LogH) |
 
@@ -151,6 +152,8 @@ Levels:
 | `RESTART_DIR` | string | `.` | user |  | Directory of restart_<step>.h5 |
 | `RESTART_FILE` | string | (empty) | user |  | Continue from this file; latest: newest in RESTART_DIR; auto: that or a fresh start (--restart overrides) |
 | `RESTART_KEEP` | int | `2` | expert |  | Restart files kept (the newest) |
+| `STALL_FACTOR` | double | `5` | expert |  | A step slower than this x the median of the previous steps prints STALL lines: the costliest LogH integrations and the deepest set (0: off) |
+| `STALL_RESTART` | bool | `false` | expert |  | Restart file before every step (RESTART_DIR/stall_roll), kept as RESTART_DIR/stall_<step>.h5 for a stalled step (scripts/cutout.py) |
 | `SNAPSHOT_INTERVAL` | int | `0` | user |  | LUNA-layout snapshot every this many steps, at step 0 and at the end (0: off) |
 | `SNAPSHOT_DIR` | string | `.` | user |  | Directory of snapdir_NNN/snapshot_NNN.0.hdf5 |
 | `SNAPSHOT_BASE` | string | `snapshot` | expert |  | Snapshot file base name |
