@@ -10,7 +10,7 @@ extern int serial_n2_gpu;              // 0 = disabled (always distributed)
 
 // Serial N² CPU threshold: below this particle count, use CPU serial loops
 // for full N² instead of GPU kernels (eliminates kernel launch overhead)
-extern int serial_n2_cpu;              // 0 = disabled (always GPU)
+extern int host_subtree_max;           // HOST_SUBTREE_MAX: sets up to this size run their sub-recursion on the host (0: off)
 
 extern bool use_integer_positions;      // INTEGER_POSITIONS config toggle
 extern double int_pos_scale;            // physical_pos = int_pos * scale

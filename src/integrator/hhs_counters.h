@@ -29,7 +29,7 @@ struct HHSCounters {
     int dist_depth_ngb_pairs[MAX_DEPTH] = {};
     int dist_depth_l0_clamped[MAX_DEPTH] = {};
 
-    // Per-depth: CPU serial path
+    // Per-depth: host subtrees
     int cpu_depth_calls[MAX_DEPTH] = {};
     long long cc_calls[MAX_DEPTH] = {}, cc_comps[MAX_DEPTH] = {}, cc_largest[MAX_DEPTH] = {};   // HHS_CC splits
     long long isolated_sets[MAX_DEPTH] = {};   // sets that were one subsystem: one FSI step, no deeper recursion

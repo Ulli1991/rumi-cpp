@@ -442,6 +442,90 @@ struct DtK {
     }
 };
 
+// DtK (collisional, component velocities, no jerk, unsoftened: the production variant) in mixed precision
+// (default since 2026-10-16; 200k, 5 seeds: |dE/E| equal (2 seeds bit-identical, 2 better, 1 at the noise floor),
+// 6-8 % per step): positions and velocities as fp32 hi + lo pairs, the pair step (FROST Eqs. 23, 49) with
+// the lower-bound skip of pair_dt_below, the tidal-sampling step and the partner-free acceleration in fp32; minimum in
+// fp32, accelerations summed over 32 sources in fp32 (SUM_F32). Both only feed time-step criteria (no kick takes them).
+// MN_IN (tree path): only the accelerations, from positions and G m. n2-bench 200k: dt rel. error median 5e-8, max 4e-7,
+// no level changed; acceleration rel. error median 5e-8, max 2e-6; 109 vs 78 Gpairs/s
+template <bool MN_IN>
+struct DtMixK {
+    static constexpr int NSRC = MN_IN ? 4 : 9, NS = 3, NM = 1;
+    static constexpr bool SUM_F32 = true, FILL_ONLY = true;
+    RawView x, y, z, m, vx, vy, vz, ax, ay, az, dt, ktid, kfl;   // ktid null: no tidal-sampling step
+    const int* sid;
+    float G, eta_ff, eta_fb;
+    struct Sink { float xh, xl, yh, yl, zh, zl, uh, ul, vh, vl, wh, wl, m, k, kf, rm; int sid; };
+    static KOKKOS_INLINE_FUNCTION float lo(double v, float h) { return (float)(v - (double)h); }
+    KOKKOS_INLINE_FUNCTION Sink sink(int i) const {
+        const float xh = (float)x(i), yh = (float)y(i), zh = (float)z(i);
+        if constexpr (MN_IN) {
+            return {xh, lo(x(i), xh), yh, lo(y(i), yh), zh, lo(z(i), zh), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, sid[i]};
+        } else {
+            const float uh = (float)vx(i), vh = (float)vy(i), wh = (float)vz(i), mi = (float)m(i);
+            return {xh, lo(x(i), xh), yh, lo(y(i), yh), zh, lo(z(i), zh), uh, lo(vx(i), uh), vh, lo(vy(i), vh), wh,
+                    lo(vz(i), wh), mi, ktid.ptr ? (float)ktid(i) : 1e30f, ktid.ptr ? (float)kfl(i) : 0.0f, 1.0f / mi,
+                    sid[i]};
+        }
+    }
+    KOKKOS_INLINE_FUNCTION void source(int j, double* s) const {
+        const float xh = (float)x(j), yh = (float)y(j), zh = (float)z(j), mj = (float)m(j);
+        s[0] = n2_pack(xh, lo(x(j), xh)); s[1] = n2_pack(yh, lo(y(j), yh)); s[2] = n2_pack(zh, lo(z(j), zh));
+        if constexpr (MN_IN) {
+            s[3] = n2_pack(sid[j], G * mj);
+        } else {
+            const float uh = (float)vx(j), vh = (float)vy(j), wh = (float)vz(j);
+            s[3] = n2_pack(uh, lo(vx(j), uh)); s[4] = n2_pack(vh, lo(vy(j), vh)); s[5] = n2_pack(wh, lo(vz(j), wh));
+            s[6] = n2_pack(sid[j], mj);
+            s[7] = n2_pack(ktid.ptr ? (float)ktid(j) : 1e30f, ktid.ptr ? (float)kfl(j) : 0.0f);
+            s[8] = n2_pack(1.0f / mj, 0.0f);
+        }
+    }
+    static KOKKOS_INLINE_FUNCTION float sym(float t, float c, float eta) {   // eta t_sym as symmetrized_timestep
+        const float ct = c * t * t * eta, sq = 1.0f + c * ct * eta;
+        return eta * (t + ct / (sq * rsqrt_f32_normal(sq) + 1.0f));
+    }
+    KOKKOS_INLINE_FUNCTION void pair(const Sink& a, int i, const double* s, int j, float* sum, float* mn) const {
+        const bool w = pair_weight(i, j, a.sid, n2_lo(s[MN_IN ? 3 : 6]));
+        const float dx = (n2_lo_f(s[0]) - a.xh) + (n2_hi_f(s[0]) - a.xl);
+        const float dy = (n2_lo_f(s[1]) - a.yh) + (n2_hi_f(s[1]) - a.yl);
+        const float dz = (n2_lo_f(s[2]) - a.zh) + (n2_hi_f(s[2]) - a.zl);
+        const float r2 = w ? dx * dx + dy * dy + dz * dz : 1.0f;
+        const float ir = rsqrt_f32_normal(r2), ir2 = ir * ir;
+        float gmj;
+        if constexpr (MN_IN) {
+            gmj = n2_hi_f(s[3]);
+        } else {
+            const float du = (n2_lo_f(s[3]) - a.uh) + (n2_hi_f(s[3]) - a.ul);
+            const float dv = (n2_lo_f(s[4]) - a.vh) + (n2_hi_f(s[4]) - a.vl);
+            const float dw = (n2_lo_f(s[5]) - a.wh) + (n2_hi_f(s[5]) - a.wl);
+            const float mj = n2_hi_f(s[6]), r = r2 * ir;
+            gmj = G * mj;
+            const float v2 = du * du + dv * dv + dw * dw + 1e-30f, iv = rsqrt_f32_normal(v2);
+            const float gm = G * (a.m + mj);
+            const float tff = r2 * rsqrt_f32_normal(r * (gm + 1e-30f)), tfb = r * iv;
+            const float rdv = (dx * du + dy * dv + dz * dw) * ir2;
+            const float cff = 1.5f * rdv, cfb = rdv * (1.0f + gm * ir * iv * iv);
+            // lower bound eta t / (1 + max(0, -c t eta)) of either symmetrized step (pair_dt_below): skip both roots and
+            // divisions when it cannot go below the running minimum
+            const float lff = eta_ff * tff, lfb = eta_fb * tfb, cur = mn[0] * 1.0001f;
+            float t = 1e30f;
+            if (lff < cur * (1.0f + fmaxf(0.0f, -cff * lff)) || lfb < cur * (1.0f + fmaxf(0.0f, -cfb * lfb)))
+                t = fminf(sym(tff, cff, eta_ff), sym(tfb, cfb, eta_fb));
+            const float kj = n2_lo_f(s[7]), kfj = n2_hi_f(s[7]), rmj = n2_lo_f(s[8]);
+            t = fminf(t, fmaxf(fminf(a.k * rmj, kj * a.rm) * r2 * r, fmaxf(a.kf, kfj)));
+            mn[0] = w ? fminf(mn[0], t) : mn[0];
+        }
+        const float f = (w ? gmj : 0.0f) * ir2 * ir;
+        sum[0] += f * dx; sum[1] += f * dy; sum[2] += f * dz;
+    }
+    KOKKOS_INLINE_FUNCTION void finish(int i, const Sink&, const double* sum, const double* mn) const {
+        ax(i) = sum[0]; ay(i) = sum[1]; az(i) = sum[2];
+        if (!MN_IN) dt(i) = mn[0];
+    }
+};
+
 // Accelerations and time steps of all particles (start of a step, diagnostics). Collisional mode adds the
 // jerk (Eq. 29) and v/a (Eq. 24) criteria. Pre-rejects, CV and JERK as DtK (bit-identical).
 // Source tile: x y z m vx vy vz | (sid, fp32 m) | [cvx cvy cvz (CV)] k kf (fp32 k, fp32 1/m) (collisional)

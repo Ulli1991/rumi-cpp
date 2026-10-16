@@ -10,7 +10,10 @@
 // fence to stand in for the deallocation fence of the mirror view it replaces).
 // Removing these fences changes no arithmetic: runs are bit-identical to the reference mode.
 #include <Kokkos_Core.hpp>
+#include "host_exec.h"
+#include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <memory>
 #include <source_location>
 #include <string>
@@ -39,9 +42,23 @@ inline void lean_copy_fence(const Kokkos::DefaultExecutionSpace& ex, const char*
     ex.fence(std::string(what) + " @" + f + ":" + std::to_string(loc.line()));
 }
 
+// Host subtree (host_exec.h): every buffer is in host memory; a contiguous copy is a memcpy
+template <class D, class S>
+inline void host_exec_copy(const D& dst, const S& src, const std::source_location& loc) {
+    if (dst.span() != src.span() || !dst.span_is_contiguous() || !src.span_is_contiguous()) {
+        std::fprintf(stderr, "host_exec_copy: non-contiguous or mismatched views at %s:%u\n", loc.file_name(), loc.line());
+        std::abort();
+    }
+    host_exec_check(dst.data(), loc);
+    host_exec_check(src.data(), loc);
+    if (dst.span() > 0 && (const void*)dst.data() != (const void*)src.data())
+        std::memcpy((void*)dst.data(), (const void*)src.data(), dst.span() * sizeof(typename D::value_type));
+}
+
 template <class D, class S>
 inline std::enable_if_t<Kokkos::is_view<D>::value && Kokkos::is_view<S>::value> dcopy(
         const D& dst, const S& src, const std::source_location loc = std::source_location::current()) {
+    if (host_exec()) { host_exec_copy(dst, src, loc); return; }
     if (!lean_sync()) { Kokkos::deep_copy(dst, src); return; }
     Kokkos::DefaultExecutionSpace ex;
     Kokkos::deep_copy(ex, dst, src);
@@ -52,6 +69,11 @@ inline std::enable_if_t<Kokkos::is_view<D>::value && Kokkos::is_view<S>::value> 
 template <class T, class S>
 inline std::enable_if_t<!Kokkos::is_view<T>::value && Kokkos::is_view<S>::value> dcopy(
         T& dst, const S& src, const std::source_location loc = std::source_location::current()) {
+    if (host_exec()) {
+        host_exec_check(src.data(), loc);
+        std::memcpy(&dst, src.data(), sizeof(T));
+        return;
+    }
     if (!lean_sync()) { Kokkos::deep_copy(dst, src); return; }
     Kokkos::DefaultExecutionSpace ex;
     Kokkos::deep_copy(ex, dst, src);
@@ -60,6 +82,12 @@ inline std::enable_if_t<!Kokkos::is_view<T>::value && Kokkos::is_view<S>::value>
 
 template <class D, class T>
 inline std::enable_if_t<Kokkos::is_view<D>::value && !Kokkos::is_view<T>::value> dcopy(const D& dst, const T& val) {
+    if (host_exec()) {
+        static_assert(D::rank == 1);
+        host_exec_check(dst.data(), std::source_location::current());
+        for (size_t i = 0; i < dst.extent(0); i++) dst.data()[i] = val;
+        return;
+    }
     if (!lean_sync() || Kokkos::SpaceAccessibility<Kokkos::HostSpace, typename D::memory_space>::accessible) {
         Kokkos::deep_copy(dst, val);
         return;
@@ -85,6 +113,6 @@ inline HostCopy<typename V::non_const_value_type> host_copy(const V& d,
     h.buf = std::make_shared<std::vector<T>>(d.extent(0));
     h.v = Kokkos::View<T*, Kokkos::HostSpace, Kokkos::MemoryUnmanaged>(h.buf->data(), d.extent(0));
     dcopy(h.v, d, loc);
-    if (!lean_sync()) Kokkos::fence("host_copy: stands in for the mirror deallocation fence");
+    if (!lean_sync() && !host_exec()) Kokkos::fence("host_copy: stands in for the mirror deallocation fence");
     return h;
 }

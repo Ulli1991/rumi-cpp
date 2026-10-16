@@ -137,6 +137,18 @@ struct SubsystemManager {
     // Allocate GPU buffers for neighbor pair output
     void allocate_ngb_buffers(int max_pairs);
 
+    // Host subtrees (host_exec.h): use_host_buffers(true) swaps the device buffers above (neighbour pairs, cm_buf_,
+    // flag_buf_) with host twins until use_host_buffers(false); allocations meanwhile take host memory
+    struct Buffers {
+        Kokkos::View<int*> ngb_i, ngb_j, ngb_bound, ngb_count, cm_buf, flag_buf;
+        Kokkos::View<double*> ngb_a, ngb_e, ngb_E;
+        Kokkos::View<int*>::host_mirror_type cm_buf_host;
+        int max_ngb_pairs = 0;
+    };
+    Buffers parked_;           // the set not in use
+    bool host_buffers_ = false;
+    void use_host_buffers(bool on);
+
     // Reset the GPU neighbor pair counter to zero (call before force kernels)
     void reset_ngb_count();
 

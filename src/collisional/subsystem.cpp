@@ -1,6 +1,7 @@
 #include "small_for.h"
 #include "lean_sync.h"
 #include "device_staging.h"
+#include "host_exec.h"
 #include <climits>
 #include "subsystem.h"
 #include "collisional_config.h"
@@ -68,6 +69,16 @@ void SubsystemManager::check_pid_to_idx(const Particles& p) const {
     auto h_pid = host_copy(p.particle_id);
     std::vector<int> full(pid_to_idx_.size(), -1);
     for (int i = 0; i < p.N; i++) if (h_pid(i) >= 0 && h_pid(i) < (int)full.size()) full[h_pid(i)] = i;
+    // A host subtree (host_exec.h) maps only its set's ids to host slots; every other id keeps its device slot
+    if (host_exec()) {
+        for (int i = 0; i < p.N; i++)
+            if (pid_to_idx_[h_pid(i)] != i) {
+                std::fprintf(stderr, "PIDMAP MISMATCH (host subtree) pid=%d map=%d actual=%d\n", h_pid(i),
+                             pid_to_idx_[h_pid(i)], i);
+                std::abort();
+            }
+        return;
+    }
     for (size_t k = 0; k < full.size(); k++)
         if (full[k] != pid_to_idx_[k]) {
             std::fprintf(stderr, "PIDMAP MISMATCH pid=%zu map=%d actual=%d\n", k, pid_to_idx_[k], full[k]);
@@ -135,11 +146,11 @@ struct MemberData {
         st.reserve(n, NF);
         std::copy(idx.begin(), idx.end(), st.h_idx.data());
         st.upload_idx(n);
-        auto d_idx = st.d_idx;
-        auto d_buf = st.d_buf;
-        auto px = p.x, py = p.y, pz = p.z, pvx = p.vx, pvy = p.vy, pvz = p.vz;
-        auto pax = p.ax, pay = p.ay, paz = p.az, pm = p.mass, pdt = p.dt_adapt;
-        auto ppid = p.particle_id;
+        auto d_idx = raw(st.d_idx);
+        auto d_buf = raw(st.d_buf);
+        auto px = raw(p.x), py = raw(p.y), pz = raw(p.z), pvx = raw(p.vx), pvy = raw(p.vy), pvz = raw(p.vz);
+        auto pax = raw(p.ax), pay = raw(p.ay), paz = raw(p.az), pm = raw(p.mass), pdt = raw(p.dt_adapt);
+        auto ppid = raw(p.particle_id);
         small_for("member_gather", n, KOKKOS_LAMBDA(int k) {
             int i = d_idx(k);
             double* b = &d_buf(k * NF);
@@ -162,9 +173,9 @@ struct MemberData {
         for (int k = 0; k < n; k++) { st.h_idx(k) = idx[k]; st.h_buf(k) = f[DT][k]; }
         st.upload_idx(n);
         st.upload_buf(n);
-        auto d_idx = st.d_idx;
-        auto d_dt = st.d_buf;
-        auto pdt = p.dt_adapt;
+        auto d_idx = raw(st.d_idx);
+        auto d_dt = raw(st.d_buf);
+        auto pdt = raw(p.dt_adapt);
         small_for("member_scatter_dt", n, KOKKOS_LAMBDA(int k) { pdt(d_idx(k)) = d_dt(k); });
     }
 };
@@ -174,16 +185,45 @@ struct MemberData {
 // GPU buffer allocation
 // ============================================================================
 
+namespace {
+// Device buffer, or host memory inside a host subtree (zero-filled, like a View allocation)
+std::vector<std::shared_ptr<void>> g_host_buf_mem;
+template <class T>
+Kokkos::View<T*> alloc_buf(const char* label, size_t n) {
+    if (host_exec()) return host_view<Kokkos::View<T*>>(g_host_buf_mem, n);
+    return Kokkos::View<T*>(label, n);
+}
+}  // namespace
+
 void SubsystemManager::allocate_ngb_buffers(int max_pairs) {
     if (max_pairs <= max_ngb_pairs) return;
     max_ngb_pairs = max_pairs;
-    ngb_pair_i     = Kokkos::View<int*>("ngb_i", max_pairs);
-    ngb_pair_j     = Kokkos::View<int*>("ngb_j", max_pairs);
-    ngb_pair_a     = Kokkos::View<double*>("ngb_a", max_pairs);
-    ngb_pair_e     = Kokkos::View<double*>("ngb_e", max_pairs);
-    ngb_pair_E     = Kokkos::View<double*>("ngb_E", max_pairs);
-    ngb_pair_bound = Kokkos::View<int*>("ngb_bound", max_pairs);
-    ngb_count      = Kokkos::View<int*>("ngb_count", 1);
+    ngb_pair_i     = alloc_buf<int>("ngb_i", max_pairs);
+    ngb_pair_j     = alloc_buf<int>("ngb_j", max_pairs);
+    ngb_pair_a     = alloc_buf<double>("ngb_a", max_pairs);
+    ngb_pair_e     = alloc_buf<double>("ngb_e", max_pairs);
+    ngb_pair_E     = alloc_buf<double>("ngb_E", max_pairs);
+    ngb_pair_bound = alloc_buf<int>("ngb_bound", max_pairs);
+    ngb_count      = alloc_buf<int>("ngb_count", 1);
+}
+
+void SubsystemManager::use_host_buffers(bool on) {
+    if (on == host_buffers_) return;
+    Buffers cur{ngb_pair_i, ngb_pair_j, ngb_pair_bound, ngb_count, cm_buf_, flag_buf_, ngb_pair_a, ngb_pair_e,
+                ngb_pair_E, cm_buf_host_, max_ngb_pairs};
+    const Buffers& b = parked_;
+    ngb_pair_i = b.ngb_i; ngb_pair_j = b.ngb_j; ngb_pair_bound = b.ngb_bound; ngb_count = b.ngb_count;
+    cm_buf_ = b.cm_buf; flag_buf_ = b.flag_buf; ngb_pair_a = b.ngb_a; ngb_pair_e = b.ngb_e; ngb_pair_E = b.ngb_E;
+    cm_buf_host_ = b.cm_buf_host; max_ngb_pairs = b.max_ngb_pairs;
+    parked_ = cur;
+    host_buffers_ = on;
+    // the host set starts as large as the device set
+    if (on && max_ngb_pairs < parked_.max_ngb_pairs) {
+        HostExecScope hs;
+        const int n = parked_.max_ngb_pairs;
+        max_ngb_pairs = 0;
+        allocate_ngb_buffers(n);
+    }
 }
 
 void SubsystemManager::reset_ngb_count() {
@@ -291,9 +331,9 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
     DeviceStaging& st = DeviceStaging::get<3>();
     st.reserve(1, PF * n_pairs);
     {
-        auto d_buf = st.d_buf;
-        auto pi = ngb_pair_i, pj = ngb_pair_j, pb = ngb_pair_bound;
-        auto pa = ngb_pair_a, pe = ngb_pair_e, pE = ngb_pair_E;
+        auto d_buf = raw(st.d_buf);
+        auto pi = raw(ngb_pair_i), pj = raw(ngb_pair_j), pb = raw(ngb_pair_bound);
+        auto pa = raw(ngb_pair_a), pe = raw(ngb_pair_e), pE = raw(ngb_pair_E);
         small_for("ngb_pair_pack", n_pairs, KOKKOS_LAMBDA(int k) {
             d_buf(k * PF + 0) = (double)pi(k); d_buf(k * PF + 1) = (double)pj(k);
             d_buf(k * PF + 2) = pa(k); d_buf(k * PF + 3) = pe(k); d_buf(k * PF + 4) = pE(k);
@@ -924,9 +964,9 @@ void SubsystemManager::update_particle_flags(Particles& p) {
     // subsystem_id exists only in collisional mode; the HHS recursion calls this unconditionally
     if (!p.collisional) return;
     // Reset all to -1 on the device, then scatter only the members (no O(N) host loop or upload)
-    auto sid = p.subsystem_id;
+    auto sid = raw(p.subsystem_id);
     int N = p.N;
-    Kokkos::parallel_for("reset_sid", N, KOKKOS_LAMBDA(int i) { sid(i) = -1; });
+    xfor("reset_sid", N, KOKKOS_LAMBDA(int i) { sid(i) = -1; });
 
     if (active.empty()) return;
     rebuild_pid_to_idx(p);   // incremental: partitions may have moved particles since the last build
@@ -942,11 +982,11 @@ void SubsystemManager::update_particle_flags(Particles& p) {
     }
     const int n = (int)idx_sid.size() / 2;
     if (n == 0) return;
-    if ((int)flag_buf_.extent(0) < 2 * n) flag_buf_ = Kokkos::View<int*>("sid_scatter", 4 * n);
+    if ((int)flag_buf_.extent(0) < 2 * n) flag_buf_ = alloc_buf<int>("sid_scatter", 4 * n);
     Kokkos::View<int*, Kokkos::HostSpace, Kokkos::MemoryUnmanaged> h_buf(idx_sid.data(), idx_sid.size());
     dcopy(Kokkos::subview(flag_buf_, Kokkos::pair<int,int>(0, 2 * n)),
                       Kokkos::subview(h_buf, Kokkos::pair<int,int>(0, 2 * n)));
-    auto buf = flag_buf_;
+    auto buf = raw(flag_buf_);
     small_for("scatter_sid", n, KOKKOS_LAMBDA(int k) { sid(buf(2 * k)) = buf(2 * k + 1); });
 }
 
@@ -971,14 +1011,15 @@ void SubsystemManager::remap_indices(const Particles& p) {
 // in the FSI at all. Only [lo, hi) is copied (the kernels' sinks and sources); the member slots are listed on the
 // host (one upload into a persistent buffer) and each subsystem sums its members in particle_ids order on the
 // device, so neither the member state nor an O(N) array crosses to the host.
-void SubsystemManager::fill_cm_velocity(const Particles& p, int lo, int hi, Kokkos::View<double*> cvx,
-                                         Kokkos::View<double*> cvy, Kokkos::View<double*> cvz,
-                                         Kokkos::View<double*> ck, Kokkos::View<double*> cf, double tol,
+void SubsystemManager::fill_cm_velocity(const Particles& p, int lo, int hi, Kokkos::View<double*> cvx_,
+                                         Kokkos::View<double*> cvy_, Kokkos::View<double*> cvz_,
+                                         Kokkos::View<double*> ck_, Kokkos::View<double*> cf_, double tol,
                                          double res, bool cm) {
-    auto vx = p.vx, vy = p.vy, vz = p.vz;
+    auto vx = raw(p.vx), vy = raw(p.vy), vz = raw(p.vz);
+    auto cvx = raw(cvx_), cvy = raw(cvy_), cvz = raw(cvz_), ck = raw(ck_), cf = raw(cf_);
     if (!cm && tol <= 0.0) return;
     if (hi > lo)
-        Kokkos::parallel_for("cm_vel_copy", Kokkos::RangePolicy<>(lo, hi), KOKKOS_LAMBDA(int i) {
+        xfor("cm_vel_copy", lo, hi, KOKKOS_LAMBDA(int i) {
             if (cm) { cvx(i) = vx(i); cvy(i) = vy(i); cvz(i) = vz(i); }
             if (tol > 0.0) { ck(i) = 1e30; cf(i) = 0.0; }
         });
@@ -1004,19 +1045,19 @@ void SubsystemManager::fill_cm_velocity(const Particles& p, int lo, int hi, Kokk
     if (n_sub == 0) return;
     const int n = (int)h.size();
     if ((int)cm_buf_.extent(0) < n) {
-        cm_buf_ = Kokkos::View<int*>("cm_members", 2 * n);
-        cm_buf_host_ = Kokkos::create_mirror_view(cm_buf_);
+        cm_buf_ = alloc_buf<int>("cm_members", 2 * n);
+        cm_buf_host_ = host_exec() ? decltype(cm_buf_host_)(cm_buf_.data(), 2 * n) : Kokkos::create_mirror_view(cm_buf_);
     }
     std::copy(h.begin(), h.end(), cm_buf_host_.data());
     dcopy(Kokkos::subview(cm_buf_, Kokkos::pair<int,int>(0, n)),
                       Kokkos::subview(cm_buf_host_, Kokkos::pair<int,int>(0, n)));
-    auto buf = cm_buf_;
-    auto pm = p.mass;
-    auto px_ = p.x, py_ = p.y, pz_ = p.z;
+    auto buf = raw(cm_buf_);
+    auto pm = raw(p.mass);
+    auto px_ = raw(p.x), py_ = raw(p.y), pz_ = raw(p.z);
     const double G = G_CODE;
     // FLYBY_CM_KICK: flagged binaries interact through their c.o.m., their kicks sample no orbit (no tidal step)
-    auto psid = p.subsystem_id;
-    auto ctab = cmk_tab_;
+    auto psid = raw(p.subsystem_id);
+    auto ctab = raw(cmk_tab_);
     const int cntab = cmk_nb_ > 0 ? cmk_ntab_ : 0;
     small_for("cm_vel_members", n_sub, KOKKOS_LAMBDA(int k) {
         const int a = base + buf(k), e = base + buf(k + 1);

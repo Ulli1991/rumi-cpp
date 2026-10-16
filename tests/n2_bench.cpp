@@ -6,6 +6,7 @@
 // env: N2_KERNELS  comma list of force,force0,grad,dt,dt64,accdt (default force,grad,dt,accdt), and the experimental
 //                  force variants that change results (not used by the code; timed and compared with force):
 //                  force_nn  ForceK without the RSQRT_NEWTON step (CUDA double rsqrt only, ~1 ulp)
+//                  dt_mix    DtMixK<false> (n2_kernels.h; after dt_nj, the production DtK variant; errors against it)
 //                  force_mix mixed precision as Sapporo (Gaburov et al. 2009): positions as fp32 hi + lo pairs, the
 //                            difference in double-single, everything else fp32 (rsqrt.approx), fp32 sums over 32
 //                            sources folded into the fp64 tile sums (needs nj and source offsets multiple of 32)
@@ -415,6 +416,29 @@ int main(int argc, char** argv) {
                 DtK<true, false, false, true> k{X, Y, Z, M, VX, VY, VZ, AX, AY, AZ, DT, VX, VY, VZ, KT, KF, sid.data(),
                                                 G, 0.0, eta, eta, 0.0};
                 bench("dt", [&] { run_n2("bench_dt", 0, c.ni, 0, c.nj, k); }, {dt, ax, ay, az});
+            }
+            if (want("dt_mix")) {   // reference: the production DtK variant (no jerk, unsoftened), then the mixed one
+                DtK<true, false, false, true> k0{X, Y, Z, M, VX, VY, VZ, AX, AY, AZ, DT, VX, VY, VZ, KT, KF, sid.data(),
+                                                 G, 0.0, eta, eta, 0.0};
+                auto k = k0.template with<false, false>();
+                bench("dt_nj", [&] { run_n2("bench_dt_nj", 0, c.ni, 0, c.nj, k); }, {dt, ax, ay, az});
+                std::vector<double> rd = host(dt, c.ni), rx = host(ax, c.ni), ry = host(ay, c.ni), rz = host(az, c.ni);
+                DtMixK<false> km{X, Y, Z, M, VX, VY, VZ, AX, AY, AZ, DT, KT, KF, sid.data(), (float)G, (float)eta, (float)eta};
+                bench("dt_mix", [&] { run_n2("bench_dt_mix", 0, c.ni, 0, c.nj, km); }, {dt, ax, ay, az});
+                std::vector<double> hd = host(dt, c.ni), hx = host(ax, c.ni), hy = host(ay, c.ni), hz = host(az, c.ni);
+                std::vector<double> ed(c.ni), ea(c.ni);
+                int lev = 0, bad = 0;
+                for (int i = 0; i < c.ni; i++) {
+                    if (!(hd[i] > 0) || !std::isfinite(hd[i])) bad++;
+                    ed[i] = std::fabs(hd[i] - rd[i]) / rd[i];
+                    lev += (int)std::floor(std::log2(1e-3 / 0.9778 / rd[i])) != (int)std::floor(std::log2(1e-3 / 0.9778 / hd[i]));
+                    ea[i] = std::sqrt(std::pow(hx[i] - rx[i], 2) + std::pow(hy[i] - ry[i], 2) + std::pow(hz[i] - rz[i], 2)) /
+                            std::sqrt(rx[i] * rx[i] + ry[i] * ry[i] + rz[i] * rz[i]);
+                }
+                for (auto* e : {&ed, &ea}) std::sort(e->begin(), e->end());
+                std::printf("       dt_mix    rel. dt error median %.2e max %.2e; level changed %d of %d; bad %d\n",
+                            ed[c.ni / 2], ed.back(), lev, c.ni, bad);
+                std::printf("       dt_mix    rel. acc error median %.2e max %.2e\n", ea[c.ni / 2], ea.back());
             }
             if (want("dtcm")) {   // FLYBY_CM_VELOCITY: pair steps with the subsystem c.o.m. velocities
                 DtK<true, false, true, true> k{X, Y, Z, M, VX, VY, VZ, AX, AY, AZ, DT, CX, CY, CZ, KT, KF, sid.data(),

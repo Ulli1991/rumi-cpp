@@ -1,5 +1,6 @@
 #include "forces.h"
 #include "lean_sync.h"
+#include "host_exec.h"
 #include "constants.h"
 #include "integrator.h"
 #include "n2_kernels.h"
@@ -73,13 +74,13 @@ PairVelocities pair_velocities(Particles& p, int lo, int hi) {
     // Msun BH binary at 55 AU and a passing star, |dE/E| 1.2e-8 over four steps)
     const double tol = g_collisional.flyby_cm_eps * g_collisional.e_ref;
     if (p.collisional && (flyby_cm_velocity || tol > 0.0)) {
-        static Kokkos::View<double*> cx("cm_vx", 0), cy("cm_vy", 0), cz("cm_vz", 0), ck("cm_k", 0), cf("cm_kf", 0);
-        static bool hook = (Kokkos::push_finalize_hook([] { cx = cy = cz = ck = cf = Kokkos::View<double*>(); }), true);
+        // device buffers, host twins in a host subtree (host_exec.h)
+        static DualBuf<double> bx("cm_vx"), by("cm_vy"), bz("cm_vz"), bk("cm_k"), bf("cm_kf");
+        static bool hook = (Kokkos::push_finalize_hook([] { for (auto* b : {&bx, &by, &bz, &bk, &bf}) b->release(); }), true);
         (void)hook;
-        if ((int)ck.extent(0) < p.N) {
-            if (flyby_cm_velocity) { Kokkos::realloc(cx, p.N); Kokkos::realloc(cy, p.N); Kokkos::realloc(cz, p.N); }
-            Kokkos::realloc(ck, p.N); Kokkos::realloc(cf, p.N);
-        }
+        Kokkos::View<double*> cx, cy, cz;
+        if (flyby_cm_velocity) { cx = bx.get(p.N); cy = by.get(p.N); cz = bz.get(p.N); }
+        Kokkos::View<double*> ck = bk.get(p.N), cf = bf.get(p.N);
         g_subsystem_mgr.fill_cm_velocity(p, std::max(lo, 0), std::min(hi, p.N), cx, cy, cz, ck, cf, tol,
                                          g_collisional.tidal_step_res, flyby_cm_velocity);
         double* k = tol > 0.0 ? ck.data() : nullptr;
@@ -109,7 +110,7 @@ using HostExec = Kokkos::DefaultHostExecutionSpace;
 enum class TreeMode { None, Device, Host };
 
 TreeMode tree_mode(int nj, int min_n = tree_dt_min_n) {
-    if (nj < 2) return TreeMode::None;
+    if (nj < 2 || host_exec()) return TreeMode::None;
     if constexpr (kHostAccessibleDevice) {
         if (tree_dt_cpu_max > 0 && nj <= tree_dt_cpu_max) return TreeMode::Host;
     }
@@ -313,7 +314,7 @@ static GradSnapshot snapshot_acc(Particles& p, int start, int count, Kokkos::Vie
                                  Kokkos::View<double*> sy, Kokkos::View<double*> sz) {
     RawView ax{p.ax.data()}, ay{p.ay.data()}, az{p.az.data()};
     RawView ox{sx.data()}, oy{sy.data()}, oz{sz.data()};
-    Kokkos::parallel_for("snap_acc", count, KOKKOS_LAMBDA(int ii) {
+    xfor("snap_acc", count, KOKKOS_LAMBDA(int ii) {
         ox(ii) = ax(start + ii); oy(ii) = ay(start + ii); oz(ii) = az(start + ii);
     });
     return {sx.data(), sy.data(), sz.data(), start};
@@ -342,9 +343,16 @@ static void dt_range(Particles& p, int i0, int ni, int j0, int nj, double G, dou
     PairVel cv = pair_vel(p, COLL, range_lo(i0, ni, j0, nj), range_hi(i0, ni, j0, nj));
     // O(N^2) time-step kernel; with component fly-by velocities (cv = v) without the second staged velocity copy
     // F32: with the single-precision pre-rejects (pair_dt_reject_f32, device code)
+    // DtMixK (mixed precision) for the production variant: collisional, component velocities, no jerk, unsoftened
+    const bool mix = COLL && e.jerk <= 0.0 && soft2 == 0.0;
     auto run_dtk_f = [&](const char* name, auto f32_tag) {
         constexpr bool F32 = decltype(f32_tag)::value;
-        if (!COLL || cv.x.ptr == p.vx.data()) {
+        if (mix && cv.x.ptr == p.vx.data()) {
+            DtMixK<false> k{{p.x.data()}, {p.y.data()}, {p.z.data()}, {p.mass.data()}, {p.vx.data()}, {p.vy.data()},
+                    {p.vz.data()}, {p.ax.data()}, {p.ay.data()}, {p.az.data()}, {p.dt_adapt.data()}, cv.k, cv.kf,
+                    sid_ptr(p, COLL), (float)G, (float)e.ff, (float)e.fb};
+            run_n2(name, i0, ni, j0, nj, k);
+        } else if (!COLL || cv.x.ptr == p.vx.data()) {
             DtK<COLL, false, false, F32> k{{p.x.data()}, {p.y.data()}, {p.z.data()}, {p.mass.data()}, {p.vx.data()}, {p.vy.data()},
                     {p.vz.data()}, {p.ax.data()}, {p.ay.data()}, {p.az.data()}, {p.dt_adapt.data()},
                     cv.x, cv.y, cv.z, cv.k, cv.kf, sid_ptr(p, COLL), G, soft2, e.ff, e.fb, COLL ? e.jerk : 0.0};
@@ -379,7 +387,12 @@ static void dt_range(Particles& p, int i0, int ni, int j0, int nj, double G, dou
         // minimum over the pair steps from the tree into dt_adapt; collisional mode then accumulates the partner-free
         // acceleration and jerk over all sources (O(N^2), identical sums) and applies the jerk criterion as DtK does
         tree_min_dt(mode, p, i0, ni, j0, nj, cv, sid_ptr(p, COLL), G, soft2, e.ff, e.fb);
-        if (COLL) {   // sums only: the pair-step velocities are not read (CV = false)
+        if (COLL && mix) {
+            DtMixK<true> ks{{p.x.data()}, {p.y.data()}, {p.z.data()}, {p.mass.data()}, {p.vx.data()}, {p.vy.data()},
+                    {p.vz.data()}, {p.ax.data()}, {p.ay.data()}, {p.az.data()}, {p.dt_adapt.data()}, cv.k, cv.kf,
+                    sid_ptr(p, COLL), (float)G, (float)e.ff, (float)e.fb};
+            run_n2("dt_sums", i0, ni, j0, nj, ks);
+        } else if (COLL) {   // sums only: the pair-step velocities are not read (CV = false)
             DtK<COLL, true, false> ks{{p.x.data()}, {p.y.data()}, {p.z.data()}, {p.mass.data()}, {p.vx.data()}, {p.vy.data()},
                                {p.vz.data()}, {p.ax.data()}, {p.ay.data()}, {p.az.data()}, {p.dt_adapt.data()},
                                cv.x, cv.y, cv.z, cv.k, cv.kf, sid_ptr(p, COLL), G, soft2, e.ff, e.fb, COLL ? e.jerk : 0.0};

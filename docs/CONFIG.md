@@ -164,7 +164,7 @@ Levels:
 | key | type | default | level | values | description |
 |---|---|---|---|---|---|
 | `SERIAL_N2_GPU` | int | `16384` | internal |  | Below this count: full N^2 on every rank, no MPI distribution (0: always distributed) |
-| `SERIAL_N2_CPU` | int | `0` | internal |  | Below this count: N^2 in host loops instead of device kernels (0: off; MI300A 200k: 0 is fastest) |
+| `HOST_SUBTREE_MAX` | int | `64` | internal |  | Sets of at most this many particles run their whole HHS sub-recursion on the host (one copy in and out; 0: off; run B 630 -> 240 s/step, 2026-10-16) |
 | `REPLICA_CHECK_INTERVAL` | int | `10` | internal |  | Distributed runs: check every this many steps that the replicas agree (0: off) |
 | `MPI_NON_BLOCKING` | bool | `false` | internal |  | MPI_Iallgatherv for overlapped transfers |
 | `MPI_TRANSPORT` | string | `auto` | internal | auto\|nccl\|host | Allgathers: nccl (USE_NCCL builds; auto there), host (staged through pinned host memory; auto otherwise) |
@@ -229,6 +229,7 @@ Levels:
 |---|---|
 | `NBODY_CHECK_CC` | Check that the connected-component split sees the pair steps of the time-step kernel |
 | `NBODY_CHECK_DT_FP32` | =1: check the fp32 time-step kernels against fp64 |
+| `NBODY_CHECK_HOSTSUB` | =1: abort on a device pointer met inside a host subtree (HOST_SUBTREE_MAX) |
 | `NBODY_CHECK_EIH` | Check that the pair EIH evaluation equals the two single-body calls bit for bit |
 | `NBODY_CHECK_PIDMAP` | Check every incremental pid-map update against a full rebuild |
 | `NBODY_CHECK_STELLAR_CACHE` | Check every cached stellar type and radius against the device values |

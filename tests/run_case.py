@@ -424,12 +424,12 @@ def cc_vs_plain(exe, label, cfg, ratio):
 
 
 def paths_agree(exe, label, cfg, bound):
-    """The CPU small-set path (SERIAL_N2_CPU covers the whole run) against the device path on the same run: the
+    """The host-subtree path (HOST_SUBTREE_MAX covers the whole run) against the device path on the same run: the
     same LogH calls and GBS steps per step, |dE/E| per step equal to `bound` (relative)."""
     def stats(out):
         return [(int(a), int(b)) for a, b in re.findall(r"Integration: LogH=(\d+) \(gbs=(\d+)", out)]
-    dev_out = run_output(exe, dict(cfg, SERIAL_N2_CPU="0"))
-    cpu_out = run_output(exe, dict(cfg, SERIAL_N2_CPU="1000000"))
+    dev_out = run_output(exe, dict(cfg, HOST_SUBTREE_MAX="0"))
+    cpu_out = run_output(exe, dict(cfg, HOST_SUBTREE_MAX="1000000"))
     dev, cpu = diagnostics(dev_out), diagnostics(cpu_out)
     print(f"   LogH calls, GBS steps per step: device {stats(dev_out)}, cpu {stats(cpu_out)}")
     print(f"   |dE/E| device {[f'{r[0]:.6e}' for r in dev]}, cpu {[f'{r[0]:.6e}' for r in cpu]}")
@@ -457,14 +457,33 @@ def force_err(exe, label, cfg, ratio):
     return ok
 
 
+def host_subtree(exe, label, cfg, de_ratio, hs_max=64):
+    """HOST_SUBTREE_MAX = hs_max: sets of up to hs_max particles run their whole sub-recursion on a host copy, with the device
+    code. Host builds do the same arithmetic either way: bit-identical diagnostics and particles. GPU builds (host
+    vs device rounding): max |dE/E| within de_ratio of the device run. NBODY_CHECK_HOSTSUB aborts on a device pointer
+    met in a host subtree."""
+    out0, dump0 = run_output(exe, {**cfg, "HOST_SUBTREE_MAX": "0"}, dump=True)
+    out1, dump1 = run_output(exe, {**cfg, "HOST_SUBTREE_MAX": str(hs_max)}, env={"NBODY_CHECK_HOSTSUB": "1"}, dump=True)
+    m = re.search(r"HOST_SUBTREE: (\d+) calls", out1)
+    ok = check(f"{label}: host subtree calls", float(m.group(1)) if m else 0.0, 1, lower=True)
+    if "KOKKOS_ENABLE_CUDA: yes" in out0 or "KOKKOS_ENABLE_HIP: yes" in out0:
+        de0 = max(r[0] for r in diagnostics(out0))
+        de1 = max(r[0] for r in diagnostics(out1))
+        print(f"   max|dE/E| device {de0:.3e}, host subtrees {de1:.3e}")
+        return ok & check(f"{label}: max|dE/E| host subtrees / device", de1 / de0, de_ratio)
+    ok &= check(f"{label}: diagnostics differ (0 = identical)", float(diagnostics(out0) != diagnostics(out1)), 0)
+    ok &= check(f"{label}: particles differ (0 = identical)", float(dump0 != dump1), 0)
+    return ok
+
+
 def paths_same_steps(exe, label, cfg, min_logh, gbs_rel=0.0):
     """The CPU small-set path against the device path: the same LogH calls per step, GBS steps per step equal to
     within `gbs_rel` (relative; the two paths sum forces in other orders, and the GBS step count of a LogH call can
     flip at round-off), and at least `min_logh` LogH calls in all."""
     def stats(out):
         return [(int(a), int(b)) for a, b in re.findall(r"Integration: LogH=(\d+) \(gbs=(\d+)", out)]
-    dev = stats(run_output(exe, dict(cfg, SERIAL_N2_CPU="0")))
-    cpu = stats(run_output(exe, dict(cfg, SERIAL_N2_CPU="1000000")))
+    dev = stats(run_output(exe, dict(cfg, HOST_SUBTREE_MAX="0")))
+    cpu = stats(run_output(exe, dict(cfg, HOST_SUBTREE_MAX="1000000")))
     print(f"   LogH calls, GBS steps per step: device {dev}, cpu {cpu}")
     ok = check(f"{label} steps with other LogH calls (device vs cpu)",
                sum(a[0] != b[0] for a, b in zip(dev, cpu)) + abs(len(dev) - len(cpu)), 0)
@@ -1343,7 +1362,7 @@ CASES = {
     "frost4_e099": lambda exe: endpoint(exe, "e=0.99", dict(FROST4, BINARY_E="0.99"), "0.008", 1.9e-11, 1e-10),
     # Through the CPU small-subset path, which kept the pre-fix FROST Eq. 49 (no eta): 1.5e-6 before, 9.1e-13
     # after (1.33e-12 with the split)
-    "frost4_e09_cpu": lambda exe: endpoint(exe, "e=0.9 cpu path", dict(FROST4, BINARY_E="0.9", SERIAL_N2_CPU="8"),
+    "frost4_e09_cpu": lambda exe: endpoint(exe, "e=0.9 cpu path", dict(FROST4, BINARY_E="0.9", HOST_SUBTREE_MAX="8"),
                                            "0.008", 1.8e-12, 1e-10),
     # Round-off floor with compensated kicks and integer positions (domain 1e-3 pc), eta = 0.004; 1.3x
     # measured. Binary e = 0: 1.8e-15 end, 6.1e-15 max, L 3e-15 on clang/arm64; 1.07e-14, 1.15e-14, L 5.6e-15
@@ -1361,18 +1380,6 @@ CASES = {
     "floor_planets": lambda exe: floor(exe, "floor planets", dict(PLANETS, ETA="0.004", ETA_FF="0.004", ETA_FB="0.004",
                                         INTEGER_POSITIONS="true", DOMAIN_HALFSIZE_PC="1e-3"),
                                        (1.25e-13, 1.5e-13, 1.0e-17, 3.3e-15)),
-    # Same floors through the CPU small-subset path (SERIAL_N2_CPU covers every set), 1.3x measured. Plain
-    # kicks there before: binary 1.9e-13 end, 3.5e-13 max, L 1.8e-13; planets 2.6e-13, P 2.1e-15, L 2.9e-14.
-    # Planets measured 2.3e-14 end, 9.5e-14 max, P 5.3e-18, L 2.7e-15 (CPU path on FROST Eq. 49 with eta);
-    # with the split 9.4e-14 end, 1.1e-13 max, L 1.9e-15.
-    "floor_binary_e0_cpu": lambda exe: floor(exe, "floor e=0 cpu path", dict(FROST4, BINARY_E="0.0", ETA="0.004",
-                                              ETA_FF="0.004", ETA_FB="0.004", INTEGER_POSITIONS="true",
-                                              DOMAIN_HALFSIZE_PC="1e-3", SERIAL_N2_CPU="8"),
-                                             (1.8e-14, 1.9e-14, 1e-14, 9.3e-15)),
-    "floor_planets_cpu": lambda exe: floor(exe, "floor planets cpu path", dict(PLANETS, ETA="0.004", ETA_FF="0.004",
-                                            ETA_FB="0.004", INTEGER_POSITIONS="true", DOMAIN_HALFSIZE_PC="1e-3",
-                                            SERIAL_N2_CPU="8"),
-                                           (1.25e-13, 1.4e-13, 1.0e-17, 3.5e-15)),
     # 1000 yr is ~6 Neptune orbits: no drift check. HHS measured 1.69e-7, 4.27e-9, 2.50e-10, order 4.70 with the
     # split (2.35e-7, 8.27e-9, 4.39e-10, order 4.53 without)
     # (FROST: ~1e-13 at eta = 0.004, which order 4 from here reaches); FSI (all at the fastest occupied
@@ -1385,7 +1392,7 @@ CASES = {
     # step restarts and |dE/E| ~ 1 from an incomplete merger sink. Measured on the host build: 1.4e-10 /
     # 6.7e-13 km/s (P grows smoothly: round-off of the LogH reconstruction of ~600 km/s orbits). Bounds: the
     # restart threshold for E, P far below one lost binary member (~3 km/s).
-    "mergers_gpu_path": lambda exe: mergers(exe, "mergers gpu path", dict(MERGERS, SERIAL_N2_CPU="0"), (1e-8, 1e-11)),
+    "mergers_gpu_path": lambda exe: mergers(exe, "mergers gpu path", dict(MERGERS, HOST_SUBTREE_MAX="0"), (1e-8, 1e-11)),
     # Before: LogH wrote a 15-body group past its 8-body arrays (bus error). Measured 9.4e-6 / 2.0e-14 km/s.
     # Before: the single-rank step skipped the global PN1 kicks (ratio 0.03). Measured 1.045 (sampled once
     # per print, so the osculating periapsis carries the intra-orbit PN oscillation).
@@ -1413,7 +1420,7 @@ CASES = {
                                              dict(PN_LOGH, GBS_SEQUENCE="deuflhard", GBS_KMAX="8"), (1e-12, 1e-11)),
     # Before: merger remnants kept a progenitor's m_zams, so SSE shrank them back (56.7 M_sun lost in 46
     # mergers). Measured 1.3e-9 M_sun (winds over 5 steps).
-    "mergers_sse": lambda exe: sse_mass(exe, "mergers + SSE", dict(MERGERS, SERIAL_N2_CPU="0", SSE_ENABLED="true",
+    "mergers_sse": lambda exe: sse_mass(exe, "mergers + SSE", dict(MERGERS, HOST_SUBTREE_MAX="0", SSE_ENABLED="true",
                                                                    TOTAL_TIME_MYR="5e-9"), 1e-6),
     # Before: the neighbour buffer (max(1000, N/10) pairs) truncated silently, 250 binaries stayed field
     # particles at level ~30 and step 1 never finished. Measured: all 1250 detected, 1.1 s, 1.7e-13 (BIFROST
@@ -1704,6 +1711,11 @@ CASES = {
     # Exact tree searches (M7.4), forced at every set size, each search checked bitwise against O(N^2)
     # Tree searches on by default above the break-even set size (host builds 2048): 5000 stars use them at the top
     # levels without any TREE_* key (no tree search ran before), bit-identical to the O(N^2) run
+    # Host-resident subtrees (GPU, 2026-10-16: max |dE/E| ratio 1.000 in all three; bound 1.3x): mergers compact the host copy mid-recursion (every set of the 400 stars on the host);
+    # binaries with subsystems at every level
+    "host_subtree_mergers": lambda exe: host_subtree(exe, "host subtrees, mergers", MERGERS, 1.3, hs_max=512),
+    "host_subtree_binaries": lambda exe: host_subtree(exe, "host subtrees, 10 % binaries", BINARIES, 1.3),
+    "host_subtree_triples": lambda exe: host_subtree(exe, "host subtrees, dense core", TRIPLES, 1.3),
     "tree_default_on": lambda exe: tree_exact(exe, "tree default, 50 % binaries", BINARIES50),
     "tree_dt_binaries": lambda exe: tree_exact(exe, "tree, 10 % binaries", dict(BINARIES, TREE_DT_MIN_N="2")),
     # host-thread tree (TREE_DT_CPU_MAX; component velocities; tree_dt_binaries_cm with the c.o.m. ones)
@@ -1714,7 +1726,7 @@ CASES = {
                                                        TREE_DT_MIN_N="2")),
     "tree_dt_binaries50": lambda exe: tree_exact(exe, "tree, 50 % binaries", dict(BINARIES50, TREE_DT_MIN_N="2")),
     "tree_dt_triples": lambda exe: tree_exact(exe, "tree, dense core", dict(TRIPLES, TREE_DT_MIN_N="2")),
-    "tree_dt_mergers": lambda exe: tree_exact(exe, "tree, mergers", dict(MERGERS, SERIAL_N2_CPU="0", TREE_DT_MIN_N="2")),
+    "tree_dt_mergers": lambda exe: tree_exact(exe, "tree, mergers", dict(MERGERS, HOST_SUBTREE_MAX="0", TREE_DT_MIN_N="2")),
     # FLYBY_CM_EPS tidal-sampling step in the tree bound (dt_tree.h tidal_lower_bound): before, the O(N^2) kernel took
     # every time-step search with the tidal step on (no tree searches), now the tree must give the same bits
     "tree_dt_tidal": lambda exe: tree_exact(exe, "tree, 10 % binaries, tidal-sampling step",
@@ -1732,7 +1744,7 @@ CASES = {
     # rank of a GPU run (host backends alias the mirror, so the host build cannot fail this one).
     "spin_mpi2": lambda exe: spins(exe, "IMBH spin, 2 ranks", SPIN_IMBH, 0.9),
     # Mergers mid-recursion on 2 ranks: compaction must leave the replicas identical (MPI slices resynced)
-    "mergers_mpi2": lambda exe: replicas(exe, "mergers, 2 ranks", dict(MERGERS, SERIAL_N2_CPU="0",
+    "mergers_mpi2": lambda exe: replicas(exe, "mergers, 2 ranks", dict(MERGERS, HOST_SUBTREE_MAX="0",
                                                                          REPLICA_CHECK_INTERVAL="1")),
     # CPU path with restarts off: a merger in a nested CPU call used to drop the enclosing level's subsystem
     # flags on the host (internal forces counted twice), |dE/E| 2e-5 per step, hidden by restarts. Measured
@@ -1747,13 +1759,13 @@ CASES = {
     "rankcount_triples": lambda exe: rank_count_identical(exe, "dense core, split sets",
                                                          dict(TRIPLES, SERIAL_N2_GPU="256")),
     "rankcount_mergers": lambda exe: rank_count_identical(exe, "mergers, split sets",
-                                                         dict(MERGERS, SERIAL_N2_CPU="0", SERIAL_N2_GPU="64")),
+                                                         dict(MERGERS, HOST_SUBTREE_MAX="0", SERIAL_N2_GPU="64")),
     # Natal kicks: hashed from (pid, PLUMMER_SEED, kw), the same on every rank count
     "rankcount_natal_kicks": lambda exe: rank_count_identical(exe, "natal kicks, split sets",
                                                              dict(NATAL_MIX, SERIAL_N2_GPU="256")),
     "mpi_1v2": lambda exe: ranks_agree(exe, "1 vs 2 ranks", dict(BINARIES, TOTAL_TIME_MYR="5e-3", REPLICA_CHECK_INTERVAL="1"),
                                        1e-13),
-    "mergers_cpu_path": lambda exe: mergers(exe, "mergers cpu path", dict(MERGERS, SERIAL_N2_CPU="64", ETA_RESTART="0"),
+    "mergers_cpu_path": lambda exe: mergers(exe, "mergers cpu path", dict(MERGERS, HOST_SUBTREE_MAX="64", ETA_RESTART="0"),
                                             (1e-8, 1e-11)),
     # Restart files (HARD_PROBLEMS.md G1): 2n steps against n steps + restart + n steps, L0 rows and particle dumps
     # bit-identical. Before (bc1cbc3): no restart files, --restart is an unknown option (exit 1).
@@ -1761,15 +1773,15 @@ CASES = {
     "restart_walltime": lambda exe: restart_identical(exe, "10 % binaries, WALLTIME_LIMIT stop", BINARIES, 2,
                                                       stop="walltime"),
     "restart_triples": lambda exe: restart_identical(exe, "dense core, triples", TRIPLES, 1),
-    "restart_mergers": lambda exe: restart_identical(exe, "mergers, step restarts", dict(MERGERS, SERIAL_N2_CPU="0"), 5),
-    "restart_mergers_sse": lambda exe: restart_identical(exe, "mergers + SSE", dict(MERGERS, SERIAL_N2_CPU="0",
+    "restart_mergers": lambda exe: restart_identical(exe, "mergers, step restarts", dict(MERGERS, HOST_SUBTREE_MAX="0"), 5),
+    "restart_mergers_sse": lambda exe: restart_identical(exe, "mergers + SSE", dict(MERGERS, HOST_SUBTREE_MAX="0",
                                                                                    SSE_ENABLED="true"), 3),
     # Natal kicks before and after the restart at 30 Myr (draws hashed from pid, PLUMMER_SEED and kw)
     "restart_natal_kicks": lambda exe: restart_identical(exe, "natal kicks", NATAL_MIX, 30),
     # NGB_MASS_SCALING: <m> of the initial particles is a run constant (043190d..: recomputed from the merged-down
     # state on restart)
     "restart_ngb_mergers": lambda exe: restart_identical(exe, "mergers, mass-scaled r_ngb",
-                                                         dict(MERGERS, SERIAL_N2_CPU="0", NGB_MASS_SCALING="true"), 5),
+                                                         dict(MERGERS, HOST_SUBTREE_MAX="0", NGB_MASS_SCALING="true"), 5),
     "restart_tidal": lambda exe: restart_identical(exe, "tidal field", dict(BINARIES, TIDAL_FIELD="loghalo",
                                                                           GALAXY_VC_KMS="220", GALAXY_R_PC="100"), 2),
     "restart_pn_logh": lambda exe: restart_identical(exe, "PN LogH binary (aux. velocities)", PN_LOGH, 5),
@@ -1793,7 +1805,7 @@ CASES = {
                                                                      SNAPSHOT_INTERVAL="1")),
     # MPI (2 ranks under NBODY_TEST_LAUNCHER): rank 0 writes, every rank reads; replicas checked before the write
     "restart_mpi2": lambda exe: restart_identical(exe, "10 % binaries, 2 ranks", dict(BINARIES, REPLICA_CHECK_INTERVAL="1"), 2),
-    "restart_mpi2_mergers": lambda exe: restart_identical(exe, "mergers, 2 ranks", dict(MERGERS, SERIAL_N2_CPU="0",
+    "restart_mpi2_mergers": lambda exe: restart_identical(exe, "mergers, 2 ranks", dict(MERGERS, HOST_SUBTREE_MAX="0",
                                                           REPLICA_CHECK_INTERVAL="1"), 5),
 }
 

@@ -168,10 +168,10 @@ std::vector<MergerEvent> detect_mergers(const SubsystemManager& mgr,
     std::copy(slots.begin(), slots.end(), st.h_idx.data());
     st.upload_idx(n_rows);
     {
-        auto d_idx = st.d_idx;
-        auto d_buf = st.d_buf;
-        auto px = p.x, py = p.y, pz = p.z, pm = p.mass, psr = p.stellar_radius;
-        auto pst = p.stellar_type;
+        auto d_idx = raw(st.d_idx);
+        auto d_buf = raw(st.d_buf);
+        auto px = raw(p.x), py = raw(p.y), pz = raw(p.z), pm = raw(p.mass), psr = raw(p.stellar_radius);
+        auto pst = raw(p.stellar_type);
         small_for("merger_gather", n_rows, KOKKOS_LAMBDA(int k) {
             int i = d_idx(k);
             d_buf(k * NF + 0) = px(i); d_buf(k * NF + 1) = py(i); d_buf(k * NF + 2) = pz(i);

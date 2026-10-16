@@ -554,7 +554,7 @@ int main(int argc, char** argv) {
         g_profiler.enabled = profiling_enabled;   // PROFILING = false: no timers and no device fences
         g_profiler.fence = profiling_enabled && cfg.get_bool("PROFILING_FENCES");
         serial_n2_gpu = cfg.get_int("SERIAL_N2_GPU");
-        serial_n2_cpu = cfg.get_int("SERIAL_N2_CPU");
+        host_subtree_max = cfg.get_int("HOST_SUBTREE_MAX");
         hhs_cc = cfg.get_bool("HHS_CC");
         hhs_cc_max = cfg.get_int("HHS_CC_MAX");
         hhs_cc_min = cfg.get_int("HHS_CC_MIN");
@@ -635,9 +635,9 @@ int main(int argc, char** argv) {
             g_collisional.flyby_cm_kick_eps = cfg.get_double("FLYBY_CM_KICK_EPS");
             // The c.o.m. swap wraps the device force launchers (forces.cpp): the CPU small-set path, integer
             // positions bypass it
-            if (g_collisional.flyby_cm_kick && (serial_n2_cpu > 0 || use_integer_positions)) {
+            if (g_collisional.flyby_cm_kick && use_integer_positions) {
                 if (MPIComm::rank() == 0)
-                    std::fprintf(stderr, "ERROR: FLYBY_CM_KICK needs SERIAL_N2_CPU = 0 and INTEGER_POSITIONS = false\n");
+                    std::fprintf(stderr, "ERROR: FLYBY_CM_KICK needs INTEGER_POSITIONS = false\n");
                 Kokkos::finalize();
                 MPIComm::finalize();
                 return 1;

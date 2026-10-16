@@ -10,7 +10,7 @@
 //   struct Sink { ... };         per-sink data held in registers
 //   Sink sink(int i) const;
 //   void source(int j, double* s) const;                                   fill NSRC doubles
-//   void pair(const Sink&, int i, const double* s, int j, double* sum, double* mn) const;
+//   void pair(const Sink&, int i, const double* s, int j, double* sum, double* mn) const;   (float* sum, mn: SUM_F32)
 //   void finish(int i, const Sink&, const double* sum, const double* mn) const;
 // for sinks [i0, i0 + ni) against sources [j0, j0 + nj). pair() must leave sum and mn unchanged for an
 // excluded pair (self pair, partner in the same subsystem), preferably without branching (see pair_weight).
@@ -78,6 +78,32 @@ inline long long n2_host_max() {
     return v;
 }
 
+// Kernels with SUM_F32 = true take float sums and minima in pair(): the driver adds the sums up over 32 sources at a
+// time and folds each partial sum into the fp64 block sum (Sapporo, Gaburov et al. 2009), independent of where a source
+// range starts; minima run in fp32 over one call
+template <class K, class = void> struct sum_f32 : std::false_type {};
+template <class K> struct sum_f32<K, std::void_t<decltype(K::SUM_F32)>> : std::bool_constant<K::SUM_F32> {};
+
+// pair() of sink i with n staged sources (NSRC doubles each) whose first index is jbase
+template <class K>
+KOKKOS_INLINE_FUNCTION void n2_pairs(const K& k, const typename K::Sink& s, int i, const double* src, int jbase, int n,
+                                     double* blk, double* mn) {
+    if constexpr (sum_f32<K>::value) {
+        float mf[K::NM > 0 ? K::NM : 1];
+        for (int a = 0; a < K::NM; a++) mf[a] = (float)mn[a];
+        for (int c = 0; c < n; c += 32) {
+            float fb[K::NS > 0 ? K::NS : 1];
+            for (int a = 0; a < K::NS; a++) fb[a] = 0.0f;
+            const int e = n < c + 32 ? n : c + 32;
+            for (int jt = c; jt < e; jt++) k.pair(s, i, src + (size_t)jt * K::NSRC, jbase + jt, fb, mf);
+            for (int a = 0; a < K::NS; a++) blk[a] += (double)fb[a];
+        }
+        for (int a = 0; a < K::NM; a++) mn[a] = Kokkos::fmin(mn[a], (double)mf[a]);
+    } else {
+        for (int jt = 0; jt < n; jt++) k.pair(s, i, src + (size_t)jt * K::NSRC, jbase + jt, blk, mn);
+    }
+}
+
 namespace n2_detail {
 // One team: TS / R threads, TS / (R P) sinks, P threads per sink. Each sink's sources are taken in tiles of TS (aligned to the
 // chunk start; a tile is the Kahan block, as TS >= N2_KAHAN_BLOCK on the devices), and the P threads of a sink take
@@ -141,7 +167,7 @@ void run_tiled(const char* name, int i0, int ni, int j0, int nj, const K& k) {
                 team.team_barrier();
                 const int b0 = p * TS, n = Kokkos::min(TS, ng - b0);   // this thread's tile of the group
                 if (active && n > 0) {
-                    for (int jt = 0; jt < n; jt++) k.pair(s, i, &tile((b0 + jt) * NSRC), g0 + b0 + jt, blk, mn);
+                    n2_pairs(k, s, i, &tile(b0 * NSRC), g0 + b0, n, blk, mn);
                     if (P == 1) {   // not constexpr-if: nvcc extended lambdas cannot first-capture there
                         in_block += n;
                         if (in_block >= N2_KAHAN_BLOCK || g0 + n >= c1) {
@@ -225,7 +251,7 @@ inline TeamShape team_shape(long long teams, int TS, int nsrc, int ns_nm, bool f
     static const int fp = std::getenv("NBODY_N2_P") ? std::atoi(std::getenv("NBODY_N2_P")) : 0;
     static const int fr = std::getenv("NBODY_N2_R") ? std::atoi(std::getenv("NBODY_N2_R")) : 0;
     if (ns_nm == 0) return {1, 1};   // append-only kernels (NgbK, EdgeK) keep one thread per sink
-    auto fits = [&](int P) { return (size_t)P * TS * nsrc * sizeof(double) <= 48 * 1024; };
+    auto fits = [&](int P) { return (size_t)P * TS * nsrc * sizeof(double) <= 45 * 1024; };   // CUDA: 47088 bytes usable of 48 KB
     TeamShape t;
     if (fill_only_kernel) {
         const double sms = Kokkos::DefaultExecutionSpace().concurrency() / 2048.0;
@@ -260,10 +286,14 @@ void run_tiled_p(const char* name, int i0, int ni, int j0, int nj, const K& k) {
 template <class K>
 void run_n2(const char* name, int i0, int ni, int j0, int nj, const K& k) {
     if (ni <= 0) return;
-    if constexpr (kHostAccessibleDevice) {
-        if ((long long)n2_detail::set_size(ni) * nj <= n2_host_max()) {   // tiny set: host loops, same accumulation as the kernel
+    // Tiny set where the host reads device memory, or a host subtree (host_exec.h): host loops, same accumulation as
+    // the kernel
+    const bool on_host = host_exec() ||
+        (kHostAccessibleDevice && (long long)n2_detail::set_size(ni) * nj <= n2_host_max());
+    {
+        if (on_host) {
             constexpr int NSa = K::NS > 0 ? K::NS : 1, NMa = K::NM > 0 ? K::NM : 1;
-            Kokkos::fence("n2_driver.h:160");
+            if (!host_exec()) Kokkos::fence("n2_driver.h:160");
             double src[K::NSRC > 0 ? K::NSRC : 1];
             for (int ii = 0; ii < ni; ii++) {
                 const int i = i0 + ii;
@@ -274,7 +304,7 @@ void run_n2(const char* name, int i0, int ni, int j0, int nj, const K& k) {
                 int in_block = 0;
                 for (int jj = 0; jj < nj; jj++) {
                     k.source(j0 + jj, src);
-                    k.pair(s, i, src, j0 + jj, blk, mn);
+                    n2_pairs(k, s, i, src, j0 + jj, 1, blk, mn);
                     if (++in_block >= N2_KAHAN_BLOCK || jj == nj - 1) {
                         for (int a = 0; a < K::NS; a++) { kahan_add(sum[a], comp[a], blk[a]); blk[a] = 0.0; }
                         in_block = 0;

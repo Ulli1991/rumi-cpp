@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 import run_case as rc  # noqa: E402
 
 FIG9 = dict(TEST_CASE="plummer", INTEGRATOR="hhs", DT_MAX_MYR="1e-3", DT_MIN_MYR="1e-14", ETA_FF="0.2", ETA_FB="0.2",
-            ETA_GRAD="0.1", ETA_JERK="0.1", SOFTENING_PC="0", SERIAL_N2_GPU="16384", SERIAL_N2_CPU="0",
+            ETA_GRAD="0.1", ETA_JERK="0.1", SOFTENING_PC="0", SERIAL_N2_GPU="16384",
             COLLISIONAL="true", R_NGB="1e-3", R_NGB_MAX="0.1", ETA_PERT="0.02", FLYBY_CM_EPS="1e-11",
             TIDAL_STEP_RES="1.0", ETA_GBS="1e-10", ETA_RESTART="1e-8", N_ORB_SECULAR="3", M_PN="5.0", PN_ORDER="31",
             R_ESCAPE_RH="100.0", SSE_ENABLED="false", SSE_METALLICITY="0.0002", SSE_WIND_MODEL="VINK",

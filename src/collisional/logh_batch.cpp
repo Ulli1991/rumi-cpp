@@ -182,11 +182,12 @@ void SubsystemBatch::pack(const SubsystemManager& mgr, const Particles& p,
         for (int i = 0; i < n_mem; i++) st.h_idx(i) = member_indices[i];
         dcopy(Kokkos::subview(st.d_idx, Kokkos::make_pair(0, n_mem)),
                           Kokkos::subview(st.h_idx, Kokkos::make_pair(0, n_mem)));
-        auto d_idx = st.d_idx;
-        auto d_buf = st.d_buf;
-        auto px = p.x; auto py = p.y; auto pz = p.z;
-        auto pvx = p.vx; auto pvy = p.vy; auto pvz = p.vz;
-        auto pm = p.mass; auto pspin = p.spin_vec; auto pstype = p.stellar_type; auto prad = p.stellar_radius;
+        auto d_idx = raw(st.d_idx);
+        auto d_buf = raw(st.d_buf);
+        auto px = raw(p.x); auto py = raw(p.y); auto pz = raw(p.z);
+        auto pvx = raw(p.vx); auto pvy = raw(p.vy); auto pvz = raw(p.vz);
+        auto pm = raw(p.mass); auto pspin = raw(p.spin_vec); auto pstype = raw(p.stellar_type);
+        auto prad = raw(p.stellar_radius);
         small_for("pack_gather", n_mem, KOKKOS_LAMBDA(int i) {
             int k = d_idx(i);
             int base = i * PACK_STRIDE;
@@ -363,12 +364,12 @@ void SubsystemBatch::unpack(SubsystemManager& mgr, Particles& p, const HostSourc
     t_x0 = wall_now();
     st.upload_idx(n_mem);
     st.upload_buf((size_t)n_mem * UNPACK_STRIDE);
-    auto d_idx = st.d_idx;
-    auto d_buf = st.d_buf;
-    auto px = p.x; auto py = p.y; auto pz = p.z;
-    auto pvx = p.vx; auto pvy = p.vy; auto pvz = p.vz;
-    auto pcx = p.cvx; auto pcy = p.cvy; auto pcz = p.cvz;
-    auto pm = p.mass;
+    auto d_idx = raw(st.d_idx);
+    auto d_buf = raw(st.d_buf);
+    auto px = raw(p.x); auto py = raw(p.y); auto pz = raw(p.z);
+    auto pvx = raw(p.vx); auto pvy = raw(p.vy); auto pvz = raw(p.vz);
+    auto pcx = raw(p.cvx); auto pcy = raw(p.cvy); auto pcz = raw(p.cvz);
+    auto pm = raw(p.mass);
     small_for("unpack_scatter", n_mem, KOKKOS_LAMBDA(int i) {
         int k = d_idx(i);
         int base = i * UNPACK_STRIDE;
@@ -415,9 +416,9 @@ void SubsystemBatch::unpack(SubsystemManager& mgr, Particles& p, const HostSourc
         std::memcpy(st.h_buf.data(), spin_values.data(), n_spin * 3 * sizeof(double));
         st.upload_idx(n_spin);
         st.upload_buf((size_t)n_spin * 3);
-        auto d_si = st.d_idx;
-        auto d_sv = st.d_buf;
-        auto pspin = p.spin_vec;
+        auto d_si = raw(st.d_idx);
+        auto d_sv = raw(st.d_buf);
+        auto pspin = raw(p.spin_vec);
         small_for("spin_scatter", n_spin, KOKKOS_LAMBDA(int i) {
             int k = d_si(i);
             pspin(k, 0) = d_sv(i * 3 + 0);

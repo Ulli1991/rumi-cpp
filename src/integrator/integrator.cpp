@@ -2,7 +2,6 @@
 #include "small_for.h"
 #include "lean_sync.h"
 #include "integrator.h"
-#include "integrator_cpu.h"
 #include "hhs_counters.h"
 #include "forces.h"
 #include "timestep.h"
@@ -42,14 +41,14 @@
 StepProfiler g_profiler;
 SubsetHistogram g_subset_hist;
 
-// HHS recursion debug counters (shared with integrator_cpu.cpp)
+// HHS recursion debug counters
 HHSCounters g_hhs_counters;
 
 // Serial N² GPU threshold: skip MPI, compute full N² locally (no tree)
 int serial_n2_gpu = 0;
 
 // Serial N² CPU threshold: use CPU serial loops for full N²
-int serial_n2_cpu = 0;
+int host_subtree_max = 64;
 
 // Fused force+gradient: use stale accelerations to compute gradient in same N² pass as force
 
@@ -251,7 +250,7 @@ void drift(Particles& p, int start, int count, double dt) {
     RawView px{p.x.data()}, py{p.y.data()}, pz{p.z.data()};
     RawView pvx{p.vx.data()}, pvy{p.vy.data()}, pvz{p.vz.data()};
     if (use_integer_positions) {
-        auto pix = p.ix; auto piy = p.iy; auto piz = p.iz;
+        auto pix = raw(p.ix); auto piy = raw(p.iy); auto piz = raw(p.iz);
         double scale = int_pos_scale;
         double inv_scale = int_pos_inv_scale;
         small_for("drift_int", count, KOKKOS_LAMBDA(int ii) {
@@ -282,9 +281,9 @@ void drift_field_only(Particles& p, int start, int count, double dt) {
     }
     RawView px{p.x.data()}, py{p.y.data()}, pz{p.z.data()};
     RawView pvx{p.vx.data()}, pvy{p.vy.data()}, pvz{p.vz.data()};
-    auto p_sid = p.subsystem_id;
+    auto p_sid = raw(p.subsystem_id);
     if (use_integer_positions) {
-        auto pix = p.ix; auto piy = p.iy; auto piz = p.iz;
+        auto pix = raw(p.ix); auto piy = raw(p.iy); auto piz = raw(p.iz);
         double scale = int_pos_scale;
         double inv_scale = int_pos_inv_scale;
         small_for("drift_field_int", count, KOKKOS_LAMBDA(int ii) {
@@ -387,11 +386,19 @@ struct RangeMirror {
     using HostCol = Kokkos::View<double*, Kokkos::HostSpace, Kokkos::MemoryUnmanaged>;
     int start = 0, count = 0;
     HostCol col[NF];
-    static Kokkos::View<double*>& dbuf() {
-        static Kokkos::View<double*> b("range_mirror_dev", 0);
-        static bool hook = (Kokkos::push_finalize_hook([] { b = Kokkos::View<double*>(); }), true);
+    static Kokkos::View<double*>& dbuf() {   // a host twin in a host subtree (host_exec.h)
+        static Kokkos::View<double*> b("range_mirror_dev", 0), bh;
+        static bool hook = (Kokkos::push_finalize_hook([] { b = bh = Kokkos::View<double*>(); }), true);
         (void)hook;
-        return b;
+        return host_exec() ? bh : b;
+    }
+    static void grow_dbuf(size_t n) {
+        Kokkos::View<double*>& d = dbuf();
+        if (d.extent(0) >= n) return;
+        if (!host_exec()) { Kokkos::realloc(d, n); return; }
+        static std::vector<std::shared_ptr<void>> mem;
+        mem.clear();
+        d = host_view<Kokkos::View<double*>>(mem, n);
     }
     static Kokkos::View<double*, Kokkos::HostSpace>& hbuf() {
         static Kokkos::View<double*, Kokkos::HostSpace> b("range_mirror_host", 0);
@@ -429,7 +436,7 @@ struct RangeMirror {
         });
     }
     RangeMirror(Particles& p, int s, int n) : start(s), count(n) {
-        if ((int)dbuf().extent(0) < NF * n) Kokkos::realloc(dbuf(), NF * n);
+        grow_dbuf((size_t)NF * n);
         if ((int)hbuf().extent(0) < NF * n) Kokkos::realloc(hbuf(), NF * n);
         for (int f = 0; f < NF; f++) col[f] = HostCol(hbuf().data() + (size_t)f * n, n);
         pull(p, NF);
@@ -1173,9 +1180,9 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
                 std::copy(m.begin(), m.end(), st.h_buf.data());
                 st.upload_idx((int)idx.size());
                 st.upload_buf(idx.size());
-                auto d_idx = st.d_idx;
-                auto d_buf = st.d_buf;
-                auto pm = p.mass;
+                auto d_idx = raw(st.d_idx);
+                auto d_buf = raw(st.d_buf);
+                auto pm = raw(p.mass);
                 small_for("restore_masses", (int)idx.size(), KOKKOS_LAMBDA(int k) { pm(d_idx(k)) = d_buf(k); });
             };
             // Helper: restore failed subsystems' particle state from saved copy
@@ -1422,12 +1429,15 @@ void advance_subsystems_in_range(Particles& p, int start, int count,
             }
         }
         if (!idx.empty()) {
-            Kokkos::View<int*> d_idx("int_pos_sync_idx", idx.size());
-            Kokkos::deep_copy(d_idx, Kokkos::View<int*, Kokkos::HostSpace, Kokkos::MemoryUnmanaged>(idx.data(), idx.size()));
-            auto px = p.x, py = p.y, pz = p.z;
-            auto pix = p.ix, piy = p.iy, piz = p.iz;
+            DeviceStaging& st = DeviceStaging::get<6>();
+            st.reserve((int)idx.size(), 1);
+            std::copy(idx.begin(), idx.end(), st.h_idx.data());
+            st.upload_idx((int)idx.size());
+            auto d_idx = raw(st.d_idx);
+            auto px = raw(p.x), py = raw(p.y), pz = raw(p.z);
+            auto pix = raw(p.ix), piy = raw(p.iy), piz = raw(p.iz);
             const double inv = int_pos_inv_scale;
-            Kokkos::parallel_for("int_pos_sync", (int)idx.size(), KOKKOS_LAMBDA(int k) {
+            xfor("int_pos_sync", (int)idx.size(), KOKKOS_LAMBDA(int k) {
                 const int i = d_idx(k);
                 pix(i) = llrint(px(i) * inv);
                 piy(i) = llrint(py(i) * inv);
@@ -1672,17 +1682,17 @@ static int partition_by_pivot(Particles& p, int start, int count, double pivot) 
     if (count <= 1) return count;
 
     RawView dt_f{p.dt_adapt.data()};
-    auto perm = p.scratch_i;
-    auto is_slow = p.scratch_i2;  // temporary: 1 if slow, 0 if fast
+    auto perm = raw(p.scratch_i);
+    auto is_slow = raw(p.scratch_i2);  // temporary: 1 if slow, 0 if fast
 
     // Fused mark + exclusive prefix sum in single kernel
     // is_slow(ii) = 1 if slow, 0 if fast
     // slow_prefix(ii) = number of slow particles with index < ii
-    auto slow_prefix = p.scratch_i3;
+    auto slow_prefix = raw(p.scratch_i3);
     // The scan's total is the slow count: returned by the scan itself (one copy and stream sync instead of two
     // single-element copies, each with its own sync; integer sums, identical result)
     int slow_count = 0;
-    Kokkos::parallel_scan("mark_prefix_slow", count,
+    xscan("mark_prefix_slow", count,
         KOKKOS_LAMBDA(int ii, int& partial_sum, bool is_final) {
             int val = (dt_f(start + ii) >= pivot) ? 1 : 0;
             if (is_final) {
@@ -1702,7 +1712,7 @@ static int partition_by_pivot(Particles& p, int start, int count, double pivot) 
     // - Fast particle at position ii goes to slow_count + (ii - slow_prefix(ii) - (1-is_slow(ii)))
     //   = slow_count + (ii - slow_prefix(ii)) for fast particles
     int sc = slow_count;
-    Kokkos::parallel_for("build_perm_deterministic", count, KOKKOS_LAMBDA(int ii) {
+    xfor("build_perm_deterministic", count, KOKKOS_LAMBDA(int ii) {
         int dest;
         if (is_slow(ii)) {
             dest = slow_prefix(ii);
@@ -1754,9 +1764,9 @@ int compact_zero_mass_range(Particles& p, int start, int count) {
 // Massless particles in [start, start + count)? (one reduction; only while placeholders exist)
 static bool range_has_ghost(const Particles& p, int start, int count) {
     if (g_subsystem_mgr.ghost_pids.empty() || count <= 0) return false;
-    auto m = p.mass;
+    auto m = raw(p.mass);
     int n = 0;
-    Kokkos::parallel_reduce("ghost_count", Kokkos::RangePolicy<>(start, start + count),
+    xreduce("ghost_count", start, start + count,
                             KOKKOS_LAMBDA(int i, int& c) { if (m(i) <= 0.0) c++; }, n);
     return n > 0;
 }
@@ -1937,7 +1947,7 @@ static void get_tree_group_range(const Octree& tree, int& g_offset, int& g_count
 }
 
 static void zero_accelerations(Particles& p, int start, int count) {
-    auto ax = p.ax; auto ay = p.ay; auto az = p.az;
+    auto ax = raw(p.ax); auto ay = raw(p.ay); auto az = raw(p.az);
     small_for("zero_acc", count, KOKKOS_LAMBDA(int ii) {
         int i = start + ii;
         ax(i) = 0.0; ay(i) = 0.0; az(i) = 0.0;
@@ -1945,7 +1955,7 @@ static void zero_accelerations(Particles& p, int start, int count) {
 }
 
 static void init_timesteps_max(Particles& p, int start, int count) {
-    auto dt_f = p.dt_adapt;
+    auto dt_f = raw(p.dt_adapt);
     small_for("init_dt_max", count, KOKKOS_LAMBDA(int ii) {
         dt_f(start + ii) = 1e30;
     });
@@ -2354,8 +2364,6 @@ static void compute_timestep_distributed(DistributedParticles& dp, int start, in
     dp.allgather_timestep_subset(start, count);
 }
 
-// CPU serial path: CpuSubset + all cpu_* functions in integrator_cpu.cpp
-// (hhs_fsi_recursive_cpu declared in integrator_cpu.h)
 // hhs_fsi_recursive_local removed — merged into hhs_fsi_recursive
 
 // =============================================================================
@@ -2494,13 +2502,294 @@ static int hhs_cc_step(Particles& p, DistributedParticles* dp, int slow_start, i
 }
 
 // =============================================================================
+// Host-resident subtrees (HOST_SUBTREE_MAX, host_exec.h). A set of at most host_subtree_max particles runs its whole
+// sub-recursion on the host: one packed copy of its particles in, the same recursion code on a host copy (time steps,
+// detection, subsystems, mergers, kicks, drifts), one packed copy out. On a discrete GPU each deep call is a chain of
+// tiny launches and synchronisations (0.2-0.3 ms per call for 4-13 particles in run B, 2026-10-15), a few us on the
+// host. The device code runs unchanged: it reads the particle arrays through raw pointers, which here point to host
+// memory. Host and device arithmetic differ in the last bits (rsqrt, FMA contraction), so the trajectories change
+// within round-off; the placement depends only on the set size (deterministic, rank-count independent).
+// =============================================================================
+namespace {
+struct HostSubtree {
+    // Particle fields moved in and out: doubles, ints and int64s, field-major ([field][slot]) in one buffer each.
+    // The host buffers are the host copy's storage (its views point into them)
+    enum { X, Y, Z, VX, VY, VZ, CVX, CVY, CVZ, AX, AY, AZ, M, DT, ND_BASE,
+           MZAMS = ND_BASE, AGE, RAD, LUM, CMASS, SMAG, DTL0, GMAG, SPX, SPY, SPZ, ND_COLL };
+    enum { LEVEL, ORIG, NI_BASE, PID = NI_BASE, SID, STYPE, NI_COLL };
+    enum { IX, IY, IZ, NL };
+    using PinD = Kokkos::View<double*, Kokkos::SharedHostPinnedSpace>;
+    using PinI = Kokkos::View<int*, Kokkos::SharedHostPinnedSpace>;
+    using PinL = Kokkos::View<int64_t*, Kokkos::SharedHostPinnedSpace>;
+    Kokkos::View<double*> d_dbl;
+    Kokkos::View<int*> d_int;
+    Kokkos::View<int64_t*> d_l;
+    PinD h_dbl;
+    PinI h_int;
+    PinL h_l;
+    std::vector<double> scr_d;     // scratch views of the host copy
+    std::vector<int> scr_i;
+    std::vector<int64_t> scr_l;
+    std::vector<double> packed;    // pos_packed, vel_packed (unused on the local path, sized for safety)
+    std::vector<double> spin;      // spin_vec (LayoutRight [n][3])
+    Particles q;
+    int cap = 0;
+
+    // the device arrays of the moved fields (spin_vec apart: interleaved)
+    struct PtrsD { double* v[ND_COLL - 3]; };
+    struct PtrsI { int* v[NI_COLL]; };
+    static PtrsD ptrs_d(const Particles& p) {
+        const bool c = p.collisional;
+        return {{p.x.data(), p.y.data(), p.z.data(), p.vx.data(), p.vy.data(), p.vz.data(), p.cvx.data(), p.cvy.data(),
+                 p.cvz.data(), p.ax.data(), p.ay.data(), p.az.data(), p.mass.data(), p.dt_adapt.data(),
+                 c ? p.m_zams.data() : nullptr, c ? p.stellar_age.data() : nullptr, c ? p.stellar_radius.data() : nullptr,
+                 c ? p.luminosity.data() : nullptr, c ? p.core_mass.data() : nullptr, c ? p.spin_mag.data() : nullptr,
+                 c ? p.dt_level0.data() : nullptr, c ? p.grad_mag.data() : nullptr}};
+    }
+    static PtrsI ptrs_i(const Particles& p) {
+        const bool c = p.collisional;
+        return {{p.level.data(), p.orig_index.data(), c ? p.particle_id.data() : nullptr,
+                 c ? p.subsystem_id.data() : nullptr, c ? p.stellar_type.data() : nullptr}};
+    }
+    static int nd(bool coll) { return coll ? ND_COLL : ND_BASE; }
+    static int ni(bool coll) { return coll ? NI_COLL : NI_BASE; }
+
+    void reserve(int n) {
+        if (n <= cap) return;
+        cap = n;
+        d_dbl = Kokkos::View<double*>(Kokkos::view_alloc(Kokkos::WithoutInitializing, "hs_d"), (size_t)ND_COLL * n);
+        d_int = Kokkos::View<int*>(Kokkos::view_alloc(Kokkos::WithoutInitializing, "hs_i"), (size_t)NI_COLL * n);
+        d_l = Kokkos::View<int64_t*>(Kokkos::view_alloc(Kokkos::WithoutInitializing, "hs_l"), (size_t)NL * n);
+        h_dbl = PinD(Kokkos::view_alloc(Kokkos::WithoutInitializing, "hs_hd"), (size_t)ND_COLL * n);
+        h_int = PinI(Kokkos::view_alloc(Kokkos::WithoutInitializing, "hs_hi"), (size_t)NI_COLL * n);
+        h_l = PinL(Kokkos::view_alloc(Kokkos::WithoutInitializing, "hs_hl"), (size_t)NL * n);
+        scr_d.assign((size_t)11 * n, 0.0);
+        scr_i.assign((size_t)3 * n, 0);
+        scr_l.assign((size_t)3 * n, 0);
+        packed.assign((size_t)8 * n, 0.0);
+        spin.assign((size_t)3 * n, 0.0);
+    }
+
+    // The host copy's views over the buffers, for a set of n particles
+    void wrap(const Particles& p, int n) {
+        using VD = Kokkos::View<double*>;
+        using VI = Kokkos::View<int*>;
+        using VL = Kokkos::View<int64_t*>;
+        auto d = [&](int f) { return VD(h_dbl.data() + (size_t)f * n, n); };
+        auto i = [&](int f) { return VI(h_int.data() + (size_t)f * n, n); };
+        auto l = [&](int f) { return VL(h_l.data() + (size_t)f * n, n); };
+        q.N = n;
+        q.collisional = p.collisional;
+        q.x = d(X); q.y = d(Y); q.z = d(Z); q.vx = d(VX); q.vy = d(VY); q.vz = d(VZ);
+        q.cvx = d(CVX); q.cvy = d(CVY); q.cvz = d(CVZ); q.ax = d(AX); q.ay = d(AY); q.az = d(AZ);
+        q.mass = d(M); q.dt_adapt = d(DT);
+        q.level = i(LEVEL); q.orig_index = i(ORIG);
+        q.ix = l(IX); q.iy = l(IY); q.iz = l(IZ);
+        VD* sd[11] = {&q.scratch1, &q.scratch2, &q.scratch3, &q.scratch4, &q.scratch5, &q.scratch6, &q.scratch7,
+                      &q.scratch8, &q.scratch9, &q.scratch10, &q.scratch11};
+        for (int k = 0; k < 11; k++) *sd[k] = VD(scr_d.data() + (size_t)k * n, n);
+        q.scratch_i = VI(scr_i.data(), n); q.scratch_i2 = VI(scr_i.data() + n, n); q.scratch_i3 = VI(scr_i.data() + 2 * n, n);
+        q.scratch_l1 = VL(scr_l.data(), n); q.scratch_l2 = VL(scr_l.data() + n, n); q.scratch_l3 = VL(scr_l.data() + 2 * n, n);
+        q.pos_packed = decltype(q.pos_packed)(packed.data(), n);
+        q.vel_packed = decltype(q.vel_packed)(packed.data() + 4 * (size_t)n, n);
+        q.layout_dirty_lo = INT_MAX; q.layout_dirty_hi = 0; q.removed_pid_log.clear();
+        if (!p.collisional) return;
+        q.m_zams = d(MZAMS); q.stellar_age = d(AGE); q.stellar_radius = d(RAD); q.luminosity = d(LUM);
+        q.core_mass = d(CMASS); q.spin_mag = d(SMAG); q.dt_level0 = d(DTL0); q.grad_mag = d(GMAG);
+        q.spin_vec = decltype(q.spin_vec)(spin.data(), n);
+        q.particle_id = i(PID); q.subsystem_id = i(SID); q.stellar_type = i(STYPE);
+    }
+
+    // [start, start + n) of p into the host copy: one pack kernel and one transfer per buffer
+    void copy_in(Particles& p, int start, int n) {
+        reserve(n);
+        const bool coll = p.collisional;
+        RawView o{d_dbl.data()};
+        Raw1<int> oi{d_int.data()};
+        Raw1<int64_t> ol{d_l.data()};
+        const PtrsD pd = ptrs_d(p);
+        const PtrsI pi = ptrs_i(p);
+        const int64_t* lx = p.ix.data(); const int64_t* ly = p.iy.data(); const int64_t* lz = p.iz.data();
+        const double* sp = coll ? p.spin_vec.data() : nullptr;
+        const int ndd = nd(coll), nii = ni(coll);
+        Kokkos::parallel_for("hs_pack", n, KOKKOS_LAMBDA(int k) {
+            const int s = start + k;
+            for (int f = 0; f < ND_BASE; f++) o((size_t)f * n + k) = pd.v[f][s];
+            if (coll) {
+                for (int f = ND_BASE; f < ND_COLL - 3; f++) o((size_t)f * n + k) = pd.v[f][s];
+                for (int c = 0; c < 3; c++) o((size_t)(SPX + c) * n + k) = sp[3 * (size_t)s + c];
+            }
+            for (int f = 0; f < nii; f++) oi((size_t)f * n + k) = pi.v[f][s];
+            ol(k) = lx[s]; ol((size_t)n + k) = ly[s]; ol(2 * (size_t)n + k) = lz[s];
+        });
+        auto cp = [&](auto& h, auto& dv, size_t len) {
+            dcopy(Kokkos::subview(h, Kokkos::make_pair((size_t)0, len)), Kokkos::subview(dv, Kokkos::make_pair((size_t)0, len)));
+        };
+        cp(h_dbl, d_dbl, (size_t)ndd * n);
+        cp(h_int, d_int, (size_t)nii * n);
+        cp(h_l, d_l, (size_t)NL * n);
+        wrap(p, n);
+        if (coll)
+            for (int k = 0; k < n; k++)
+                for (int c = 0; c < 3; c++) spin[3 * (size_t)k + c] = h_dbl((size_t)(SPX + c) * n + k);
+    }
+
+    // The host copy back to [start, start+n): its first n_out slots (a compaction on the host keeps the field stride
+    // n), then n - n_out removed slots (mass 0, ids `gone`)
+    void copy_out(Particles& p, int start, int n, int n_out, const std::vector<int>& gone) {
+        const bool coll = p.collisional;
+        const int ndd = nd(coll), nii = ni(coll);
+        if (coll)
+            for (int k = 0; k < n; k++)
+                for (int c = 0; c < 3; c++) h_dbl((size_t)(SPX + c) * n + k) = spin[3 * (size_t)k + c];
+        for (int k = n_out; k < n; k++) {
+            h_dbl((size_t)M * n + k) = 0.0;
+            if (coll) { h_int((size_t)PID * n + k) = gone[k - n_out]; h_int((size_t)SID * n + k) = -1; }
+        }
+        auto cp = [&](auto& dv, auto& h, size_t len) {
+            dcopy(Kokkos::subview(dv, Kokkos::make_pair((size_t)0, len)), Kokkos::subview(h, Kokkos::make_pair((size_t)0, len)));
+        };
+        cp(d_dbl, h_dbl, (size_t)ndd * n);
+        cp(d_int, h_int, (size_t)nii * n);
+        cp(d_l, h_l, (size_t)NL * n);
+        RawView o{d_dbl.data()};
+        Raw1<int> oi{d_int.data()};
+        Raw1<int64_t> ol{d_l.data()};
+        const PtrsD pd = ptrs_d(p);
+        const PtrsI pi = ptrs_i(p);
+        int64_t* lx = p.ix.data(); int64_t* ly = p.iy.data(); int64_t* lz = p.iz.data();
+        double* sp = coll ? p.spin_vec.data() : nullptr;
+        Kokkos::parallel_for("hs_unpack", n, KOKKOS_LAMBDA(int k) {
+            const int s = start + k;
+            for (int f = 0; f < ND_BASE; f++) pd.v[f][s] = o((size_t)f * n + k);
+            if (coll) {
+                for (int f = ND_BASE; f < ND_COLL - 3; f++) pd.v[f][s] = o((size_t)f * n + k);
+                for (int c = 0; c < 3; c++) sp[3 * (size_t)s + c] = o((size_t)(SPX + c) * n + k);
+            }
+            for (int f = 0; f < nii; f++) pi.v[f][s] = oi((size_t)f * n + k);
+            lx[s] = ol(k); ly[s] = ol((size_t)n + k); lz[s] = ol(2 * (size_t)n + k);
+        });
+    }
+};
+struct HostSubtreeStats {   // printed at exit (tests read it)
+    long long calls = 0, particles = 0;
+    ~HostSubtreeStats() {
+        if (calls) std::printf("HOST_SUBTREE: %lld calls, %lld particles\n", calls, particles);
+        std::fflush(stdout);
+    }
+} g_host_subtree_stats;
+HostSubtree& host_subtree() {
+    static HostSubtree* h = nullptr;
+    if (!h) {
+        h = new HostSubtree();
+        Kokkos::push_finalize_hook([] { delete h; h = nullptr; });
+    }
+    return *h;
+}
+}  // namespace
+
+// Whether a set of `count` particles runs as a host subtree here: local path (no MPI distribution, no tree), and
+// none of the experiments the host copy does not carry (FLYBY_CM_KICK swaps, integer positions, HHS_CC buffers)
+static bool host_subtree_eligible(const Particles& p, int count, bool use_mpi, bool tree_eligible) {
+    if (host_subtree_max <= 0 || count > host_subtree_max || host_exec() || use_mpi || tree_eligible) return false;
+    if (use_integer_positions || hhs_cc) return false;
+#ifdef ENABLE_COLLISIONAL
+    if (p.collisional && g_collisional.flyby_cm_kick) return false;
+#endif
+    (void)p;
+    return true;
+}
+
+static int hhs_fsi_host_subtree(Particles& p, DistributedParticles* dp, int start, int count, double pivot_dt,
+                                double G, double soft2, double dt_min, double eta, bool dt_valid, int depth) {
+    HostSubtree& hs = host_subtree();
+    g_host_subtree_stats.calls++;
+    g_host_subtree_stats.particles += count;
+    g_profiler.start();
+    hs.copy_in(p, start, count);
+    g_profiler.stop(StepProfiler::CPU_PATH);
+    Particles& q = hs.q;
+#ifdef ENABLE_COLLISIONAL
+    // The pid map points the set's ids at their host slots for the duration (the map entries of all other ids stay
+    // untouched: no subsystem of the host copy refers to them); subsystems with a member outside the set are not the
+    // set's (parent levels); the stellar cache must hold every particle before (a refresh inside sees only the set)
+    SubsystemManager& mgr = g_subsystem_mgr;
+    const long long cache_refreshes = StellarPropsCache::get().refreshes;
+    if (p.collisional) {
+        if (!StellarPropsCache::get().valid) StellarPropsCache::get().ensure(p);
+        mgr.rebuild_pid_to_idx(p);
+        const int* pid = q.particle_id.data();
+        for (int k = 0; k < count; k++) mgr.pid_to_idx_[pid[k]] = k;
+        mgr.map_source_ = &q;
+        std::vector<Subsystem> mine;
+        for (const auto& sub : mgr.active) {
+            bool in = true;
+            for (int m : sub.particle_ids) {
+                const int i = mgr.safe_pid_to_idx(m);
+                in = in && i >= 0 && i < count && pid[i] == m;
+            }
+            if (in) mine.push_back(sub);
+        }
+        mgr.active.swap(mine);
+        mgr.use_host_buffers(true);
+    }
+#endif
+    std::vector<int> pids_in;
+    if (p.collisional) pids_in.assign(q.particle_id.data(), q.particle_id.data() + count);
+    int n_removed = 0;
+    {
+        HostExecScope on;
+        n_removed = hhs_fsi_recursive(q, nullptr, 0, count, pivot_dt, G, soft2, dt_min, eta, dt_valid, false, depth);
+    }
+    const int n_out = count - n_removed;
+    std::vector<int> gone;   // ids merged away on the host
+    if (n_removed > 0) {
+        std::vector<int> kept(q.particle_id.data(), q.particle_id.data() + n_out);
+        std::sort(kept.begin(), kept.end());
+        for (int pid : pids_in)
+            if (!std::binary_search(kept.begin(), kept.end(), pid)) gone.push_back(pid);
+        if ((int)gone.size() != n_removed) {
+            std::fprintf(stderr, "host subtree: %d particles removed, %zu ids gone\n", n_removed, gone.size());
+            std::abort();
+        }
+    }
+#ifdef ENABLE_COLLISIONAL
+    if (p.collisional) {
+        mgr.use_host_buffers(false);
+        const int* pid = q.particle_id.data();
+        for (int k = 0; k < n_out; k++) mgr.pid_to_idx_[pid[k]] = start + k;
+        for (int g : gone) mgr.pid_to_idx_[g] = -1;
+        mgr.map_source_ = &p;
+        if (StellarPropsCache::get().refreshes != cache_refreshes) StellarPropsCache::get().invalidate();
+    }
+#endif
+    g_profiler.start();
+    hs.copy_out(p, start, count, n_out, gone);
+    g_profiler.stop(StepProfiler::CPU_PATH);
+#ifdef ENABLE_COLLISIONAL
+    if (n_removed > 0) {
+        // the removed particles' slots (mass 0) leave the device arrays: the tail shifts down as after a merger here
+        const int k = p.compact_remove_zero_mass(start + n_out, start + count);
+        if (k != n_removed) {
+            std::fprintf(stderr, "host subtree: %d particles removed on the host, %d on the device\n", n_removed, k);
+            std::abort();
+        }
+        sync_after_removal(p, dp);
+        g_subsystem_mgr.update_particle_flags(p);
+    }
+#endif
+    if (dp) p.pack_pos_range(start, n_out);
+    return n_removed;
+}
+
+// =============================================================================
 // Unified HHS-FSI recursion (Algorithm 4 from FROST paper)
 //
 // Single function handles all GPU paths: MPI-distributed, local GPU, and tree.
 // dp == nullptr → single-rank mode (no MPI, no tree).
 // dp != nullptr → dispatch MPI vs local GPU based on count vs serial_n2_gpu.
 // Tree operations require dp != nullptr (tree_threshold >> serial_n2_gpu).
-// CPU serial path (count <= serial_n2_cpu) delegated to hhs_fsi_recursive_cpu.
+// Sets of at most host_subtree_max particles run as a host subtree (hhs_fsi_host_subtree).
 // =============================================================================
 static int hhs_fsi_recursive(
     Particles& p,
@@ -2544,6 +2833,12 @@ static int hhs_fsi_recursive(
     bool use_mpi = dp && (serial_n2_gpu == 0 || count > serial_n2_gpu) && !cc_set;
     bool tree_eligible = dp && use_tree && count >= tree_threshold;
 
+    // Host-resident subtree (HOST_SUBTREE_MAX): the whole sub-recursion of this set on the host
+    if (host_subtree_eligible(p, count, use_mpi, tree_eligible)) {
+        g_hhs_counters.cpu++;
+        return n_removed + hhs_fsi_host_subtree(p, dp, start, count, pivot_dt, G, soft2, dt_min, eta, dt_valid, depth);
+    }
+
     // Counters
     if (use_mpi) g_hhs_counters.distributed++;
     else g_hhs_counters.local++;
@@ -2559,16 +2854,6 @@ static int hhs_fsi_recursive(
     }
     g_subset_hist.record(use_mpi ? SubsetHistogram::DISTRIBUTED : SubsetHistogram::LOCAL_GPU, count);
 
-    // CPU serial for very small subsets
-    if (serial_n2_cpu > 0 && count <= serial_n2_cpu) {
-        g_hhs_counters.cpu++;
-        g_profiler.start();
-        n_removed = hhs_fsi_recursive_cpu(p, start, count, pivot_dt, G, soft2, dt_min, eta, dt_valid, depth);
-        g_profiler.stop(StepProfiler::CPU_PATH);
-        if (n_removed > 0) sync_after_removal(p, dp);
-        if (dp) p.pack_pos_range(start, count - n_removed);
-        return n_removed;
-    }
 
     // Base case: at minimum timestep, use FSI on the subset
     if (pivot_dt * 0.5 < dt_min) {
@@ -2663,8 +2948,8 @@ static int hhs_fsi_recursive(
                     gradient_magnitude_range(p, start, count, start, count, G, soft2);
                 }
             }
-            auto dt_f = p.dt_adapt;
-            auto gm = p.grad_mag;
+            auto dt_f = raw(p.dt_adapt);
+            auto gm = raw(p.grad_mag);
             RawView agx{p.ax.data()}, agy{p.ay.data()}, agz{p.az.data()};
             RawView vvx{p.vx.data()}, vvy{p.vy.data()}, vvz{p.vz.data()};
             double eta_g = (fresh && depth > 0) ? 0.0 : g_collisional.eta_grad;
@@ -2794,10 +3079,10 @@ static int hhs_fsi_recursive(
         }
         // Level-0 clamping (BIFROST Section 3.4.1)
         if (p.collisional && depth > 0) {
-            auto dt_f = p.dt_adapt;
-            auto dt_l0 = p.dt_level0;
+            auto dt_f = raw(p.dt_adapt);
+            auto dt_l0 = raw(p.dt_level0);
             int n_clamped = 0;
-            Kokkos::parallel_reduce("clamp_dt_level0", count,
+            xreduce("clamp_dt_level0", count,
                 KOKKOS_LAMBDA(int ii, int& cnt) {
                     int i = start + ii;
                     if (dt_f(i) > dt_l0(i)) {
@@ -2822,8 +3107,8 @@ static int hhs_fsi_recursive(
 
             // Level-0 store: capture dt AFTER subsystem adjustments
             if (depth == 0) {
-                auto dt_f = p.dt_adapt;
-                auto dt_l0 = p.dt_level0;
+                auto dt_f = raw(p.dt_adapt);
+                auto dt_l0 = raw(p.dt_level0);
                 small_for("copy_dt_level0", count, KOKKOS_LAMBDA(int ii) {
                     int i = start + ii;
                     dt_l0(i) = dt_f(i);

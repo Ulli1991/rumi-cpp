@@ -185,8 +185,9 @@ const std::vector<ParamSpec> kParams = {
     // ---- Performance and parallelism ----
     {"SERIAL_N2_GPU", I, "16384", "Performance and parallelism", INTERNAL, "",
      "Below this count: full N^2 on every rank, no MPI distribution (0: always distributed)"},
-    {"SERIAL_N2_CPU", I, "0", "Performance and parallelism", INTERNAL, "",
-     "Below this count: N^2 in host loops instead of device kernels (0: off; MI300A 200k: 0 is fastest)"},
+    {"HOST_SUBTREE_MAX", I, "64", "Performance and parallelism", INTERNAL, "",
+     "Sets of at most this many particles run their whole HHS sub-recursion on the host (one copy in and out; 0: off; "
+     "run B 630 -> 240 s/step, 2026-10-16)"},
     {"REPLICA_CHECK_INTERVAL", I, "10", "Performance and parallelism", INTERNAL, "",
      "Distributed runs: check every this many steps that the replicas agree (0: off)"},
     {"MPI_NON_BLOCKING", B, "false", "Performance and parallelism", INTERNAL, "",
@@ -263,6 +264,7 @@ const std::vector<ParamSpec> kParams = {
 const std::vector<DebugEnvSpec> kDebugEnv = {
     {"NBODY_CHECK_CC", "Check that the connected-component split sees the pair steps of the time-step kernel"},
     {"NBODY_CHECK_DT_FP32", "=1: check the fp32 time-step kernels against fp64"},
+    {"NBODY_CHECK_HOSTSUB", "=1: abort on a device pointer met inside a host subtree (HOST_SUBTREE_MAX)"},
     {"NBODY_CHECK_EIH", "Check that the pair EIH evaluation equals the two single-body calls bit for bit"},
     {"NBODY_CHECK_PIDMAP", "Check every incremental pid-map update against a full rebuild"},
     {"NBODY_CHECK_STELLAR_CACHE", "Check every cached stellar type and radius against the device values"},

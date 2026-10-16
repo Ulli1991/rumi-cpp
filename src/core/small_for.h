@@ -7,6 +7,7 @@
 
 #include <Kokkos_Core.hpp>
 #include <cstdlib>
+#include "host_exec.h"
 
 constexpr bool kHostAccessibleDevice =
     Kokkos::SpaceAccessibility<Kokkos::HostSpace, Kokkos::DefaultExecutionSpace::memory_space>::accessible;
@@ -18,6 +19,10 @@ inline int small_for_max() {
 
 template <class F>
 void small_for(const char* name, int n, const F& f) {
+    if (host_exec()) {   // host subtree: the data are in host memory
+        for (int i = 0; i < n; i++) f(i);
+        return;
+    }
     if constexpr (kHostAccessibleDevice) {
         if (n <= small_for_max()) {
             Kokkos::fence("small_for.h:23");   // device work that produced the data
