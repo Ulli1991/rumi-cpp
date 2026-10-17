@@ -171,6 +171,13 @@ Status: **closed** (fixed, test, ensemble checked), **option** (fix kept as an o
 - **Next:** the PN energy check of PN subsystems can be switched on again for PN1 (E_N + E_1PN conserved to
   O(v^4/c^4)); higher orders need their energies (2PN) and the radiated flux (2.5PN).
 
+## Verified building blocks (checked against an independent derivation, no bug found)
+
+| Building block | Check | Result | Test |
+|---|---|---|---|
+| FSI gradient force (GradK, FROST Eq. 19) | correction vs (1/m_i) d/dx_i of 1/2 sum m &#124;a&#124;^2 (Enzyme, 2-32 bodies); sign by the measured order | exactly GRAD_COEFF dt^2 (12 digits); order 4.64 | `grad_force_consistency`, `kepler_e09` |
+| PN1 EIH acceleration, 2 bodies | energy consistency, Euler-Lagrange of the EIH Lagrangian (Enzyme) | c^-4; O(v^2/c^2) | `pn1_energy_consistency` |
+
 ## R1 FLYBY_CM_KICK, c.o.m. kicks of weakly perturbed binaries (rejected)
 
 - **Tried on:** the C2 step. |dL/L| 1.3e-14 -> 1.4e-9, 15 % faster. Deleted in 1483094 (the isolated tests had stayed
