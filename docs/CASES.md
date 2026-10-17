@@ -23,6 +23,30 @@ Goal (2026-10-16): the smallest long-run |dE/E| with P and L at double-precision
    isolated case; it becomes a test in `tests/data/` if it reproduces.
 7. Fix, test, A/B on seed ensembles (energy rule), entry here.
 
+## Lessons (what the cases teach; check new code against these)
+
+1. **Book from the states, never from a model of them.** Every path must book exactly the change of its members'
+   T + U recomputed from positions and velocities. Booking from orbital elements or an approximate model (C4: only the
+   inner binary's GW loss of a secular triple) hides the model's error inside the dynamics.
+2. **An approximation must conserve what the real dynamics conserves.** A rebuild from averaged or approximate
+   variables has to restore E, P and L explicitly (C4 energy, C6 angular momentum: a frozen outer orbit while the
+   inner orbit's L changes). Put the correction where it touches no other invariant (radial velocity for E, the outer
+   orbit's L vector for L).
+3. **Isolated cut-outs can hide state-dependent bugs.** C4 did not show in cut-outs (fresh subsystem state, own
+   c.o.m. frame, different path choice); the replay of the run's own restart with the ledger found it. Use the
+   ledger on the run's state first, cut-outs second.
+4. **A weakly coupled test case can pass a broken path.** The secular-triple test showed |dL/L| 8e-13, taken for
+   rounding; a strongly coupled triple showed 1e-2 (C6). Tests of a path must include its strongly coupled corner;
+   the adversarial search finds it.
+5. **A bound that is safe can still be far too pessimistic**, and pessimism costs levels (C3: extent of one member
+   times the speed of another, 400x). Derive bounds from the exact decomposition.
+6. **A floor or cutoff that is right for one class breaks another.** The pericentre-passage floor of the
+   tidal-sampling step fixed C1 and is the limit in C5; a missing floor caused C1. Every floor needs the class it is
+   meant for written next to it.
+7. **More neighbours is not more accuracy.** Pulling perturbers into subsystems by a larger radius made C5 slower and
+   worse (2026-10-17).
+8. **Check L and P, not only E.** C6 and R1 conserved energy and broke angular momentum.
+
 Status: **closed** (fixed, test, ensemble checked), **option** (fix kept as an option, trade-off), **open**,
 **rejected** (a candidate fix that broke a conservation law).
 
