@@ -339,6 +339,19 @@ Status: **closed** (fixed, test, ensemble checked), **option** (fix kept as an o
 | PN1 EIH acceleration, 2 bodies | energy consistency, Euler-Lagrange of the EIH Lagrangian (Enzyme) | c^-4; O(v^2/c^2) | `pn1_energy_consistency` |
 | Spin PN (leading SO 1.5PN, SS + Kerr quadrupole 2PN, precession, Kidder 1995) | dE/dt and dJ/dt along the code's flow, precession vs Poisson bracket of the spin Hamiltonian (Enzyme, q 1 to 1e-3, random spins, bound and unbound) | leftovers c^-5 / c^-6 (ratios 32.0 / 64.0: the next spin orders the code does not include); precession 6e-16; integrated &#124;S&#124; drift 1.9e-15. Gap: spin terms stay at leading order with PN to 3.5; frozen in 3+ body and secular paths | `spin_pn_consistency` |
 
+## R3 Compensated (Kahan) sums in the LogH leapfrog chain (rejected by the cluster A/B)
+
+- **Motivation:** Verificarlo (Monte Carlo arithmetic) showed that the e = 0.999 LogH step is limited by the rounding
+  of x += dx and v += dv, amplified by the extrapolation (Bulirsch ~9x). Compensated sums lowered the round-off
+  scatter per e = 0.999 orbit from 1.2e-11 to 1.4e-12.
+- **Cluster A/B (NBODY_LOGH_KAHAN):** 200k, 10 % binaries, 0.06 Myr, |dE/E| at the end. Seeds 3/7/13/21/42:
+  - base 8.6e-12 / 5.2e-12 / 6.6e-11 / 3.2e-11 / 3.1e-11;
+  - Kahan 2.0e-11 / 5.3e-12 / 1.2e-10 / 1.6e-10 / 1.2e-11.
+  Worse on three seeds; median step time unchanged.
+- **Decision:** rejected (energy rule), switch removed together with R2's. With R2, this says the 200k cluster's
+  energy error (1e-11 to 1e-10) is not set by LogH round-off or by the LogH kick. The next suspects are the FSI/field
+  part and the subsystem boundaries; per-path ledger on these seeds (NBODY_ELEDGER).
+
 ## R2 BIFROST's symplectic LogH kick 1/(-U) instead of 1/(T+B) (rejected by the cluster A/B; C12 open as a finding)
 
 - **Finding (Enzyme Jacobians, M^T J M - J):** the production LogH leapfrog is not symplectic in extended phase space.
