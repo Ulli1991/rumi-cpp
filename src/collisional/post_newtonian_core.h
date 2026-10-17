@@ -31,6 +31,13 @@ void eih_pn_acceleration_pair(const double x_i[3], const double v_i[3], double m
 // ============================================================================
 // E_conserved = T + U + E_pn1 + E_pn2 (+ cumulative GW losses for PN2.5)
 
+// Genuine N-body EIH 1PN acceleration (Einstein, Infeld & Hoffmann 1938; Poisson & Will 2014 eq. 9.127), the PN1
+// part only, all bodies at once (a[3n] is overwritten): the two-body terms of every pair plus the three-body terms
+// (a third body's potential in the A-B interaction). From the EIH Lagrangian (Landau & Lifshitz sec. 106); for n = 2
+// the same as the pair formula (eih_pn_acceleration with pn_order 1) up to rounding.
+void eih1_nbody_acceleration(const double* pos, const double* vel, const double* mass, int n, double G,
+                             double c_code, double* a);
+
 // PN1 energy correction for an N-body system
 // pos[i*3+k], vel[i*3+k], mass[i] for i=0..n-1
 double pn1_energy(const double* pos, const double* vel, const double* mass,

@@ -451,6 +451,60 @@ void eih_pn_acceleration_pair(const double x_i[3], const double v_i[3], double m
 }
 
 // ============================================================================
+// Genuine N-body EIH 1PN acceleration (PN1 part). n_AB = (x_A - x_B) / r_AB.
+// a_A = (1/c^2) sum_{B != A} { -(G m_B / r_AB^2) n_AB [ v_A^2 + 2 v_B^2 - 4 v_A.v_B - 3/2 (n_AB.v_B)^2
+//          - 4 sum_{C != A} G m_C / r_AC - sum_{C != B} G m_C / r_BC + 1/2 sum_{C != B} G m_C (x_B - x_A).(x_C - x_B) / r_BC^3 ]
+//        + (G m_B / r_AB^2) [n_AB.(4 v_A - 3 v_B)] (v_A - v_B)
+//        - 7/2 (G m_B / r_AB) sum_{C != B} G m_C (x_B - x_C) / r_BC^3 }
+// (Poisson & Will 2014 eq. 9.127; checked with Enzyme against the Euler-Lagrange acceleration of the EIH Lagrangian
+// and against pn1_energy, tests/enzyme/pn_consistency.cpp). For two bodies it is the pair formula: C = B in the
+// first sum gives 4 G m_B / r, C = A in the second G m_A / r, in the third G m_A / (2 r) with the sign that makes
+// 5 G m_A / r together with the 7/2 term.
+// ============================================================================
+void eih1_nbody_acceleration(const double* pos, const double* vel, const double* mass, int n, double G,
+                             double c_code, double* a) {
+    const double inv_c2 = 1.0 / (c_code * c_code);
+    // Newtonian potentials phi_A = sum_{C != A} G m_C / r_AC and fields g_B = sum_{C != B} G m_C (x_C - x_B) / r_BC^3
+    double phi[8], g[8][3];
+    const int nn = n < 8 ? n : 8;
+    for (int A = 0; A < nn; A++) {
+        phi[A] = 0.0; g[A][0] = g[A][1] = g[A][2] = 0.0;
+        for (int C = 0; C < nn; C++) {
+            if (C == A) continue;
+            const double d[3] = {pos[3*C] - pos[3*A], pos[3*C+1] - pos[3*A+1], pos[3*C+2] - pos[3*A+2]};
+            const double r = std::sqrt(d[0]*d[0] + d[1]*d[1] + d[2]*d[2]);
+            phi[A] += G * mass[C] / r;
+            for (int k = 0; k < 3; k++) g[A][k] += G * mass[C] * d[k] / (r * r * r);
+        }
+    }
+    for (int A = 0; A < nn; A++) {
+        double acc[3] = {0.0, 0.0, 0.0};
+        const double* vA = &vel[3*A];
+        const double vA2 = vA[0]*vA[0] + vA[1]*vA[1] + vA[2]*vA[2];
+        for (int B = 0; B < nn; B++) {
+            if (B == A) continue;
+            const double* vB = &vel[3*B];
+            const double dAB[3] = {pos[3*A] - pos[3*B], pos[3*A+1] - pos[3*B+1], pos[3*A+2] - pos[3*B+2]};
+            const double r = std::sqrt(dAB[0]*dAB[0] + dAB[1]*dAB[1] + dAB[2]*dAB[2]);
+            const double nAB[3] = {dAB[0] / r, dAB[1] / r, dAB[2] / r};
+            const double vB2 = vB[0]*vB[0] + vB[1]*vB[1] + vB[2]*vB[2];
+            const double vAvB = vA[0]*vB[0] + vA[1]*vB[1] + vA[2]*vB[2];
+            const double nvA = nAB[0]*vA[0] + nAB[1]*vA[1] + nAB[2]*vA[2];
+            const double nvB = nAB[0]*vB[0] + nAB[1]*vB[1] + nAB[2]*vB[2];
+            // (x_B - x_A).(x_C - x_B) / r_BC^3 summed with G m_C = (x_B - x_A).g_B
+            const double xg = -(dAB[0]*g[B][0] + dAB[1]*g[B][1] + dAB[2]*g[B][2]);
+            const double bracket = vA2 + 2.0*vB2 - 4.0*vAvB - 1.5*nvB*nvB - 4.0*phi[A] - phi[B] + 0.5*xg;
+            const double Gm_r2 = G * mass[B] / (r * r);
+            const double nv43 = 4.0*nvA - 3.0*nvB;
+            for (int k = 0; k < 3; k++)
+                acc[k] += -Gm_r2 * nAB[k] * bracket + Gm_r2 * nv43 * (vA[k] - vB[k])
+                          + 3.5 * (G * mass[B] / r) * g[B][k];
+        }
+        for (int k = 0; k < 3; k++) a[3*A+k] = inv_c2 * acc[k];
+    }
+}
+
+// ============================================================================
 // PN1 conserved energy correction (Poisson & Will 2014, Section 9.3)
 // E_total = T + U + E_pn1 is conserved at PN1 order.
 //
@@ -508,7 +562,22 @@ double pn1_energy(const double* pos, const double* vel, const double* mass,
         }
     }
 
-    return inv_c2 * (E_kin + E_pot_kin + E_pot_pot);
+    // Genuine three-body terms of the EIH energy, +1/2 sum_A sum_{B != A} sum_{C != A, C != B} G^2 m_A m_B m_C /
+    // (r_AB r_AC) (the C = B terms are the pair term above); none for n = 2 (bit-identical there)
+    double E_three = 0.0;
+    for (int A = 0; A < n && n > 2; A++)
+        for (int B = 0; B < n; B++) {
+            if (B == A) continue;
+            const double rAB = std::sqrt((pos[A*3]-pos[B*3])*(pos[A*3]-pos[B*3]) + (pos[A*3+1]-pos[B*3+1])*(pos[A*3+1]-pos[B*3+1]) +
+                                         (pos[A*3+2]-pos[B*3+2])*(pos[A*3+2]-pos[B*3+2]));
+            for (int C = 0; C < n; C++) {
+                if (C == A || C == B) continue;
+                const double rAC = std::sqrt((pos[A*3]-pos[C*3])*(pos[A*3]-pos[C*3]) + (pos[A*3+1]-pos[C*3+1])*(pos[A*3+1]-pos[C*3+1]) +
+                                             (pos[A*3+2]-pos[C*3+2])*(pos[A*3+2]-pos[C*3+2]));
+                E_three += 0.5 * G * G * mass[A] * mass[B] * mass[C] / (rAB * rAC);
+            }
+        }
+    return inv_c2 * (E_kin + E_pot_kin + E_pot_pot + E_three);
 }
 
 // ============================================================================

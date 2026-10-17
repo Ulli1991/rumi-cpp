@@ -494,6 +494,12 @@ static void compute_pn_all_pairs(const LogHState& state, const double* eval_vel,
                                   double* pn_out, const double* chi1 = nullptr, const double* chi2 = nullptr) {
     int n = state.n_bodies;
     std::memset(pn_out, 0, n * 3 * sizeof(double));
+    // Three or more bodies: the PN1 part from the genuine N-body EIH equations (three-body terms included; pair sums
+    // of the two-body formula have no conserved 1PN energy, docs/CASES.md C7); the higher orders stay pairwise
+    // (binary formulas). Two bodies, and slowed (SDAR) pairs present: the pair formula for every order, as before
+    const bool eih_nbody = n >= 3 && (pn_order & 1) && state.n_sd == 0;
+    if (eih_nbody) eih1_nbody_acceleration(state.pos, eval_vel, state.mass, n, G, c_code, pn_out);
+    const int pair_order = eih_nbody ? (pn_order & ~1) : pn_order;
     for (int i = 0; i < n; i++) {
         for (int j = i + 1; j < n; j++) {
             // Slowed (SDAR) pairs have no member above M_PN: their own PN term is left out. Applied at full strength
@@ -505,20 +511,21 @@ static void compute_pn_all_pairs(const LogHState& state, const double* eval_vel,
             if (slowed) continue;
             // EIH: compute individual PN accelerations directly (both bodies of the pair in one call)
             double a_pn_i[3], a_pn_j[3];
+            if (pair_order == 0) continue;
             eih_pn_acceleration_pair(&state.pos[i*3], &eval_vel[i*3], state.mass[i],
                                      &state.pos[j*3], &eval_vel[j*3], state.mass[j],
-                                     G, c_code, a_pn_i, a_pn_j, pn_order);
+                                     G, c_code, a_pn_i, a_pn_j, pair_order);
             // NBODY_CHECK_EIH=1 (tests): the pair call must equal the two single-body calls bit for bit
             static const bool check_eih = std::getenv("NBODY_CHECK_EIH") != nullptr;
             if (check_eih) {
                 double ref_i[3], ref_j[3];
                 eih_pn_acceleration(&state.pos[i*3], &eval_vel[i*3], state.mass[i],
-                                    &state.pos[j*3], &eval_vel[j*3], state.mass[j], G, c_code, ref_i, pn_order);
+                                    &state.pos[j*3], &eval_vel[j*3], state.mass[j], G, c_code, ref_i, pair_order);
                 eih_pn_acceleration(&state.pos[j*3], &eval_vel[j*3], state.mass[j],
-                                    &state.pos[i*3], &eval_vel[i*3], state.mass[i], G, c_code, ref_j, pn_order);
+                                    &state.pos[i*3], &eval_vel[i*3], state.mass[i], G, c_code, ref_j, pair_order);
                 if (std::memcmp(ref_i, a_pn_i, sizeof ref_i) || std::memcmp(ref_j, a_pn_j, sizeof ref_j)) {
                     std::fprintf(stderr, "EIH CHECK FAILED: pair %d-%d order %d: %a %a %a vs %a %a %a\n", i, j,
-                                 pn_order, a_pn_i[0], a_pn_i[1], a_pn_i[2], ref_i[0], ref_i[1], ref_i[2]);
+                                 pair_order, a_pn_i[0], a_pn_i[1], a_pn_i[2], ref_i[0], ref_i[1], ref_i[2]);
                     std::abort();
                 }
             }

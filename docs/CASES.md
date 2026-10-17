@@ -145,7 +145,7 @@ Status: **closed** (fixed, test, ensemble checked), **option** (fix kept as an o
   |dL/L| 8.4e-13 -> 6.2e-16 (bound tightened to round-off).
 - **Cluster:** pending (the next campaign; runs without secular triples are unchanged).
 
-## C7 PN1 energy: wrong sign (B1, closed) and no N-body EIH for n >= 3 (B2, open)
+## C7 PN1 energy: wrong sign (B1, closed) and no N-body EIH for n >= 3 (B2, closed)
 
 - **Found by:** Enzyme (tests/enzyme/pn_consistency.cpp), not by a conservation run: under the code's PN1 equations
   of motion the energy T + U + E_pn1 must be conserved to O(1/c^4); dE/dt = grad_x E . v + grad_v E . a with the
@@ -161,8 +161,15 @@ Status: **closed** (fixed, test, ensemble checked), **option** (fix kept as an o
   A-B interaction, in acceleration and energy, Poisson & Will 2014 sec. 9.3) are missing, so PN subsystems with 3+
   bodies follow a model without a conserved 1PN energy (documented as "EIH N-body"). Small for hierarchical triples
   (terms ~ (m_C/m_B)(r_AB/r_AC)), a full 1PN effect for BH triples with comparable separations.
-- **Next:** the full N-body EIH acceleration and energy (literature formulas), Enzyme check for n = 3, 4 (ratio 16),
-  then the PN energy check of PN subsystems switched on again (order 1PN, two and more bodies).
+- **B2 fix:** `eih1_nbody_acceleration` (Poisson & Will 2014 eq. 9.127, three-body terms included) for the PN1 part of
+  LogH subsystems with 3+ bodies (higher orders stay pairwise, binaries unchanged), and the three-body G^2 terms in
+  `pn1_energy` (from the EIH Lagrangian, Landau & Lifshitz sec. 106; none for n = 2). Checked with Enzyme two ways:
+  energy consistency ratio 16.00 for n = 2, 3, 4 (20 configurations each), and the explicit acceleration against the
+  Euler-Lagrange acceleration of the EIH Lagrangian (deviation 4-7e-4 of the PN1 part = O(v^2/c^2) at v/c ~ 0.01).
+  Test `pn1_energy_consistency` now requires 16 for n = 2, 3, 4 (pair sums: ~4). BIFROST includes these three-body
+  terms (sec. 3.7, conclusions); our code claimed them but had pair sums.
+- **Next:** the PN energy check of PN subsystems can be switched on again for PN1 (E_N + E_1PN conserved to
+  O(v^4/c^4)); higher orders need their energies (2PN) and the radiated flux (2.5PN).
 
 ## R1 FLYBY_CM_KICK, c.o.m. kicks of weakly perturbed binaries (rejected)
 
