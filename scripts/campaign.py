@@ -28,7 +28,10 @@ def main():
     h, m, s = (int(x) for x in a.time.split(":"))
     minutes = h * 60 + m + (s > 0)
     partition = "gpudev,gpu" if minutes <= 15 else a.partition
-    over = {"TOTAL_TIME_MYR": a.total_myr, "STALL_RESTART": "true", "RESTART_FILE": "", "RESTART_INTERVAL": "0"}
+    # WALLTIME_LIMIT: the run stops before the job's end with a restart file; RESTART_FILE = auto continues from it when
+    # the same job script is submitted again (a chain), and starts fresh the first time
+    over = {"TOTAL_TIME_MYR": a.total_myr, "STALL_RESTART": "true", "RESTART_FILE": "auto", "RESTART_INTERVAL": "0",
+            "WALLTIME_LIMIT": f"{(minutes - 5) / 60.0:.3f}"}
     for kv in a.set:
         k, v = kv.split("=", 1)
         over[k.strip()] = v.strip()
@@ -63,7 +66,7 @@ def main():
 #SBATCH --mem=240000
 module purge; module load gcc/15 cuda/13.2 openmpi_gpu/5.0 hdf5-serial/1.14.1
 export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK OMP_PROC_BIND=spread OMP_PLACES=threads
-timeout {max(minutes - 2, 1)}m srun {exe} --config config.txt --kokkos-map-device-id-by=mpi_rank > run.log 2>&1
+timeout {max(minutes - 2, 1)}m srun {exe} --config config.txt --kokkos-map-device-id-by=mpi_rank >> run.log 2>&1
 """)
         print(d)
         if a.submit:
