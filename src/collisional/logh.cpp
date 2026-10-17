@@ -1,5 +1,5 @@
 #include "logh.h"
-#include "post_newtonian.h"
+#include "post_newtonian_core.h"
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>

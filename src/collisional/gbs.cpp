@@ -15,148 +15,6 @@ constexpr int GBSIntegrator::STEP_SEQ_DEUFLHARD[];
 const int* GBSIntegrator::seq() { return g_collisional.gbs_deuflhard ? STEP_SEQ_DEUFLHARD : STEP_SEQ; }
 int GBSIntegrator::kmax() { return std::max(2, std::min(MAX_STAGES, g_collisional.gbs_kmax)); }
 
-// ============================================================================
-// Pack/unpack LogHState to flat array for extrapolation
-// ============================================================================
-
-void GBSIntegrator::pack_state(const LogHState& state, double* y, int& dim) {
-    dim = 0;
-    int n = state.n_bodies;
-    for (int i = 0; i < n * 3; i++) y[dim++] = state.pos[i];
-    for (int i = 0; i < n * 3; i++) y[dim++] = state.vel[i];
-    if (state.use_aux_vel) {
-        for (int i = 0; i < n * 3; i++) y[dim++] = state.aux_vel[i];
-    }
-    if (state.has_spins) {
-        for (int k = 0; k < 3; k++) y[dim++] = state.spin1[k];
-        for (int k = 0; k < 3; k++) y[dim++] = state.spin2[k];
-        for (int k = 0; k < 3; k++) y[dim++] = state.aux_spin1[k];
-        for (int k = 0; k < 3; k++) y[dim++] = state.aux_spin2[k];
-    }
-    y[dim++] = state.t;
-    y[dim++] = state.B;
-}
-
-void GBSIntegrator::unpack_state(const double* y, int dim, LogHState& state) {
-    (void)dim;
-    int idx = 0;
-    int n = state.n_bodies;
-    for (int i = 0; i < n * 3; i++) state.pos[i] = y[idx++];
-    for (int i = 0; i < n * 3; i++) state.vel[i] = y[idx++];
-    if (state.use_aux_vel) {
-        for (int i = 0; i < n * 3; i++) state.aux_vel[i] = y[idx++];
-    }
-    if (state.has_spins) {
-        for (int k = 0; k < 3; k++) state.spin1[k] = y[idx++];
-        for (int k = 0; k < 3; k++) state.spin2[k] = y[idx++];
-        for (int k = 0; k < 3; k++) state.aux_spin1[k] = y[idx++];
-        for (int k = 0; k < 3; k++) state.aux_spin2[k] = y[idx++];
-    }
-    state.t = y[idx++];
-    state.B = y[idx++];
-}
-
-static double* spin_vec(LogHState& s, int i) {
-    return i == 0 ? s.spin1 : i == 1 ? s.spin2 : i == 2 ? s.aux_spin1 : s.aux_spin2;
-}
-
-void GBSIntegrator::spin_norms(LogHState& state, double norm[4]) {
-    for (int i = 0; i < 4; i++) {
-        const double* c = spin_vec(state, i);
-        norm[i] = std::sqrt(c[0]*c[0] + c[1]*c[1] + c[2]*c[2]);
-    }
-}
-
-void GBSIntegrator::restore_spin_norms(LogHState& state, const double norm[4]) {
-    double now[4];
-    spin_norms(state, now);
-    for (int i = 0; i < 4; i++) {
-        if (now[i] == 0.0) continue;
-        double* c = spin_vec(state, i);
-        for (int k = 0; k < 3; k++) c[k] *= norm[i] / now[i];
-    }
-}
-
-// ============================================================================
-// Take n_substeps leapfrog steps over interval ds_total
-// Leapfrog is symmetric (time-reversible) so error expands in even powers
-// of h — GBS polynomial extrapolation in h² works directly, no smoothing needed
-// ============================================================================
-
-void GBSIntegrator::midpoint(const LogHState& in, LogHState& out,
-                              int n_substeps, double ds_total, double G,
-                              double c_code, int pn_order, const LogHStepStart* start) {
-    double h = ds_total / n_substeps;
-    out = in;
-    if (pn_order > 0 && out.use_aux_vel) {
-        logh_leapfrog_steps_pn(out, h, G, c_code, pn_order, n_substeps, start);
-    } else {
-        logh_leapfrog_steps(out, h, G, n_substeps, start);
-    }
-}
-
-// ============================================================================
-// Polynomial extrapolation (Neville-Aitken) in h²
-//
-// table[0..stage] hold RAW midpoint results M(n_i) — never modified.
-// work[][] is used for the Neville table: T[i][j].
-//   T[i][0] = M(n_i)
-//   T[i][j] = T[i][j-1] + (T[i][j-1] - T[i-1][j-1]) / ((n_i/n_{i-j})² - 1)
-// Best estimate: T[stage][stage] stored in work[stage].
-// Error: |T[stage][stage] - T[stage-1][stage-1]|.
-//
-// Incremental: row i of the table depends only on M(n_0..n_i), so each call adds one row. On entry work[j] holds
-// T[stage-1][j] (j < stage), on exit T[stage][j] (j <= stage): O(stage) row operations per call instead of
-// rebuilding the table from table[0..stage] (O(stage^2)). Each T[i][j] is computed with the same operation as in
-// the full rebuild, so the result is bit-identical. Calls must come in stage order 0, 1, 2, ... (GBS step).
-//
-// IMPORTANT: The old algorithm overwrote table[] in-place, which corrupted
-// intermediate values (table[j] = T[k,k] after stage k, not M(n_j)).
-// Stages > 1 then used T[k-1,k-1] instead of the raw midpoint, producing
-// wrong extrapolation that could falsely report convergence.
-// ============================================================================
-
-double GBSIntegrator::extrapolate(int stage, int dim) {
-    double* cur = work[stage];   // T[stage][j-1] before column j, T[stage][j] after
-    std::memcpy(cur, table[stage], dim * sizeof(double));   // T[stage][0] = raw midpoint result
-    if (stage == 0) return 1.0;  // need at least 2 stages
-
-    double max_err = 0.0;
-    for (int j = 1; j <= stage; j++) {
-        // T[i][j] = T[i][j-1] + (T[i][j-1] - T[i-1][j-1]) / ((n_i/n_{i-j})^2 - 1),  i = stage
-        const int i = stage;
-        double ratio = (double)(seq()[i] * seq()[i]) /
-                       (double)(seq()[i-j] * seq()[i-j]);
-        double factor = 1.0 / (ratio - 1.0);
-
-        double* prev = work[j-1];   // T[stage-1][j-1], replaced by T[stage][j-1] for the next call
-        if (j < stage) {
-            for (int d = 0; d < dim; d++) {
-                double delta = cur[d] - prev[d];
-                double t = cur[d] + factor * delta;
-                prev[d] = cur[d];
-                cur[d] = t;
-            }
-        } else {
-            // Last column: also the error |T[stage][stage] - T[stage-1][stage-1]| (prev = T[stage-1][stage-1])
-            for (int d = 0; d < dim; d++) {
-                double delta = cur[d] - prev[d];
-                double t = cur[d] + factor * delta;
-                double scale = std::max(1.0, std::fabs(t));
-                double err = std::fabs(t - prev[d]) / scale;
-                if (err > max_err) max_err = err;
-                prev[d] = cur[d];
-                cur[d] = t;
-            }
-        }
-    }
-    return max_err;
-}
-
-// ============================================================================
-// Full GBS step with adaptive order
-// ============================================================================
-
 // NBODY_GBS_STATS=1: totals over the run, printed at exit (calls, GBS steps, failed and overshooting steps, the
 // stage at which converged steps stopped). Counted only then: the host batch integrates subsystems on all
 // threads, and atomic updates of shared counters on every step cost cache-line traffic
@@ -174,24 +32,23 @@ struct GbsStats {
 } g_gbs_stats;
 }  // namespace
 
-// Midpoint results of stages k0..k1 into table[] on the host threads, the largest stage handed out first
+// Midpoint results of stages k0..k1 into tab.table[] on the host threads, the largest stage handed out first
 void GBSIntegrator::compute_stages(const LogHState& state, int k0, int k1, double ds, double G,
                                    double c_code, int pn_order, const LogHStepStart* start) {
     using Policy = Kokkos::RangePolicy<Kokkos::DefaultHostExecutionSpace, Kokkos::Schedule<Kokkos::Dynamic>>;
     Kokkos::parallel_for("gbs_stages", Policy(0, k1 - k0 + 1).set_chunk_size(1), [&](int i) {
         const int k = k1 - i;
         LogHState result;   // midpoint copies state into it
-        midpoint(state, result, seq()[k], ds, G, c_code, pn_order, start);
+        gbs_midpoint(state, result, seq()[k], ds, G, c_code, pn_order, start);
         int d = 0;
-        pack_state(result, table[k], d);
+        gbs_pack_state(result, tab.table[k], d);
     });
 }
 
 bool GBSIntegrator::step(LogHState& state, double ds, double G, double& ds_next,
                           double c_code, int pn_order) {
     int dim = 0;
-    pack_state(state, y_start, dim);   // the integrated fields of the state before the step (restore_step)
-    dim_start = dim;
+    gbs_pack_state(state, y_start, dim);   // the integrated fields of the state before the step (restore_step)
 
     // Values at the start of the first substep, the same for every stage (not used by the SDAR steps)
     LogHStepStart start_buf;
@@ -201,64 +58,29 @@ bool GBSIntegrator::step(LogHState& state, double ds, double G, double& ds_next,
         start = &start_buf;
     }
 
-    int computed = -1;   // table[0..computed] holds the raw midpoint results
-    const int k_max = kmax();
-    for (int stage = 0; stage < k_max; stage++) {
-        if (stage > computed) {
-            if (par_stages) {
-                // Stage-parallel: the substep divisions are independent (Rantala et al. 2020, MSTAR, Sec. 4);
-                // compute stage..k1 at once, k1 = the stage the last step converged at. The extrapolation below
-                // runs in the same order on the same table, so the result is the serial one; unused stages
-                // beyond the converged one are discarded
-                const int k1 = std::min(k_max - 1, std::max(stage, par_hint));
-                compute_stages(state, stage, k1, ds, G, c_code, pn_order, start);
-                computed = k1;
-            } else {
-                LogHState result;   // midpoint copies state into it (masses, B, n_bodies, etc.)
-                midpoint(state, result, seq()[stage], ds, G, c_code, pn_order, start);
-                pack_state(result, table[stage], dim);
-                computed = stage;
-            }
-        }
-
-        // Always call extrapolate, in stage order — stage 0 starts the Neville table (returns 1.0).
-        // Without this, the table row is uninitialized garbage and stage 1 can
-        // falsely report convergence.
-        double err = extrapolate(stage, dim);
-
-        if (stage > 0) {
-            if (err < eta_gbs) {
-                if (gbs_stats_on) g_gbs_stats.stage[stage]++;
-                par_hint = stage;
-                // Converged: unpack best estimate from work[stage]
-                double chi_norm[4];
-                if (state.has_spins) spin_norms(state, chi_norm);
-                unpack_state(work[stage], dim, state);
-                // |chi| is an exact invariant of dS/dt = Omega × S (the leapfrog rotations keep it); the
-                // polynomial extrapolation does not, to within eta_gbs: restore the norms
-                if (state.has_spins) restore_spin_norms(state, chi_norm);
-
-                // Suggest next step size
-                double safety = 0.8;
-                double order = 2.0 * (stage + 1);
-                ds_next = ds * safety * std::pow(eta_gbs / (err + 1e-30), 1.0 / order);
-                ds_next = std::min(ds_next, 4.0 * ds);  // don't grow too fast
-                return true;
-            }
-
-            // Early exit: if error is enormous after several stages,
-            // the step is clearly too large for the dynamics. Bail out
-            // early to save computing higher stages with no hope.
-            if (stage >= 3 && err > 1.0) {
-                ds_next = 0.5 * ds;
-                return false;
-            }
-        }
+    GbsParams par;
+    par.seq = seq();
+    par.k_max = kmax();
+    par.eta = eta_gbs;
+    par.G = G;
+    par.c_code = c_code;
+    par.pn_order = pn_order;
+    // Stage-parallel: the substep divisions are independent (Rantala et al. 2020, MSTAR, Sec. 4); stages 0..k1,
+    // k1 = the stage the last step converged at, at once, the later ones (if needed) serially. The extrapolation
+    // runs in the same order on the same table, so the result is the serial one; unused stages are discarded
+    int computed = -1;
+    if (par_stages) {
+        computed = std::min(par.k_max - 1, std::max(0, par_hint));
+        compute_stages(state, 0, computed, ds, G, c_code, pn_order, start);
     }
-
-    // Did not converge — halve step size and try again
-    ds_next = 0.5 * ds;
-    return false;
+    GbsStepOut out;
+    gbs_step(par, state, ds, tab, computed, start, out);
+    ds_next = out.ds_next;
+    if (out.accepted) {
+        if (gbs_stats_on) g_gbs_stats.stage[out.stage]++;
+        par_hint = out.stage;
+    }
+    return out.accepted;
 }
 
 // ============================================================================

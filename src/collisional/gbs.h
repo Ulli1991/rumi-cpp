@@ -1,9 +1,7 @@
 #pragma once
 
 #include "logh.h"
-
-// pos + vel + aux_vel per body, 2 spins + 2 auxiliary spins, t, B
-constexpr int GBS_DIM_MAX = LOGH_MAX_BODIES * 9 + 12 + 2;
+#include "logh_step.h"
 
 // GBS (Gragg-Bulirsch-Stoer) extrapolation integrator
 // for high-accuracy integration of LogH equations of motion
@@ -13,7 +11,7 @@ struct GBSIntegrator {
     static constexpr int STEP_SEQ[] = {2, 4, 6, 8, 12, 16, 24, 32, 48, 64};
     // Deuflhard (1983) sequence n_k = 2 (k + 1), as in MSTAR (Rantala et al. 2020, sec. 2.3) and FROST-CLUSTERS
     static constexpr int STEP_SEQ_DEUFLHARD[] = {2, 4, 6, 8, 10, 12, 14, 16, 18, 20};
-    static constexpr int MAX_STAGES = 10;
+    static constexpr int MAX_STAGES = GBS_MAX_STAGES;
     // GBS_SEQUENCE (bulirsch | deuflhard) and GBS_KMAX (<= MAX_STAGES; FROST-CLUSTERS I: 8) from g_collisional
     static const int* seq();
     static int kmax();
@@ -36,15 +34,10 @@ struct GBSIntegrator {
     int peri_landings = 0;      // statistics: pericentres a step was forced onto
     int peri_misses = 0;        // statistics: candidates whose actual pericentre stayed outside r_coll
 
-    // Extrapolation table (Neville-Aitken)
-    // table[i] stores RAW midpoint result M(n_i) — never modified by extrapolation
-    // work[j] stores the last row T[k][j] of the Neville table (extrapolate adds row k)
-    double table[MAX_STAGES][GBS_DIM_MAX];  // pos+vel+aux_vel(+spins)+t+B per stage
-    double work[MAX_STAGES][GBS_DIM_MAX];
+    GbsTable tab;   // extrapolation table (logh_step.h)
     // Packed state at the start of the last step() call: the only fields a step changes (pos, vel, aux_vel,
     // spins, t, B), so that restore_step undoes an accepted step without a copy of the whole LogHState
     double y_start[GBS_DIM_MAX];
-    int dim_start = 0;
 
     // Stage-parallel steps (host threads; only outside other host-parallel regions): the midpoint integrations
     // of stages k..par_hint run concurrently, par_hint = the stage the previous step converged at. Same result
@@ -54,17 +47,7 @@ struct GBSIntegrator {
 
     GBSIntegrator(double eta = 1e-10) : eta_gbs(eta) {}
 
-    // Modified midpoint method: integrate LogHState by n_substeps of ds_total/n
-    // start: the values at the start of the first substep (logh_step_start of in; nullptr: computed here)
-    void midpoint(const LogHState& in, LogHState& out,
-                  int n_substeps, double ds_total, double G,
-                  double c_code = 0.0, int pn_order = 0, const LogHStepStart* start = nullptr);
-
-    // Rational polynomial extrapolation (Stoer & Bulirsch)
-    // Returns max relative error across all extrapolated components
-    double extrapolate(int stage, int dim);
-
-    // Full GBS step: advance LogHState by ds
+    // Full GBS step (gbs_step, logh_step.h): advance LogHState by ds
     // Returns true if converged within eta_gbs tolerance
     // out: converged state, ds_next: suggested next step size
     bool step(LogHState& state, double ds, double G, double& ds_next,
@@ -80,13 +63,6 @@ struct GBSIntegrator {
 private:
     void compute_stages(const LogHState& state, int k0, int k1, double ds, double G, double c_code, int pn_order,
                         const LogHStepStart* start);
-    // Pack LogHState into flat array for extrapolation
-    void pack_state(const LogHState& state, double* y, int& dim);
-    // Unpack flat array back into LogHState
-    void unpack_state(const double* y, int dim, LogHState& state);
     // Back to the state before the last step() (overshoot of the end time)
-    void restore_step(LogHState& state) { unpack_state(y_start, dim_start, state); }
-    // |chi| of spin1, spin2, aux_spin1, aux_spin2, and their restoration after extrapolation
-    static void spin_norms(LogHState& state, double norm[4]);
-    static void restore_spin_norms(LogHState& state, const double norm[4]);
+    void restore_step(LogHState& state) { gbs_unpack_state(y_start, state); }
 };

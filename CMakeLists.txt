@@ -43,6 +43,7 @@ if(ENABLE_COLLISIONAL)
         ${SRC_DIR}/collisional/subsystem.cpp
         ${SRC_DIR}/collisional/logh.cpp
         ${SRC_DIR}/collisional/gbs.cpp
+        ${SRC_DIR}/collisional/logh_step.cpp
         ${SRC_DIR}/collisional/logh_batch.cpp
         ${SRC_DIR}/collisional/secular.cpp
         ${SRC_DIR}/collisional/secular_triple_step.cpp
