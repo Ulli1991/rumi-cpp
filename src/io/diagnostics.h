@@ -60,7 +60,7 @@ struct EnergyAttribution {
     void reset() { bool o = on; double c = dt_cap; *this = EnergyAttribution(); on = o; dt_cap = c; }
 };
 extern EnergyAttribution g_eattr;
-// Number of the top-level step in progress (main loop; NBODY_SUBSYS_LOG lines)
+// Number of the top-level step in progress (main loop; SUBSYS_ERR lines)
 extern int g_step_in_progress;
 
 DiagnosticState compute_diagnostics(const Particles& p, double G, double soft2);

@@ -1,6 +1,6 @@
 # Config reference
 
-All 150 keys of the config file (`config.txt`, or `--config <file>`), generated from the parameter table in `src/core/params.cpp` by `scripts/gen_config_md.py`. Every key has one default, in that table; an unknown key in a config file is an error. Each run writes the effective value of every key, and whether it came from the file or the default, to `run_params.txt`.
+All 151 keys of the config file (`config.txt`, or `--config <file>`), generated from the parameter table in `src/core/params.cpp` by `scripts/gen_config_md.py`. Every key has one default, in that table; an unknown key in a config file is an error. Each run writes the effective value of every key, and whether it came from the file or the default, to `run_params.txt`.
 
 Levels:
 
@@ -153,6 +153,7 @@ Levels:
 | `RESTART_KEEP` | int | `2` | expert |  | Restart files kept (the newest) |
 | `STALL_FACTOR` | double | `5` | expert |  | A step slower than this x the median of the previous steps prints STALL lines: the costliest LogH integrations and the deepest set (0: off) |
 | `STALL_DE_FACTOR` | double | `10` | expert |  | A step whose energy change (ETA_RESTART check) exceeds this x the median of the previous steps prints STALL lines (0: off) |
+| `SUBSYS_ERR_TOL` | double | `1e-11` | expert |  | A subsystem advance (LogH, secular binary or triple) with unbooked \|dE\| above this x \|E0\| prints a SUBSYS_ERR line with its members' state (scripts/subsys_cases.py; 0: off) |
 | `STALL_RESTART` | bool | `false` | expert |  | Restart file before every step (RESTART_DIR/stall_roll), kept as RESTART_DIR/stall_<step>.h5 for a stalled step (scripts/cutout.py) |
 | `SNAPSHOT_INTERVAL` | int | `0` | user |  | LUNA-layout snapshot every this many steps, at step 0 and at the end (0: off) |
 | `SNAPSHOT_DIR` | string | `.` | user |  | Directory of snapdir_NNN/snapshot_NNN.0.hdf5 |
@@ -261,7 +262,6 @@ Levels:
 | `NBODY_SDAR` | =0/1: overrides SDAR |
 | `NBODY_SDAR_PN` | =1: SDAR slow-down of inner binaries without a PN member inside PN subsystems (PLAN item 4c; A/B) |
 | `NBODY_SLOW0_STATS` | Statistics of small all-fast HHS sets, printed at the end |
-| `NBODY_SUBSYS_LOG` | =x: one line per Newtonian subsystem advance with unbooked \|dE\| > x \|E0\|, with the members' initial state |
 | `NBODY_SMALL_FOR` | Largest loop run on the host where it can access device memory (default 256; 0: off) |
 | `NBODY_SMALL_N2` | Largest pair count run on the host where it can access device memory (default 4096) |
 | `NBODY_TILE256_MIN` | N^2 kernel: 256-thread tiles from this set size (GPUs; default 131072) |

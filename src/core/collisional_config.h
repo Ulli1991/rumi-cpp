@@ -32,6 +32,7 @@ struct CollisionalConfig {
     double tidal_step_res = 1.0;       // TIDAL_STEP_RES: floor of the FLYBY_CM_EPS step, this x P (1 - e)^(3/2) of a bound binary or
                                        // the shortest pair pericentre passage of other subsystems (0: none)
     bool flyby_ngb_cm = true;
+    double subsys_err_tol = 1e-11;     // SUBSYS_ERR_TOL: log subsystem advances with unbooked |dE| above this x |E0|
     double weak_split_gamma = 0.0;     // WEAK_SPLIT_GAMMA: tidal ratio below which a fly-by / unstable triple is split (0: off)
     double ngb_mass_gamma = 1e-3;      // NGB_MASS_GAMMA: tidal ratio above which a mass-scaled neighbour joins a binary
     double ngb_inv_mref = 0.0;         // NGB_MASS_SCALING: 1 / mean particle mass (pair neighbour radius r_ngb max(1, m/<m>)^(1/3)), 0: off          // FLYBY_NGB_CM: distant fly-by neighbour test of a binary member against the binary's c.o.m.

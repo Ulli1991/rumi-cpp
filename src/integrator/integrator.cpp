@@ -761,7 +761,8 @@ void advance_subsystems_in_range_impl(Particles& p, int start, int count,
         // summed afterwards in a fixed order, so every MPI rank books the same value.
         const int n_sec = (int)secular_idx.size();
         std::vector<double> dE_gw(n_sec, 0.0);
-        std::vector<double> sec_res(n_sec, 0.0);   // NBODY_ELEDGER
+        std::vector<double> sec_res(n_sec, 0.0);   // NBODY_ELEDGER, SUBSYS_ERR_TOL: booking residue per binary
+        std::vector<double> sec_pre(14 * (size_t)n_sec, 0.0);   // SUBSYS_ERR_TOL: m x y z vx vy vz of both members before
         std::vector<char> sec_pn(n_sec, 0);
         std::vector<char> evolved(n_sec, 0);
         std::vector<int> substeps(n_sec, 0);
@@ -803,7 +804,13 @@ void advance_subsystems_in_range_impl(Particles& p, int start, int count,
             const double a_pre = pn_b ? cartesian_to_elements(r_rel_pre, v_rel_pre, mu_sec).a : 0.0;
 
             static const bool led_sec = std::getenv("NBODY_ELEDGER") != nullptr;
-            const double e_sec0 = led_sec ? pair_energy(m1_sec, p1, v1, m2_sec, p2, v2, G) : 0.0;
+            const bool err_log = g_collisional.subsys_err_tol > 0.0 && g_collisional.e_ref > 0.0;
+            const double e_sec0 = (led_sec || err_log) ? pair_energy(m1_sec, p1, v1, m2_sec, p2, v2, G) : 0.0;
+            if (err_log) {
+                double* q = &sec_pre[14 * k];
+                q[0] = m1_sec; q[7] = m2_sec;
+                for (int c = 0; c < 3; c++) { q[1 + c] = p1[c]; q[4 + c] = v1[c]; q[8 + c] = p2[c]; q[11 + c] = v2[c]; }
+            }
             substeps[k] = integrate_secular_binary(p1, v1, m1_sec, p2, v2, m2_sec, G, g_collisional.c_code, pn_b, dt);
 
             if (pn_b) {
@@ -813,7 +820,7 @@ void advance_subsystems_in_range_impl(Particles& p, int start, int count,
                 if (a_post > 0.0 && a_pre > 0.0)
                     dE_gw[k] = -G * m1_sec * m2_sec / (2.0 * a_pre) + G * m1_sec * m2_sec / (2.0 * a_post);
             }
-            if (led_sec) sec_res[k] = pair_energy(m1_sec, p1, v1, m2_sec, p2, v2, G) - e_sec0 + dE_gw[k];
+            if (led_sec || err_log) sec_res[k] = pair_energy(m1_sec, p1, v1, m2_sec, p2, v2, G) - e_sec0 + dE_gw[k];
 
             // P and L moved by the evolution (Kepler motion and the CoM drift conserve both)
             {
@@ -841,6 +848,20 @@ void advance_subsystems_in_range_impl(Particles& p, int start, int count,
                 Kokkos::RangePolicy<Kokkos::DefaultHostExecutionSpace, Kokkos::Schedule<Kokkos::Dynamic>>(0, n_sec),
                 evolve);
         }
+        if (g_collisional.subsys_err_tol > 0.0 && g_collisional.e_ref > 0.0 && MPIComm::rank() == 0)
+            for (int k = 0; k < n_sec; k++)
+                if (evolved[k] && std::fabs(sec_res[k]) > g_collisional.subsys_err_tol * g_collisional.e_ref) {
+                    const auto& sub = g_subsystem_mgr.active[secular_idx[k]];
+                    const double* q = &sec_pre[14 * k];
+                    auto& sc = StellarPropsCache::get();
+                    const int k0 = sc.type_of(p, sub.particle_ids[0]), k1 = sc.type_of(p, sub.particle_ids[1]);
+                    std::printf("SUBSYS_ERR step %d secular%s dE/E0 %.3e type %d n 2 dt %.3e a %.4e e %.5f m %.4g %.4g pids %d %d "
+                                "state [%.17g %.17g %.17g %.17g %.17g %.17g %.17g %d %.17g] [%.17g %.17g %.17g %.17g %.17g %.17g %.17g %d %.17g]\n",
+                                g_step_in_progress, sec_pn[k] ? "_pn" : "", sec_res[k] / g_collisional.e_ref, (int)sub.type,
+                                dt * TIME_UNIT_MYR, sub.orb.a, sub.orb.e, q[0], q[7], sub.particle_ids[0], sub.particle_ids[1],
+                                q[0], q[1], q[2], q[3], q[4], q[5], q[6], k0, k0 >= 0 ? sc.radius_of(sub.particle_ids[0]) : 0.0,
+                                q[7], q[8], q[9], q[10], q[11], q[12], q[13], k1, k1 >= 0 ? sc.radius_of(sub.particle_ids[1]) : 0.0);
+                }
         for (int k = 0; k < n_sec; k++) {
             if (evolved[k]) { g_led_sec2 += sec_res[k]; if (sec_pn[k]) g_led_sec2_pn += sec_res[k]; g_led_n_sec2++; }
             g_energy_books.E_gw += dE_gw[k];
@@ -972,6 +993,15 @@ void advance_subsystems_in_range_impl(Particles& p, int start, int count,
                 return E;
             };
             const double E_tri0 = tri_energy();   // T + U of the three members before the secular step
+            double tri_pre[21];   // SUBSYS_ERR_TOL: m x y z vx vy vz of the three members before the step
+            {
+                const int ii[3] = {idx0 - start, idx1 - start, idx2 - start};
+                for (int b = 0; b < 3; b++) {
+                    const int i = ii[b];
+                    double* q = tri_pre + 7 * b;
+                    q[0] = h_m(i); q[1] = h_x(i); q[2] = h_y(i); q[3] = h_z(i); q[4] = h_vx(i); q[5] = h_vy(i); q[6] = h_vz(i);
+                }
+            }
             if (led_tri) led_tri_pending.push_back({idx0, idx1, idx2, E_tri0, 0.0});
 
             secular_evolve_triple(tri, dt, G, g_collisional.c_code,
@@ -1135,6 +1165,23 @@ void advance_subsystems_in_range_impl(Particles& p, int start, int count,
                 const int i0 = idx0 - start, i1 = idx1 - start, i2 = idx2 - start;
                 if (dE != 0.0 && !radial_fix(i0, i1, m1, m2, i2, m3, true) && !radial_fix(i0, i1, m1, m2, i2, m3, false))
                     g_subsystem_mgr.step_sec_triple_unfixed++;
+                const double res = tri_energy() - (E_tri0 - booked_tri);   // what is left after the fix (round-off)
+                if (g_collisional.subsys_err_tol > 0.0 && g_collisional.e_ref > 0.0 && MPIComm::rank() == 0 &&
+                    std::fabs(res) > g_collisional.subsys_err_tol * g_collisional.e_ref) {
+                    std::printf("SUBSYS_ERR step %d secular_triple dE/E0 %.3e type %d n 3 dt %.3e a %.4e e %.5f m %.4g %.4g %.4g "
+                                "pids %d %d %d state", g_step_in_progress, res / g_collisional.e_ref, (int)sub.type,
+                                dt * TIME_UNIT_MYR, tri.inner.a, tri.inner.e, m1, m2, m3, sub.inner_binary_id, inner_j,
+                                sub.outer_companion_pid);
+                    auto& sc = StellarPropsCache::get();
+                    const int tp[3] = {sub.inner_binary_id, inner_j, sub.outer_companion_pid};
+                    for (int b = 0; b < 3; b++) {
+                        const int kw = sc.type_of(p, tp[b]);
+                        std::printf(" [%.17g %.17g %.17g %.17g %.17g %.17g %.17g %d %.17g]", tri_pre[7 * b], tri_pre[7 * b + 1],
+                                    tri_pre[7 * b + 2], tri_pre[7 * b + 3], tri_pre[7 * b + 4], tri_pre[7 * b + 5],
+                                    tri_pre[7 * b + 6], kw, kw >= 0 ? sc.radius_of(tp[b]) : 0.0);
+                    }
+                    std::printf("\n");
+                }
             }
         }
 
@@ -1405,10 +1452,11 @@ void advance_subsystems_in_range_impl(Particles& p, int start, int count,
         // Newtonian energy, momentum and angular momentum over this advance (Newtonian LogH conserves
         // them; what changed is the PN dynamics, plus GBS error at its tolerance)
         const bool pn_on = g_collisional.pn_order > 0 && g_collisional.c_code > 0.0;
-        // NBODY_SUBSYS_LOG=x: one line per Newtonian subsystem advance whose unbooked energy change (integration
-        // error) exceeds x |E0|, with the members' state before the advance (Msun, pc, km/s; to rerun it in
-        // isolation). PN subsystems book their whole change (E_pn), so they cannot show up in dE/E
-        static const double subsys_log = std::getenv("NBODY_SUBSYS_LOG") ? std::atof(std::getenv("NBODY_SUBSYS_LOG")) : 0.0;
+        // SUBSYS_ERR_TOL = x: one SUBSYS_ERR line per subsystem advance whose unbooked energy change (integration
+        // error) exceeds x |E0|, with the members' state before the advance (Msun, pc, km/s; scripts/subsys_cases.py
+        // reruns it in isolation). PN subsystems book their whole change (E_pn), so they cannot show up in dE/E;
+        // the secular paths log the same way (secular binaries incl. Kepler drifts, secular triples)
+        const double subsys_log = g_collisional.subsys_err_tol;
         auto log_subsys = [&](const Subsystem& sub, int nb, const char* kind, double d, int si) {
             if (subsys_log <= 0.0 || g_collisional.e_ref <= 0.0 || MPIComm::rank() != 0 ||
                 std::fabs(d) <= subsys_log * g_collisional.e_ref) return;
@@ -1431,8 +1479,10 @@ void advance_subsystems_in_range_impl(Particles& p, int start, int count,
             for (int b = 0; b < nb; b++) {
                 const auto& q = saved_bodies[si][b];
                 char sb[200];
-                std::snprintf(sb, sizeof(sb), " [%.17g %.17g %.17g %.17g %.17g %.17g %.17g]", q.m, q.x, q.y, q.z, q.vx,
-                              q.vy, q.vz);
+                auto& sc = StellarPropsCache::get();
+                const int kw = sc.type_of(p, sub.particle_ids[b]);
+                std::snprintf(sb, sizeof(sb), " [%.17g %.17g %.17g %.17g %.17g %.17g %.17g %d %.17g]", q.m, q.x, q.y, q.z,
+                              q.vx, q.vy, q.vz, kw, kw >= 0 ? sc.radius_of(sub.particle_ids[b]) : 0.0);
                 msg += sb;
             }
             std::printf("%s\n", msg.c_str());
