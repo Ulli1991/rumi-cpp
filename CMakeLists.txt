@@ -46,6 +46,7 @@ if(ENABLE_COLLISIONAL)
         ${SRC_DIR}/collisional/logh_batch.cpp
         ${SRC_DIR}/collisional/secular.cpp
         ${SRC_DIR}/collisional/secular_triple_step.cpp
+        ${SRC_DIR}/collisional/post_newtonian_core.cpp
         ${SRC_DIR}/collisional/post_newtonian.cpp
         ${SRC_DIR}/collisional/mergers.cpp
         ${SRC_DIR}/collisional/merger_tree.cpp
@@ -116,6 +117,10 @@ target_compile_features(sse-test PRIVATE cxx_std_17)
 # Two-body drift check (tests/kepler_test.cpp; ctest case kepler_drift_unit)
 if(ENABLE_COLLISIONAL)
     add_executable(kepler-test ${CMAKE_CURRENT_SOURCE_DIR}/tests/kepler_test.cpp ${SRC_DIR}/collisional/kepler.cpp)
+    # PN1 energy against the PN1 equations of motion (tests/pn_energy_test.cpp; ctest case pn1_energy_consistency)
+    add_executable(pn-energy-test ${CMAKE_CURRENT_SOURCE_DIR}/tests/pn_energy_test.cpp ${SRC_DIR}/collisional/post_newtonian_core.cpp)
+    target_include_directories(pn-energy-test PRIVATE ${SRC_DIR}/collisional)
+    target_compile_features(pn-energy-test PRIVATE cxx_std_17)
     target_include_directories(kepler-test PRIVATE ${SRC_DIR}/collisional)
     target_compile_features(kepler-test PRIVATE cxx_std_17)
 endif()
@@ -225,6 +230,7 @@ endforeach()
 if(ENABLE_COLLISIONAL)
     add_test(NAME kepler_drift_unit COMMAND Python3::Interpreter ${CMAKE_SOURCE_DIR}/tests/run_case.py
              $<TARGET_FILE:kepler-test> kepler_drift_unit)
+    add_test(NAME pn1_energy_consistency COMMAND pn-energy-test)
 endif()
 if(USE_MPI)
     foreach(case spin_mpi2 mergers_mpi2 mpi_1v2 rankcount_binaries rankcount_mergers rankcount_triples rankcount_natal_kicks)

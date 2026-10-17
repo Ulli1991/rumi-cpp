@@ -25,6 +25,10 @@ Goal (2026-10-16): the smallest long-run |dE/E| with P and L at double-precision
 
 ## Lessons (what the cases teach; check new code against these)
 
+0. **Check formulas against each other, not only runs.** A wrong sign in the PN1 energy (C7) survived because the
+   check it would have failed was switched off as "impossible". Enzyme gradients turn "equations of motion and
+   energy must agree" into a direct test (tests/enzyme).
+
 1. **Book from the states, never from a model of them.** Every path must book exactly the change of its members'
    T + U recomputed from positions and velocities. Booking from orbital elements or an approximate model (C4: only the
    inner binary's GW loss of a secular triple) hides the model's error inside the dynamics.
@@ -140,6 +144,25 @@ Status: **closed** (fixed, test, ensemble checked), **option** (fix kept as an o
 - **Test:** `adv_kozai_triple`: max |dE/E| 4.4e-16, |dL/L| 1.2e-15 (old code: 5.8e-3, 1.26e-2); `sec_triple_energy`
   |dL/L| 8.4e-13 -> 6.2e-16 (bound tightened to round-off).
 - **Cluster:** pending (the next campaign; runs without secular triples are unchanged).
+
+## C7 PN1 energy: wrong sign (B1, closed) and no N-body EIH for n >= 3 (B2, open)
+
+- **Found by:** Enzyme (tests/enzyme/pn_consistency.cpp), not by a conservation run: under the code's PN1 equations
+  of motion the energy T + U + E_pn1 must be conserved to O(1/c^4); dE/dt = grad_x E . v + grad_v E . a with the
+  exact gradients of `pn1_energy` scaled as c^-2 (doubling c divided it by 4, not 16), for 2, 3 and 4 bodies.
+- **B1 (closed):** the G^2 potential-potential term of `pn1_energy` had the wrong sign (-mu (GM/r)^2 / 2 instead of +,
+  Blanchet 2014 eq. 233). With the sign flipped two bodies are consistent to exactly c^-4 (ratio 16.00, residual 1e-4
+  of the 1PN terms): the acceleration was right, the energy wrong. Effect: `pn1_energy` is used only in the LogH
+  energy check of PN subsystems, which is then overwritten with 0 ("no energy this check can hold"), so no effect on
+  the dynamics, but the check could never have worked. Test `pn1_energy_consistency` (central differences, gcc):
+  ratio 16.00 for 20 binaries (4 with the old sign).
+- **B2 (open):** for n >= 3 the ratio stays ~4: acceleration (LogH `compute_pn_all_pairs`) and energy are pair sums of
+  the 2-body EIH formulas; the genuine three-body terms of the N-body EIH dynamics (sums over a third body C in the
+  A-B interaction, in acceleration and energy, Poisson & Will 2014 sec. 9.3) are missing, so PN subsystems with 3+
+  bodies follow a model without a conserved 1PN energy (documented as "EIH N-body"). Small for hierarchical triples
+  (terms ~ (m_C/m_B)(r_AB/r_AC)), a full 1PN effect for BH triples with comparable separations.
+- **Next:** the full N-body EIH acceleration and energy (literature formulas), Enzyme check for n = 3, 4 (ratio 16),
+  then the PN energy check of PN subsystems switched on again (order 1PN, two and more bodies).
 
 ## R1 FLYBY_CM_KICK, c.o.m. kicks of weakly perturbed binaries (rejected)
 
