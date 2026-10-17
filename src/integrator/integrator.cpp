@@ -513,6 +513,7 @@ void advance_subsystems_in_range_impl(Particles& p, int start, int count,
                                        double G, double dt) {
     PhaseClock phase_clock;
     if (!p.collisional || g_subsystem_mgr.active.empty()) return;
+    NvtxScope nvtx_subsys("SUBSYS");
     g_subsys_phase.calls[std::min(g_profiler.cur_depth, SubsystemPhaseTimes::MAXD - 1)]++;
 
     // Rebuild pid→idx mapping: partition_by_pivot() reorders particles,
@@ -2671,6 +2672,7 @@ static bool host_subtree_eligible(const Particles& p, int count, bool use_mpi, b
 static int hhs_fsi_host_subtree(Particles& p, DistributedParticles* dp, int start, int count, double pivot_dt,
                                 double G, double soft2, double dt_min, double eta, bool dt_valid, int depth) {
     HostSubtree& hs = host_subtree();
+    NvtxScope nvtx_hostsub("HOSTSUB");
     g_host_subtree_stats.calls++;
     g_host_subtree_stats.particles += count;
     g_profiler.start();
@@ -3018,8 +3020,13 @@ static int hhs_fsi_recursive_impl(
 #endif
     struct DepthScope {   // profiler charges work to this depth until the call returns
         int saved;
-        explicit DepthScope(int d) : saved(g_profiler.cur_depth) { g_profiler.cur_depth = d; }
-        ~DepthScope() { g_profiler.cur_depth = saved; }
+        explicit DepthScope(int d) : saved(g_profiler.cur_depth) {
+            g_profiler.cur_depth = d;
+#if defined(NBODY_NVTX) && defined(KOKKOS_ENABLE_CUDA)
+            char nv[16]; std::snprintf(nv, sizeof nv, "D%02d", d); NBODY_NVTX_PUSH(nv);   // per-depth NVTX range
+#endif
+        }
+        ~DepthScope() { NBODY_NVTX_POP(); g_profiler.cur_depth = saved; }
     } depth_scope(depth);
 
     // HHS_CC splits sets of at most cc_max particles; they run locally on every rank (replicated), so that the
