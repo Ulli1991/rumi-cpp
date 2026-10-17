@@ -339,6 +339,25 @@ Status: **closed** (fixed, test, ensemble checked), **option** (fix kept as an o
 | PN1 EIH acceleration, 2 bodies | energy consistency, Euler-Lagrange of the EIH Lagrangian (Enzyme) | c^-4; O(v^2/c^2) | `pn1_energy_consistency` |
 | Spin PN (leading SO 1.5PN, SS + Kerr quadrupole 2PN, precession, Kidder 1995) | dE/dt and dJ/dt along the code's flow, precession vs Poisson bracket of the spin Hamiltonian (Enzyme, q 1 to 1e-3, random spins, bound and unbound) | leftovers c^-5 / c^-6 (ratios 32.0 / 64.0: the next spin orders the code does not include); precession 6e-16; integrated &#124;S&#124; drift 1.9e-15. Gap: spin terms stay at leading order with PN to 3.5; frozen in 3+ body and secular paths | `spin_pn_consistency` |
 
+## R2 BIFROST's symplectic LogH kick 1/(-U) instead of 1/(T+B) (rejected by the cluster A/B; C12 open as a finding)
+
+- **Finding (Enzyme Jacobians, M^T J M - J):** the production LogH leapfrog is not symplectic in extended phase space.
+  - Since 8cd3029 (2026-02) the kick divides by the implicit Omega = T(v_mid) + B (cubic solve), not by BIFROST's
+    -U(x) (Mikkola & Tanikawa 1999). That kick depends on v, so it is no Hamiltonian flow: defect O(ds), 4e-2 at
+    ds = 0.01.
+  - On the energy shell T + B = -U the two kicks agree, so only the off-shell part is extra; GBS extrapolation does
+    not remove it.
+  - BIFROST's kick is symplectic to 6e-13 (test in branch worktree-agent-ae641fc52220640f6, tests/symplectic_test.cpp).
+- **A/B (NBODY_KICK_U):**
+  - Isolated (agent): e = 0.999 binary 1.8e-11 vs 4.4e-9; 200-system ensemble median 1.2-4x better, but the p90/max
+    of e >= 0.9 binaries 2-4x worse.
+  - Cluster, 0.06 Myr, |dE/E| at the end: 200k seeds 3/7/13/21/42 base 8.6e-12 / 5.2e-12 / 6.6e-11 / 3.2e-11 /
+    3.1e-11, 1/(-U) 6.8e-11 / 1.7e-12 / 4.0e-11 / 8.2e-11 / 2.3e-11 (8x and 2.6x worse on two seeds). B (110k) seeds
+    7/13/42: equal to 2 digits.
+- **Decision:** the energy rule (equal or better on every seed) fails, so the implicit kick stays. Open: why the
+  non-symplectic kick does as well in clusters. Likely the energy error there is dominated by the FSI/field, and
+  LogH steps are short.
+
 ## R1 FLYBY_CM_KICK, c.o.m. kicks of weakly perturbed binaries (rejected)
 
 - **Tried on:** the C2 step. |dL/L| 1.3e-14 -> 1.4e-9, 15 % faster. Deleted in 1483094 (the isolated tests had stayed
