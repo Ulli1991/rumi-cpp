@@ -254,6 +254,8 @@ Levels:
 | `NBODY_EATTR` | Per-print energy attribution |
 | `NBODY_ELEDGER` | =1: energy ledger of the HHS recursion (error per call and level; one rank, replays only) |
 | `NBODY_ECHECK_CMP` | Energy check: the split sum against the replicated whole-range sum |
+| `NBODY_PE_STREAMS` | =0: the potential-energy blocks one after the other on the default stream (GPU default: concurrent streams, same bits) |
+| `NBODY_PE_REUSE` | =0: the print diagnostics recompute the energy check's potential energy (same bits); =check: recompute and compare |
 | `NBODY_ESPLIT` | Total energy and the internal energy of a fixed list of binaries at each print |
 | `NBODY_GBS_DYNCAP` | Initial LogH step: t_dyn / this (default 3) |
 | `NBODY_GBS_STAGE_PAR` | Batches of up to this many subsystems run their GBS stages on host threads (default 2) |

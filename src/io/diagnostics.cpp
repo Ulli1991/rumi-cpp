@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <type_traits>
 #include <vector>
 #ifdef USE_MPI
 #include <mpi.h>
@@ -29,24 +30,27 @@ int g_step_in_progress = 0;
 // (r0 its first row) instead of tile 0: the skipped tiles held only j <= i, which added nothing, so every row's sum
 // (same j, same order) and the reduction are bit-identical to the full loop, at half the work (AUDIT G row 3)
 // ==========================================================================
-double compute_potential_energy_tiled(const Particles& p, double G, double soft2,
-                                      int i_start, int i_count) {
+namespace {
+// One launch of the tiled PE kernel on the instance `ex`, reduced into `result` (a scalar or a rank-0 view).
+// The reduction (block partials, inter-block tree) depends only on the launch shape, not on the stream, so a
+// launch on any instance gives the same bits for the same rows
+template <class Exec, class Result>
+void pe_tiled_launch(const Exec& ex, const Particles& p, double G, double soft2, int i_start, int i_count,
+                     Result&& result) {
     const int N = p.N;
     auto px = p.x; auto py = p.y; auto pz = p.z;
     auto pm = p.mass;
 
-    using team_policy = Kokkos::TeamPolicy<>;
-    using member_type = team_policy::member_type;
-    using scratch_space = Kokkos::DefaultExecutionSpace::scratch_memory_space;
+    using team_policy = Kokkos::TeamPolicy<Exec>;
+    using member_type = typename team_policy::member_type;
+    using scratch_space = typename Exec::scratch_memory_space;
 
     // Tile: x,y,z,m per j-particle
     size_t scratch_size = TILE_SIZE * 4 * sizeof(double);
     int num_teams = (i_count + TILE_SIZE - 1) / TILE_SIZE;
-    if (num_teams == 0) return 0.0;
 
-    double PE = 0;
     Kokkos::parallel_reduce("pe_tiled",
-        team_policy(num_teams, TILE_SIZE).set_scratch_size(0, Kokkos::PerTeam(scratch_size)),
+        team_policy(ex, num_teams, TILE_SIZE).set_scratch_size(0, Kokkos::PerTeam(scratch_size)),
         KOKKOS_LAMBDA(const member_type& team, double& lPE) {
             int i = i_start + team.league_rank() * TILE_SIZE + team.team_rank();
 
@@ -92,8 +96,15 @@ double compute_potential_energy_tiled(const Particles& p, double G, double soft2
                 team.team_barrier();
             }
             lPE += pe_i;
-        }, PE);
+        }, result);
+}
+}  // namespace
 
+double compute_potential_energy_tiled(const Particles& p, double G, double soft2,
+                                      int i_start, int i_count) {
+    if ((i_count + TILE_SIZE - 1) / TILE_SIZE <= 0) return 0.0;
+    double PE = 0;
+    pe_tiled_launch(Kokkos::DefaultExecutionSpace(), p, G, soft2, i_start, i_count, PE);
     return PE;
 }
 
@@ -110,6 +121,33 @@ double compute_potential_energy_tiled(const Particles& p, double G, double soft2
 // ==========================================================================
 namespace {
 constexpr int PE_BLOCKS = 64;
+// Concurrent block launches (device backends only; NBODY_PE_STREAMS=0: one after the other on the default stream,
+// same bits). On a host backend the reduction order depends on the threads an instance owns, so it stays serial
+bool pe_streams_enabled() {
+    if constexpr (std::is_same_v<Kokkos::DefaultExecutionSpace, Kokkos::DefaultHostExecutionSpace>) {
+        return false;
+    } else {
+        static const bool on = [] { const char* v = std::getenv("NBODY_PE_STREAMS"); return !(v && v[0] == '0'); }();
+        return on;
+    }
+}
+// One execution-space instance (stream) per block, created on first use and released before Kokkos::finalize
+std::vector<Kokkos::DefaultExecutionSpace>& pe_instances() {
+    static std::vector<Kokkos::DefaultExecutionSpace> ex;
+    if (ex.empty()) {
+        ex = Kokkos::Experimental::partition_space(Kokkos::DefaultExecutionSpace(), std::vector<int>(PE_BLOCKS, 1));
+        Kokkos::push_finalize_hook([] { ex.clear(); });
+    }
+    return ex;
+}
+Kokkos::View<double*>& pe_block_results() {
+    static Kokkos::View<double*> v;
+    if (v.extent(0) == 0) {
+        v = Kokkos::View<double*>("pe_block_sums", PE_BLOCKS);
+        Kokkos::push_finalize_hook([] { v = Kokkos::View<double*>(); });
+    }
+    return v;
+}
 int pe_block_bound(int N, int k) {
     if (k <= 0) return 0;
     if (k >= PE_BLOCKS) return N;
@@ -124,9 +162,26 @@ double pe_fixed_blocks(const Particles& p, double G, double soft2) {
     if (n_ranks > 1) { k0 = (int)((long long)r * PE_BLOCKS / n_ranks); k1 = (int)((long long)(r + 1) * PE_BLOCKS / n_ranks); }
 #endif
     std::vector<double> blk(PE_BLOCKS, 0.0);
-    for (int k = k0; k < k1; k++) {
-        const int b0 = pe_block_bound(N, k), b1 = pe_block_bound(N, k + 1);
-        if (b1 > b0) blk[k] = compute_potential_energy_tiled(p, G, soft2, b0, b1 - b0);
+    if (pe_streams_enabled()) {
+        // Device: the blocks' launches run concurrently, one stream each (a block alone fills ~7 of the 108 A100
+        // SMs: 64 launches one after the other took 0.4 s per evaluation at 50k). Each launch is the one above,
+        // reduced into its own device slot, so every block sum and the ordered addition keep their bits
+        auto& ex = pe_instances();
+        auto& d_blk = pe_block_results();
+        Kokkos::DefaultExecutionSpace().fence("pe_fixed_blocks: particles ready");
+        for (int k = k0; k < k1; k++) {
+            const int b0 = pe_block_bound(N, k), b1 = pe_block_bound(N, k + 1);
+            if (b1 > b0) pe_tiled_launch(ex[k], p, G, soft2, b0, b1 - b0, Kokkos::subview(d_blk, k));
+        }
+        for (int k = k0; k < k1; k++) ex[k].fence("pe_fixed_blocks: block sums");
+        auto h_blk = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), d_blk);
+        for (int k = k0; k < k1; k++)
+            if (pe_block_bound(N, k + 1) > pe_block_bound(N, k)) blk[k] = h_blk(k);
+    } else {
+        for (int k = k0; k < k1; k++) {
+            const int b0 = pe_block_bound(N, k), b1 = pe_block_bound(N, k + 1);
+            if (b1 > b0) blk[k] = compute_potential_energy_tiled(p, G, soft2, b0, b1 - b0);
+        }
     }
 #ifdef USE_MPI
     if (n_ranks > 1) {
@@ -150,7 +205,7 @@ double compute_potential_energy_split(const Particles& p, double G, double soft2
     return pe_fixed_blocks(p, G, soft2);
 }
 
-DiagnosticState compute_diagnostics(const Particles& p, double G, double soft2) {
+DiagnosticState compute_diagnostics(const Particles& p, double G, double soft2, const double* pe_known) {
     const int N = p.N;
     auto px = p.x; auto py = p.y; auto pz = p.z;
     auto pvx = p.vx; auto pvy = p.vy; auto pvz = p.vz;
@@ -185,7 +240,7 @@ DiagnosticState compute_diagnostics(const Particles& p, double G, double soft2) 
         }, Lz);
 
     // Potential energy: tiled GPU kernel + MPI-distributed
-    double PE = compute_potential_energy_distributed(p, G, soft2);
+    double PE = pe_known ? *pe_known : compute_potential_energy_distributed(p, G, soft2);
 
     Kokkos::fence("diagnostics.cpp:156");
 

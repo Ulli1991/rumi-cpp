@@ -63,7 +63,8 @@ extern EnergyAttribution g_eattr;
 // Number of the top-level step in progress (main loop; SUBSYS_ERR lines)
 extern int g_step_in_progress;
 
-DiagnosticState compute_diagnostics(const Particles& p, double G, double soft2);
+// pe_known: the potential energy of exactly this state in this particle order (the last energy check's), reused
+DiagnosticState compute_diagnostics(const Particles& p, double G, double soft2, const double* pe_known = nullptr);
 
 // Tiled GPU potential energy computation (shared-memory tiled, O(N²))
 // Computes PE for i in [i_start, i_start+i_count) against all N particles (j > i only)

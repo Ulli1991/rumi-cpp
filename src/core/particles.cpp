@@ -365,6 +365,7 @@ int Particles::compact_remove_zero_mass(int from, int to) {
 
 void Particles::partition_by_level() {
     if (N == 0 || n_levels == 0) return;
+    const unsigned long long version0 = layout_version;
     mark_layout_dirty(0, N);  // reorders every slot
 
     // Resize level_count / level_start on host
@@ -399,6 +400,14 @@ void Particles::partition_by_level() {
                 }
                 partial_sum += is_level;
             });
+    }
+    // Identity permutation: the gathers below copy every field onto itself, so the layout keeps its version and
+    // order-dependent sums of the state (the energy check's potential energy, main.cpp) stay valid
+    {
+        int moved = 0;
+        Kokkos::parallel_reduce("level_perm_moved", N,
+            KOKKOS_LAMBDA(int i, int& c) { c += perm(i) != i ? 1 : 0; }, moved);
+        if (moved == 0) layout_version = version0;
     }
 
 

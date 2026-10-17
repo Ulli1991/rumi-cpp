@@ -76,7 +76,10 @@ struct Particles {
     // compactions, restores); lets SubsystemManager::rebuild_pid_to_idx update only that range
     mutable int layout_dirty_lo = 0, layout_dirty_hi = INT_MAX;
     mutable std::vector<int> removed_pid_log;   // ids removed since the last map build
+    // Counts the reorderings (every one marks its slots dirty); unchanged: every particle is in the same slot
+    mutable unsigned long long layout_version = 0;
     void mark_layout_dirty(int lo, int hi) const {
+        layout_version++;
         layout_dirty_lo = std::min(layout_dirty_lo, lo);
         layout_dirty_hi = std::max(layout_dirty_hi, hi);
     }

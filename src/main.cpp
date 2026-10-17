@@ -1291,8 +1291,8 @@ int main(int argc, char** argv) {
             if (std::isfinite(ade)) stall_de_hist.push_back(ade);
         };
 
-        auto print_progress = [&](double t_now, int step_now) {
-            auto diag = compute_diagnostics(work_p, G, soft2);
+        auto print_progress = [&](double t_now, int step_now, const double* pe_known = nullptr) {
+            auto diag = compute_diagnostics(work_p, G, soft2, pe_known);
             double dE, dP, dL;
             compute_errors(diag, diag0, work_p, is_cluster, dE, dP, dL);
             if (my_rank == 0) {
@@ -1414,6 +1414,12 @@ int main(int argc, char** argv) {
             // Recomputed when the particles changed in between (SSE here; escaper removal changes N)
             double E_carry = 0;
             int E_carry_N = -1;
+            // PE of the accepted state from the energy check: the print diagnostics reuse it while the particles
+            // keep their slots (same order, same summation, same bits); any reordering in between (a level partition
+            // that moves a particle, a compaction, a restore: Particles::layout_version) makes them recompute it
+            double pe_chk = 0.0;
+            bool pe_chk_valid = false;
+            unsigned long long pe_chk_layout = 0;   // work_p.layout_version at the check
 #endif
             g_step_in_progress = step + 1;
             while (t < t_final) {
@@ -1421,6 +1427,9 @@ int main(int argc, char** argv) {
                 fence_stats::report(step, false);   // reset: count only this step
                 auto step_t0 = std::chrono::high_resolution_clock::now();
                 g_stall.reset();
+#ifdef ENABLE_COLLISIONAL
+                pe_chk_valid = false;
+#endif
                 double step_de = std::nan("");
 #ifdef ENABLE_COLLISIONAL
                 g_sim_time = t;
@@ -1490,7 +1499,8 @@ int main(int argc, char** argv) {
 
                         // Per-step error: |E(t) - E(t-τ)| / |E(t₀)|  (BIFROST §3.19)
                         g_profiler.start();
-                        double E_part = compute_particle_energy(work_p, G, soft2);
+                        double PE_part = 0.0;
+                        double E_part = compute_particle_energy(work_p, G, soft2, &PE_part);
                         double E_after = E_part + g_energy_books.total_sink();
                         g_profiler.stop(StepProfiler::ENERGY_CHECK);
                         double dE = std::fabs((E_after - E_step_start) / (std::fabs(diag0.E_total) + 1e-30));
@@ -1499,6 +1509,9 @@ int main(int argc, char** argv) {
                             // Accepted
                             E_carry = E_part;
                             E_carry_N = work_p.N;
+                            pe_chk = PE_part;
+                            pe_chk_layout = work_p.layout_version;
+                            pe_chk_valid = true;
                             break;
                         }
 
@@ -1514,6 +1527,9 @@ int main(int argc, char** argv) {
                                         restart == max_restarts ? "max retries reached" : "dE not decreasing",
                                         std::min(dE, best_dE));
                             E_carry = dE > best_dE ? best_Epart : E_part;
+                            pe_chk = PE_part;
+                            pe_chk_layout = work_p.layout_version;
+                            pe_chk_valid = !(dE > best_dE);   // a restored best state: recompute
                             E_carry_N = work_p.N;
                             break;
                         }
@@ -1607,7 +1623,27 @@ int main(int argc, char** argv) {
                     }
                     assign_levels(work_p, levels);
                     work_p.partition_by_level();
+#ifdef ENABLE_COLLISIONAL
+                    {
+                        // NBODY_PE_REUSE=0: always recompute; =check: recompute and compare the bits (debug)
+                        static const char* reuse_env = std::getenv("NBODY_PE_REUSE");
+                        static const bool reuse = !(reuse_env && reuse_env[0] == '0');
+                        static const bool reuse_check = reuse_env && std::string(reuse_env) == "check";
+                        const bool use_chk = reuse && pe_chk_valid && work_p.layout_version == pe_chk_layout;
+                        if (use_chk && reuse_check) {
+                            const double pe_new = compute_potential_energy_split(work_p, G, soft2);
+                            if (my_rank == 0)
+                                std::printf("PE_REUSE step %d reused %.17g recomputed %.17g %s\n", step, pe_chk, pe_new,
+                                            pe_new == pe_chk ? "same" : "DIFFERENT");
+                        } else if (reuse_check && my_rank == 0) {
+                            std::printf("PE_REUSE step %d recompute (valid %d same layout %d)\n", step, (int)pe_chk_valid,
+                                        (int)(work_p.layout_version == pe_chk_layout));
+                        }
+                        print_progress(t, step, use_chk ? &pe_chk : nullptr);
+                    }
+#else
                     print_progress(t, step);
+#endif
 #ifdef ENABLE_COLLISIONAL
                     // Periodic escaper removal
                     if (g_collisional.enabled && is_cluster && g_collisional.r_escape_rh > 0) {

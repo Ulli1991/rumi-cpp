@@ -224,7 +224,7 @@ double compute_total_energy(const Particles& p, const EnergyBookkeeping& books,
 }
 
 // KE + PE (PE split over the MPI ranks, compute_potential_energy_split)
-double compute_particle_energy(const Particles& p, double G, double soft2) {
+double compute_particle_energy(const Particles& p, double G, double soft2, double* pe_out) {
     double KE = 0;
     auto pvx = p.vx; auto pvy = p.vy; auto pvz = p.vz;
     auto pm = p.mass;
@@ -245,6 +245,7 @@ double compute_particle_energy(const Particles& p, double G, double soft2) {
             std::printf("ECHECK_CMP PE_split %.17g PE_full %.17g rel %.3e (KE+PE) rel %.3e\n", PE, PE_full,
                         (PE - PE_full) / std::fabs(PE_full), (PE - PE_full) / std::fabs(KE + PE_full));
     }
+    if (pe_out) *pe_out = PE;
     return KE + PE;
 }
 

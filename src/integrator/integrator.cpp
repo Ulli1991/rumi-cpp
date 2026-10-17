@@ -380,67 +380,75 @@ struct PhaseClock {
 };
 }  // namespace
 
-// Host copy of x, y, z, vx, vy, vz, mass of [start, start + count) for the subsystem advance: one packed device
-// buffer and one transfer per direction instead of a transfer (and a host allocation) per array. Buffers persist.
+// Host copy of x, y, z, vx, vy, vz, mass of the member particles of the subsystems one subsystem advance owns,
+// all inside [start, start + count). The host columns span the range (access as col[f](idx - start)), but only the
+// member slots are transferred: one gather into a packed device buffer and one transfer per direction (before
+// 2026-10-17 the whole range went both ways). Nothing reads or writes another slot of the columns. Buffers persist.
+// The "mirror" phase time is mostly the wait for the FSI kernels still queued when the first copy fences (50k
+// cluster, 10 % binaries: 0.45 s per step with the whole range and with the members only)
 namespace {
 struct RangeMirror {
     enum { X, Y, Z, VX, VY, VZ, M, NF };
     using HostCol = Kokkos::View<double*, Kokkos::HostSpace, Kokkos::MemoryUnmanaged>;
     int start = 0, count = 0;
     HostCol col[NF];
-    static Kokkos::View<double*>& dbuf() {   // a host twin in a host subtree (host_exec.h)
-        static Kokkos::View<double*> b("range_mirror_dev", 0), bh;
-        static bool hook = (Kokkos::push_finalize_hook([] { b = bh = Kokkos::View<double*>(); }), true);
-        (void)hook;
-        return host_exec() ? bh : b;
-    }
-    static void grow_dbuf(size_t n) {
-        Kokkos::View<double*>& d = dbuf();
-        if (d.extent(0) >= n) return;
-        if (!host_exec()) { Kokkos::realloc(d, n); return; }
-        static std::vector<std::shared_ptr<void>> mem;
-        mem.clear();
-        d = host_view<Kokkos::View<double*>>(mem, n);
-    }
+    std::vector<int> members;   // global indices of the member slots, ascending
     static Kokkos::View<double*, Kokkos::HostSpace>& hbuf() {
         static Kokkos::View<double*, Kokkos::HostSpace> b("range_mirror_host", 0);
         static bool hook = (Kokkos::push_finalize_hook([] { b = Kokkos::View<double*, Kokkos::HostSpace>(); }), true);
         (void)hook;
         return b;
     }
+    static DeviceStaging& staging() { return DeviceStaging::get<7>(); }   // a host twin in a host subtree
     // nf = 6: positions and velocities, 7: also masses
     void pull(Particles& p, int nf) {
-        auto d = dbuf();
+        DeviceStaging& st = staging();
+        const int n = (int)members.size();
+        auto d_idx = raw(st.d_idx);
+        auto o = raw(st.d_buf);
         RawView x{p.x.data()}, y{p.y.data()}, z{p.z.data()}, vx{p.vx.data()}, vy{p.vy.data()}, vz{p.vz.data()},
             m{p.mass.data()};
-        RawView o{d.data()};
-        const int s0 = start, n = count;
-        small_for("range_mirror_pack", n, KOKKOS_LAMBDA(int ii) {
-            int i = s0 + ii;
-            o(ii) = x(i); o(n + ii) = y(i); o(2 * n + ii) = z(i);
-            o(3 * n + ii) = vx(i); o(4 * n + ii) = vy(i); o(5 * n + ii) = vz(i);
-            if (nf > 6) o(6 * n + ii) = m(i);
+        small_for("range_mirror_pack", n, KOKKOS_LAMBDA(int k) {
+            const int i = d_idx(k);
+            o(k) = x(i); o(n + k) = y(i); o(2 * n + k) = z(i);
+            o(3 * n + k) = vx(i); o(4 * n + k) = vy(i); o(5 * n + k) = vz(i);
+            if (nf > 6) o(6 * n + k) = m(i);
         });
-        auto rng = Kokkos::make_pair(0, nf * n);
-        dcopy(Kokkos::subview(hbuf(), rng), Kokkos::subview(d, rng));
+        st.download_buf((size_t)nf * n);
+        for (int f = 0; f < nf; f++) {
+            const double* src = st.h_buf.data() + (size_t)f * n;
+            for (int k = 0; k < n; k++) col[f](members[k] - start) = src[k];
+        }
     }
     void push(Particles& p) {   // positions and velocities
-        auto d = dbuf();
-        auto rng = Kokkos::make_pair(0, 6 * count);
-        dcopy(Kokkos::subview(d, rng), Kokkos::subview(hbuf(), rng));
+        DeviceStaging& st = staging();
+        const int n = (int)members.size();
+        for (int f = 0; f < 6; f++) {
+            double* dst = st.h_buf.data() + (size_t)f * n;
+            for (int k = 0; k < n; k++) dst[k] = col[f](members[k] - start);
+        }
+        st.upload_buf((size_t)6 * n);
+        auto d_idx = raw(st.d_idx);
+        auto o = raw(st.d_buf);
         RawView x{p.x.data()}, y{p.y.data()}, z{p.z.data()}, vx{p.vx.data()}, vy{p.vy.data()}, vz{p.vz.data()};
-        RawView o{d.data()};
-        const int s0 = start, n = count;
-        small_for("range_mirror_unpack", n, KOKKOS_LAMBDA(int ii) {
-            int i = s0 + ii;
-            x(i) = o(ii); y(i) = o(n + ii); z(i) = o(2 * n + ii);
-            vx(i) = o(3 * n + ii); vy(i) = o(4 * n + ii); vz(i) = o(5 * n + ii);
+        small_for("range_mirror_unpack", n, KOKKOS_LAMBDA(int k) {
+            const int i = d_idx(k);
+            x(i) = o(k); y(i) = o(n + k); z(i) = o(2 * n + k);
+            vx(i) = o(3 * n + k); vy(i) = o(4 * n + k); vz(i) = o(5 * n + k);
         });
     }
-    RangeMirror(Particles& p, int s, int n) : start(s), count(n) {
-        grow_dbuf((size_t)NF * n);
-        if ((int)hbuf().extent(0) < NF * n) Kokkos::realloc(hbuf(), NF * n);
+    // member_slots: global indices in [s, s + n) (any order, repeats allowed)
+    RangeMirror(Particles& p, int s, int n, std::vector<int> member_slots)
+        : start(s), count(n), members(std::move(member_slots)) {
+        std::sort(members.begin(), members.end());
+        members.erase(std::unique(members.begin(), members.end()), members.end());
+        if ((int)hbuf().extent(0) < NF * n) Kokkos::realloc(Kokkos::WithoutInitializing, hbuf(), NF * n);
         for (int f = 0; f < NF; f++) col[f] = HostCol(hbuf().data() + (size_t)f * n, n);
+        const int nm = (int)members.size();
+        DeviceStaging& st = staging();
+        st.reserve(nm, NF);
+        std::copy(members.begin(), members.end(), st.h_idx.data());
+        st.upload_idx(nm);
         pull(p, NF);
     }
 };
@@ -545,9 +553,12 @@ void advance_subsystems_in_range_impl(Particles& p, int start, int count,
     g_subsys_phase.count(SubsystemPhaseTimes::C_ELIG, (long long)eligible.size());
     g_subsys_phase.add(SubsystemPhaseTimes::MAP, phase_clock.lap());
 
-    // Host copy of the particle data of [start, start+count); all accessed indices are in this range,
+    // Host copy of the members' particle data; all accessed indices are members in [start, start+count),
     // access as h_x(idx - start). Changes go back with mirror.push(p).
-    RangeMirror mirror(p, start, count);
+    std::vector<int> member_slots;
+    for (int s : eligible)
+        for (int pid : g_subsystem_mgr.active[s].particle_ids) member_slots.push_back(pid_to_idx[pid]);
+    RangeMirror mirror(p, start, count, std::move(member_slots));
     g_subsys_phase.add(SubsystemPhaseTimes::MIRROR, phase_clock.lap());
     auto h_x = mirror.col[RangeMirror::X], h_y = mirror.col[RangeMirror::Y], h_z = mirror.col[RangeMirror::Z];
     auto h_vx = mirror.col[RangeMirror::VX], h_vy = mirror.col[RangeMirror::VY], h_vz = mirror.col[RangeMirror::VZ];
