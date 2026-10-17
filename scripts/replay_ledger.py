@@ -89,8 +89,9 @@ export OMP_NUM_THREADS=36 OMP_PROC_BIND=spread OMP_PLACES=threads
 NBODY_ELEDGER=1 NBODY_EATTR=1 timeout 14m srun -n 1 {Path(a.exe).resolve()} --config config.txt > run.log 2>&1
 """)
             print(d)
-            if a.submit:
-                subprocess.run(["sbatch", str(job)], check=True)
+            if a.submit:   # gpudev takes at most 10 queued jobs per user: fall back to gpu
+                if subprocess.run(["sbatch", str(job)]).returncode != 0:
+                    subprocess.run(["sbatch", "--partition=gpu", str(job)])
 
 
 def classify(a):
