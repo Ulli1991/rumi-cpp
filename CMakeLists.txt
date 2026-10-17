@@ -45,6 +45,7 @@ if(ENABLE_COLLISIONAL)
         ${SRC_DIR}/collisional/gbs.cpp
         ${SRC_DIR}/collisional/logh_batch.cpp
         ${SRC_DIR}/collisional/secular.cpp
+        ${SRC_DIR}/collisional/secular_triple_step.cpp
         ${SRC_DIR}/collisional/post_newtonian.cpp
         ${SRC_DIR}/collisional/mergers.cpp
         ${SRC_DIR}/collisional/merger_tree.cpp

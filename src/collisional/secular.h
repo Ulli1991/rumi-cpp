@@ -1,6 +1,5 @@
 #pragma once
 
-#include "subsystem.h"
 
 // Secular (orbit-averaged) evolution for tight binaries and stable triples
 // Peters (1964) GW dissipation + Kozai-Lidov oscillations
@@ -33,8 +32,6 @@ int secular_evolve_binary(SecularBinary& bin, double dt, double G, double c_code
 // Evolve a secular triple by dt (Kozai-Lidov + GW dissipation)
 void secular_evolve_triple(SecularTriple& tri, double dt, double G, double c_code, int pn_order);
 
-// Check if a subsystem should transition to secular mode
-bool should_be_secular(const Subsystem& sub, double dt_step, int n_orb_threshold);
 
 // Reconstruct (r, v) from secular elements (relative coordinates)
 void secular_to_cartesian(const SecularBinary& bin, double G,

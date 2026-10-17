@@ -17,6 +17,8 @@ config.txt) for scripts/replay_ledger / tests. Pure Python (multiprocessing).
 Families:
   triple    hierarchical triple (m1, m2, m3 0.1-100 Msun, BH or star, a_in 1e-2-1e2 AU, e_in, a_out / a_in 2-1e4,
             e_out, mutual inclination, phases)
+  binbin    two binaries on a hyperbolic encounter (masses, a, e, impact parameter, v_inf, orientations)
+  pnbh      BH binary near merger (GW time 1e-4-1e1 Myr) with a perturbing star or BH (PN, GW, mergers)
   binflyby  binary (m1, m2 0.1-100 Msun, BH or star above 5 Msun, a 1e-3-1e3 AU, e, orientation, phase) and a
             passing star (m3, impact parameter 1-1e5 a, v_inf 1-100 km/s), closest approach in mid-run
 """
@@ -121,7 +123,61 @@ def family_triple(u, total_myr):
     return out, desc
 
 
-FAMILIES = {"binflyby": (12, family_binflyby), "triple": (13, family_triple)}
+def family_binbin(u, total_myr):
+    """unit cube point (16) -> two binaries on a hyperbolic encounter: (m1, m2, a1, e1), (m3, m4, a2, e2), impact
+    parameter in units of the larger a, v_inf, orientations and phases"""
+    m = [loguni(u[k], 0.1, 100.0) for k in range(4)]
+    bh = u[4] > 0.5
+    a1, a2 = loguni(u[5], 1e-2, 1e2) * AU, loguni(u[6], 1e-2, 1e2) * AU
+    e1, e2 = min(u[7], 0.99), min(u[8], 0.99)
+    b = loguni(u[9], 0.1, 1e3) * max(a1, a2)
+    vinf = loguni(u[10], 1.0, 100.0)
+    kw = lambda mm: (14 if bh else 1) if mm >= 5.0 else 1
+    rad = lambda mm, k: 0.0 if k == 14 else 2.25e-8 * mm ** 0.8
+    r1, v1 = kepler_state(m[0], m[1], a1, e1, math.acos(1 - 2 * u[11]), 2 * math.pi * u[12], 0.0, 2 * math.pi * u[13])
+    r2, v2 = kepler_state(m[2], m[3], a2, e2, math.acos(1 - 2 * u[14]), 0.0, 2 * math.pi * u[15], 2 * math.pi * u[12])
+    d0 = vinf * PC_KMS_MYR * 0.5 * total_myr
+    M1, M2 = m[0] + m[1], m[2] + m[3]
+    c1, w1 = [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]
+    c2, w2 = [-d0, b, 0.0], [vinf, 0.0, 0.0]
+    bodies = [[m[0]] + [c1[k] - m[1] / M1 * r1[k] for k in range(3)] + [w1[k] - m[1] / M1 * v1[k] for k in range(3)],
+              [m[1]] + [c1[k] + m[0] / M1 * r1[k] for k in range(3)] + [w1[k] + m[0] / M1 * v1[k] for k in range(3)],
+              [m[2]] + [c2[k] - m[3] / M2 * r2[k] for k in range(3)] + [w2[k] - m[3] / M2 * v2[k] for k in range(3)],
+              [m[3]] + [c2[k] + m[2] / M2 * r2[k] for k in range(3)] + [w2[k] + m[2] / M2 * v2[k] for k in range(3)]]
+    Mt = M1 + M2
+    cm = [sum(bd[0] * bd[k] for bd in bodies) / Mt for k in range(1, 7)]
+    out = [[bd[0]] + [bd[c] - cm[c - 1] for c in range(1, 7)] + [kw(bd[0]), rad(bd[0], kw(bd[0]))] for bd in bodies]
+    return out, dict(m=m, bh=bh, a1_au=a1 / AU, a2_au=a2 / AU, e1=e1, e2=e2, b_over_a=b / max(a1, a2), vinf=vinf)
+
+
+def family_pnbh(u, total_myr):
+    """unit cube point (10) -> BH binary near merger (m1, m2 5-100 Msun, a such that the GW time is 1e-4-1e1 Myr,
+    e) with a perturbing star or BH (m3, distance 10-1e4 a, v): PN orders, GW inspiral, mergers, the secular path"""
+    m1, m2 = loguni(u[0], 5.0, 100.0), loguni(u[1], 5.0, 100.0)
+    e = min(u[2], 0.95)
+    t_gw = loguni(u[3], 1e-4, 10.0)                     # Myr, Peters (1964) circular estimate, e-corrected below
+    c_kms = 299792.458
+    beta = 64.0 / 5.0 * G ** 3 * m1 * m2 * (m1 + m2) / c_kms ** 5        # pc^4 / (pc/(km/s))
+    f_e = (1 - e * e) ** 3.5
+    a = (4.0 * beta * t_gw / PC_KMS_MYR / max(f_e, 1e-6)) ** 0.25          # pc
+    m3 = loguni(u[4], 0.1, 100.0)
+    d = loguni(u[5], 10.0, 1e4) * a
+    v3 = loguni(u[6], 1.0, 100.0)
+    r, v = kepler_state(m1, m2, a, e, math.acos(1 - 2 * u[7]), 2 * math.pi * u[8], 0.0, 2 * math.pi * u[9])
+    M12 = m1 + m2
+    bodies = [[m1] + [-m2 / M12 * c for c in r] + [-m2 / M12 * c for c in v],
+              [m2] + [m1 / M12 * c for c in r] + [m1 / M12 * c for c in v],
+              [m3, d, 0.0, 0.0, -v3, 0.0, 0.0]]
+    Mt = M12 + m3
+    cm = [sum(bd[0] * bd[k] for bd in bodies) / Mt for k in range(1, 7)]
+    kws = [14, 14, 14 if m3 >= 5.0 else 1]
+    out = [[bd[0]] + [bd[c] - cm[c - 1] for c in range(1, 7)] + [kws[i], 0.0 if kws[i] == 14 else 2.25e-8 * bd[0] ** 0.8]
+           for i, bd in enumerate(bodies)]
+    return out, dict(m1=m1, m2=m2, e=e, t_gw_myr=t_gw, a_au=a / AU, m3=m3, d_over_a=d / a, v3=v3)
+
+
+FAMILIES = {"binflyby": (12, family_binflyby), "triple": (13, family_triple), "binbin": (16, family_binbin),
+            "pnbh": (10, family_pnbh)}
 
 
 def energy(bodies):
