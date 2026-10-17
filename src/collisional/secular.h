@@ -24,6 +24,7 @@ struct SecularTriple {
     double m3;                // outer companion mass
     int pid3;                 // outer companion particle ID
     double cos_i_mut;         // mutual inclination cosine
+    double dG1_gw = 0.0;      // change of the inner orbit's angular momentum G1 by GW over the evolution (radiated)
 };
 
 // Orbit-averaged PN two-body evolution in eps = -2E/c^2, j = -2EJ^2/(Gm)^2 (E, J per reduced mass, c.o.m., harmonic);

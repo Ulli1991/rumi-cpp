@@ -313,9 +313,20 @@ Status: **closed** (fixed, test, ensemble checked), **option** (fix kept as an o
   - 1PN precession 5e-14;
   - direct three-body RK4 run over 2 outer periods: de within 19 % (was up to 4.7x).
   9 checks fail on the old code.
-- **Remaining:** the substep integrator is forward Euler (eta 0.01), first order, so slow drift is expected. The
-  angular momentum GW removes from the inner orbit is put into the outer orbit by the rebuild (L_out = L - L_in,
-  C6), not booked as radiated.
+- **Follow-up (same day, found by `coll_bh_isco`, a BH binary at 100 a with a star on the secular-triple path):**
+  with the planes fixed under GW (B3), the rebuild still assumed the internal L is conserved (C6:
+  L_out = L - L_in). It pushed the radiated angular momentum into the outer orbit. For a circular outer orbit no orbit
+  at a_out carries that, so the rebuild failed every call, the energy fix found no radial velocity to use, and
+  1.4e-7 of E went unbooked (|dL/L| 6.6e-2).
+  - Fix: the secular step accumulates the GW part of G1 (`dG1_gw`). The rebuild keeps L + dG1_gw L_in_hat and
+    measures the inner plane's angle against that total. The caller books the radiated L (L_sink, as E_gw).
+  - Last energy fallback: when no radial velocity can take the energy (circular orbits), the outer orbit takes it in
+    a_out. The inner plane turns about the mutual node so that |L_tot - L_in| is the outer angular momentum at that
+    a_out (at fixed L a circular orbit cannot shrink otherwise), iterated to the round-off of the members' energy.
+  - Result: `coll_bh_isco` |dE/E| 1.3e-14, |dL/L| 3e-16.
+  - Lesson: a fix that makes a book physical (GW radiates L) breaks a correction that relied on the unphysical
+    conservation. Check every correction downstream of a changed invariant.
+- **Remaining:** the substep integrator is forward Euler (eta 0.01), first order, so slow drift is expected.
 - **Cluster effect:** octupole (eccentric Kozai-Lidov) evolution, the channel to extreme eccentricities and GW
   mergers in triples, had wrong signs, and results depended on the orientation of the coordinate frame. Triple-driven
   merger rates from runs before this fix are not reliable.

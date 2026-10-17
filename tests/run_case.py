@@ -1618,7 +1618,7 @@ CASES = {
     # A100: end 9.28e-16, |dP|/M 4.16e-15. Angular-momentum-exact outer orbit (2026-10-17): max |dL/L| 6.2e-16 (8.4e-13
     # with the frozen outer orbit)
     "sec_triple_energy": lambda exe: floor(exe, "secular triple energy", dict(SEC_TRIPLE, ETA_RESTART="0"),
-                                           (1.6e-15, 1.6e-15, 5.7e-15, 1.4e-15)),   # C11: 1.24e-15, 1.08e-15 (L)
+                                           (1.6e-15, 1.6e-15, 5.7e-15, 2.4e-15)),   # C11: 1.24e-15, 1.86e-15 (L)
     # Found by scripts/adversary.py: a strongly coupled Kozai triple on the secular-triple path; the frozen outer
     # orbit lost |dL/L| 1.26e-2 in one step. Measured (host): max |dE/E| 4.39e-16, |dP|/M 1.74e-15 km/s, |dL/L| 1.21e-15
     # After C11 (octupole signs, mutual-node angles): |dE/E| 1.17e-15, |dP|/M 2.90e-15 km/s
@@ -1767,7 +1767,9 @@ CASES = {
     "natal_kicks_fallback": lambda exe: natal_kicks_fallback(exe, "rapid + ECSN", NATAL_MIX, 1.25e-8),
     "coll_tde_accretion": lambda exe: tde_accretion(exe, "TDE accretion fraction", COLL_TDE),
     "coll_tde_parabolic": lambda exe: subsys_collision(exe, "TDE, parabolic", COLL_TDE, "TDE", 1.5e-12),
-    "coll_bh_isco": lambda exe: subsys_collision(exe, "BH binary to ISCO, PN", COLL_ISCO, "ISCO", 1e-14),
+    # 1.32e-14 measured (C11: the GW angular momentum of the secular triple booked, the energy fix through a_out and
+    # the inclination at round-off of the members' energy; 2.5e-16 before, with the radiated L put into the outer orbit)
+    "coll_bh_isco": lambda exe: subsys_collision(exe, "BH binary to ISCO, PN", COLL_ISCO, "ISCO", 1.7e-14),
     # Kepler drift (kepler_drift, subsystem audit #2): universal variables below e = 0.1 and near the parabola, the
     # perifocal construction from the anomaly otherwise. Bounds 1.3x measured (raven host, 2026-10-11); 043190d's
     # elements route: bound e < 0.5 1v16 = 2.0, ref = 1.2 (phase lost at e <= 1e-8), parabolic and hyperbolic

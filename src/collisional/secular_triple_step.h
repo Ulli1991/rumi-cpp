@@ -4,6 +4,7 @@
 struct SecularTripleStep {
     bool hierarchical = true;    // false: no longer hierarchical (a_in or a_out <= 0), integrate it directly (LogH)
     double booked_gw = 0.0;      // energy radiated by the inner binary (E_gw)
+    double dL_gw[3] = {0.0, 0.0, 0.0};   // angular momentum the members lost to GW (books: L_sink -= dL_gw)
     int unfixed = 0;             // corrections no orbit could take (angular momentum, energy)
     double a_in = 0.0, e_in = 0.0, a_out = 0.0, cos_i = 0.0;   // elements before the step (log)
 };

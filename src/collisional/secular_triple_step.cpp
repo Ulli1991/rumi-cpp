@@ -132,7 +132,11 @@ SecularTripleStep secular_triple_step(double M_[3], double X_[3][3], double V_[3
     // Global (inc, Omega, omega) from the vectors
     const double mu_in_red0 = m1 * m2 / M12, mu_out_red0 = M12 * m3 / (M12 + m3);
     double Ltot[3];
-    for (int k = 0; k < 3; k++) Ltot[k] = mu_in_red0 * L_in[k] + mu_out_red0 * L_out[k];
+    // after GW: it radiates dG1_gw along the inner orbit's L (the planes stay, C11); booked by the caller
+    for (int k = 0; k < 3; k++) {
+        out.dL_gw[k] = tri.dG1_gw * Lih[k];
+        Ltot[k] = mu_in_red0 * L_in[k] + mu_out_red0 * L_out[k] + out.dL_gw[k];
+    }
     const double Gt = std::sqrt(dot(Ltot, Ltot));
     auto to_global = [&](const double* Lh, const double* n, double g, double& inc, double& Om, double& om) {
         double q[3], ev[3];
@@ -153,64 +157,58 @@ SecularTripleStep secular_triple_step(double M_[3], double X_[3][3], double V_[3
         }
     };
     double Lih_new[3] = {Lih[0], Lih[1], Lih[2]};
+    const double g1_new = tri.inner.omega;   // argument of pericentre from the mutual node after the step
+    const double i1_ref = std::acos(std::max(-1.0, std::min(1.0, dot(Lih, Ltot) / Gt)));
+    // inner plane at the angle i1 to L_tot (Rodrigues about n1; a positive angle turns L_in away from L_tot)
+    auto orient_inner = [&](double i1) {
+        double kcv[3];
+        cross(n1, Lih, kcv);
+        const double cd = std::cos(i1 - i1_ref), sd = std::sin(i1 - i1_ref), kdv = dot(n1, Lih);
+        for (int k = 0; k < 3; k++) Lih_new[k] = Lih[k] * cd + kcv[k] * sd + n1[k] * kdv * (1.0 - cd);
+        to_global(Lih_new, n1, g1_new, tri.inner.inc, tri.inner.Omega, tri.inner.omega);
+    };
     {
         const double G1n = mu_in_red0 * std::sqrt(mu_in * tri.inner.a * (1.0 - tri.inner.e * tri.inner.e));
         const double G2n = mu_out_red0 * std::sqrt(mu_out * tri.a_out * (1.0 - tri.e_out * tri.e_out));
         // i1 from the evolved mutual inclination (not from the old |L_tot|: GW shrinks G1 without turning the planes)
         const double Gtn = std::sqrt(std::max(G1n * G1n + G2n * G2n + 2.0 * G1n * G2n * tri.cos_i_mut, 0.0));
-        const double i1_old = std::acos(std::max(-1.0, std::min(1.0, dot(Lih, Ltot) / Gt)));
-        const double i1_new = Gtn > 0.0 ? std::acos(std::max(-1.0, std::min(1.0, (G1n + G2n * tri.cos_i_mut) / Gtn))) : i1_old;
-        // Rodrigues about n1; a positive angle turns L_in away from L_out (and L_tot)
-        double kcv[3];
-        cross(n1, Lih, kcv);
-        const double cd = std::cos(i1_new - i1_old), sd = std::sin(i1_new - i1_old), kdv = dot(n1, Lih);
-        for (int k = 0; k < 3; k++) Lih_new[k] = Lih[k] * cd + kcv[k] * sd + n1[k] * kdv * (1.0 - cd);
-        to_global(Lih_new, n1, tri.inner.omega, tri.inner.inc, tri.inner.Omega, tri.inner.omega);
+        orient_inner(Gtn > 0.0 ? std::acos(std::max(-1.0, std::min(1.0, (G1n + G2n * tri.cos_i_mut) / Gtn))) : i1_ref);
     }
 
-    // Convert evolved elements back to Cartesian
-    // Inner binary
-    double n_in = std::sqrt(mu_in / (tri.inner.a * tri.inner.a * tri.inner.a));
-    double M_in_new = oe_in.mean_anom + n_in * dt;
+    // Inner orbit in Cartesian; outer orbit. Angular-momentum-exact: the secular step changes the inner orbit's
+    // angular momentum (e_in, plane); the internal L = mu_in r_in x v_in + mu_out r_out x v_out is conserved by taking
+    // the outer orbit's L as what is left, L_out = L(before) - L_in(new): its direction gives the outer plane (i_out,
+    // Omega_out), its magnitude e_out at the given a_out (a frozen outer orbit lost up to |dL/L| 1.3e-2 per step in a
+    // strongly coupled Kozai triple, found by scripts/adversary.py). The energy fix below leaves L alone. GW radiates
+    // dG1_gw along the inner L (C11: the planes stay): L(before) + dG1_gw L_in_hat is what the members keep, booked
+    const double n_in = std::sqrt(mu_in / (tri.inner.a * tri.inner.a * tri.inner.a));
+    const double M_in_new = oe_in.mean_anom + n_in * dt;
+    const double mu_in_red = m1 * m2 / M12, mu_out_red = M12 * m3 / (M12 + m3);
     double r_in_new[3], v_in_new[3];
-    elements_to_cartesian(tri.inner.a, tri.inner.e, tri.inner.inc,
-                           tri.inner.Omega, tri.inner.omega, M_in_new, mu_in,
-                           r_in_new, v_in_new);
-
-    // Outer orbit. Angular-momentum-exact: the secular step changes the inner orbit's angular momentum (e_in,
-    // plane); the internal L = mu_in r_in x v_in + mu_out r_out x v_out is conserved by taking the outer orbit's
-    // L as what is left, L_out = L(before) - L_in(new): its direction gives the outer plane (i_out, Omega_out),
-    // its magnitude e_out at the unchanged a_out (a frozen outer orbit lost up to |dL/L| 1.3e-2 per step in a
-    // strongly coupled Kozai triple, found by scripts/adversary.py). The energy fix below leaves L alone
     double e_out_rb = tri.e_out, inc_out_rb = tri.inc_out, Omega_out_rb = tri.Omega_out, omega_out_rb = oe_out.omega;
-    {
-        const double mu_in_red = m1 * m2 / M12, mu_out_red = M12 * m3 / (M12 + m3);
-        double Lin_new[3] = {r_in_new[1] * v_in_new[2] - r_in_new[2] * v_in_new[1],
-                             r_in_new[2] * v_in_new[0] - r_in_new[0] * v_in_new[2],
-                             r_in_new[0] * v_in_new[1] - r_in_new[1] * v_in_new[0]};
+    double h_out = -1.0;   // specific angular momentum of the rebuilt outer orbit (-1: not rebuilt)
+    auto build_orbits = [&](double a_o) {   // false: no outer orbit at a_o carries the remaining L
+        elements_to_cartesian(tri.inner.a, tri.inner.e, tri.inner.inc, tri.inner.Omega, tri.inner.omega, M_in_new,
+                              mu_in, r_in_new, v_in_new);
+        const double Lin_new[3] = {r_in_new[1] * v_in_new[2] - r_in_new[2] * v_in_new[1],
+                                   r_in_new[2] * v_in_new[0] - r_in_new[0] * v_in_new[2],
+                                   r_in_new[0] * v_in_new[1] - r_in_new[1] * v_in_new[0]};
         double Lout_t[3];
         for (int k = 0; k < 3; k++)
-            Lout_t[k] = mu_in_red * L_in[k] + mu_out_red * L_out[k] - mu_in_red * Lin_new[k];
+            Lout_t[k] = mu_in_red * L_in[k] + mu_out_red * L_out[k] + out.dL_gw[k] - mu_in_red * Lin_new[k];
         const double Lm = std::sqrt(Lout_t[0] * Lout_t[0] + Lout_t[1] * Lout_t[1] + Lout_t[2] * Lout_t[2]);
-        const double h = Lm / mu_out_red;                       // specific angular momentum of the outer orbit
-        const double q = 1.0 - h * h / (mu_out * tri.a_out);     // e_out^2
-        if (Lm > 0.0 && q >= 0.0) {
-            e_out_rb = std::sqrt(q);
-            const double Loh_new[3] = {Lout_t[0] / Lm, Lout_t[1] / Lm, Lout_t[2] / Lm};
-            to_global(Loh_new, n2, tri.omega_out, inc_out_rb, Omega_out_rb, omega_out_rb);
-        } else {
-            out.unfixed++;   // no outer orbit at this a_out carries that L
-        }
-    }
+        const double h = Lm / mu_out_red;                 // specific angular momentum of the outer orbit
+        const double q = 1.0 - h * h / (mu_out * a_o);    // e_out^2
+        if (!(Lm > 0.0) || q < -1e-10) return false;      // a circular outer orbit gives q = 0 to round-off, either sign
+        e_out_rb = std::sqrt(std::max(q, 0.0));
+        h_out = h;
+        const double Loh_new[3] = {Lout_t[0] / Lm, Lout_t[1] / Lm, Lout_t[2] / Lm};
+        to_global(Loh_new, n2, tri.omega_out, inc_out_rb, Omega_out_rb, omega_out_rb);
+        return true;
+    };
+    if (!build_orbits(tri.a_out)) out.unfixed++;
     double n_out = std::sqrt(mu_out / (tri.a_out * tri.a_out * tri.a_out));
     double M_out_new = oe_out.mean_anom + n_out * dt;
-    double r_out_new[3], v_out_new[3];
-    elements_to_cartesian(tri.a_out, e_out_rb, inc_out_rb,
-                           Omega_out_rb, omega_out_rb, M_out_new, mu_out,
-                           r_out_new, v_out_new);
-
-    // Reconstruct absolute coordinates
-    // Total CM
     double M_tot = M12 + m3;
     double cm_tot[3] = {
         (M12*cm_x + m3*h_x(idx2 - start)) / M_tot,
@@ -222,38 +220,37 @@ SecularTripleStep secular_triple_step(double M_[3], double X_[3][3], double V_[3
         (M12*cm_vy + m3*h_vy(idx2 - start)) / M_tot,
         (M12*cm_vz + m3*h_vz(idx2 - start)) / M_tot
     };
+    for (int k = 0; k < 3; k++) cm_tot[k] += cm_tot_v[k] * dt;   // drift of the total c.o.m.
 
-    // Drift total CM
-    for (int k = 0; k < 3; k++) cm_tot[k] += cm_tot_v[k] * dt;
-
-    // Outer orbit positions: CM_inner and particle 3
-    double cm_in_new[3], v_cm_in_new[3];
-    for (int k = 0; k < 3; k++) {
-        cm_in_new[k] = cm_tot[k] - (m3/M_tot) * r_out_new[k];
-        v_cm_in_new[k] = cm_tot_v[k] - (m3/M_tot) * v_out_new[k];
-    }
-
-    // Inner binary: particle 0 and 1
-    h_x(idx0 - start) = cm_in_new[0] - (m2/M12)*r_in_new[0];
-    h_y(idx0 - start) = cm_in_new[1] - (m2/M12)*r_in_new[1];
-    h_z(idx0 - start) = cm_in_new[2] - (m2/M12)*r_in_new[2];
-    h_vx(idx0 - start) = v_cm_in_new[0] - (m2/M12)*v_in_new[0];
-    h_vy(idx0 - start) = v_cm_in_new[1] - (m2/M12)*v_in_new[1];
-    h_vz(idx0 - start) = v_cm_in_new[2] - (m2/M12)*v_in_new[2];
-
-    h_x(idx1 - start) = cm_in_new[0] + (m1/M12)*r_in_new[0];
-    h_y(idx1 - start) = cm_in_new[1] + (m1/M12)*r_in_new[1];
-    h_z(idx1 - start) = cm_in_new[2] + (m1/M12)*r_in_new[2];
-    h_vx(idx1 - start) = v_cm_in_new[0] + (m1/M12)*v_in_new[0];
-    h_vy(idx1 - start) = v_cm_in_new[1] + (m1/M12)*v_in_new[1];
-    h_vz(idx1 - start) = v_cm_in_new[2] + (m1/M12)*v_in_new[2];
-
-    h_x(idx2 - start) = cm_tot[0] + (M12/M_tot)*r_out_new[0];
-    h_y(idx2 - start) = cm_tot[1] + (M12/M_tot)*r_out_new[1];
-    h_z(idx2 - start) = cm_tot[2] + (M12/M_tot)*r_out_new[2];
-    h_vx(idx2 - start) = cm_tot_v[0] + (M12/M_tot)*v_out_new[0];
-    h_vy(idx2 - start) = cm_tot_v[1] + (M12/M_tot)*v_out_new[1];
-    h_vz(idx2 - start) = cm_tot_v[2] + (M12/M_tot)*v_out_new[2];
+    // Members from the outer orbit (a_o, e_o) and the rebuilt inner orbit, about the drifted total c.o.m.
+    auto place = [&](double a_o, double e_o) {
+        double r_out_new[3], v_out_new[3];
+        elements_to_cartesian(a_o, e_o, inc_out_rb, Omega_out_rb, omega_out_rb, M_out_new, mu_out, r_out_new, v_out_new);
+        double cm_in_new[3], v_cm_in_new[3];
+        for (int k = 0; k < 3; k++) {
+            cm_in_new[k] = cm_tot[k] - (m3/M_tot) * r_out_new[k];
+            v_cm_in_new[k] = cm_tot_v[k] - (m3/M_tot) * v_out_new[k];
+        }
+        h_x(idx0 - start) = cm_in_new[0] - (m2/M12)*r_in_new[0];
+        h_y(idx0 - start) = cm_in_new[1] - (m2/M12)*r_in_new[1];
+        h_z(idx0 - start) = cm_in_new[2] - (m2/M12)*r_in_new[2];
+        h_vx(idx0 - start) = v_cm_in_new[0] - (m2/M12)*v_in_new[0];
+        h_vy(idx0 - start) = v_cm_in_new[1] - (m2/M12)*v_in_new[1];
+        h_vz(idx0 - start) = v_cm_in_new[2] - (m2/M12)*v_in_new[2];
+        h_x(idx1 - start) = cm_in_new[0] + (m1/M12)*r_in_new[0];
+        h_y(idx1 - start) = cm_in_new[1] + (m1/M12)*r_in_new[1];
+        h_z(idx1 - start) = cm_in_new[2] + (m1/M12)*r_in_new[2];
+        h_vx(idx1 - start) = v_cm_in_new[0] + (m1/M12)*v_in_new[0];
+        h_vy(idx1 - start) = v_cm_in_new[1] + (m1/M12)*v_in_new[1];
+        h_vz(idx1 - start) = v_cm_in_new[2] + (m1/M12)*v_in_new[2];
+        h_x(idx2 - start) = cm_tot[0] + (M12/M_tot)*r_out_new[0];
+        h_y(idx2 - start) = cm_tot[1] + (M12/M_tot)*r_out_new[1];
+        h_z(idx2 - start) = cm_tot[2] + (M12/M_tot)*r_out_new[2];
+        h_vx(idx2 - start) = cm_tot_v[0] + (M12/M_tot)*v_out_new[0];
+        h_vy(idx2 - start) = cm_tot_v[1] + (M12/M_tot)*v_out_new[1];
+        h_vz(idx2 - start) = cm_tot_v[2] + (M12/M_tot)*v_out_new[2];
+    };
+    place(tri.a_out, e_out_rb);
 
     // Energy-exact rebuild: the orbit-averaged step and the rebuild from elements (point-mass outer orbit,
     // re-placed phases) change the members' true T + U by more than the booked GW energy (200k seed 3,
@@ -299,8 +296,32 @@ SecularTripleStep secular_triple_step(double M_[3], double X_[3][3], double V_[3
             return true;
         };
         const int i0 = idx0 - start, i1 = idx1 - start, i2 = idx2 - start;
-        if (dE != 0.0 && !radial_fix(i0, i1, m1, m2, i2, m3, true) && !radial_fix(i0, i1, m1, m2, i2, m3, false))
-            out.unfixed++;
+        if (dE != 0.0 && !radial_fix(i0, i1, m1, m2, i2, m3, true) && !radial_fix(i0, i1, m1, m2, i2, m3, false)) {
+            // No radial velocity to take it (circular orbits): the outer orbit takes it in a_out, at the rebuilt
+            // outer angular momentum (L stays exact). Physically the orbit-averaged interaction energy changes with
+            // a_in under GW and the outer orbit pays for it (C11)
+            bool fixed = false;
+            if (h_out > 0.0) {
+                // a_out from the energy; the inner plane turns about n1 until |L_tot - L_in| is the outer angular
+                // momentum at (a_out, e_out): at fixed L a circular outer orbit cannot shrink otherwise (C11)
+                const double G1n = mu_in_red * std::sqrt(mu_in * tri.inner.a * (1.0 - tri.inner.e * tri.inner.e));
+                const double e_o = e_out_rb;
+                double a_o = tri.a_out;
+                for (int it = 0; it < 30; it++) {
+                    const double res = (E_tri0 - booked_tri) - tri_energy();
+                    // the evaluation of the members' T + U in absolute coordinates rounds at ~1e-14 of it
+                    if (std::fabs(res) <= 1e-13 * std::fabs(E_tri0)) { fixed = true; break; }
+                    a_o += res * 2.0 * a_o * a_o / (G * M12 * m3);
+                    const double G2r = mu_out_red * std::sqrt(mu_out * a_o * (1.0 - e_o * e_o));
+                    const double c1 = (Gt * Gt + G1n * G1n - G2r * G2r) / (2.0 * Gt * G1n);
+                    if (!(a_o > 0.0) || std::fabs(c1) > 1.0) break;
+                    orient_inner(std::acos(c1));
+                    if (!build_orbits(a_o)) break;
+                    place(a_o, e_out_rb);
+                }
+            }
+            if (!fixed) out.unfixed++;
+        }
     }
     out.booked_gw = booked_tri;
     return out;

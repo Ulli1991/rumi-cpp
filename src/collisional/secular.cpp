@@ -372,7 +372,8 @@ void secular_evolve_triple(SecularTriple& tri, double dt, double G, double c_cod
         // H^2 = G1^2 + G2^2 + 2*G1*G2*cos(i_mut) => cos(i_mut) = (H^2-G1^2-G2^2)/(2*G1*G2)
         double j1_new = std::sqrt(1.0 - tri.inner.e * tri.inner.e);
         double G1_new = m1 * m2 / M12 * std::sqrt(G * M12 * std::max(tri.inner.a, 1e-30)) * j1_new;
-        // GW changes |G1| but not the planes (Blaes et al. 2002 eq. 37): H follows at fixed cos i
+        // GW changes |G1| but not the planes (Blaes et al. 2002 eq. 37): H follows at fixed cos i; the radiated part
+        tri.dG1_gw += G1_new - G1_kl;
         H2 = G1_new * G1_new + G2_new * G2_new + 2.0 * G1_new * G2_new * tri.cos_i_mut;
 
         if (tri.inner.a <= 0.0) break;

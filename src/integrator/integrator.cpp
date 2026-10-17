@@ -962,6 +962,7 @@ void advance_subsystems_in_range_impl(Particles& p, int start, int count,
                    sub.inner_binary_id, inner_j, sub.outer_companion_pid, st.a_in, st.e_in, st.a_out, st.cos_i, dt);
             adv_check.advanced(s, dt, "secular triple");
             if (st.booked_gw != 0.0) g_energy_books.E_gw += st.booked_gw;   // GW energy of the inner binary's inspiral
+            for (int c = 0; c < 3; c++) g_energy_books.L_sink[c] -= st.dL_gw[c];   // and its angular momentum
             if (led_tri) led_tri_pending.push_back({idx0, idx1, idx2, E_tri0, st.booked_gw});
             g_subsystem_mgr.step_sec_triple_unfixed += st.unfixed;
             for (int b = 0; b < 3; b++) {
