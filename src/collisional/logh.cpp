@@ -158,6 +158,25 @@ static double solve_kick_omega(double Omega0, double C, double D) {
 // uniformly. n_sd = 0 takes the unchanged plain-LogH code paths.
 // ============================================================================
 
+// A/B (C12): NBODY_KICK_U kicks with BIFROST's 1 / (-U(x)) (Mikkola & Tanikawa 1999; kick and drift exact flows of
+// Gamma = ln(T + B) - ln(-U): symplectic in extended phase space) instead of the implicit 1 / (T(v_mid) + B)
+static bool kick_u() {
+    static const bool on = std::getenv("NBODY_KICK_U") != nullptr;
+    return on;
+}
+
+// A/B: NBODY_LOGH_KAHAN compensates the x += dx, v += dv, t += dt sums of a leapfrog chain (Verificarlo: the e = 0.999
+// LogH step is limited by their rounding, amplified by the extrapolation); c: the running compensation
+static bool logh_kahan() {
+    static const bool on = std::getenv("NBODY_LOGH_KAHAN") != nullptr;
+    return on;
+}
+static inline void add_comp(double& x, double dx, double& c) {
+    const double y = dx - c, t = x + y;
+    c = (t - x) - y;
+    x = t;
+}
+
 static double sd_dot(const LogHState& s, const double* u, const double* w) {
     double d = 0.0;
     for (int b = 0; b < s.n_bodies; b++)
@@ -228,10 +247,15 @@ static void sd_drift_velocity(const LogHState& s, double* xdot) {
 
 // Implicit-midpoint kick of logh_leapfrog_step with the slowed metric: Omega = T_sd(v_mid) + B gives the same
 // cubic Omega^3 - Omega0 Omega^2 - C Omega - D = 0 with C = <v, Delta>_sd / 2, D = <Delta, Delta>_sd / 8
-static void sd_kick(LogHState& s, double h, const double* accel) {
+static void sd_kick(LogHState& s, double h, const double* accel, double G) {
     const int n3 = s.n_bodies * 3;
     double delta[LOGH_MAX_BODIES * 3];
     for (int i = 0; i < n3; i++) delta[i] = h * accel[i];
+    if (kick_u()) {
+        const double inv_U = -1.0 / logh_sd_potential_energy(s, G);
+        for (int i = 0; i < n3; i++) s.vel[i] += delta[i] * inv_U;
+        return;
+    }
     const double Omega0 = logh_sd_kinetic_energy(s) + s.B;
     const double C = 0.5 * sd_dot(s, s.vel, delta), D = 0.125 * sd_dot(s, delta, delta);
     const double inv_Omega = 1.0 / solve_kick_omega(Omega0, C, D);
@@ -243,7 +267,7 @@ static void logh_leapfrog_step_sd(LogHState& state, double ds, double G) {
     double accel[LOGH_MAX_BODIES * 3], xdot[LOGH_MAX_BODIES * 3];
     logh_internal_accel(state, G, accel);
     sd_scale_binary_accel(state, G, accel);
-    sd_kick(state, 0.5 * ds, accel);
+    sd_kick(state, 0.5 * ds, accel, G);
 
     const double inv_Omega_half = 1.0 / (logh_sd_kinetic_energy(state) + state.B);
     sd_drift_velocity(state, xdot);
@@ -252,7 +276,7 @@ static void logh_leapfrog_step_sd(LogHState& state, double ds, double G) {
 
     logh_internal_accel(state, G, accel);
     sd_scale_binary_accel(state, G, accel);
-    sd_kick(state, 0.5 * ds, accel);
+    sd_kick(state, 0.5 * ds, accel, G);
 }
 
 double logh_sd_dyn_time(const LogHState& state, double G, double M_total) {
@@ -373,8 +397,15 @@ double logh_sd_update(LogHState& state, double G, const SdarParams& par, bool cl
 
 // Kick v += (ds/2) a / Omega with the exact implicit midpoint: Omega solves the cubic with
 // Omega0 = T(v_old) + B (the caller's), C = ½ Σ mᵢ vᵢ·Δᵢ, D = ⅛ Σ mᵢ|Δᵢ|², Δ = (ds/2) a
-static inline void kick_cubic(LogHState& state, const double* accel, double ds_half, double Omega0) {
+static inline void kick_cubic(LogHState& state, const double* accel, double ds_half, double Omega0, double G,
+                              double* cv = nullptr) {
     const int n = state.n_bodies, n3 = n * 3;
+    if (kick_u()) {
+        const double inv_U = -1.0 / logh_potential_energy(state, G);
+        if (cv) for (int i = 0; i < n3; i++) add_comp(state.vel[i], ds_half * accel[i] * inv_U, cv[i]);
+        else for (int i = 0; i < n3; i++) state.vel[i] += ds_half * accel[i] * inv_U;
+        return;
+    }
     double C = 0.0, D = 0.0;
     for (int b = 0; b < n; b++) {
         double vdot = 0.0, dsq = 0.0;
@@ -392,6 +423,10 @@ static inline void kick_cubic(LogHState& state, const double* accel, double ds_h
 
     double Omega = solve_kick_omega(Omega0, C, D);
     double inv_Omega = 1.0 / Omega;
+    if (cv) {
+        for (int i = 0; i < n3; i++) add_comp(state.vel[i], ds_half * accel[i] * inv_Omega, cv[i]);
+        return;
+    }
     for (int i = 0; i < n3; i++)
         state.vel[i] += ds_half * accel[i] * inv_Omega;
 }
@@ -419,22 +454,29 @@ void logh_leapfrog_steps(LogHState& state, double ds, double G, int nsteps, cons
         Omega0 = logh_kinetic_energy(state) + state.B;
     }
 
+    const bool comp = logh_kahan();
+    double cx[LOGH_MAX_BODIES * 3] = {}, cv[LOGH_MAX_BODIES * 3] = {}, ct = 0.0;
     for (int s = 0; s < nsteps; s++) {
         if (s > 0) Omega0 = logh_kinetic_energy(state) + state.B;   // velocities changed by the last kick
 
         // First half-kick: exact implicit midpoint via cubic solve
-        kick_cubic(state, accel, ds_half, Omega0);
+        kick_cubic(state, accel, ds_half, Omega0, G, comp ? cv : nullptr);
 
         // Drift
         double Omega_half = logh_kinetic_energy(state) + state.B;
         double inv_Omega_half = 1.0 / Omega_half;
-        for (int i = 0; i < n3; i++)
-            state.pos[i] += ds * state.vel[i] * inv_Omega_half;
-        state.t += ds * inv_Omega_half;
+        if (comp) {
+            for (int i = 0; i < n3; i++) add_comp(state.pos[i], ds * state.vel[i] * inv_Omega_half, cx[i]);
+            add_comp(state.t, ds * inv_Omega_half, ct);
+        } else {
+            for (int i = 0; i < n3; i++)
+                state.pos[i] += ds * state.vel[i] * inv_Omega_half;
+            state.t += ds * inv_Omega_half;
+        }
 
         // Accelerations at the new positions; second half-kick (Omega0 = T + B unchanged by the drift)
         logh_internal_accel(state, G, accel);
-        kick_cubic(state, accel, ds_half, Omega_half);
+        kick_cubic(state, accel, ds_half, Omega_half, G, comp ? cv : nullptr);
     }
 }
 
@@ -586,6 +628,17 @@ static void k_phys_cubic(LogHState& state, const double* accel, const double* pn
     double delta[LOGH_MAX_BODIES * 3];
     for (int i = 0; i < n3; i++)
         delta[i] = eps * (accel[i] + pn[i]);
+    if (kick_u()) {   // explicit: v += Δ / Ubar, B -= eps W_mid / Ubar, W_mid = Σ m v_mid · g(w)
+        const double inv_U = -1.0 / logh_potential_energy(state, G);
+        double W_mid = 0.0;
+        for (int i = 0; i < n3; i++) W_mid += state.mass[i / 3] * (state.vel[i] + 0.5 * delta[i] * inv_U) * pn[i];
+        for (int i = 0; i < n3; i++) state.vel[i] += delta[i] * inv_U;
+        state.B -= eps * W_mid * inv_U;
+        if (state.has_spins && n == 2)
+            rotate_spins(state, state.aux_vel, state.aux_spin1, state.aux_spin2, G, eps * inv_U,
+                         state.spin1, state.spin2);
+        return;
+    }
 
     // Cubic coefficients from T(v_mid); Omega0 = T(v_old) + B_old (the caller's)
     double C = 0.0, D = 0.0;
@@ -644,7 +697,9 @@ static void k_phys_cubic(LogHState& state, const double* accel, const double* pn
 static inline void k_aux(LogHState& state, const double* accel, const double* pn_v, double ds_quarter,
                          double Omega, double G) {
     const int n = state.n_bodies, n3 = n * 3;
-    double inv_Omega = 1.0 / Omega;
+    const double inv_Omega = kick_u() ? (state.n_sd > 0 ? -1.0 / logh_sd_potential_energy(state, G)
+                                                       : -1.0 / logh_potential_energy(state, G))
+                                      : 1.0 / Omega;
     for (int i = 0; i < n3; i++)
         state.aux_vel[i] += ds_quarter * (accel[i] + pn_v[i]) * inv_Omega;
     if (state.has_spins && n == 2)
@@ -670,10 +725,20 @@ void logh_step_start(const LogHState& state, double G, double c_code, int pn_ord
 // as dB/ds = -<v, g>_sd / Omega, and K_phys is k_phys_cubic with every inner product taken in <.,.>_sd; the Newtonian
 // acceleration carries the (1/kappa - 1) a_bin terms and the drift the slowed internal velocities, as in
 // logh_leapfrog_step_sd. g(v), g(w) act on the slowed binaries as perturbations (W20 sec. 2.3).
-static void k_phys_cubic_sd(LogHState& state, const double* accel, const double* pn, double eps, double Omega0) {
+static void k_phys_cubic_sd(LogHState& state, const double* accel, const double* pn, double eps, double Omega0,
+                            double G) {
     const int n3 = state.n_bodies * 3;
     double delta[LOGH_MAX_BODIES * 3];
     for (int i = 0; i < n3; i++) delta[i] = eps * (accel[i] + pn[i]);
+    if (kick_u()) {
+        const double inv_U = -1.0 / logh_sd_potential_energy(state, G);
+        double hdelta[LOGH_MAX_BODIES * 3];
+        for (int i = 0; i < n3; i++) hdelta[i] = state.vel[i] + 0.5 * delta[i] * inv_U;
+        const double W_mid = sd_dot(state, hdelta, pn);
+        for (int i = 0; i < n3; i++) state.vel[i] += delta[i] * inv_U;
+        state.B -= eps * W_mid * inv_U;
+        return;
+    }
     const double C = 0.5 * sd_dot(state, state.vel, delta), D = 0.125 * sd_dot(state, delta, delta);
     const double W_old = sd_dot(state, state.vel, pn), P = sd_dot(state, delta, pn);
     const double Omega = solve_kick_omega(Omega0, C - 0.5 * eps * W_old, D - 0.25 * eps * P);
@@ -701,7 +766,7 @@ static void logh_leapfrog_step_pn_sd(LogHState& state, double ds, double G, doub
         compute_pn_all_pairs(state, state.vel, G, c_code, pn_order, pn_v);
         k_aux(state, accel, pn_v, ds_quarter, Omega, G);
         compute_pn_all_pairs(state, state.aux_vel, G, c_code, pn_order, pn);
-        k_phys_cubic_sd(state, accel, pn, ds_half, Omega);
+        k_phys_cubic_sd(state, accel, pn, ds_half, Omega, G);
         Omega = logh_omega(state);
         compute_pn_all_pairs(state, state.vel, G, c_code, pn_order, pn_v);
         k_aux(state, accel, pn_v, ds_quarter, Omega, G);

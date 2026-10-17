@@ -240,6 +240,8 @@ Levels:
 | `NBODY_CHECK_STELLAR_CACHE` | Check every cached stellar type and radius against the device values |
 | `NBODY_CHECK_SUBSYS` | Check that every subsystem is advanced exactly once per subsystem call |
 | `NBODY_CHECK_TREE_DT` | =1: check every tree time-step / neighbour search against O(N^2) |
+| `NBODY_KICK_U` | A/B (C12): LogH kick with 1/(-U) (BIFROST, symplectic) instead of 1/(T+B) |
+| `NBODY_LOGH_KAHAN` | A/B: compensated (Kahan) x, v, t sums in the Newtonian LogH leapfrog chain |
 | `NBODY_DEEP_LOG` | =d: log the particles and pairs that keep HHS sets at depth >= d |
 | `NBODY_FENCE_STATS` | =1/2: count device fences and copies per call site (fence_stats.h; NVTX ranges for nsys) |
 | `NBODY_FORCE_ERR` | =eps: synthetic relative force error before every field kick of HHS sets >= NBODY_FORCE_ERR_MIN (FMM accuracy study; not bit-identical) |
