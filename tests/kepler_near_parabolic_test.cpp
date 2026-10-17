@@ -32,7 +32,22 @@ int main() {
         const double r0[3] = {rr * std::cos(f), rr * std::sin(f) * ci, rr * std::sin(f) * si};
         const double v0[3] = {-vs * std::sin(f), vs * (e + std::cos(f)) * ci, vs * (e + std::cos(f)) * si};
         double q = 0.0;
-        const double tp = kepler_time_to_pericentre(r0, v0, 1.0, &q);
+        // pericentre time: kepler_time_to_pericentre, refined by bisection on r.v after the drift (its Barker branch,
+        // |1 - e| < 1e-6, is off by O(1) for starts beyond |a|: 0.108 instead of 1.228 in case 2, 9.68 instead of
+        // 1.81 in case 5)
+        double hi = kepler_time_to_pericentre(r0, v0, 1.0, &q), lo = 0.0;
+        auto rv_after = [&](double t) {
+            double r[3] = {r0[0], r0[1], r0[2]}, v[3] = {v0[0], v0[1], v0[2]};
+            kepler_drift(r, v, 1.0, t);
+            return r[0]*v[0] + r[1]*v[1] + r[2]*v[2];
+        };
+        while (rv_after(hi) < 0.0) { lo = hi; hi *= 2.0; }
+        for (int i = 0; i < 200; i++) {
+            const double m = 0.5 * (lo + hi);
+            if (m == lo || m == hi) break;
+            (rv_after(m) < 0.0 ? lo : hi) = m;
+        }
+        const double tp = 0.5 * (lo + hi);
         const double tq = std::sqrt(q * q * q);
         const double E0 = energy(r0, v0), L0 = angmom(r0, v0);
         double worst_E = 0.0, worst_L = 0.0;

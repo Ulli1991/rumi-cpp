@@ -282,8 +282,9 @@ inline void stumpff_c(double z, double& c0, double& c1, double& c2, double& c3) 
 
 }  // namespace
 
-// f and g drift from the state itself (kepler_drift below chooses the starting point)
-static int kepler_drift_fg(double r[3], double v[3], double mu, double dt) {
+// Universal-variable drift: Kepler's equation in X from the state itself; the new state from f and g (peri = false)
+// or from the pericentre (peri = true; kepler_drift below chooses)
+static int kepler_drift_fg(double r[3], double v[3], double mu, double dt, bool peri) {
     const double r0 = std::sqrt(r[0]*r[0] + r[1]*r[1] + r[2]*r[2]);
     if (dt == 0.0 || !(r0 > 0.0) || !(mu > 0.0)) return 0;
     const double v2 = v[0]*v[0] + v[1]*v[1] + v[2]*v[2];
@@ -380,8 +381,73 @@ static int kepler_drift_fg(double r[3], double v[3], double mu, double dt) {
         G1 = X * c1; G2 = X * X * c2; G3 = X * X * X * c3;
     }
 
+    const double rr = r0 + eta0 * G1 + zeta0 * G2;     // r at the end
+    // r = f r0 + g v0 cancels when the end is much closer to the pericentre than the start (|f r0|, |g v0| ~ r0 >> r:
+    // per drift from r0 ~ a to the pericentre at 1 - e = 1e-6 an energy error of 2e-10 mu / q, |dL/L| 1.5e-10,
+    // ctest kepler_near_parabolic). There (peri: near the parabola, rr < r0 / 2) the end state is built from the
+    // pericentre instead. Not for every drift: from the pericentre a short drift far out sums s1 = s0 + X with
+    // |s0| >> |X|, which is accurate in value but its derivative cancels (Enzyme symplectic defect 3e-5 at the
+    // apocentre, 1 - e = 1e-8, against 8e-16 for f and g)
+    if (peri && rr < 0.5 * r0) {
+        // New state from the pericentre. Universal anomaly s from the pericentre
+        // (ds = dt / r): r = q + mu e G2(s), r.v = dr/ds = mu e G1(s), and in the perifocal frame (P along e_vec,
+        // Q = L_hat x P) the f and g functions from the pericentre (r_q = q P, v_q = (h / q) Q) give
+        //   x = q - mu G2, y = h G1, vx = -mu G1 / r, vy = h c0 / r   (q - mu (1 - e) G2 = q (1 - beta G2) = q c0)
+        // with no cancellation at the pericentre: an error in s (the X of the start plus the start's anomaly s0)
+        // only moves the point along the orbit, E and L are the round-off of the construction (universal variables:
+        // Danby 1992, ch. 6; the anomaly route of kepler_drift does the same with E or F)
+        const double hv[3] = {r[1]*v[2] - r[2]*v[1], r[2]*v[0] - r[0]*v[2], r[0]*v[1] - r[1]*v[0]};
+        const double hn = std::sqrt(hv[0]*hv[0] + hv[1]*hv[1] + hv[2]*hv[2]);
+        const double Lh[3] = {hv[0] / hn, hv[1] / hn, hv[2] / hn};
+        double Ph[3] = {(v[1]*hv[2] - v[2]*hv[1]) / mu - r[0] / r0, (v[2]*hv[0] - v[0]*hv[2]) / mu - r[1] / r0,
+                        (v[0]*hv[1] - v[1]*hv[0]) / mu - r[2] / r0};
+        const double e = std::sqrt(Ph[0]*Ph[0] + Ph[1]*Ph[1] + Ph[2]*Ph[2]);
+        const double pl = Ph[0]*Lh[0] + Ph[1]*Lh[1] + Ph[2]*Lh[2];   // e_vec . L_hat: 0 up to round-off
+        for (int k = 0; k < 3; k++) Ph[k] -= pl * Lh[k];
+        const double pn = std::sqrt(Ph[0]*Ph[0] + Ph[1]*Ph[1] + Ph[2]*Ph[2]);
+        for (int k = 0; k < 3; k++) Ph[k] /= pn;
+        const double Qh[3] = {Lh[1]*Ph[2] - Lh[2]*Ph[1], Lh[2]*Ph[0] - Lh[0]*Ph[2], Lh[0]*Ph[1] - Lh[1]*Ph[0]};
+        const double q = hn * hn / mu / (1.0 + e), mue = mu * e;
+        // Anomaly of the start: mu e G1(s0) = r0.v0, mu e c0(beta s0^2) = zeta0 (= mu - beta r0), so with
+        // t = eta0 / zeta0: s0 = atan(sqrt(beta) t) / sqrt(beta) (bound), atanh(sqrt(-beta) t) / sqrt(-beta)
+        // (hyperbolic), = t Phi(beta t^2) with Phi(z) = sum_k (-z)^k / (2k + 1), analytic through beta = 0 (the
+        // parabola; separate formulas per sign of beta would give a wrong derivative there). The series for
+        // |beta t^2| < 1e-2, else atan2 (any E0) and asinh (no cancellation far out on the hyperbola)
+        double s1;
+        const double t0 = zeta0 > 0.0 ? eta0 / zeta0 : 0.0, z0 = beta * t0 * t0;
+        if (zeta0 > 0.0 && std::fabs(z0) < 1e-2) {
+            double phi = 1.0, term = 1.0;
+            for (int k = 1; k < 30; k++) {
+                term *= -z0;
+                const double phin = phi + term / (2 * k + 1);
+                if (phin == phi) break;
+                phi = phin;
+            }
+            s1 = t0 * phi + X;
+        } else if (beta > 0.0) {
+            const double sb = std::sqrt(beta);
+            s1 = std::atan2(eta0 * sb, zeta0) / sb + X;
+        } else {
+            const double k = std::sqrt(-beta);
+            s1 = std::asinh(eta0 * k / mue) / k + X;
+        }
+        if (beta > 0.0) {
+            // G_n periodic in s (whole orbits): reduce to |beta s1^2| <= pi^2 (n fixed, so the derivative keeps -n dP)
+            const double Ps = 2.0 * M_PI / std::sqrt(beta);
+            if (std::fabs(s1) > 0.5 * Ps) s1 -= Ps * std::nearbyint(s1 / Ps);
+        }
+        stumpff_c(beta * s1 * s1, c0, c1, c2, c3);
+        const double S1 = s1 * c1, S2 = s1 * s1 * c2;
+        const double rq = q + mue * S2;
+        const double x = q - mu * S2, y = hn * S1, vx = -mu * S1 / rq, vy = hn * c0 / rq;
+        for (int k = 0; k < 3; k++) {
+            r[k] = x * Ph[k] + y * Qh[k];
+            v[k] = vx * Ph[k] + vy * Qh[k];
+        }
+        return it + 1;
+    }
+
     // Gauss f and g functions in incremental form, r = r0 + (f - 1) r0 + g v0 (WHFast Eqs. 15-16, 20)
-    const double rr = r0 + eta0 * G1 + zeta0 * G2;
     const double fm1 = -mu * G2 / r0;
     const double g = r0 * G1 + eta0 * G2;
     const double fd = -mu * G1 / (r0 * rr);
@@ -426,9 +492,10 @@ int kepler_drift(double r[3], double v[3], double mu, double dt) {
     // error is the round-off of the new point itself, as in the elements route, while the frame (P along e_vec,
     // Q = L_hat x P) and the anomaly (atan2 / asinh of r.v and e cos E) come from the state without acos
     // Near the parabola the anomaly form loses the phase (bound, 1 - e < 1e-5: 1 vs 16 drifts 3e-11 ... 4e-4 at
-    // 1 - e = 1e-12) or fails (hyperbolic, e - 1 < 1e-4), where the universal variables stay at round-off
+    // 1 - e = 1e-12) or fails (hyperbolic, e - 1 < 1e-4), where the universal variables stay at round-off; there the
+    // drift that ends near the pericentre builds the end state from it (kepler_drift_fg, peri)
     if (e < 0.1 || !(hn > 0.0) || beta == 0.0 || (e < 1.0 && 1.0 - e < 1e-5) || (e >= 1.0 && e - 1.0 < 1e-4))
-        return kepler_drift_fg(r, v, mu, dt);
+        return kepler_drift_fg(r, v, mu, dt, hn > 0.0 && e >= 0.1);
     const double zeta0 = mu - beta * r0;                 // mu e cos E (bound), mu e cosh F (hyperbolic)
     const double p = hn * hn / mu;
     double Ph[3], Qh[3];
