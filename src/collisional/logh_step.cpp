@@ -139,6 +139,18 @@ double gbs_extrapolate(const int* seq, GbsTable& tab, int stage, int dim) {
 // Full GBS step with adaptive order (k_fixed = 0) or a fixed number of stages
 // ============================================================================
 
+// Sum of |w_k| of the extrapolation to h -> 0 from stages 0..stage, w_k = prod_{j != k} n_k^2 / (n_k^2 - n_j^2)
+static double neville_weight_sum(const int* seq, int stage) {
+    double lam = 0.0;
+    for (int k = 0; k <= stage; k++) {
+        double w = 1.0;
+        for (int j = 0; j <= stage; j++)
+            if (j != k) w *= double(seq[k]) * seq[k] / (double(seq[k]) * seq[k] - double(seq[j]) * seq[j]);
+        lam += std::fabs(w);
+    }
+    return lam;
+}
+
 void gbs_step(const GbsParams& par, LogHState& state, double ds, GbsTable& tab, int computed,
               const LogHStepStart* start, GbsStepOut& out) {
     int dim = state.n_bodies * (state.use_aux_vel ? 9 : 6) + (state.has_spins ? 12 : 0) + 2;   // gbs_pack_state
@@ -161,7 +173,11 @@ void gbs_step(const GbsParams& par, LogHState& state, double ds, GbsTable& tab, 
         out.err = err;
 
         if (stage > 0) {
-            if (fixed ? stage == k_max - 1 : err < par.eta) {
+            // Tolerance at least the round-off floor of the error estimate: rounding of ~eps in each stage is
+            // amplified by the sum of the absolute Neville weights Lambda (Bulirsch ~9, Deuflhard 119-553 at 8-10
+            // stages). Below it the step size collapsed (ETA_GBS 1e-14: 1.2e6 steps per orbit, test gbs_eta_floor)
+            const double eta = std::max(par.eta, 1e3 * neville_weight_sum(par.seq, stage) * 2.220446049250313e-16);
+            if (fixed ? stage == k_max - 1 : err < eta) {
                 // Converged: unpack best estimate from work[stage]
                 double chi_norm[4];
                 if (state.has_spins) spin_norms(state, chi_norm);
@@ -173,7 +189,7 @@ void gbs_step(const GbsParams& par, LogHState& state, double ds, GbsTable& tab, 
                 // Suggest next step size
                 double safety = 0.8;
                 double order = 2.0 * (stage + 1);
-                double ds_next = ds * safety * std::pow(par.eta / (err + 1e-30), 1.0 / order);
+                double ds_next = ds * safety * std::pow(eta / (err + 1e-30), 1.0 / order);
                 out.ds_next = std::min(ds_next, 4.0 * ds);  // don't grow too fast
                 out.accepted = true;
                 return;
