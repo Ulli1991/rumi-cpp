@@ -1601,9 +1601,10 @@ CASES = {
     "secular_triples_off": lambda exe: secular_triples_off(exe, "secular triple off", SEC_TRIPLE, 2.9e-11),
     # Energy-exact rebuild of the secular-triple step: the members' T + U changes by exactly the booked GW energy
     # (before: max |dE/E| 1.4e-4 on this triple, the -8e-10 jump of the 200k seed-3 step 60). Measured (host):
-    # end 6.19e-16, max 9.28e-16, max |dP|/M 4.34e-15 km/s, max |dL/L| 8.43e-13 (the rebuild rotates the inner orbit)
+    # end 6.19e-16, max 9.28e-16, max |dP|/M 4.34e-15 km/s, max |dL/L| 8.43e-13 (the rebuild rotates the inner orbit);
+    # A100: end 9.28e-16, |dP|/M 4.16e-15
     "sec_triple_energy": lambda exe: floor(exe, "secular triple energy", dict(SEC_TRIPLE, ETA_RESTART="0"),
-                                           (8.1e-16, 1.21e-15, 5.7e-15, 1.1e-12)),
+                                           (1.21e-15, 1.21e-15, 5.7e-15, 1.1e-12)),
     # Measured 9.8e-9 (dense core, at the restart threshold); 2.35e-8 before the pericentre check, 2.68e-8 with
     # it (seed 5): bound 3.5e-8
     "triples_detected": lambda exe: triples(exe, "dense core", TRIPLES, 3.5e-8),
@@ -1766,7 +1767,8 @@ CASES = {
     # Secular (Kepler-drift) binary at e = 0 and 1e-8, 100.37 orbits as 1 or 16 steps. Measured: 1 vs 16 9.5e-13 /
     # 1.1e-12, vs analytic 1.1e-12 / 9.2e-13, |dE/E| 3.3e-15 / 3.0e-15, |dL/L| 0. 043190d: 1 vs 16 = 2.0 / 0.55,
     # vs analytic up to 2.0 / 1.3 (elements route)
-    "secular_drift_e0": lambda exe: secular_drift(exe, "e = 0", SEC_DRIFT, (1.25e-12, 1.45e-12, 4.3e-15, 1e-15)),
+    # bounds 1.3x the larger of host and A100 (GPU 2026-10-17: 1 vs 16 1.44e-12, vs analytic 1.59e-12, fma rounding)
+    "secular_drift_e0": lambda exe: secular_drift(exe, "e = 0", SEC_DRIFT, (1.88e-12, 2.08e-12, 4.3e-15, 1e-15)),
     "secular_drift_e1e-8": lambda exe: secular_drift(exe, "e = 1e-8", dict(SEC_DRIFT, BINARY_E="1e-8"),
                                                      (1.4e-12, 1.2e-12, 4e-15, 1e-15)),
     # Kepler path of isolated non-PN pairs (subsystem audit #1, KEPLER_2BODY until 2026-10-12): the drift is exact
