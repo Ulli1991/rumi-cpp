@@ -174,11 +174,14 @@ COLL_CONTACT = dict(F3_FLYBY, TRIPLE_E_IN="0.6", TRIPLE_A_OUT_PC="0.003", SDAR="
 COLL_TDE = dict(COLL_HEADON, TRIPLE_A_IN_PC="1e-7", TRIPLE_E_IN="1.0", TRIPLE_M1="100.0", TRIPLE_M2="1.0",
                 TRIPLE_A_OUT_PC="1e-4", TRIPLE_E_OUT="0.0", TRIPLE_M3="4.0", TOTAL_TIME_MYR="4e-9", DT_MAX_MYR="1e-9",
                 DT_MIN_MYR="1e-18", M_PN="5.0")
-# BH binary reaching the ISCO: 10+10 Msun at a = 1.5 r_ISCO (6 G M / c^2 = 5.74e-12 pc), circular, all PN orders: the
-# 2.5PN / 3.5PN inspiral reaches r_ISCO within the first step; a 1 Msun star at 100 a makes it a 3-body subsystem
+# BH binary reaching the ISCO: 10+10 Msun at a = 1.5 r_ISCO (6 G M / c^2 = 5.74e-12 pc), circular, PN1 + PN2 + PN2.5:
+# the inspiral reaches r_ISCO within the first step; a 1 Msun star at 100 a makes it a 3-body subsystem. Not PN3.5:
+# at x ~ 0.1 on the eccentric orbit the 3.5PN term exceeds the 2.5PN one with the opposite sign at pericentre
+# (B_3.5 / B_2.5 ~ -12 x for v^2 = 2 G M / r), the binary gains energy and widens (with a star at 1000 a it even
+# unbinds; truncated PN outside its range, docs/CASES.md C8). Before the C8 fix the wrong 3.5PN (10 x Peters) merged it.
 COLL_ISCO = dict(COLL_HEADON, TRIPLE_A_IN_PC="8.6e-12", TRIPLE_E_IN="0.0", TRIPLE_M1="10.0", TRIPLE_M2="10.0",
                  TRIPLE_A_OUT_PC="8.6e-10", TRIPLE_E_OUT="0.0", TRIPLE_M3="1.0", TOTAL_TIME_MYR="2e-14",
-                 DT_MAX_MYR="1e-15", DT_MIN_MYR="1e-24", PN_ORDER="31", M_PN="5.0", TEST_STELLAR_RADIUS_RSUN="0")
+                 DT_MAX_MYR="1e-15", DT_MIN_MYR="1e-24", PN_ORDER="7", M_PN="5.0", TEST_STELLAR_RADIUS_RSUN="0")
 
 # Wide stellar binary (0.97 + 0.97 Msun, a = 46 AU, e = 0.5, P = 220 yr) and a 46.5 Msun black hole passing at 1.6 mpc
 # (outside r_ngb = 1 mpc; e = 2.5, from 8 mpc): tidal ratio ~0.1 at pericentre. The 200k, 10 % binaries seed-42
@@ -1679,7 +1682,8 @@ CASES = {
     # G-1. LogH PN binary: frame-invariant to round-off (measured 6.0e-12 at 30 km/s, 5e-13 at 300 km/s along x,
     # 4.3e-12 along y). Secular PN binary: 1.2e-3 before (the reshaped orbit kept the rounding error of a, a phase
     # error over 1e4-1e5 orbits per step); 9.1e-8 after (absolute-coordinate rounding)
-    "pn_boost_logh": lambda exe: boost_invariance(exe, "PN LogH binary", PN_LOGH, ["30,0,0", "300,0,0", "0,300,0"], 8e-12),
+    # round-off noise, not monotonic in the boost (PN_ORDER 1 alone 7e-12 - 1.8e-11); 1.18e-11 after the PN2-3.5 fix (C8)
+    "pn_boost_logh": lambda exe: boost_invariance(exe, "PN LogH binary", PN_LOGH, ["30,0,0", "300,0,0", "0,300,0"], 1.6e-11),
     "pn_boost_secular": lambda exe: boost_invariance(exe, "PN secular binary", SEC_BH_TIGHT,
                                                      ["30,0,0", "300,0,0", "0,300,0"], 1.2e-7),
     # AUDIT G row 1a: 1000 binaries of 250-450 AU (just above r_ngb = 206 AU) in 2000 stars. Plain: the pairs are FSI

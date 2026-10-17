@@ -50,6 +50,10 @@ Goal (2026-10-16): the smallest long-run |dE/E| with P and L at double-precision
 7. **More neighbours is not more accuracy.** Pulling perturbers into subsystems by a larger radius made C5 slower and
    worse (2026-10-17).
 8. **Check L and P, not only E.** C6 and R1 conserved energy and broke angular momentum.
+9. **Books cannot catch a wrong force.** A force whose work is booked (PN orders into E_pn / E_gw) can have any
+   sign or coefficient and |dE/E| stays at round-off (C8: radiation reaction with the wrong sign since 2026-02).
+   Check every force term against the literature by a physical identity it must satisfy (flux balance, Kepler's law,
+   test-mass limit, energy consistency), order by order, both mass limits.
 
 Status: **closed** (fixed, test, ensemble checked), **option** (fix kept as an option, trade-off), **open**,
 **rejected** (a candidate fix that broke a conservation law).
@@ -170,6 +174,51 @@ Status: **closed** (fixed, test, ensemble checked), **option** (fix kept as an o
   terms (sec. 3.7, conclusions); our code claimed them but had pair sums.
 - **Next:** the PN energy check of PN subsystems can be switched on again for PN1 (E_N + E_1PN conserved to
   O(v^4/c^4)); higher orders need their energies (2PN) and the radiated flux (2.5PN).
+
+## C8 PN2, PN2.5, PN3, PN3.5 of the subsystem equations of motion wrong since 2026-02 (closed; secular rates open)
+
+- **Found by:** checking each order against Blanchet, Living Rev. Rel. 17, 2 (2014, v3 2024; on disk
+  papers/pn/src/1310.1528), after Enzyme had found C7: the work of the dissipative orders on a circular binary
+  against the GW flux (balance), and the conservative orders against Kepler's third law to 3PN (eq. keplerlaw) and
+  the c.o.m. coefficients A_2PN, B_2PN. Not visible in any conservation run: the work of the PN forces goes into the
+  books (E_pn, E_gw), so |dE/E| stayed at round-off while the binaries followed wrong equations.
+- **System:** every PN subsystem integrated by LogH (BH binaries, BH triples) with PN_ORDER >= 2. PN_ORDER defaults
+  to 7 (1PN + 2PN + 2.5PN); the campaigns and adversary runs use 31. The secular path (Peters rates) and the global
+  PN1 kick (PN1 only) were not affected.
+- **Bugs (all in `post_newtonian_core.cpp`, single-pair and pair version alike):**
+  - B1 2.5PN: opposite sign. Radiation reaction **added** the Peters power (work / Peters = -1.000): LogH binaries
+    widened instead of inspiralling (e = 0.5 BH binary: da/a from 2.5PN +1.3e-5, now -1.3e-5).
+  - B2 3.5PN: coefficients not Blanchet's A_3.5PN, B_3.5PN; on a circular orbit +11 x the 2.5PN loss (q = 1),
+    should be -(1247/336 + 35/12 nu) x of it. With PN_ORDER 31 the sum was a loss of ~10 x Peters: the ISCO test binary
+    "merged" in its first step at a = 1.3e-10 pc, e = 0.98 (15 x its start).
+  - B3 2PN: the G^2 terms had an extra 1/r (dimension length^-1, Gm_r * Gm_r * inv_r), and two velocity terms of the
+    v-coefficient were wrong (+4 v_A^2 (n.v_A) - 5 v_B^2 (n.v_A) instead of +4 v_B^2 (n.v_A) - 5 v_B^2 (n.v_B),
+    Blanchet eq. acc3PN). LogH works in units with R_scale ~ a, so the extra 1/r scaled those terms by ~a/r (O(1),
+    largest at pericentre), not by 1e5-1e7 as in pc.
+  - B4 3PN: incomplete coefficients (several terms missing, same 1/r slip).
+- **Fix:** 2PN corrected in place (general frame, Blanchet eq. acc3PN). 2.5PN, 3PN, 3.5PN: Blanchet's c.o.m. relative
+  acceleration a = -(G M / r^2)(A n + B v) (eqs. calAcoeff, calBcoeff; 3PN in modified harmonic coordinates, eq.
+  ABcoeffMH, no ln r'_0), computed once per pair (`pn_rel_highorder`), body 1 gets (m_2/M) a, body 2 -(m_1/M) a:
+  sum m a = 0 exactly (momentum to round-off), depends only on relative position and velocity (Galilean
+  invariant, so the conservative 3PN part keeps its energy in any frame). The pair call stays bit-identical to the
+  two single calls (NBODY_CHECK_EIH).
+- **Test:** `pn_highorder` (tests/pn_highorder_test.cpp): 2.5PN work / Peters = 1 to 1e-15 (q = 1, 0.2); 1PN flux
+  coefficient from the 2.5PN + 3.5PN work -4.44046 / -4.11639 (Blanchet -4.44048 / -4.11640); Kepler residual drops
+  by 8.1 (PN1 + 2) and 16.2 (+ 3PN) when gamma halves (q = 1, 1e-6); PN2 with r' != 0 equal to A_2PN, B_2PN to 1e-13.
+  The old code fails all 10 checks. `coll_bh_isco` / `bh_merge_radius_*` now use PN_ORDER 7 (see below);
+  `pn_boost_logh` bound 8e-12 -> 1.6e-11 (round-off noise, not monotonic in the boost).
+- **Open (a), strong field:** truncated PN at x ~ 0.1. On an eccentric orbit with pericentre at 9 G M / c^2 the 3.5PN
+  term exceeds the 2.5PN one with the opposite sign (B_3.5 / B_2.5 = -12.4 x at v^2 = 2 G M / r): radiation reaction
+  pumps energy at every pericentre; the ISCO test binary widened ~80 x with a star at 100 a and unbound with the star
+  at 1000 a (books closed, |dE/E| 5e-16). Correct implementation of the formula outside its range. Options: 3.5PN
+  only below some x, or the orbit-averaged correction; decide with the literature (what BIFROST / ARCHAIN do).
+- **Open (b), secular rates (`secular.cpp`):** the 3.5PN correction of da/dt, de/dt uses Gm/(a c^2) where nu belongs
+  and the flux coefficient -1247/336 where da/dt needs its own (-1751/336 - 7/4 nu for circular orbits, harmonic a;
+  eccentric: 1PN-accurate orbit averages from the literature); the 2PN / 3PN periapsis advance has no nu terms.
+  Size ~x << 1 of the leading terms in the secular regime.
+- **Cluster effect:** all LogH BH binaries of runs with PN_ORDER >= 4 since 2026-02 had wrong inspirals (widening with
+  7, ~10 x too fast with 31); runs with PN binaries (flagship A, BIFROST Fig. 12) have to be repeated. The energy
+  error of the runs is unchanged (books); campaign case harvesting is unaffected.
 
 ## Verified building blocks (checked against an independent derivation, no bug found)
 
