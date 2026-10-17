@@ -22,6 +22,10 @@ struct StallRecorder {
     std::mutex mu;
     std::vector<LogH> logh;
     std::vector<LogH> logh_err;            // gbs field: unused; dt_myr field: |dE| / |E0| of the run
+    // binaries with the largest tidal-sampling error estimate mu |f_tidal| v dt of a step (|E0| units; the field
+    // kicks sample the perturber's tide on the binary at the binary's step)
+    struct Tidal { double est = 0.0, a = 0.0, e = 0.0, gamma = 0.0, P_myr = 0.0, dt_myr = 0.0; int pid0 = -1, pid1 = -1; double m0 = 0.0, m1 = 0.0; };
+    std::vector<Tidal> tidal;
     int deep_depth = -1;
     double deep_pivot_myr = 0.0;
     std::vector<int> deep_pids;
@@ -30,6 +34,7 @@ struct StallRecorder {
         std::lock_guard<std::mutex> lk(mu);
         logh.clear();
         logh_err.clear();
+        tidal.clear();
         deep_depth = -1;
         deep_pivot_myr = 0.0;
         deep_pids.clear();
@@ -59,6 +64,19 @@ struct StallRecorder {
                                          [](const LogH& a, const LogH& b) { return a.dt_myr > b.dt_myr; }), std::move(r));
         if ((int)logh_err.size() > MAX_LOGH) logh_err.pop_back();
     }
+    void note_tidal(const Tidal& t) {
+        if (tidal.size() >= MAX_LOGH && t.est <= tidal.back().est) return;   // unlocked pre-check (serial caller)
+        std::lock_guard<std::mutex> lk(mu);
+        for (auto& o : tidal)   // one entry per binary: its largest estimate
+            if (o.pid0 == t.pid0 && o.pid1 == t.pid1) {
+                if (t.est > o.est) o = t;
+                std::sort(tidal.begin(), tidal.end(), [](const Tidal& a, const Tidal& b) { return a.est > b.est; });
+                return;
+            }
+        tidal.insert(std::upper_bound(tidal.begin(), tidal.end(), t,
+                                      [](const Tidal& a, const Tidal& b) { return a.est > b.est; }), t);
+        if (tidal.size() > MAX_LOGH) tidal.pop_back();
+    }
     bool deeper(int depth) const { return depth > deep_depth; }
     void note_deep(int depth, double pivot_myr, const std::vector<int>& pids) {
         deep_depth = depth;
@@ -78,6 +96,9 @@ struct StallRecorder {
             for (double m : r.mass) std::printf(" %.4g", m);
             std::printf("\n");
         }
+        for (const auto& t : tidal)
+            std::printf("STALL tidal est/E0 %.3e pids %d %d m[Msun] %.4g %.4g a %.3e pc e %.4f gamma %.3e P %.3e dt %.3e Myr\n",
+                        t.est, t.pid0, t.pid1, t.m0, t.m1, t.a, t.e, t.gamma, t.P_myr, t.dt_myr);
         for (const auto& r : logh_err) {
             std::printf("STALL loghE dE/E0 %.3e pids", r.dt_myr);
             for (int pid : r.pids) std::printf(" %d", pid);

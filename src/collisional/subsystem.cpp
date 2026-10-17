@@ -8,6 +8,7 @@
 #include "collisional_config.h"
 #include "constants.h"
 #include "diagnostics.h"
+#include "stall.h"
 #include <algorithm>
 #include <unordered_map>
 #include <numeric>
@@ -1442,6 +1443,16 @@ static bool perturbation_timestep_md(const std::vector<Subsystem>& active, const
                     }
                     std::fflush(stdout);
                 }
+            }
+            if (a > 0.0 && g_collisional.e_ref > 0.0) {   // STALL lines: the largest tidal-sampling estimates
+                const double mi = h_m(idx_i), mj = h_m(idx_j);
+                const double dte = std::min(h_dt(idx_i), dt_pert);
+                StallRecorder::Tidal t;
+                t.est = mi * mj / (mi + mj) * f_mag * std::sqrt(v2) * dte / g_collisional.e_ref;
+                t.a = a; t.e = e; t.gamma = f_mag * r2 / mu; t.dt_myr = dte * TIME_UNIT_MYR;
+                t.P_myr = 2.0 * M_PI * std::sqrt(a * a * a / mu) * TIME_UNIT_MYR;
+                t.pid0 = sub.particle_ids[0]; t.pid1 = sub.particle_ids[1]; t.m0 = mi; t.m1 = mj;
+                g_stall.note_tidal(t);
             }
             if (g_eattr.on && a > 0.0) {
                 const double mi = h_m(idx_i), mj = h_m(idx_j);
