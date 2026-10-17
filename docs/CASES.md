@@ -16,9 +16,12 @@ Goal (2026-10-16): the smallest long-run |dE/E| with P and L at double-precision
    HHS call and level, subsystem advances against the books, per-path residues.
 4. `scripts/replay_ledger.py classify`: `booking:<path>` (a path changes its members' energy without booking it),
    `field:d<depth>` (the FSI error, with the tidal suspect), `merger`.
-5. `scripts/cutout.py` / `harvest_stalls.py`: the system cut out of the restart (parent's `E_REF`, `NGB_MREF`) as an
+5. `scripts/subsys_cases.py`: per-subsystem error events (SUBSYS_ERR lines) replayed in isolation;
+   `scripts/adversary.py`: a search over few-body configurations for the worst violations (complements the campaigns:
+   what can happen vs what does happen, see docs/ADVERSARY.md).
+6. `scripts/cutout.py` / `harvest_stalls.py`: the system cut out of the restart (parent's `E_REF`, `NGB_MREF`) as an
    isolated case; it becomes a test in `tests/data/` if it reproduces.
-6. Fix, test, A/B on seed ensembles (energy rule), entry here.
+7. Fix, test, A/B on seed ensembles (energy rule), entry here.
 
 Status: **closed** (fixed, test, ensemble checked), **option** (fix kept as an option, trade-off), **open**,
 **rejected** (a candidate fix that broke a conservation law).
@@ -92,9 +95,27 @@ Status: **closed** (fixed, test, ensemble checked), **option** (fix kept as an o
   change). The perturber does not join the subsystem (it fails the arrival-within-the-step test, not the tidal one:
   NGB_MASS_GAMMA 1e-5 / 1e-6 changed nothing).
 - **Tried:** no floor: the binary's estimate 170x smaller, the step's jump -45 %, 9x the cost; floor x 0.25: -32 %.
+- **Tried (2026-10-17):** perturbers into the subsystem: R_NGB 2e-3 / 3e-3 pc with NGB_MASS_GAMMA 1e-6: the step 6x slower,
+  its error larger (-6.0e-9 / -3.6e-9 vs -2.2e-9 cumulative), and the binary still sampled by the kicks at 3e-3 pc.
+  Not the answer in this form.
 - **Next:** count the binaries per jump with the STALL tidal lines over the campaign; literature (BIFROST sec. 6 lists
   slow-down for perturbed binaries as missing; PeTar/SDAR perturbers in the regularised step; NBODY6 KS perturber
   lists down to gamma ~1e-6), then a method proposal.
+
+## C6 Secular triple: angular momentum of the frozen outer orbit (closed)
+
+- **System:** any strongly coupled stable triple on the secular path; found by `scripts/adversary.py` (family triple,
+  smoke test of 8 random points): 0.12 + 0.46 Msun inner binary, a = 0.086 AU, e = 0.23, 2.06 Msun outer body at
+  a_out = 12.9 a_in, e_out = 0.46, 65 deg (Kozai regime).
+- **Symptom:** |dL/L| 1.26e-2 in one step (|dE/E| 4e-16 after C4, P exact); with the code before C4 also |dE/E| 5.8e-3.
+  The existing test triple (weakly coupled) showed 8.4e-13, taken for the rebuild's rounding.
+- **Cause:** the secular step changes the inner orbit's angular momentum (e_in, plane) but kept the outer orbit
+  frozen, so mu_in r_in x v_in + mu_out r_out x v_out changed.
+- **Fix:** the outer orbit carries what is left, L_out = L(before) - L_in(new): direction -> i_out, Omega_out, magnitude
+  -> e_out at the unchanged a_out; then the C4 energy fix (radial, leaves L alone). E, P, L exact.
+- **Test:** `adv_kozai_triple`: max |dE/E| 4.4e-16, |dL/L| 1.2e-15 (old code: 5.8e-3, 1.26e-2); `sec_triple_energy`
+  |dL/L| 8.4e-13 -> 6.2e-16 (bound tightened to round-off).
+- **Cluster:** pending (the next campaign; runs without secular triples are unchanged).
 
 ## R1 FLYBY_CM_KICK, c.o.m. kicks of weakly perturbed binaries (rejected)
 

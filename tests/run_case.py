@@ -139,6 +139,12 @@ CM_TIDE = dict(TEST_CASE="triple_test", INTEGRATOR="hhs", TRIPLE_A_IN_PC="2e-4",
 # Hard stellar binary (0.92 + 0.92 Msun, a = 0.011 AU, e = 0.86, ~1e6 orbits per 1e-3 Myr: secular) and a slow star
 # passing at 0.011 pc (e = 22, from 0.057 pc): the 200k, 10 % binaries seed-13 configuration (component velocities).
 # The inner orbit is turned so that at t = 0 a member's velocity points at the star (its pair "pericentre" is ~0)
+ADV_KOZAI = dict(TEST_CASE="particle_file", IC_FILE=str(Path(__file__).parent / "data" / "adv_kozai_triple.txt"),
+                 INTEGRATOR="hhs", COLLISIONAL="true", PN_ORDER="31", SSE_ENABLED="false", PRINT_INTERVAL="1",
+                 PROFILING="false", DT_MAX_MYR="1e-3", TOTAL_TIME_MYR="2e-3", DT_MIN_MYR="1.0e-14", ETA="0",
+                 ETA_GRAD="0.2", ETA_JERK="0", ETA_RESTART="1e-8", FLYBY_CM_EPS="1e-11", NGB_MASS_SCALING="true",
+                 SERIAL_N2_GPU="16384", TREE_THRESHOLD="100000", TREE_THETA="0.7", SDAR="true",
+                 E_REF="271184797.0", NGB_MREF="0.40052478")
 FLYBY_TRIPLE = dict(TEST_CASE="triple_test", INTEGRATOR="hhs", TRIPLE_A_IN_PC="5.54e-8", TRIPLE_E_IN="0.86",
                     TRIPLE_M1="0.923", TRIPLE_M2="0.923", TRIPLE_A_OUT_PC="0.0113", TRIPLE_E_OUT="22.0",
                     TRIPLE_M3="0.352", TRIPLE_INCL_DEG="0", TRIPLE_IN_ROT_DEG="-170.58", TOTAL_TIME_MYR="2e-3",
@@ -1602,9 +1608,13 @@ CASES = {
     # Energy-exact rebuild of the secular-triple step: the members' T + U changes by exactly the booked GW energy
     # (before: max |dE/E| 1.4e-4 on this triple, the -8e-10 jump of the 200k seed-3 step 60). Measured (host):
     # end 6.19e-16, max 9.28e-16, max |dP|/M 4.34e-15 km/s, max |dL/L| 8.43e-13 (the rebuild rotates the inner orbit);
-    # A100: end 9.28e-16, |dP|/M 4.16e-15
+    # A100: end 9.28e-16, |dP|/M 4.16e-15. Angular-momentum-exact outer orbit (2026-10-17): max |dL/L| 6.2e-16 (8.4e-13
+    # with the frozen outer orbit)
     "sec_triple_energy": lambda exe: floor(exe, "secular triple energy", dict(SEC_TRIPLE, ETA_RESTART="0"),
-                                           (1.21e-15, 1.21e-15, 5.7e-15, 1.1e-12)),
+                                           (1.21e-15, 1.21e-15, 5.7e-15, 8.1e-16)),
+    # Found by scripts/adversary.py: a strongly coupled Kozai triple on the secular-triple path; the frozen outer
+    # orbit lost |dL/L| 1.26e-2 in one step. Measured (host): max |dE/E| 4.39e-16, |dP|/M 1.74e-15 km/s, |dL/L| 1.21e-15
+    "adv_kozai_triple": lambda exe: floor(exe, "Kozai triple (adversary)", ADV_KOZAI, (5.7e-16, 5.7e-16, 2.3e-15, 1.6e-15)),
     # Measured 9.8e-9 (dense core, at the restart threshold); 2.35e-8 before the pericentre check, 2.68e-8 with
     # it (seed 5): bound 3.5e-8
     "triples_detected": lambda exe: triples(exe, "dense core", TRIPLES, 3.5e-8),

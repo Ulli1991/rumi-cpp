@@ -1065,12 +1065,36 @@ void advance_subsystems_in_range_impl(Particles& p, int start, int count,
                                    tri.inner.Omega, tri.inner.omega, M_in_new, mu_in,
                                    r_in_new, v_in_new);
 
-            // Outer orbit
+            // Outer orbit. Angular-momentum-exact: the secular step changes the inner orbit's angular momentum (e_in,
+            // plane); the internal L = mu_in r_in x v_in + mu_out r_out x v_out is conserved by taking the outer orbit's
+            // L as what is left, L_out = L(before) - L_in(new): its direction gives the outer plane (i_out, Omega_out),
+            // its magnitude e_out at the unchanged a_out (a frozen outer orbit lost up to |dL/L| 1.3e-2 per step in a
+            // strongly coupled Kozai triple, found by scripts/adversary.py). The energy fix below leaves L alone
+            double e_out_rb = tri.e_out, inc_out_rb = tri.inc_out, Omega_out_rb = tri.Omega_out;
+            {
+                const double mu_in_red = m1 * m2 / M12, mu_out_red = M12 * m3 / (M12 + m3);
+                double Lin_new[3] = {r_in_new[1] * v_in_new[2] - r_in_new[2] * v_in_new[1],
+                                     r_in_new[2] * v_in_new[0] - r_in_new[0] * v_in_new[2],
+                                     r_in_new[0] * v_in_new[1] - r_in_new[1] * v_in_new[0]};
+                double Lout_t[3];
+                for (int k = 0; k < 3; k++)
+                    Lout_t[k] = mu_in_red * L_in[k] + mu_out_red * L_out[k] - mu_in_red * Lin_new[k];
+                const double Lm = std::sqrt(Lout_t[0] * Lout_t[0] + Lout_t[1] * Lout_t[1] + Lout_t[2] * Lout_t[2]);
+                const double h = Lm / mu_out_red;                       // specific angular momentum of the outer orbit
+                const double q = 1.0 - h * h / (mu_out * tri.a_out);     // e_out^2
+                if (Lm > 0.0 && q >= 0.0) {
+                    e_out_rb = std::sqrt(q);
+                    inc_out_rb = std::acos(std::max(-1.0, std::min(1.0, Lout_t[2] / Lm)));
+                    Omega_out_rb = std::atan2(Lout_t[0], -Lout_t[1]);
+                } else {
+                    g_subsystem_mgr.step_sec_triple_unfixed++;   // no outer orbit at this a_out carries that L
+                }
+            }
             double n_out = std::sqrt(mu_out / (tri.a_out * tri.a_out * tri.a_out));
             double M_out_new = oe_out.mean_anom + n_out * dt;
             double r_out_new[3], v_out_new[3];
-            elements_to_cartesian(tri.a_out, tri.e_out, tri.inc_out,
-                                   tri.Omega_out, tri.omega_out, M_out_new, mu_out,
+            elements_to_cartesian(tri.a_out, e_out_rb, inc_out_rb,
+                                   Omega_out_rb, tri.omega_out, M_out_new, mu_out,
                                    r_out_new, v_out_new);
 
             // Reconstruct absolute coordinates
