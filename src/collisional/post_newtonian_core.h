@@ -38,6 +38,82 @@ void eih_pn_acceleration_pair(const double x_i[3], const double v_i[3], double m
 void eih1_nbody_acceleration(const double* pos, const double* vel, const double* mass, int n, double G,
                              double c_code, double* a);
 
+// ============================================================================
+// The PN accelerations of a LogH subsystem (eih1_nbody_acceleration and eih_pn_acceleration_pair over all pairs) at
+// several velocities and the same positions: a leapfrog step evaluates them 5 times at two position sets (K_aux and
+// K_phys change only v, w). PnGeom holds what depends only on the masses (pn_geom_set_masses: total masses, nu, the
+// nu polynomials of PN3.0 / 3.5, 1/c^n) and only on the positions (pn_geom_set_positions: separations, 1/r, unit
+// vectors, G m / r, the prefactors, the EIH potentials and fields), computed once; eih1_nbody_acceleration_geom and
+// eih_pn_pairs_geom then do only the velocity-dependent part.
+// Bit-identical to eih1_nbody_acceleration and eih_pn_acceleration_pair: each cached value is computed with the
+// operations of those functions and is one that they round on its own (sqrt, quotient, a product that only feeds
+// products, a complete sum), never a product that they fuse into an addition (FMA contraction), and the
+// velocity-dependent code is theirs statement for statement, with loads of the cached values in place of their
+// computation: the compiler's FMA choices (GCC: in statement order; clang -ffp-contract=on: within an expression)
+// come out the same. Not so under clang -ffp-contract=fast (the HIP default), where already the pair and the
+// single-body functions differ in the last bit. Checked bitwise on random configurations of 2-8 bodies over all
+// orders (tests/pn_geom_test.cpp, ctest pn_geom_bitwise; g++ 13 and 15, nvcc_wrapper, clang 18 -ffp-contract=on)
+// and on every evaluation of the run_case tests (NBODY_CHECK_EIH=1). A structure-of-arrays variant vectorised over
+// the pairs was faster but not bit-identical under g++ 15 (the vectoriser reorders the statements, and with them
+// which product of a sum GCC fuses).
+// ============================================================================
+constexpr int PN_GEOM_MAX_BODIES = 8;
+constexpr int PN_GEOM_MAX_PAIRS = PN_GEOM_MAX_BODIES * (PN_GEOM_MAX_BODIES - 1) / 2;
+constexpr int PN_GEOM_MAX_DIR = 2 * PN_GEOM_MAX_PAIRS;   // bodies of the pairs (ordered pairs)
+
+struct PnBodyGeom {          // body A of a pair from body B (eih_pn_acceleration with A, B)
+    double n[3];             // (x_A - x_B) * (1/r)
+    double Gm_A, Gm_B;       // G m_A, G m_B
+    double Gm_A_r, Gm_B_r;   // G m_A / r, G m_B / r (as G m * (1/r))
+    double pf1, pf2;         // PN1, PN2 prefactors G m_B (1/r)^2 / c^2, / c^4
+    double fA;               // m_B / M: body A's share of the PN2.5-3.5 relative acceleration
+};
+
+struct PnPairGeom {          // pair i < j
+    int i, j;
+    // masses
+    double M, Gm, nu;        // m_i + m_j, G M, m_i m_j / M^2
+    double f25;              // 8/5 nu
+    double P3A[10], P3B[6];  // nu polynomials of the PN3.0 coefficients A, B
+    double P35A[5], P35B[5]; // nu polynomials of the PN3.5 coefficients A, B
+    // positions
+    double rij[3];           // x_i - x_j
+    double inv_r;
+    double u, uu, uuu;       // G M / r and its square, cube
+    double c25, c35;         // (1/c^5) (8/5) nu u, (1/c^7) nu u
+    double g;                // -G M / r^2
+    PnBodyGeom body[2];      // [0]: i from j, [1]: j from i
+};
+
+struct PnGeom {
+    int n = 0;
+    bool eih_nbody = false;  // eih1_nbody_acceleration part set up (positions: phi, g, nAB, ...)
+    int pair_order = 0;      // orders of the pair formula (0: no pair part)
+    double G = 0.0;
+    double inv_c2 = 0.0, inv_c4 = 0.0, inv_c5 = 0.0, inv_c6 = 0.0, inv_c7 = 0.0;
+    double Gm[PN_GEOM_MAX_BODIES];
+    // eih1_nbody_acceleration: potentials phi_A, fields g_A and per ordered pair (A, B) n_AB, G m_B / r^2,
+    // 3.5 G m_B / r, (x_B - x_A).g_B
+    double phi[PN_GEOM_MAX_BODIES], g[PN_GEOM_MAX_BODIES][3];
+    double nAB[PN_GEOM_MAX_BODIES][PN_GEOM_MAX_BODIES][3];
+    double Gm_r2[PN_GEOM_MAX_BODIES][PN_GEOM_MAX_BODIES];
+    double c35_r[PN_GEOM_MAX_BODIES][PN_GEOM_MAX_BODIES];
+    double xg[PN_GEOM_MAX_BODIES][PN_GEOM_MAX_BODIES];
+    int n_pairs = 0;
+    PnPairGeom pair[PN_GEOM_MAX_PAIRS];   // (0,1), (0,2), ..., (1,2), ...: the order of the loop i < j
+};
+
+// Masses and constants (n <= PN_GEOM_MAX_BODIES; eih_nbody: the PN1 part by eih1_nbody_acceleration_geom; pair_order:
+// the orders of eih_pn_pairs_geom, 0 for none). Then pn_geom_set_positions at every new position set.
+void pn_geom_set_masses(const double* mass, int n, double G, double c_code, bool eih_nbody, int pair_order,
+                        PnGeom& geom);
+void pn_geom_set_positions(const double* pos, PnGeom& geom);
+// = eih1_nbody_acceleration(pos, vel, mass, n, G, c_code, a) at the positions and masses of geom (a[3n] overwritten)
+void eih1_nbody_acceleration_geom(const PnGeom& geom, const double* vel, double* a);
+// = eih_pn_acceleration_pair(x_i, v_i, m_i, x_j, v_j, m_j, G, c_code, a_i, a_j, pn_order) of every pair q of geom
+// (bodies geom.pair[q].i, .j): a[6 q + k] = a_i[k], a[6 q + 3 + k] = a_j[k]
+void eih_pn_pairs_geom(const PnGeom& geom, const double* vel, int pn_order, double* a);
+
 // PN1 energy correction for an N-body system
 // pos[i*3+k], vel[i*3+k], mass[i] for i=0..n-1
 double pn1_energy(const double* pos, const double* vel, const double* mass,

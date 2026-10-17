@@ -126,6 +126,12 @@ if(ENABLE_COLLISIONAL)
     add_executable(pn-highorder-test ${CMAKE_CURRENT_SOURCE_DIR}/tests/pn_highorder_test.cpp ${SRC_DIR}/collisional/post_newtonian_core.cpp)
     target_include_directories(pn-highorder-test PRIVATE ${SRC_DIR}/collisional)
     target_compile_features(pn-highorder-test PRIVATE cxx_std_17)
+    # The cached-geometry PN evaluation of LogH against the direct functions, bitwise (tests/pn_geom_test.cpp; ctest
+    # pn_geom_bitwise). Compiled with the flags of the main code (-O3 -march=native): FMA contraction included
+    add_executable(pn-geom-test ${CMAKE_CURRENT_SOURCE_DIR}/tests/pn_geom_test.cpp ${SRC_DIR}/collisional/post_newtonian_core.cpp)
+    target_include_directories(pn-geom-test PRIVATE ${SRC_DIR}/collisional)
+    target_compile_features(pn-geom-test PRIVATE cxx_std_17)
+    target_compile_options(pn-geom-test PRIVATE $<$<CONFIG:Release>:-O3 -march=native> $<$<CONFIG:RelWithDebInfo>:-O2 -g -march=native>)
     # Spin-orbit / spin-spin / Kerr-quadrupole accelerations and spin precession against Kidder 1995's E and J and the
     # Poisson bracket of the canonical spin Hamiltonian (tests/spin_pn_test.cpp; ctest spin_pn_consistency)
     add_executable(spin-pn-test ${CMAKE_CURRENT_SOURCE_DIR}/tests/spin_pn_test.cpp ${SRC_DIR}/collisional/post_newtonian_core.cpp)
@@ -259,9 +265,9 @@ foreach(case kepler_e09 kepler_e0 frost4_e09 frost4_e099 planets_hhs planets_fsi
     add_test(NAME ${case} COMMAND Python3::Interpreter ${CMAKE_SOURCE_DIR}/tests/run_case.py
              $<TARGET_FILE:nbody-kokkos> ${case})
     # Few-body cases: host threads only add overhead (and timeouts); every incremental pid-map update is
-    # checked against a full rebuild, every subsystem must be advanced exactly once per subsystem call, and the
-    # pair EIH evaluation must equal the two single-body calls bit for bit, and every cached stellar type and radius
-    # (stellar_cache.h) must equal the device value
+    # checked against a full rebuild, every subsystem must be advanced exactly once per subsystem call, the PN
+    # evaluations of LogH (cached geometry) must equal the direct EIH functions bit for bit, and every cached stellar
+    # type and radius (stellar_cache.h) must equal the device value
     set_tests_properties(${case} PROPERTIES ENVIRONMENT "OMP_NUM_THREADS=1;NBODY_CHECK_PIDMAP=1;NBODY_CHECK_SUBSYS=1;NBODY_CHECK_EIH=1;NBODY_CHECK_STELLAR_CACHE=1")
 endforeach()
 if(ENABLE_COLLISIONAL)
@@ -269,6 +275,7 @@ if(ENABLE_COLLISIONAL)
              $<TARGET_FILE:kepler-test> kepler_drift_unit)
     add_test(NAME pn1_energy_consistency COMMAND pn-energy-test)
     add_test(NAME pn_highorder COMMAND pn-highorder-test)
+    add_test(NAME pn_geom_bitwise COMMAND pn-geom-test)
     add_test(NAME spin_pn_consistency COMMAND spin-pn-test)
     add_test(NAME secular_pn COMMAND secular-pn-test)
     add_test(NAME secular_triple COMMAND secular-triple-test)

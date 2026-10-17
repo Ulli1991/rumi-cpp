@@ -531,19 +531,47 @@ static void rotate_spins(const LogHState& state, const double* eval_vel, const d
     rotate_about(rot2, O2, dt);
 }
 
-static void compute_pn_all_pairs(const LogHState& state, const double* eval_vel,
-                                  double G, double c_code, int pn_order,
-                                  double* pn_out, const double* chi1 = nullptr, const double* chi2 = nullptr) {
-    int n = state.n_bodies;
-    std::memset(pn_out, 0, n * 3 * sizeof(double));
+// The PN geometry of the state (masses, the EIH choice and the pair orders of compute_pn_all_pairs; positions)
+static void pn_geom_init(const LogHState& state, double G, double c_code, int pn_order, PnGeom& geom) {
     // Three or more bodies: the PN1 part from the genuine N-body EIH equations (three-body terms included; pair sums
     // of the two-body formula have no conserved 1PN energy, docs/CASES.md C7); the higher orders stay pairwise
     // (binary formulas). Two bodies, and slowed (SDAR) pairs present: the pair formula for every order, as before
+    const int n = state.n_bodies;
     const bool eih_nbody = n >= 3 && (pn_order & 1) && state.n_sd == 0;
-    if (eih_nbody) eih1_nbody_acceleration(state.pos, eval_vel, state.mass, n, G, c_code, pn_out);
-    const int pair_order = eih_nbody ? (pn_order & ~1) : pn_order;
+    pn_geom_set_masses(state.mass, n, G, c_code, eih_nbody, eih_nbody ? (pn_order & ~1) : pn_order, geom);
+    pn_geom_set_positions(state.pos, geom);
+}
+
+// PN accelerations at the positions of geom (pn_geom_init / pn_geom_set_positions at state.pos) and the velocities
+// eval_vel: the position- and mass-only factors come from geom, computed once per position set (5 evaluations per
+// leapfrog step at 2 position sets), bit-identical to eih1_nbody_acceleration and eih_pn_acceleration_pair
+static void compute_pn_all_pairs(const LogHState& state, const PnGeom& geom, const double* eval_vel,
+                                  double G, double c_code,
+                                  double* pn_out, const double* chi1 = nullptr, const double* chi2 = nullptr) {
+    int n = state.n_bodies;
+    std::memset(pn_out, 0, n * 3 * sizeof(double));
+    // NBODY_CHECK_EIH=1 (tests): every evaluation must equal the direct functions (eih1_nbody_acceleration, and
+    // eih_pn_acceleration of each body of a pair) bit for bit
+    static const bool check_eih = std::getenv("NBODY_CHECK_EIH") != nullptr;
+    if (geom.eih_nbody) {
+        eih1_nbody_acceleration_geom(geom, eval_vel, pn_out);
+        if (check_eih) {
+            double ref[LOGH_MAX_BODIES * 3];
+            eih1_nbody_acceleration(state.pos, eval_vel, state.mass, n, G, c_code, ref);
+            if (std::memcmp(ref, pn_out, n * 3 * sizeof(double))) {
+                std::fprintf(stderr, "EIH CHECK FAILED: N-body PN1, n = %d: %a %a %a vs %a %a %a\n", n, pn_out[0],
+                             pn_out[1], pn_out[2], ref[0], ref[1], ref[2]);
+                std::abort();
+            }
+        }
+    }
+    const int pair_order = geom.pair_order;
+    double a_pairs[PN_GEOM_MAX_DIR * 3];   // both bodies of every pair
+    if (pair_order != 0) eih_pn_pairs_geom(geom, eval_vel, pair_order, a_pairs);
+    int q = -1;
     for (int i = 0; i < n; i++) {
         for (int j = i + 1; j < n; j++) {
+            q++;
             // Slowed (SDAR) pairs have no member above M_PN: their own PN term is left out. Applied at full strength
             // to the slowed orbit it acts kappa times longer per orbit (PN1 precession x kappa, ~0.3 rad per slowed
             // orbit for kappa 9e4 at 0.019 AU), which breaks the slow-down approximation
@@ -551,14 +579,9 @@ static void compute_pn_all_pairs(const LogHState& state, const double* eval_vel,
             for (int k = 0; k < state.n_sd; k++)
                 if (state.sd_a[k] == i && state.sd_b[k] == j) slowed = true;
             if (slowed) continue;
-            // EIH: compute individual PN accelerations directly (both bodies of the pair in one call)
-            double a_pn_i[3], a_pn_j[3];
             if (pair_order == 0) continue;
-            eih_pn_acceleration_pair(&state.pos[i*3], &eval_vel[i*3], state.mass[i],
-                                     &state.pos[j*3], &eval_vel[j*3], state.mass[j],
-                                     G, c_code, a_pn_i, a_pn_j, pair_order);
-            // NBODY_CHECK_EIH=1 (tests): the pair call must equal the two single-body calls bit for bit
-            static const bool check_eih = std::getenv("NBODY_CHECK_EIH") != nullptr;
+            const double* a_pn_i = &a_pairs[6*q];
+            const double* a_pn_j = &a_pairs[6*q + 3];
             if (check_eih) {
                 double ref_i[3], ref_j[3];
                 eih_pn_acceleration(&state.pos[i*3], &eval_vel[i*3], state.mass[i],
@@ -710,8 +733,11 @@ static inline void k_aux(LogHState& state, const double* accel, const double* pn
 void logh_step_start(const LogHState& state, double G, double c_code, int pn_order, LogHStepStart& start) {
     logh_internal_accel(state, G, start.accel);
     start.omega = logh_kinetic_energy(state) + state.B;
-    if (pn_order > 0 && state.use_aux_vel)
-        compute_pn_all_pairs(state, state.vel, G, c_code, pn_order, start.pn_v, state.spin1, state.spin2);
+    if (pn_order > 0 && state.use_aux_vel) {
+        PnGeom geom;
+        pn_geom_init(state, G, c_code, pn_order, geom);
+        compute_pn_all_pairs(state, geom, state.vel, G, c_code, start.pn_v, state.spin1, state.spin2);
+    }
 }
 
 // nsteps PN leapfrog steps. A step needs the Newtonian acceleration a(x), g(v) = PN(x, v, S) and Omega = T(v) + B
@@ -753,6 +779,8 @@ static void logh_leapfrog_step_pn_sd(LogHState& state, double ds, double G, doub
     double accel[LOGH_MAX_BODIES * 3], pn_v[LOGH_MAX_BODIES * 3], pn[LOGH_MAX_BODIES * 3], xdot[LOGH_MAX_BODIES * 3];
     logh_internal_accel(state, G, accel);
     sd_scale_binary_accel(state, G, accel);
+    PnGeom geom;
+    pn_geom_init(state, G, c_code, pn_order, geom);
     for (int half = 0; half < 2; half++) {
         if (half == 1) {   // drift with the Omega of the K_aux before it, then the forces at the new positions
             const double inv_Omega = 1.0 / logh_omega(state);
@@ -761,14 +789,15 @@ static void logh_leapfrog_step_pn_sd(LogHState& state, double ds, double G, doub
             state.t += ds * inv_Omega;
             logh_internal_accel(state, G, accel);
             sd_scale_binary_accel(state, G, accel);
+            pn_geom_set_positions(state.pos, geom);
         }
         double Omega = logh_omega(state);
-        compute_pn_all_pairs(state, state.vel, G, c_code, pn_order, pn_v);
+        compute_pn_all_pairs(state, geom, state.vel, G, c_code, pn_v);
         k_aux(state, accel, pn_v, ds_quarter, Omega, G);
-        compute_pn_all_pairs(state, state.aux_vel, G, c_code, pn_order, pn);
+        compute_pn_all_pairs(state, geom, state.aux_vel, G, c_code, pn);
         k_phys_cubic_sd(state, accel, pn, ds_half, Omega, G);
         Omega = logh_omega(state);
-        compute_pn_all_pairs(state, state.vel, G, c_code, pn_order, pn_v);
+        compute_pn_all_pairs(state, geom, state.vel, G, c_code, pn_v);
         k_aux(state, accel, pn_v, ds_quarter, Omega, G);
     }
 }
@@ -787,6 +816,8 @@ void logh_leapfrog_steps_pn(LogHState& state, double ds, double G, double c_code
     double pn_v[LOGH_MAX_BODIES * 3];    // g(v) = PN acceleration at (x, v, S)
     double pn[LOGH_MAX_BODIES * 3];      // g(w) = PN acceleration at (x, w, Z)
     double Omega;                        // T(v) + B
+    PnGeom geom;                         // position- and mass-only factors of g at x (set again after each drift)
+    pn_geom_init(state, G, c_code, pn_order, geom);
     if (start) {
         std::memcpy(accel, start->accel, n3 * sizeof(double));
         std::memcpy(pn_v, start->pn_v, n3 * sizeof(double));
@@ -794,7 +825,7 @@ void logh_leapfrog_steps_pn(LogHState& state, double ds, double G, double c_code
     } else {
         logh_internal_accel(state, G, accel);
         Omega = logh_kinetic_energy(state) + state.B;
-        compute_pn_all_pairs(state, state.vel, G, c_code, pn_order, pn_v, state.spin1, state.spin2);
+        compute_pn_all_pairs(state, geom, state.vel, G, c_code, pn_v, state.spin1, state.spin2);
     }
 
     for (int s = 0; s < nsteps; s++) {
@@ -805,12 +836,12 @@ void logh_leapfrog_steps_pn(LogHState& state, double ds, double G, double c_code
         k_aux(state, accel, pn_v, ds_quarter, Omega, G);
 
         // K_phys(ds/2): cubic solve for implicit midpoint (v and B)
-        compute_pn_all_pairs(state, state.aux_vel, G, c_code, pn_order, pn, state.aux_spin1, state.aux_spin2);
+        compute_pn_all_pairs(state, geom, state.aux_vel, G, c_code, pn, state.aux_spin1, state.aux_spin2);
         k_phys_cubic(state, accel, pn, ds_half, G, Omega);
 
         // K_aux(ds/4) with g(v') at the updated v', B'
         Omega = logh_kinetic_energy(state) + state.B;
-        compute_pn_all_pairs(state, state.vel, G, c_code, pn_order, pn_v, state.spin1, state.spin2);
+        compute_pn_all_pairs(state, geom, state.vel, G, c_code, pn_v, state.spin1, state.spin2);
         k_aux(state, accel, pn_v, ds_quarter, Omega, G);
 
         // ============ DRIFT: x += ds * v / Omega,  t += ds / Omega  [EXPLICIT] ============
@@ -823,16 +854,17 @@ void logh_leapfrog_steps_pn(LogHState& state, double ds, double G, double c_code
 
         // ============ Newtonian acceleration and g(v) at the new positions ============
         logh_internal_accel(state, G, accel);
-        compute_pn_all_pairs(state, state.vel, G, c_code, pn_order, pn_v, state.spin1, state.spin2);
+        pn_geom_set_positions(state.pos, geom);
+        compute_pn_all_pairs(state, geom, state.vel, G, c_code, pn_v, state.spin1, state.spin2);
 
         // ============ SECOND HALF-KICK: K(ds/2) = K_aux(ds/4) · K_phys(ds/2) · K_aux(ds/4) ============
         k_aux(state, accel, pn_v, ds_quarter, Omega, G);
 
-        compute_pn_all_pairs(state, state.aux_vel, G, c_code, pn_order, pn, state.aux_spin1, state.aux_spin2);
+        compute_pn_all_pairs(state, geom, state.aux_vel, G, c_code, pn, state.aux_spin1, state.aux_spin2);
         k_phys_cubic(state, accel, pn, ds_half, G, Omega);
 
         Omega = logh_kinetic_energy(state) + state.B;
-        compute_pn_all_pairs(state, state.vel, G, c_code, pn_order, pn_v, state.spin1, state.spin2);
+        compute_pn_all_pairs(state, geom, state.vel, G, c_code, pn_v, state.spin1, state.spin2);
         k_aux(state, accel, pn_v, ds_quarter, Omega, G);
     }
 }

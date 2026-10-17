@@ -235,7 +235,7 @@ Levels:
 | `NBODY_CHECK_CC` | Check that the connected-component split sees the pair steps of the time-step kernel |
 | `NBODY_CHECK_DT_FP32` | =1: check the fp32 time-step kernels against fp64 |
 | `NBODY_CHECK_HOSTSUB` | =1: abort on a device pointer met inside a host subtree (HOST_SUBTREE_MAX) |
-| `NBODY_CHECK_EIH` | Check that the pair EIH evaluation equals the two single-body calls bit for bit |
+| `NBODY_CHECK_EIH` | Check that every LogH PN evaluation (cached geometry) equals the direct EIH functions bit for bit |
 | `NBODY_CHECK_PIDMAP` | Check every incremental pid-map update against a full rebuild |
 | `NBODY_CHECK_STELLAR_CACHE` | Check every cached stellar type and radius against the device values |
 | `NBODY_CHECK_SUBSYS` | Check that every subsystem is advanced exactly once per subsystem call |

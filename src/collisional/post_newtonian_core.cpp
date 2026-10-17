@@ -351,6 +351,313 @@ void eih1_nbody_acceleration(const double* pos, const double* vel, const double*
 }
 
 // ============================================================================
+// eih1_nbody_acceleration and eih_pn_acceleration_pair with the mass- and position-only quantities from PnGeom
+// (post_newtonian_core.h). Every cached value below repeats the expression of the original function; the
+// velocity-dependent expressions are copied unchanged, with the cached values in place of their computation.
+// ============================================================================
+void pn_geom_set_masses(const double* mass, int n, double G, double c_code, bool eih_nbody, int pair_order,
+                        PnGeom& geom) {
+    geom.n = n < PN_GEOM_MAX_BODIES ? n : PN_GEOM_MAX_BODIES;
+    geom.eih_nbody = eih_nbody;
+    geom.pair_order = pair_order;
+    geom.G = G;
+    const double c2 = c_code * c_code;
+    geom.inv_c2 = 1.0 / c2;
+    geom.inv_c4 = geom.inv_c2 * geom.inv_c2;
+    geom.inv_c5 = geom.inv_c2 * geom.inv_c2 / c_code;
+    geom.inv_c6 = geom.inv_c2 * geom.inv_c2 * geom.inv_c2;
+    geom.inv_c7 = geom.inv_c2 * geom.inv_c2 * geom.inv_c2 / c_code;
+    for (int A = 0; A < geom.n; A++) geom.Gm[A] = G * mass[A];
+    geom.n_pairs = 0;
+    if (pair_order == 0) return;
+    const double pi2 = M_PI * M_PI;
+    for (int i = 0; i < geom.n; i++)
+        for (int j = i + 1; j < geom.n; j++) {
+            PnPairGeom& p = geom.pair[geom.n_pairs++];
+            p.i = i;
+            p.j = j;
+            p.M = mass[i] + mass[j];
+            p.Gm = G * p.M;
+            const double nu = mass[i] * mass[j] / (p.M * p.M);
+            p.nu = nu;
+            p.f25 = 8.0/5.0 * nu;
+            const double nu2 = nu * nu, nu3 = nu2 * nu;
+            p.P3A[0] = (-35.0/16.0 * nu + 175.0/16.0 * nu2 - 175.0/16.0 * nu3);
+            p.P3A[1] = (15.0/2.0 * nu - 135.0/4.0 * nu2 + 255.0/8.0 * nu3);
+            p.P3A[2] = (-15.0/2.0 * nu + 237.0/8.0 * nu2 - 45.0/2.0 * nu3);
+            p.P3A[3] = (11.0/4.0 * nu - 49.0/4.0 * nu2 + 13.0 * nu3);
+            p.P3A[4] = (79.0 * nu - 69.0/2.0 * nu2 - 30.0 * nu3);
+            p.P3A[5] = (-121.0 * nu + 16.0 * nu2 + 20.0 * nu3);
+            p.P3A[6] = (75.0/4.0 * nu + 8.0 * nu2 - 10.0 * nu3);
+            p.P3A[7] = (1.0 + 22717.0/168.0 * nu + 11.0/8.0 * nu2 - 7.0 * nu3 + 615.0/64.0 * pi2 * nu);
+            p.P3A[8] = (-20827.0/840.0 * nu + nu3 - 123.0/64.0 * pi2 * nu);
+            p.P3A[9] = (-16.0 - 1399.0/12.0 * nu - 71.0/2.0 * nu2 + 41.0/16.0 * pi2 * nu);
+            p.P3B[0] = (-45.0/8.0 * nu + 15.0 * nu2 + 15.0/4.0 * nu3);
+            p.P3B[1] = (12.0 * nu - 111.0/4.0 * nu2 - 12.0 * nu3);
+            p.P3B[2] = (-65.0/8.0 * nu + 19.0 * nu2 + 6.0 * nu3);
+            p.P3B[3] = (329.0/6.0 * nu + 59.0/2.0 * nu2 + 18.0 * nu3);
+            p.P3B[4] = (-15.0 * nu - 27.0 * nu2 - 10.0 * nu3);
+            p.P3B[5] = (-4.0 - 5849.0/840.0 * nu + 25.0 * nu2 + 8.0 * nu3 - 123.0/32.0 * pi2 * nu);
+            p.P35A[0] = (3956.0/35.0 + 184.0/5.0 * nu);
+            p.P35A[1] = (692.0/35.0 - 724.0/15.0 * nu);
+            p.P35A[2] = (366.0/35.0 + 12.0 * nu);
+            p.P35A[3] = (294.0/5.0 + 376.0/5.0 * nu);
+            p.P35A[4] = (114.0 + 12.0 * nu);
+            p.P35B[0] = (-1060.0/21.0 - 104.0/5.0 * nu);
+            p.P35B[1] = (164.0/21.0 + 148.0/5.0 * nu);
+            p.P35B[2] = (-626.0/35.0 - 12.0/5.0 * nu);
+            p.P35B[3] = (-82.0/3.0 - 848.0/15.0 * nu);
+            p.P35B[4] = (678.0/5.0 + 12.0/5.0 * nu);
+            for (int s = 0; s < 2; s++) {
+                const int A = s ? j : i, B = s ? i : j;
+                PnBodyGeom& b = p.body[s];
+                b.Gm_A = G * mass[A];
+                b.Gm_B = G * mass[B];
+                b.fA = mass[B] / p.M;
+            }
+        }
+}
+
+void pn_geom_set_positions(const double* pos_in, PnGeom& geom) {
+    const int nn = geom.n;
+    double pos[3 * PN_GEOM_MAX_BODIES], Gm[PN_GEOM_MAX_BODIES];   // local copies: no aliasing with the stores to geom
+    for (int i = 0; i < 3 * nn; i++) pos[i] = pos_in[i];
+    for (int A = 0; A < nn; A++) Gm[A] = geom.Gm[A];
+    if (geom.eih_nbody) {
+        // Newtonian potentials phi_A and fields g_A, as eih1_nbody_acceleration. Its two loops compute every r
+        // separately (r_AC, r_CA and the r of the second loop are mathematically the same number, but the compiler may
+        // order the sums of squares differently and so round them differently): so do they here
+        double phi[PN_GEOM_MAX_BODIES], g[PN_GEOM_MAX_BODIES][3];
+        for (int A = 0; A < nn; A++) {
+            phi[A] = 0.0; g[A][0] = g[A][1] = g[A][2] = 0.0;
+            for (int C = 0; C < nn; C++) {
+                if (C == A) continue;
+                const double d[3] = {pos[3*C] - pos[3*A], pos[3*C+1] - pos[3*A+1], pos[3*C+2] - pos[3*A+2]};
+                const double r = std::sqrt(d[0]*d[0] + d[1]*d[1] + d[2]*d[2]);
+                phi[A] += Gm[C] / r;
+                for (int k = 0; k < 3; k++) g[A][k] += Gm[C] * d[k] / (r * r * r);
+            }
+        }
+        for (int A = 0; A < nn; A++) {
+            geom.phi[A] = phi[A];
+            for (int k = 0; k < 3; k++) geom.g[A][k] = g[A][k];
+        }
+        for (int A = 0; A < nn; A++)
+            for (int B = 0; B < nn; B++) {
+                if (B == A) continue;
+                const double dAB[3] = {pos[3*A] - pos[3*B], pos[3*A+1] - pos[3*B+1], pos[3*A+2] - pos[3*B+2]};
+                const double r = std::sqrt(dAB[0]*dAB[0] + dAB[1]*dAB[1] + dAB[2]*dAB[2]);
+                for (int k = 0; k < 3; k++) geom.nAB[A][B][k] = dAB[k] / r;
+                geom.xg[A][B] = -(dAB[0]*g[B][0] + dAB[1]*g[B][1] + dAB[2]*g[B][2]);
+                geom.Gm_r2[A][B] = Gm[B] / (r * r);
+                geom.c35_r[A][B] = 3.5 * (Gm[B] / r);
+            }
+    }
+    for (int q = 0; q < geom.n_pairs; q++) {
+        PnPairGeom& p = geom.pair[q];
+        const double* x_i = &pos[3*p.i];
+        const double* x_j = &pos[3*p.j];
+        // as eih_pn_acceleration_pair
+        double r_AB[3] = { x_i[0]-x_j[0], x_i[1]-x_j[1], x_i[2]-x_j[2] };
+        double r2 = r_AB[0]*r_AB[0] + r_AB[1]*r_AB[1] + r_AB[2]*r_AB[2];
+        double r_mag = std::sqrt(r2);
+        double inv_r = 1.0 / r_mag;
+        for (int k = 0; k < 3; k++) p.rij[k] = r_AB[k];
+        p.inv_r = inv_r;
+        // as eih_body (A = i, B = j and A = j, B = i)
+        double inv_r2 = inv_r * inv_r;
+        for (int s = 0; s < 2; s++) {
+            const double* x_A = s ? x_j : x_i;
+            const double* x_B = s ? x_i : x_j;
+            PnBodyGeom& b = p.body[s];
+            double rA[3] = { x_A[0]-x_B[0], x_A[1]-x_B[1], x_A[2]-x_B[2] };
+            for (int k = 0; k < 3; k++) b.n[k] = rA[k] * inv_r;
+            b.Gm_A_r = b.Gm_A * inv_r;
+            b.Gm_B_r = b.Gm_B * inv_r;
+            b.pf1 = b.Gm_B * inv_r2 * geom.inv_c2;
+            b.pf2 = b.Gm_B * inv_r2 * geom.inv_c4;
+        }
+        // as pn_rel_highorder
+        const double u = p.Gm * inv_r;
+        p.u = u;
+        p.uu = u * u;
+        p.uuu = u * u * u;
+        p.c25 = geom.inv_c5 * (p.f25 * u);
+        p.c35 = geom.inv_c7 * (p.nu * u);
+        p.g = -p.Gm * inv_r * inv_r;
+    }
+}
+
+void eih1_nbody_acceleration_geom(const PnGeom& geom, const double* vel, double* a) {
+    const int nn = geom.n;
+    for (int A = 0; A < nn; A++) {
+        double acc[3] = {0.0, 0.0, 0.0};
+        const double* vA = &vel[3*A];
+        const double vA2 = vA[0]*vA[0] + vA[1]*vA[1] + vA[2]*vA[2];
+        for (int B = 0; B < nn; B++) {
+            if (B == A) continue;
+            const double* vB = &vel[3*B];
+            const double* nAB = geom.nAB[A][B];
+            const double vB2 = vB[0]*vB[0] + vB[1]*vB[1] + vB[2]*vB[2];
+            const double vAvB = vA[0]*vB[0] + vA[1]*vB[1] + vA[2]*vB[2];
+            const double nvA = nAB[0]*vA[0] + nAB[1]*vA[1] + nAB[2]*vA[2];
+            const double nvB = nAB[0]*vB[0] + nAB[1]*vB[1] + nAB[2]*vB[2];
+            const double xg = geom.xg[A][B];
+            const double bracket = vA2 + 2.0*vB2 - 4.0*vAvB - 1.5*nvB*nvB - 4.0*geom.phi[A] - geom.phi[B] + 0.5*xg;
+            const double Gm_r2 = geom.Gm_r2[A][B];
+            const double nv43 = 4.0*nvA - 3.0*nvB;
+            const double c35 = geom.c35_r[A][B];
+            for (int k = 0; k < 3; k++)
+                acc[k] += -Gm_r2 * nAB[k] * bracket + Gm_r2 * nv43 * (vA[k] - vB[k])
+                          + c35 * geom.g[B][k];
+        }
+        for (int k = 0; k < 3; k++) a[3*A+k] = geom.inv_c2 * acc[k];
+    }
+}
+
+// pn_rel_highorder with the mass- and position-only factors of pair p
+[[gnu::noinline]] static void pn_rel_highorder_geom(const PnGeom& geom, const PnPairGeom& p, double v2, double rd,
+                                                    int pn_order, double& Cn, double& Cv) {
+    const double u = p.u;
+    double A = 0.0, B = 0.0;
+    if (pn_order & 4) {
+        A += p.c25 * rd * (-17.0/3.0 * u - 3.0 * v2);
+        B += p.c25 * (3.0 * u + v2);
+    }
+    if (pn_order & 8) {
+        const double* PA = p.P3A;
+        const double* PB = p.P3B;
+        const double rd2 = rd * rd, rd3 = rd2 * rd, rd4 = rd2 * rd2, rd5 = rd4 * rd, rd6 = rd4 * rd2;
+        const double v4 = v2 * v2, v6 = v4 * v2;
+        const double A3 =
+              rd6 * PA[0]
+            + rd4 * v2 * PA[1]
+            + rd2 * v4 * PA[2]
+            + v6 * PA[3]
+            + u * (rd4 * PA[4]
+                   + rd2 * v2 * PA[5]
+                   + v4 * PA[6])
+            + p.uu * (rd2 * PA[7]
+                      + v2 * PA[8])
+            + p.uuu * PA[9];
+        const double B3 =
+              rd5 * PB[0]
+            + rd3 * v2 * PB[1]
+            + rd * v4 * PB[2]
+            + u * (rd3 * PB[3]
+                   + rd * v2 * PB[4])
+            + p.uu * rd * PB[5];
+        A += geom.inv_c6 * A3;
+        B += geom.inv_c6 * B3;
+    }
+    if (pn_order & 16) {
+        const double* PA = p.P35A;
+        const double* PB = p.P35B;
+        const double rd2 = rd * rd, v4 = v2 * v2;
+        A += p.c35 * rd * (p.uu * PA[0] + u * v2 * PA[1]
+                           + v4 * PA[2] + u * rd2 * PA[3]
+                           - v2 * rd2 * PA[4] + 112.0 * rd2 * rd2);
+        B += p.c35 * (p.uu * PB[0] + u * v2 * PB[1]
+                      + v4 * PB[2] + u * rd2 * PB[3]
+                      + v2 * rd2 * PB[4] - 120.0 * rd2 * rd2);
+    }
+    Cn = p.g * A;
+    Cv = p.g * B;
+}
+
+// eih_body with the mass- and position-only factors of body A from B
+[[gnu::noinline]] static void eih_body_geom(const double v_A[3], const double v_B[3], const PnBodyGeom& b,
+                                            double inv_r, const EihPairCoeffs& h, int pn_order, double a_pn_A[3]) {
+    a_pn_A[0] = a_pn_A[1] = a_pn_A[2] = 0.0;
+
+    const double* n = b.n;
+    double dv[3] = { v_A[0]-v_B[0], v_A[1]-v_B[1], v_A[2]-v_B[2] };
+    double vA2 = v_A[0]*v_A[0] + v_A[1]*v_A[1] + v_A[2]*v_A[2];
+    double vB2 = v_B[0]*v_B[0] + v_B[1]*v_B[1] + v_B[2]*v_B[2];
+    double vA_dot_vB = v_A[0]*v_B[0] + v_A[1]*v_B[1] + v_A[2]*v_B[2];
+    double n_dot_vA = n[0]*v_A[0] + n[1]*v_A[1] + n[2]*v_A[2];
+    double n_dot_vB = n[0]*v_B[0] + n[1]*v_B[1] + n[2]*v_B[2];
+    double Gm_A = b.Gm_A;
+    double Gm_B = b.Gm_B;
+
+    if (pn_order & 1) {
+        double coeff_n = -vA2 - 2.0*vB2 + 4.0*vA_dot_vB
+                         + 1.5 * n_dot_vB * n_dot_vB
+                         + 5.0 * Gm_A * inv_r + 4.0 * Gm_B * inv_r;
+        double coeff_v = 4.0 * n_dot_vA - 3.0 * n_dot_vB;
+        double prefactor = b.pf1;
+        for (int k = 0; k < 3; k++) {
+            a_pn_A[k] += prefactor * (coeff_n * n[k] + coeff_v * dv[k]);
+        }
+    }
+
+    if (pn_order & 2) {
+        double Gm_A_r = b.Gm_A_r;
+        double Gm_B_r = b.Gm_B_r;
+
+        double coeff_n =
+            -2.0 * vB2 * vB2
+            + 4.0 * vB2 * vA_dot_vB - 2.0 * vA_dot_vB * vA_dot_vB
+            + 1.5 * vA2 * n_dot_vB * n_dot_vB
+            + 4.5 * vB2 * n_dot_vB * n_dot_vB
+            - 6.0 * vA_dot_vB * n_dot_vB * n_dot_vB
+            - (15.0/8.0) * n_dot_vB * n_dot_vB * n_dot_vB * n_dot_vB
+            + Gm_A_r * (-15.0/4.0 * vA2 + 5.0/4.0 * vB2 - 2.5 * vA_dot_vB
+                         + 39.0/2.0 * n_dot_vA * n_dot_vA
+                         - 39.0 * n_dot_vA * n_dot_vB
+                         + 17.0/2.0 * n_dot_vB * n_dot_vB)
+            + Gm_B_r * (4.0 * vB2 - 8.0 * vA_dot_vB
+                         + 2.0 * n_dot_vA * n_dot_vA
+                         - 4.0 * n_dot_vA * n_dot_vB
+                         - 6.0 * n_dot_vB * n_dot_vB)
+            + Gm_A_r * Gm_A_r * (-57.0/4.0)
+            + Gm_B_r * Gm_B_r * (-9.0)
+            + Gm_A_r * Gm_B_r * (-69.0/2.0);
+
+        double coeff_v =
+            vA2 * n_dot_vB + 4.0 * vB2 * n_dot_vA
+            - 5.0 * vB2 * n_dot_vB - 4.0 * vA_dot_vB * n_dot_vA
+            + 4.0 * vA_dot_vB * n_dot_vB
+            - 6.0 * n_dot_vA * n_dot_vB * n_dot_vB
+            + (9.0/2.0) * n_dot_vB * n_dot_vB * n_dot_vB
+            + Gm_A_r * (-63.0/4.0 * n_dot_vA + 55.0/4.0 * n_dot_vB)
+            + Gm_B_r * (-2.0 * n_dot_vA - 2.0 * n_dot_vB);
+
+        double prefactor = b.pf2;
+        for (int k = 0; k < 3; k++) {
+            a_pn_A[k] += prefactor * (coeff_n * n[k] + coeff_v * dv[k]);
+        }
+    }
+
+    if (pn_order & 28) {
+        const double fA = b.fA;
+        for (int k = 0; k < 3; k++) {
+            a_pn_A[k] += fA * (h.Cn * n[k] + h.Cv * dv[k]);
+        }
+    }
+}
+
+void eih_pn_pairs_geom(const PnGeom& geom, const double* vel, int pn_order, double* a) {
+    for (int q = 0; q < geom.n_pairs; q++) {
+        // as eih_pn_acceleration_pair
+        const PnPairGeom& p = geom.pair[q];
+        const double* v_i = &vel[3*p.i];
+        const double* v_j = &vel[3*p.j];
+        const double* r_AB = p.rij;
+        double dv[3] = { v_i[0]-v_j[0], v_i[1]-v_j[1], v_i[2]-v_j[2] };
+        EihPairCoeffs h{};
+        h.M = p.M;
+        if (pn_order & 28) {
+            double dv2 = dv[0]*dv[0] + dv[1]*dv[1] + dv[2]*dv[2];
+            double rd = (r_AB[0]*dv[0] + r_AB[1]*dv[1] + r_AB[2]*dv[2]) * p.inv_r;
+            pn_rel_highorder_geom(geom, p, dv2, rd, pn_order, h.Cn, h.Cv);
+        }
+        eih_body_geom(v_i, v_j, p.body[0], p.inv_r, h, pn_order, &a[6*q]);       // A = i, B = j
+        eih_body_geom(v_j, v_i, p.body[1], p.inv_r, h, pn_order, &a[6*q + 3]);   // A = j, B = i
+    }
+}
+
+// ============================================================================
 // PN1 conserved energy correction (Poisson & Will 2014, Section 9.3)
 // E_total = T + U + E_pn1 is conserved at PN1 order.
 //
