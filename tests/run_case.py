@@ -606,9 +606,9 @@ def triple_order(exe, label, cfg, rel):
     e = {of: diagnostics(o)[-1][0] for of, o in out.items()}
     ok = check(f"{label} secular-triple calls, outer body last", n_sec["false"], 1, lower=True)
     ok &= check(f"{label} secular-triple calls, outer body first", n_sec["true"], n_sec["false"], lower=True)
-    ok &= check(f"{label} |dE/E| outer body first (evolves)", e["true"], 1e-30, lower=True)
-    return ok & check(f"{label} |dE/E| first vs last, relative difference",
-                      abs(e["true"] - e["false"]) / max(e["false"], 1e-300), rel)
+    # (evolution is shown by the call counts: since C11 the step can end with |dE/E| exactly 0, so no energy proxy)
+    return ok & check(f"{label} |dE/E| first vs last, difference relative to max(|dE/E|, 1e-15)",
+                      abs(e["true"] - e["false"]) / max(e["false"], 1e-15), rel)
 
 
 def triple_stability(exe, label, cfg, cases):
@@ -1618,10 +1618,11 @@ CASES = {
     # A100: end 9.28e-16, |dP|/M 4.16e-15. Angular-momentum-exact outer orbit (2026-10-17): max |dL/L| 6.2e-16 (8.4e-13
     # with the frozen outer orbit)
     "sec_triple_energy": lambda exe: floor(exe, "secular triple energy", dict(SEC_TRIPLE, ETA_RESTART="0"),
-                                           (1.21e-15, 1.21e-15, 5.7e-15, 8.1e-16)),
+                                           (1.6e-15, 1.6e-15, 5.7e-15, 1.4e-15)),   # C11: 1.24e-15, 1.08e-15 (L)
     # Found by scripts/adversary.py: a strongly coupled Kozai triple on the secular-triple path; the frozen outer
     # orbit lost |dL/L| 1.26e-2 in one step. Measured (host): max |dE/E| 4.39e-16, |dP|/M 1.74e-15 km/s, |dL/L| 1.21e-15
-    "adv_kozai_triple": lambda exe: floor(exe, "Kozai triple (adversary)", ADV_KOZAI, (5.7e-16, 5.7e-16, 2.3e-15, 1.6e-15)),
+    # After C11 (octupole signs, mutual-node angles): |dE/E| 1.17e-15, |dP|/M 2.90e-15 km/s
+    "adv_kozai_triple": lambda exe: floor(exe, "Kozai triple (adversary)", ADV_KOZAI, (1.5e-15, 1.5e-15, 3.8e-15, 1.6e-15)),
     # Measured 9.8e-9 (dense core, at the restart threshold); 2.35e-8 before the pericentre check, 2.68e-8 with
     # it (seed 5): bound 3.5e-8
     "triples_detected": lambda exe: triples(exe, "dense core", TRIPLES, 3.5e-8),

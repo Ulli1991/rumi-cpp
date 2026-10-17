@@ -280,6 +280,46 @@ Status: **closed** (fixed, test, ensemble checked), **option** (fix kept as an o
   the split.
 - **Next:** a per-path L ledger (as NBODY_ELEDGER does for E) on this case.
 
+## C11 Secular triple: octupole equations not Hamiltonian, frame-dependent angles, GW tilts the planes (closed)
+
+- **Found by:** Enzyme. Hamilton's equations of the double-averaged quadrupole + octupole Hamiltonian (Naoz et al.
+  2013 App. A), differentiated exactly, against the code's rates at 2000 random states each (tests/enzyme/
+  secular_triple.cpp). The quadrupole agreed to 4e-10; the octupole did not.
+- **System:** every stable hierarchical triple on the secular path (`secular_evolve_triple`,
+  `secular_triple_step`) with unequal inner masses (octupole C3 ~ m1 - m2), and every PN triple (GW).
+- **Bugs:**
+  - B1 two octupole signs, taken over from the kozai package's derivative code while the code uses Blaes et al.
+    2002's equations: cos phi = cos g1 cos g2 - cos i sin g1 sin g2 instead of -cos g1 cos g2 - cos i sin g1 sin g2
+    (Blaes eq. 23, Naoz), and C3 with (m2 - m1) instead of (m1 - m2). The octupole rates were off by 0.3-1.5 of the
+    total rates, and the averaged energy was not conserved by them (8.5e-2).
+  - B2 de2/dt missing (the outer eccentricity was frozen); G2 fixed in cos i.
+  - B3 GW tilted the orbits: H (total angular momentum) was held fixed while GW shrank G1, so cos i changed by
+    0.3 dG1/G1 from GW alone. Blaes eq. 37: GW leaves the planes alone.
+  - B4 frame dependence: g1, g2 came from `cartesian_to_elements`, measured from the node on the simulation xy-plane,
+    not from the mutual node. Rotating the coordinate frame changed the inner eccentricity vector after one step by
+    0.45.
+- **Why the energy did not show it:** the step books its energy change (C4), and the secular energy of the
+  octupole terms is small compared with the triple's orbital energy.
+- **Fix (`secular.cpp`, `secular_triple_step.cpp`):** Blaes signs; de2/dt with e_out, G2, C2, C3 refreshed every
+  substep. Each substep takes cos i from the conserved H after the Kozai-Lidov change, then moves H with the GW
+  change at fixed cos i. g1, g2 are measured from the mutual node n1 = L_out x L_in (n2 = -n1). The rebuild turns
+  L_in about n1 to the evolved inclination against L_tot and places the pericentres at g1, g2.
+- **Test:** `secular_triple` (tests/secular_triple_test.cpp, plain C++):
+  - rates vs Hamilton (long-double derivatives of the Hamiltonian in tests/secular_triple_ham.h): octupole now
+    4e-8 to 6e-11;
+  - dH_avg/dt along the rates 3e-10;
+  - frame rotation 3.7e-15;
+  - GW alone d cos i 1.5e-10 of dG1/G1;
+  - 1PN precession 5e-14;
+  - direct three-body RK4 run over 2 outer periods: de within 19 % (was up to 4.7x).
+  9 checks fail on the old code.
+- **Remaining:** the substep integrator is forward Euler (eta 0.01), first order, so slow drift is expected. The
+  angular momentum GW removes from the inner orbit is put into the outer orbit by the rebuild (L_out = L - L_in,
+  C6), not booked as radiated.
+- **Cluster effect:** octupole (eccentric Kozai-Lidov) evolution, the channel to extreme eccentricities and GW
+  mergers in triples, had wrong signs, and results depended on the orientation of the coordinate frame. Triple-driven
+  merger rates from runs before this fix are not reliable.
+
 ## Verified building blocks (checked against an independent derivation, no bug found)
 
 | Building block | Check | Result | Test |

@@ -228,10 +228,8 @@ void secular_evolve_triple(SecularTriple& tri, double dt, double G, double c_cod
     // C2: quadrupole coefficient
     double C2 = G * m1 * m2 * m3 / (16.0 * M12 * a_out * std::pow(j2, 3)) *
                 (tri.inner.a / a_out) * (tri.inner.a / a_out);
-    // C3: octupole coefficient (note: m2-m1 sign convention from Blaes et al.)
-    double C3 = 15.0 * G * m1 * m2 * m3 * (m2 - m1) /
-                (64.0 * M12 * M12 * a_out * std::pow(j2, 5)) *
-                (tri.inner.a / a_out) * (tri.inner.a / a_out) * (tri.inner.a / a_out);
+    // C3 (octupole, (m1 - m2) with Blaes et al. 2002's equation signs; Antognini's kozai code has m2 - m1 with its own
+    // signs) is recomputed per substep below
 
     // Delaunay angular momenta
     // G1 = mu_red1 * sqrt(G * M12 * a1) * j1
@@ -264,6 +262,8 @@ void secular_evolve_triple(SecularTriple& tri, double dt, double G, double c_cod
         double th = tri.cos_i_mut;
 
         if (a_in <= 0.0) break;
+        e_out = tri.e_out; e_out2 = e_out * e_out; j2 = std::sqrt(1.0 - e_out2);
+        G2 = (M12 * m3 / M_tot) * std::sqrt(G * M_tot * a_out) * j2;
 
         double e1_2 = e1 * e1;
         double j1 = std::sqrt(1.0 - e1_2);
@@ -277,7 +277,7 @@ void secular_evolve_triple(SecularTriple& tri, double dt, double G, double c_cod
         // Recompute C2, C3 with current a_in (a_in changes due to GW)
         double alpha = a_in / a_out;
         double C2_cur = G * m1 * m2 * m3 / (16.0 * M12 * a_out * std::pow(j2, 3)) * alpha * alpha;
-        double C3_cur = 15.0 * G * m1 * m2 * m3 * (m2 - m1) /
+        double C3_cur = 15.0 * G * m1 * m2 * m3 * (m1 - m2) /
                         (64.0 * M12 * M12 * a_out * std::pow(j2, 5)) * alpha * alpha * alpha;
 
         // Trigonometric quantities
@@ -287,7 +287,7 @@ void secular_evolve_triple(SecularTriple& tri, double dt, double G, double c_cod
         // Octupole auxiliary quantities (Blaes et al. 2002)
         double B = 2.0 + 5.0 * e1_2 - 7.0 * e1_2 * std::cos(2.0 * g1);
         double A = 4.0 + 3.0 * e1_2 - 2.5 * sin2i * B;
-        double cosphi = cosg1 * cosg2 - th * sing1 * sing2;
+        double cosphi = -cosg1 * cosg2 - th * sing1 * sing2;
 
         // ---- de1/dt ----
         // Quadrupole (Blaes et al. 2002, Eq. 13)
@@ -339,6 +339,12 @@ void secular_evolve_triple(SecularTriple& tri, double dt, double G, double c_cod
             );
         }
 
+        // ---- de2/dt ---- (octupole; Blaes et al. 2002 eq. de2dt)
+        double de2_dt = 0.0;
+        if (std::fabs(C3_cur) > 0.0)
+            de2_dt = C3_cur * e1 * (1.0 - e_out2) / G2 * (10.0 * th * sin2i * (1.0 - e1_2) * sing1 * cosg2
+                                                          + A * (cosg1 * sing2 - th * sing1 * cosg2));
+
         // PN on the inner orbit: periastron advance (suppresses high-e Kozai) and GW dissipation (PN2.5, PN3.5)
         double da_in_dt = 0.0, de1_gw_dt = 0.0;
         {
@@ -348,6 +354,12 @@ void secular_evolve_triple(SecularTriple& tri, double dt, double G, double c_cod
         }
 
         // Integrate
+        // interaction (H conserved) first: cos i from H, G1 and G2 after the Kozai-Lidov change
+        const double e_kl = std::max(1e-6, std::min(tri.inner.e + h * de1_dt, 0.9999));
+        tri.e_out = std::max(1e-6, std::min(tri.e_out + h * de2_dt, 0.9999));
+        const double G2_new = (M12 * m3 / M_tot) * std::sqrt(G * M_tot * a_out) * std::sqrt(1.0 - tri.e_out * tri.e_out);
+        const double G1_kl = m1 * m2 / M12 * std::sqrt(G * M12 * a_in) * std::sqrt(1.0 - e_kl * e_kl);
+        tri.cos_i_mut = std::max(-1.0, std::min((H2 - G1_kl * G1_kl - G2_new * G2_new) / (2.0 * G1_kl * G2_new), 1.0));
         tri.inner.a += h * da_in_dt;
         tri.inner.e += h * (de1_dt + de1_gw_dt);
         tri.inner.omega += h * dg1_dt;
@@ -360,10 +372,8 @@ void secular_evolve_triple(SecularTriple& tri, double dt, double G, double c_cod
         // H^2 = G1^2 + G2^2 + 2*G1*G2*cos(i_mut) => cos(i_mut) = (H^2-G1^2-G2^2)/(2*G1*G2)
         double j1_new = std::sqrt(1.0 - tri.inner.e * tri.inner.e);
         double G1_new = m1 * m2 / M12 * std::sqrt(G * M12 * std::max(tri.inner.a, 1e-30)) * j1_new;
-        if (G1_new > 1e-30) {
-            double cos_i_new = (H2 - G1_new * G1_new - G2 * G2) / (2.0 * G1_new * G2);
-            tri.cos_i_mut = std::max(-1.0, std::min(cos_i_new, 1.0));
-        }
+        // GW changes |G1| but not the planes (Blaes et al. 2002 eq. 37): H follows at fixed cos i
+        H2 = G1_new * G1_new + G2_new * G2_new + 2.0 * G1_new * G2_new * tri.cos_i_mut;
 
         if (tri.inner.a <= 0.0) break;
     }
