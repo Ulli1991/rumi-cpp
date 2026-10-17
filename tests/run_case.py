@@ -49,7 +49,8 @@ SPIN_IMBH = dict(TEST_CASE="plummer", INTEGRATOR="hhs", TOTAL_TIME_MYR="2e-3", D
 # 2000 Kroupa stars, 10 % primordial binaries (a = 0.1-100 AU, thermal e), two 1e-3 Myr steps
 WEAK_SPLIT_GBS = 1000     # weak_split_bh_binary: 0 measured (3.3M without the split)
 WEAK_SPLIT_DE = 1.23e-11  # weak_split_bh_binary: 9.43e-12 measured (host build; 1.35e-11 without the split)
-WEAK_SPLIT_DL = 1.7e-14   # weak_split_bh_binary: 1.31e-14 measured
+WEAK_SPLIT_DL = 3.6e-13   # weak_split_bh_binary: 2.76e-13 measured (secular PN of C9); 1.31e-14 before was one lucky
+                          # sample: with DT_MAX 1e-4 the old code reaches 1.9e-13, without PN both 1.6e-13 (CASES.md C10)
 FLYBY_GROUP_STEPS = 39400  # flyby_group_floor: 30304 measured (host build)
 FLYBY_GROUP_DE = 5.8e-10   # flyby_group_floor: 4.42e-10 measured (host build)
 PN_BH_ONLY_DE = 7.7e-10   # pn_bh_only: 5.93e-10 measured (host build)

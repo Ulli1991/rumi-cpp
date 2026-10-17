@@ -2,7 +2,7 @@
 
 
 // Secular (orbit-averaged) evolution for tight binaries and stable triples
-// Peters (1964) GW dissipation + Kozai-Lidov oscillations
+// Orbit-averaged PN evolution (gauge-invariant E, J; Blanchet 2014, Arun et al. 2009) + Kozai-Lidov oscillations
 
 struct SecularBinary {
     double a, e;              // semi-major axis, eccentricity
@@ -26,8 +26,24 @@ struct SecularTriple {
     double cos_i_mut;         // mutual inclination cosine
 };
 
-// Evolve a secular binary by dt; returns the number of internal steps
-int secular_evolve_binary(SecularBinary& bin, double dt, double G, double c_code, int pn_order);
+// Orbit-averaged PN two-body evolution in eps = -2E/c^2, j = -2EJ^2/(Gm)^2 (E, J per reduced mass, c.o.m., harmonic);
+// dw, dM: pericentre angle and mean anomaly advanced over dt. Returns the number of internal steps
+struct SecularPnState {
+    double eps, j;
+    double dw = 0.0, dM = 0.0;
+    bool merged = false;
+};
+int secular_evolve_pn(SecularPnState& s, double dt, double nu, double Gm, double c, int pn_order);
+void secular_pn_eps_j(const double r[3], const double v[3], double Gm, double nu, double c, int pn_order,
+                      double& eps, double& j);
+double secular_pn_n(double eps, double j, double nu, double Gm, double c, int pn_order);
+double secular_pn_k(double eps, double j, double nu, int pn_order);
+double secular_pn_et2(double eps, double j, double nu, int pn_order);
+void secular_pn_fluxes(double x, double et2, double nu, double Gm, double c, int pn_order, double& F, double& Gf);
+void secular_pn_rates(double eps, double j, double nu, double Gm, double c, int pn_order, double& deps, double& dj);
+// Secular-triple inner orbit: (a, e) as mean-motion semi-major axis and e_t -> da/dt, de/dt, d omega/dt
+void secular_pn_inner_rates(double a, double e, double nu, double Gm, double c, int pn_order,
+                            double& da, double& de, double& dw);
 
 // Evolve a secular triple by dt (Kozai-Lidov + GW dissipation)
 void secular_evolve_triple(SecularTriple& tri, double dt, double G, double c_code, int pn_order);

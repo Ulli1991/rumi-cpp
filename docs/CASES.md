@@ -175,7 +175,7 @@ Status: **closed** (fixed, test, ensemble checked), **option** (fix kept as an o
 - **Next:** the PN energy check of PN subsystems can be switched on again for PN1 (E_N + E_1PN conserved to
   O(v^4/c^4)); higher orders need their energies (2PN) and the radiated flux (2.5PN).
 
-## C8 PN2, PN2.5, PN3, PN3.5 of the subsystem equations of motion wrong since 2026-02 (closed; secular rates open)
+## C8 PN2, PN2.5, PN3, PN3.5 of the subsystem equations of motion wrong since 2026-02 (closed; strong field open)
 
 - **Found by:** checking each order against Blanchet, Living Rev. Rel. 17, 2 (2014, v3 2024; on disk
   papers/pn/src/1310.1528), after Enzyme had found C7: the work of the dissipative orders on a circular binary
@@ -212,13 +212,63 @@ Status: **closed** (fixed, test, ensemble checked), **option** (fix kept as an o
   pumps energy at every pericentre; the ISCO test binary widened ~80 x with a star at 100 a and unbound with the star
   at 1000 a (books closed, |dE/E| 5e-16). Correct implementation of the formula outside its range. Options: 3.5PN
   only below some x, or the orbit-averaged correction; decide with the literature (what BIFROST / ARCHAIN do).
-- **Open (b), secular rates (`secular.cpp`):** the 3.5PN correction of da/dt, de/dt uses Gm/(a c^2) where nu belongs
+- **Open (b), secular rates (`secular.cpp`), closed as C9:** the 3.5PN correction of da/dt, de/dt uses Gm/(a c^2) where nu belongs
   and the flux coefficient -1247/336 where da/dt needs its own (-1751/336 - 7/4 nu for circular orbits, harmonic a;
   eccentric: 1PN-accurate orbit averages from the literature); the 2PN / 3PN periapsis advance has no nu terms.
   Size ~x << 1 of the leading terms in the secular regime.
 - **Cluster effect:** all LogH BH binaries of runs with PN_ORDER >= 4 since 2026-02 had wrong inspirals (widening with
   7, ~10 x too fast with 31); runs with PN binaries (flagship A, BIFROST Fig. 12) have to be repeated. The energy
   error of the runs is unchanged (books); campaign case harvesting is unaffected.
+
+## C9 Secular PN binaries and triples: 3.5PN rates, precession and mean motion (closed)
+
+- **Found by:** C8 open (b), then checking the secular path against the equations of motion that C8 had verified.
+- **System:** isolated PN binaries evolved by `integrate_secular_binary` (BH binaries too tight for LogH) and the inner
+  orbit of secular triples, any PN_ORDER with PN1; 3.5PN rates with PN_ORDER & 16 (31 in campaigns).
+- **Bugs:**
+  - B1 3.5PN rates: Peters times -(1247/336 + 35/12 G m / (a c^2)) G m / (a (1 - e^2) c^2): the energy-flux
+    coefficient used for da/dt and de/dt alike, G m / (a c^2) where nu belongs, no eccentricity terms. In mean-motion
+    a and e_t the 1PN coefficient of da/dt is +3.1 (e = 0, nu = 0.25), +10.0 (e = 0.5), +72 (e = 0.9); the old one
+    -3.7, -5.0, -19.5: opposite sign, 4x too small at e = 0.9.
+  - B2 the correction is only defined in variables that are constant along the PN orbit. Osculating Newtonian a, e
+    of the state oscillate at O(x) around the orbit, the same size as the correction, so the old rates had an O(x)
+    error from the entry phase as well.
+  - B3 periastron advance: 2PN and 3PN terms of a test mass (no nu), in osculating elements.
+  - B4 mean motion: the Kepler drift advanced the orbit with the Newtonian n of the osculating a; the PN n differs at
+    O(x). Pericentre time and angle drifted by 1.3e-3 rad per orbit (gamma = G m / (a c^2) = 1e-3, e = 0.5, q = 0.5).
+- **Why E did not show it:** the Newtonian energy change of the secular step is booked as E_gw (lesson 9).
+- **Fix (`secular.cpp`):** the state gives E, J per reduced mass to 2PN (Kidder 1995 eqs. 2.7-2.8, c.o.m.
+  harmonic), eps = -2E/c^2, j = -2EJ^2/(Gm)^2 (gauge invariant). The aux-variable leapfrog evolves eps, j by the
+  balance mu dE/dt = -<F>, mu dJ/dt = -<G> with the orbit-averaged fluxes in x, e_t to 1PN (Blanchet LRR eq. Finst,
+  Arun et al. 2009 PRD 80 124018 eq. 4.5; x, e_t from eps, j at 1PN). Drift: pericentre angle by k n, mean anomaly by
+  n, n and K = 1 + k from eps, j to 3PN (LRR eqs. n3PN, K3PN). After the Kepler drift and the rotation, the orbit is
+  reshaped (a1, k e, M + dM) by a fixed point so that the state's eps, j are the evolved ones. Secular triple: inner
+  (a, e) are read as the mean-motion a and e_t, with Arun et al. eqs. 6.6-6.9 for dn/dt and de_t/dt. PN2.5 alone is
+  Peters, as before.
+- **Test:** `secular_pn` (tests/secular_pn_test.cpp), all against the integrated equations of motion:
+  - (1) radial period and pericentre advance of PN1 + 2 orbits: residual / 8 when gamma halves (e 0.5, 0.6; q 1, 0.25).
+  - (2) <d eps/dt>, <d j/dt> under the 2.5 + 3.5PN acceleration along 1PN orbits: the 1PN corrections agree; the
+    residual drops by 4.0 when gamma halves.
+  - (3) triple closed forms equal the flux chain rule to O(x^2) (ratio 4.0); PN2.5 equals Peters to 1e-15.
+  - (4) secular binary vs integrated orbit after 400 orbits: pericentre offsets 9.8e-4 P, 2.6e-3 rad, bounded (to
+    3200 orbits). The old code: 2.5e-2 P, 0.50 rad, growing linearly.
+- **Remaining, documented:** the Newtonian orbit shape differs from the PN orbit (e_t, e_r, e_phi differ at 1PN). So
+  the secular state has O(x) periodic offsets in phase (up to ~20 x rad near pericentre) and none in the long term.
+  The triple reads Newtonian elements as (a_n, e_t); exact to the leading order, O(x) ambiguity in the corrections.
+- **Cluster effect:** secular BH binaries are orbit-averaged and their phase only matters for later encounters, so
+  this is small for cluster statistics. Inspiral times at e ~ 0.9 change by O(70 x).
+
+## C10 Weak-split BH binary case: |dL/L| ~2e-13 without PN (open)
+
+- **Found by:** `weak_split_bh_binary` while closing C9. Its |dL/L| bound of 1.7e-14 came from one step. With DT_MAX
+  1e-4 over the same 1e-3 Myr, L grows to 1.6e-13 with PN_ORDER 0, identically at 668c025 and with C9. With PN_ORDER
+  31 the old code reaches 1.9e-13, the new code 2.8e-13.
+- **System:** a 1 h BH binary with a star passing at 600 AU, split off by WEAK_SPLIT_GAMMA = 1e-6; the binary is
+  advanced by the Kepler/secular path. dE/E ~ 2e-11 to 6e-11.
+- **Why L jumps:** not known yet. The secular path books its members' P and L change from the states, so the
+  candidates are the split itself (field kicks on the binary c.o.m. versus on the members) and the FSI kicks across
+  the split.
+- **Next:** a per-path L ledger (as NBODY_ELEDGER does for E) on this case.
 
 ## Verified building blocks (checked against an independent derivation, no bug found)
 

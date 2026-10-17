@@ -7,211 +7,199 @@
 #include <initializer_list>
 
 // ============================================================================
-// Peters (1964) orbit-averaged GW dissipation
+// Orbit-averaged PN evolution of a two-body orbit
 // ============================================================================
+//
+// Variables: E, J per reduced mass (c.o.m. frame, harmonic coordinates), eps = -2E/c^2, j = -2 E J^2 / (Gm)^2: gauge
+// invariant and constant along the conservative PN orbit, unlike osculating Newtonian a, e, which oscillate at O(x)
+// around a PN orbit (the 1PN radiation-reaction correction, PN3.5, is a relative O(x) effect too, so it is only
+// defined in such variables). Mean motion n and periastron advance k = K - 1 in eps, j (Blanchet, Living Rev. Rel. 17, 2
+// (2014, v3 2024), eqs. n3PN, K3PN); fluxes in x and e_t (eq. Finst, AvEMh0-1; Arun et al. 2009, PRD 80, 124018,
+// eqs. 4.5-4.6), with x, e_t from eps, j (eqs. xepsj, etMH) to 1PN; the balance mu dE/dt = -<F>, mu dJ/dt = -<G>
+// (Arun et al. eq. 6.4). ADM and MH e_t differ from 2PN on: not needed here.
 
-static double peters_F(double e) {
-    double e2 = e * e;
-    return (1.0 + 73.0/24.0 * e2 + 37.0/96.0 * e2*e2) / std::pow(1.0 - e2, 3.5);
+static double sec_one_m(double et2) { return std::max(1.0 - et2, 1e-12); }
+
+// x and e_t^2 from eps, j; 1PN terms with PN3.5 (they enter only the 1PN-corrected fluxes)
+static void sec_x_et2(double eps, double j, double nu, int pn_order, double& x, double& et2) {
+    x = eps;
+    et2 = 1.0 - j;
+    if (pn_order & 16) {
+        x = eps * (1.0 + eps * (-1.25 + nu / 12.0 + 2.0 / j));
+        et2 += 0.25 * eps * (-8.0 + 8.0 * nu + j * (17.0 - 7.0 * nu));
+    }
 }
 
-static double peters_G(double e) {
-    double e2 = e * e;
-    return (1.0 + 121.0/304.0 * e2) / std::pow(1.0 - e2, 2.5);
-}
-
-static double peters_beta(double m1, double m2, double G, double c) {
-    // beta = 64/5 * G^3 * m1 * m2 * (m1+m2) / c^5
-    double c5 = c * c * c * c * c;
-    return 64.0/5.0 * G*G*G * m1 * m2 * (m1 + m2) / c5;
-}
-
-// ============================================================================
-// Rate computation helpers for the auxiliary variable leapfrog
-// ============================================================================
-
-// GW dissipation rate da/dt (Peters 1964, Eq. 16)
-// Note: peters_beta includes the 64/5 prefactor, so da/dt = -beta/a^3 * F(e)
-static double compute_da_dt(double a, double e, double beta, int pn_order) {
-    if (!(pn_order & 4)) return 0.0;  // PN2.5 required
-    return -beta / (a * a * a) * peters_F(e);
-}
-
-// GW dissipation rate de/dt (Peters 1964, Eq. 16)
-// Paper: de/dt = -304/15 * beta_raw/a^4 * e * G(e)  where beta_raw = G^3 m1 m2 M / c^5
-// Code:  peters_beta = 64/5 * beta_raw, so beta_raw = 5/64 * peters_beta
-// Therefore: de/dt = -304/15 * (5/64) * beta/a^4 * e * G(e) = -19/12 * beta/a^4 * e * G(e)
-static double compute_de_dt(double a, double e, double beta, int pn_order) {
-    if (!(pn_order & 4)) return 0.0;  // PN2.5 required
-    return -19.0/12.0 * beta / (a * a * a * a) * e * peters_G(e);
-}
-
-// PN1.0 + PN2.0 + PN3.0 periapsis advance rate
-static double compute_domega_dt(double a, double e, double mu, double c2, int pn_order) {
-    if (!(pn_order & 1)) return 0.0;
-    double e2 = e * e;
-    double one_me2 = 1.0 - e2;
-    double P = 2.0 * M_PI * std::sqrt(a * a * a / mu);
-    double Gm_ap = mu / (a * one_me2);
-    double rate = 6.0 * M_PI * Gm_ap / (c2 * P);
-    // PN2.0 term
+void secular_pn_eps_j(const double r[3], const double v[3], double Gm, double nu, double c, int pn_order,
+                      double& eps, double& j) {
+    // Kidder 1995, PRD 52, 821, eqs. 2.7-2.8 (c.o.m., harmonic), to the conservative orders of pn_order
+    const double rr = std::sqrt(r[0]*r[0] + r[1]*r[1] + r[2]*r[2]);
+    const double v2 = v[0]*v[0] + v[1]*v[1] + v[2]*v[2];
+    const double rd = (r[0]*v[0] + r[1]*v[1] + r[2]*v[2]) / rr, rd2 = rd * rd;
+    const double u = Gm / rr, c2 = c * c, nu2 = nu * nu;
+    double E = 0.5 * v2 - u, fJ = 1.0;
+    if (pn_order & 1) {
+        E += (3.0/8.0 * (1.0 - 3.0 * nu) * v2 * v2 + 0.5 * (3.0 + nu) * v2 * u + 0.5 * nu * u * rd2 + 0.5 * u * u) / c2;
+        fJ += (0.5 * v2 * (1.0 - 3.0 * nu) + (3.0 + nu) * u) / c2;
+    }
     if (pn_order & 2) {
-        double c4 = c2 * c2;
-        rate += 3.0 * (18.0 + e2) * M_PI * Gm_ap * Gm_ap / (2.0 * c4 * P);
+        const double c4 = c2 * c2;
+        E += (5.0/16.0 * (1.0 - 7.0 * nu + 13.0 * nu2) * v2 * v2 * v2 - 3.0/8.0 * nu * (1.0 - 3.0 * nu) * u * rd2 * rd2
+              + 1.0/8.0 * (21.0 - 23.0 * nu - 27.0 * nu2) * u * v2 * v2 + 1.0/8.0 * (14.0 - 55.0 * nu + 4.0 * nu2) * u * u * v2
+              + 0.25 * nu * (1.0 - 15.0 * nu) * u * v2 * rd2 - 0.25 * (2.0 + 15.0 * nu) * u * u * u
+              + 1.0/8.0 * (4.0 + 69.0 * nu + 12.0 * nu2) * u * u * rd2) / c4;
+        fJ += (3.0/8.0 * (1.0 - 7.0 * nu + 13.0 * nu2) * v2 * v2 - 0.5 * nu * (2.0 + 5.0 * nu) * u * rd2
+               + 0.5 * (7.0 - 10.0 * nu - 9.0 * nu2) * u * v2 + 0.25 * (14.0 - 41.0 * nu + 4.0 * nu2) * u * u) / c4;
     }
-    // PN3.0 term (Blanchet 2014, periapsis advance at 3PN)
-    if (pn_order & 8) {
-        double c6 = c2 * c2 * c2;
-        double Gm_ap3 = Gm_ap * Gm_ap * Gm_ap;
-        rate += M_PI * Gm_ap3 / (c6 * P) *
-                (1.0/4.0 * (3024.0 + 1152.0*e2 + 41.0*M_PI*M_PI));
-    }
-    return rate;
+    double h[3] = {r[1]*v[2] - r[2]*v[1], r[2]*v[0] - r[0]*v[2], r[0]*v[1] - r[1]*v[0]};
+    const double J2 = (h[0]*h[0] + h[1]*h[1] + h[2]*h[2]) * fJ * fJ;
+    eps = -2.0 * E / c2;
+    j = -2.0 * E * J2 / (Gm * Gm);
 }
 
-// PN3.5 corrections to da/dt and de/dt (higher-order radiation reaction)
-// Corrections to Peters 1964 formulas at order c^-7
-static double compute_da_dt_pn35(double a, double e, double beta, double mu,
-                                   double c2, int pn_order) {
-    if (!(pn_order & 16)) return 0.0;
-    double e2 = e * e;
-    double one_me2 = 1.0 - e2;
-    double c7_corr = mu / (a * one_me2 * c2);  // GM/(a*(1-e^2)*c^2)
-
-    // Blanchet & Iyer (2003): relative correction to PN2.5 da/dt at PN3.5
-    // da/dt_{3.5} = da/dt_{2.5} * correction * c7_corr
-    double correction = -(1247.0/336.0 + 35.0/12.0 * (mu / (a * c2)));
-    return compute_da_dt(a, e, beta, pn_order) * correction * c7_corr;
+double secular_pn_n(double eps, double j, double nu, double Gm, double c, int pn_order) {
+    double s = 1.0;
+    if (pn_order & 1) s += eps / 8.0 * (-15.0 + nu);
+    if (pn_order & 2) s += eps * eps / 128.0 * (555.0 + 30.0 * nu + 11.0 * nu * nu + 192.0 / std::sqrt(j) * (-5.0 + 2.0 * nu));
+    if (pn_order & 8)
+        s += eps * eps * eps / 3072.0 * (-29385.0 - 4995.0 * nu - 315.0 * nu * nu + 135.0 * nu * nu * nu
+             + 5760.0 / std::sqrt(j) * (17.0 - 9.0 * nu + 2.0 * nu * nu)
+             - 16.0 / (j * std::sqrt(j)) * (10080.0 + (-13952.0 + 123.0 * M_PI * M_PI) * nu + 1440.0 * nu * nu));
+    return c * c * c / Gm * eps * std::sqrt(eps) * s;
 }
 
-static double compute_de_dt_pn35(double a, double e, double beta, double mu,
-                                   double c2, int pn_order) {
-    if (!(pn_order & 16)) return 0.0;
-    double e2 = e * e;
-    double one_me2 = 1.0 - e2;
-    double c7_corr = mu / (a * one_me2 * c2);
+double secular_pn_k(double eps, double j, double nu, int pn_order) {
+    double k = 0.0;
+    if (pn_order & 1) k += 3.0 * eps / j;
+    if (pn_order & 2) k += eps * eps / 4.0 * (3.0 / j * (-5.0 + 2.0 * nu) + 15.0 / (j * j) * (7.0 - 2.0 * nu));
+    if (pn_order & 8)
+        k += eps * eps * eps / 128.0 * (24.0 / j * (5.0 - 5.0 * nu + 4.0 * nu * nu)
+             - 1.0 / (j * j) * (10080.0 + (-13952.0 + 123.0 * M_PI * M_PI) * nu + 1440.0 * nu * nu)
+             + 5.0 / (j * j * j) * (7392.0 + (-8000.0 + 123.0 * M_PI * M_PI) * nu + 336.0 * nu * nu));
+    return k;
+}
 
-    double correction = -(1247.0/336.0 + 35.0/12.0 * (mu / (a * c2)));
-    return compute_de_dt(a, e, beta, pn_order) * correction * c7_corr;
+// Orbit-averaged energy and angular-momentum fluxes per reduced mass, <F>/mu and <G>/mu (PN2.5, + PN3.5 1PN terms)
+void secular_pn_fluxes(double x, double et2, double nu, double Gm, double c, int pn_order, double& F, double& Gf) {
+    F = 0.0; Gf = 0.0;
+    if (!(pn_order & 4)) return;
+    const double e2 = std::max(et2, 0.0), e4 = e2 * e2, om = sec_one_m(e2);
+    double I = (1.0 + 73.0/24.0 * e2 + 37.0/96.0 * e4) / std::pow(om, 3.5);
+    double H = (8.0 + 7.0 * e2) / (om * om);
+    if (pn_order & 16) {
+        I += x * (-1247.0/336.0 - 35.0/12.0 * nu + e2 * (10475.0/672.0 - 1081.0/36.0 * nu)
+                  + e4 * (10043.0/384.0 - 311.0/12.0 * nu) + e4 * e2 * (2179.0/1792.0 - 851.0/576.0 * nu)) / std::pow(om, 4.5);
+        H += x * (-1247.0/42.0 - 70.0/3.0 * nu + e2 * (3019.0/42.0 - 335.0/3.0 * nu)
+                  + e4 * (8399.0/336.0 - 275.0/12.0 * nu)) / (om * om * om);
+    }
+    const double x2 = x * x;
+    F = 32.0/5.0 * std::pow(c, 5) * nu * x2 * x2 * x / Gm * I;
+    Gf = 0.8 * c * c * nu * x2 * x * std::sqrt(x) * H;
+}
+
+void secular_pn_rates(double eps, double j, double nu, double Gm, double c, int pn_order, double& deps, double& dj) {
+    double x, et2, F, Gf;
+    sec_x_et2(eps, j, nu, pn_order, x, et2);
+    secular_pn_fluxes(x, et2, nu, Gm, c, pn_order, F, Gf);
+    deps = 2.0 * F / (c * c);
+    dj = 2.0 * F * j / (eps * c * c) - 2.0 * c * std::sqrt(eps * j) * Gf / Gm;
+}
+
+double secular_pn_et2(double eps, double j, double nu, int pn_order) {
+    double x, et2;
+    sec_x_et2(eps, j, nu, pn_order, x, et2);
+    return et2;
 }
 
 // ============================================================================
-// Secular binary evolution — auxiliary variable leapfrog
-// (Hellstrom & Mikkola 2010)
+// Secular evolution of (eps, j) — auxiliary variable leapfrog (Hellstrom & Mikkola 2010)
 // ============================================================================
 //
-// Since da/dt = f(a,e) and de/dt = g(a,e) — the rates depend on the state —
-// the ODE is not separable into independent position/velocity parts for a
-// standard leapfrog.  The auxiliary variable trick introduces copies (a_aux,
-// e_aux) and cross-evaluates:
-//
-//   da/dt      = f(a_aux, e_aux)     da_aux/dt = f(a, e)
-//   de/dt      = g(a_aux, e_aux)     de_aux/dt = g(a, e)
-//
-// This makes each pair explicit and amenable to KDK leapfrog:
-//   1) half-kick:  update (a, e) by dt/2 from rates at (a_aux, e_aux)
-//                  update (a_aux, e_aux) by dt/2 from rates at (a, e)
-//   2) drift:      advance omega by dt using rates at the half-stepped (a, e)
-//   3) half-kick:  same as step 1
-
-int secular_evolve_binary(SecularBinary& bin, double dt, double G, double c_code, int pn_order) {
-    double beta = peters_beta(bin.m1, bin.m2, G, c_code);
-    double c2 = c_code * c_code;
-    double mu = G * (bin.m1 + bin.m2);
-
-    // Secular timestep criterion: eta_sec * min(|a/da_dt|, |e/de_dt|) from the current state, re-evaluated every
-    // sub-step (t_GW ~ a^4 shrinks within one interval of an inspiral; a count fixed from the initial rates
-    // overshot coalescence). BIFROST Eq. 30 also has omega/omega-dot, but omega is an angle (near omega = 0
-    // every call ran the 100000-step cap), and the drift of omega is the midpoint rule of omega-dot(a, e):
-    // exact while a and e are constant; with a, e changing on t_GW its error over dt is ~ eta_sec^2 of the
-    // precession angle. A precession term (1/omega-dot) made a 10+10 Msun binary at 0.01 AU take the
-    // 100000-step cap in every evolution (48 ms each; the A/B of 4ebc740).
+// The rates depend on the state, so the ODE is not separable; copies (eps_aux, j_aux) are kicked with the rates of
+// the physical state and vice versa (KDK), and the drift advances the pericentre angle (k n) and the mean anomaly (n)
+// at the half-stepped state.
+int secular_evolve_pn(SecularPnState& s, double dt, double nu, double Gm, double c, int pn_order) {
+    // Secular timestep criterion: eta_sec * min(eps / |eps'|, e_t^2 / |(e_t^2)'|) from the current state, re-evaluated
+    // every sub-step (t_GW ~ a^4 shrinks within one interval of an inspiral). BIFROST Eq. 30 also has omega/omega-dot,
+    // but omega is an angle (near omega = 0 every call ran the step cap), and the drift of omega is the midpoint rule
+    // of omega-dot(eps, j): exact while eps, j are constant (the A/B of 4ebc740).
     const double eta_sec = 0.01;
     constexpr int max_steps = 100000;
-    auto step_size = [&](double a, double e) {
-        const double da = compute_da_dt(a, e, beta, pn_order) + compute_da_dt_pn35(a, e, beta, mu, c2, pn_order);
-        const double de = compute_de_dt(a, e, beta, pn_order) + compute_de_dt_pn35(a, e, beta, mu, c2, pn_order);
+    auto step_size = [&](double eps, double j) {
+        double de, dj;
+        secular_pn_rates(eps, j, nu, Gm, c, pn_order, de, dj);
         double t_sec = 1e30;
-        if (std::fabs(da) > 0.0) t_sec = std::min(t_sec, std::fabs(a / da));
-        if (std::fabs(de) > 0.0 && e > 0.0) t_sec = std::min(t_sec, std::fabs(e / de));
+        if (std::fabs(de) > 0.0) t_sec = std::min(t_sec, eps / std::fabs(de));
+        const double et2 = secular_pn_et2(eps, j, nu, pn_order);
+        if (et2 > 1e-8) {
+            const double h = 1e-7 * dt;
+            const double det2 = (secular_pn_et2(eps + h * de, j + h * dj, nu, pn_order) - et2) / h;
+            if (std::fabs(det2) > 0.0) t_sec = std::min(t_sec, 2.0 * et2 / std::fabs(det2));
+        }
         return std::max(eta_sec * t_sec, dt / max_steps);
     };
+    auto drift_rate = [&](double eps, double j, double& dw, double& dM) {
+        dM = secular_pn_n(eps, j, nu, Gm, c, pn_order);
+        dw = secular_pn_k(eps, j, nu, pn_order) * dM;
+    };
 
-    // Initialize auxiliary variables equal to the physical state
-    double a_aux = bin.a;
-    double e_aux = bin.e;
-
+    double eps_aux = s.eps, j_aux = s.j;
+    s.dw = 0.0; s.dM = 0.0; s.merged = false;
     int n_steps = 0;
     for (double t_done = 0.0; t_done < dt && n_steps < max_steps; n_steps++) {
-        double h = step_size(bin.a, bin.e);
+        double h = step_size(s.eps, s.j);
         if (h >= (dt - t_done) * (1.0 - 1e-12)) h = dt - t_done;   // last sub-step lands on dt
         t_done = (h == dt - t_done) ? dt : t_done + h;
-        double a = bin.a;
-        double e = bin.e;
-
-        // --- Half-kick (step 1) ---
-        // Rates from auxiliary state for physical variables
-        double da_from_aux = compute_da_dt(a_aux, e_aux, beta, pn_order)
-                           + compute_da_dt_pn35(a_aux, e_aux, beta, mu, c2, pn_order);
-        double de_from_aux = compute_de_dt(a_aux, e_aux, beta, pn_order)
-                           + compute_de_dt_pn35(a_aux, e_aux, beta, mu, c2, pn_order);
-        // Rates from physical state for auxiliary variables
-        double da_from_phys = compute_da_dt(a, e, beta, pn_order)
-                            + compute_da_dt_pn35(a, e, beta, mu, c2, pn_order);
-        double de_from_phys = compute_de_dt(a, e, beta, pn_order)
-                            + compute_de_dt_pn35(a, e, beta, mu, c2, pn_order);
-
-        // Half-kick physical
-        bin.a += 0.5 * h * da_from_aux;
-        bin.e += 0.5 * h * de_from_aux;
-        // Half-kick auxiliary
-        a_aux += 0.5 * h * da_from_phys;
-        e_aux += 0.5 * h * de_from_phys;
-
-        // Clamp eccentricity after half-kick
-        bin.e = std::max(0.0, std::min(bin.e, 0.9999));
-        e_aux = std::max(0.0, std::min(e_aux, 0.9999));
-
-        // --- Drift (step 2): advance omega using half-stepped (a, e) ---
-        double dw = compute_domega_dt(bin.a, bin.e, mu, c2, pn_order);
-        bin.omega += h * dw;
-
-        // --- Second half-kick (step 3) ---
-        // Recompute rates from the updated states
-        da_from_aux = compute_da_dt(a_aux, e_aux, beta, pn_order)
-                    + compute_da_dt_pn35(a_aux, e_aux, beta, mu, c2, pn_order);
-        de_from_aux = compute_de_dt(a_aux, e_aux, beta, pn_order)
-                    + compute_de_dt_pn35(a_aux, e_aux, beta, mu, c2, pn_order);
-        da_from_phys = compute_da_dt(bin.a, bin.e, beta, pn_order)
-                     + compute_da_dt_pn35(bin.a, bin.e, beta, mu, c2, pn_order);
-        de_from_phys = compute_de_dt(bin.a, bin.e, beta, pn_order)
-                     + compute_de_dt_pn35(bin.a, bin.e, beta, mu, c2, pn_order);
-
-        // Half-kick physical
-        bin.a += 0.5 * h * da_from_aux;
-        bin.e += 0.5 * h * de_from_aux;
-        // Half-kick auxiliary
-        a_aux += 0.5 * h * da_from_phys;
-        e_aux += 0.5 * h * de_from_phys;
-
-        // Clamp eccentricity
-        bin.e = std::max(0.0, std::min(bin.e, 0.9999));
-        e_aux = std::max(0.0, std::min(e_aux, 0.9999));
-
-        // Check for coalescence: pericenter < 6 * G*M / c^2 (innermost stable circular orbit)
-        if (bin.a < 0.0 || bin.a * (1.0 - bin.e) < 6.0 * mu / c2) {
-            bin.a = 0.0;  // signal merger
-            break;
+        for (int half = 0; half < 2; half++) {
+            double de_a, dj_a, de_p, dj_p;
+            secular_pn_rates(eps_aux, j_aux, nu, Gm, c, pn_order, de_a, dj_a);
+            secular_pn_rates(s.eps, s.j, nu, Gm, c, pn_order, de_p, dj_p);
+            s.eps += 0.5 * h * de_a; s.j += 0.5 * h * dj_a;
+            eps_aux += 0.5 * h * de_p; j_aux += 0.5 * h * dj_p;
+            if (half == 0) {
+                double dw, dM;
+                drift_rate(s.eps, s.j, dw, dM);
+                s.dw += h * dw; s.dM += h * dM;
+            }
         }
+        // Coalescence: pericentre a (1 - e) < 6 G m / c^2, a = G m / (eps c^2), e = e_t
+        const double e = std::sqrt(std::max(secular_pn_et2(s.eps, s.j, nu, pn_order), 0.0));
+        if (!(s.eps > 0.0) || !(s.j > 0.0) || (1.0 - e) < 6.0 * s.eps) { s.merged = true; break; }
     }
-
-    // Store final rates for external use (e.g., secular timestep criterion)
-    bin.da_dt = compute_da_dt(bin.a, bin.e, beta, pn_order)
-              + compute_da_dt_pn35(bin.a, bin.e, beta, mu, c2, pn_order);
-    bin.de_dt = compute_de_dt(bin.a, bin.e, beta, pn_order)
-              + compute_de_dt_pn35(bin.a, bin.e, beta, mu, c2, pn_order);
-    bin.domega_dt = compute_domega_dt(bin.a, bin.e, mu, c2, pn_order);
     return n_steps;
+}
+
+// Secular triple inner orbit: (a, e) read as the mean-motion semi-major axis a = (G m / n^2)^(1/3) and e_t. Rates of
+// n and e_t from Arun et al. 2009 eqs. 6.6-6.9 (1PN terms with PN3.5) in x = zeta^(2/3) (1 + 2 zeta^(2/3) / (1 - e_t^2))
+// (eq. 4.13, zeta = G m n / c^3); periastron advance k n with eps, j from x, e_t to 1PN (eq. 6.11, etMH) when a 1PN
+// accurate eps, j matters (PN2 or PN3.5).
+void secular_pn_inner_rates(double a, double e, double nu, double Gm, double c, int pn_order,
+                            double& da, double& de, double& dw) {
+    da = 0.0; de = 0.0; dw = 0.0;
+    const double n = std::sqrt(Gm / (a * a * a)), z23 = Gm / (a * c * c);
+    const double e2 = e * e, e4 = e2 * e2, om = sec_one_m(e2);
+    const bool pn1_elements = (pn_order & 18) != 0;
+    const double x = pn1_elements ? z23 * (1.0 + 2.0 * z23 / om) : z23;
+    if (pn_order & 4) {
+        double N = (96.0/5.0 + 292.0/5.0 * e2 + 37.0/5.0 * e4) / std::pow(om, 3.5);
+        double Ee = (304.0/15.0 + 121.0/15.0 * e2) / std::pow(om, 2.5);
+        if (pn_order & 16) {
+            N += x * (-4846.0/35.0 - 264.0/5.0 * nu + e2 * (5001.0/35.0 - 570.0 * nu) + e4 * (2489.0/4.0 - 5061.0/10.0 * nu)
+                      + e4 * e2 * (11717.0/280.0 - 148.0/5.0 * nu)) / std::pow(om, 4.5);
+            Ee += x * (-939.0/35.0 - 4084.0/45.0 * nu + e2 * (29917.0/105.0 - 7753.0/30.0 * nu)
+                       + e4 * (13929.0/280.0 - 1664.0/45.0 * nu)) / std::pow(om, 3.5);
+        }
+        const double c3 = c * c * c, x2 = x * x;
+        const double ndot = c3 * c3 * nu / (Gm * Gm) * x2 * x2 * x * std::sqrt(x) * N;
+        da = -2.0/3.0 * a * ndot / n;
+        de = -c3 / Gm * e * nu * x2 * x2 * Ee;
+    }
+    double eps = x, j = om;
+    if (pn1_elements) {
+        eps = x * (1.0 + x / om * (-0.75 - nu / 12.0 + e2 * (-1.25 + nu / 12.0)));
+        j = (1.0 - e2 + 0.25 * eps * (-8.0 + 8.0 * nu)) / (1.0 - 0.25 * eps * (17.0 - 7.0 * nu));
+    }
+    dw = secular_pn_k(eps, j, nu, pn_order) * n;
 }
 
 // ============================================================================
@@ -351,25 +339,12 @@ void secular_evolve_triple(SecularTriple& tri, double dt, double G, double c_cod
             );
         }
 
-        // PN precession on inner orbit (suppresses high-e Kozai)
-        // Uses compute_domega_dt which includes PN1.0, PN2.0, and PN3.0
-        {
-            double c2_loc = c_code * c_code;
-            dg1_dt += compute_domega_dt(a_in, e1, mu_in, c2_loc, pn_order);
-        }
-
-        // GW dissipation on inner binary — Peters (1964) Eq. 16 + PN3.5 correction
+        // PN on the inner orbit: periastron advance (suppresses high-e Kozai) and GW dissipation (PN2.5, PN3.5)
         double da_in_dt = 0.0, de1_gw_dt = 0.0;
-        if (pn_order & 4) {
-            double beta = peters_beta(m1, m2, G, c_code);
-            da_in_dt = -beta / (a_in * a_in * a_in) * peters_F(e1);
-            de1_gw_dt = -19.0/12.0 * beta / (a_in * a_in * a_in * a_in) * e1 * peters_G(e1);
-            // PN3.5 higher-order radiation reaction correction
-            if (pn_order & 16) {
-                double c2_loc = c_code * c_code;
-                da_in_dt += compute_da_dt_pn35(a_in, e1, beta, mu_in, c2_loc, pn_order);
-                de1_gw_dt += compute_de_dt_pn35(a_in, e1, beta, mu_in, c2_loc, pn_order);
-            }
+        {
+            double dw_pn;
+            secular_pn_inner_rates(a_in, e1, m1 * m2 / (M12 * M12), mu_in, c_code, pn_order, da_in_dt, de1_gw_dt, dw_pn);
+            dg1_dt += dw_pn;
         }
 
         // Integrate
@@ -509,15 +484,15 @@ int integrate_secular_binary(
     const double r_in[3] = {r[0], r[1], r[2]}, v_in[3] = {v[0], v[1], v[2]};
 
     int n_sub = 1;
-    double a1 = 0.0, k_e = 1.0, dw = 0.0, dM = 0.0;
-    double hhat[3] = {0.0, 0.0, 1.0};
+    double a1 = 0.0;
     bool reshape = false;
     if (pn_order != 0) {
-        // Orbit-averaged PN evolution of (a, e, omega) from the state's a (energy) and e (|e_vec|, accurate to
-        // round-off at small e, unlike sqrt(1 - p / a)); only the increments are used
+        // Orbit-averaged PN evolution of the gauge-invariant eps, j of the state (secular_evolve_pn), the pericentre
+        // angle (k n) and the mean anomaly (n): the Kepler drift advances M by the Newtonian n(a0), the PN mean motion
+        // differs by O(x) (for a 10 + 10 Msun binary at 0.01 AU, x = 2e-5 over 4.5e4 orbits: 6 rad per step)
         const double rr = std::sqrt(dot3(r, r));
         const double beta = 2.0 * mu / rr - dot3(v, v);
-        double h[3], vh[3];
+        double h[3], vh[3], hhat[3];
         cross3(r, v, h);
         cross3(v, h, vh);
         double e2 = 0.0;
@@ -526,43 +501,43 @@ int integrate_secular_binary(
         const double hn = std::sqrt(dot3(h, h));
         if (!(beta > 0.0) || e0 >= 1.0 || !(hn > 0.0)) return 0;   // unbound or radial: not a secular binary
         for (int c = 0; c < 3; c++) hhat[c] = h[c] / hn;
-        SecularBinary bin;
-        bin.a = mu / beta;
-        bin.e = e0;
-        bin.omega = 0.0;
-        bin.inc = 0.0;
-        bin.Omega = 0.0;
-        bin.m1 = m1;
-        bin.m2 = m2;
-        const double a0 = bin.a;
-        const double e_ref = std::min(e0, 0.9999);   // secular_evolve_binary clamps e to 0.9999: a change, not the clamp
-        n_sub = secular_evolve_binary(bin, dt, G, c_code, pn_order);
-
-        // Merger (secular_evolve_binary sets a = 0 at coalescence) or unbound after the evolution: leave the
-        // particles as they are (as before)
-        if (bin.a <= 0.0) {
+        const double nu = m1 * m2 / (M_tot * M_tot);
+        SecularPnState s;
+        secular_pn_eps_j(r, v, mu, nu, c_code, pn_order, s.eps, s.j);
+        if (!(s.eps > 0.0) || !(s.j > 0.0)) return 0;
+        n_sub = secular_evolve_pn(s, dt, nu, mu, c_code, pn_order);
+        // Merger (pericentre inside 6 G m / c^2): leave the particles as they are (as before)
+        if (s.merged) {
             printf("  [SEC] WARNING: binary merged during secular evolution "
                    "(pericenter < ISCO)\n");
             return n_sub;
         }
-        if (bin.e >= 1.0) {
-            printf("  [SEC] WARNING: binary became unbound during secular evolution "
-                   "(e=%.6f)\n", bin.e);
-            return n_sub;
+        const double a0 = mu / beta;
+        const double dM = s.dM - std::sqrt(mu / (a0 * a0 * a0)) * dt;
+        kepler_drift(r, v, mu, dt);
+        if (s.dw != 0.0) rotate_about(r, v, hhat, s.dw);
+        // Newtonian orbit (a1, k e0) at mean anomaly M + dM whose eps, j are the evolved ones; the drifted state is not
+        // on them (a Newtonian orbit is not a PN orbit: eps, j of its states vary by O(x) along it). Fixed point: eps
+        // ~ 1 / a, e_t^2 ~ e^2 to leading order, converging by O(x) per iteration
+        const double et2_1 = secular_pn_et2(s.eps, s.j, nu, pn_order);
+        const double r_d[3] = {r[0], r[1], r[2]}, v_d[3] = {v[0], v[1], v[2]};
+        double eN2 = e2;
+        a1 = a0;
+        for (int it = 0; it < 60; it++) {
+            for (int c = 0; c < 3; c++) { r[c] = r_d[c]; v[c] = v_d[c]; }
+            reshape_orbit(r, v, mu, a1, e0 > 0.0 ? std::sqrt(eN2) / e0 : 1.0, dM);
+            double eps, j;
+            secular_pn_eps_j(r, v, mu, nu, c_code, pn_order, eps, j);
+            const double d_et2 = et2_1 - secular_pn_et2(eps, j, nu, pn_order);
+            const double f_eps = eps / s.eps;
+            if (std::fabs(f_eps - 1.0) < 1e-15 && (std::fabs(d_et2) < 1e-15 || !(e0 > 0.0) || (eN2 == 0.0 && d_et2 < 0.0))) break;
+            a1 *= f_eps;
+            eN2 = std::min(std::max(eN2 + d_et2, 0.0), 1.0 - 1e-12);
         }
-        a1 = bin.a;
-        k_e = e_ref > 0.0 ? bin.e / e_ref : 1.0;
-        dw = bin.omega;
-        // Mean motion: the drift advances M by n(a0) dt; the trapezoid of n(a) over the interval adds the rest. (The
-        // elements route used n(a1) dt, first order: for the 10 + 10 Msun BH binary at 0.01 AU, 4.5e4 orbits and
-        // da/a = 2.5e-6 per 1e-5 Myr, that is 0.5 rad of phase per step)
-        if (a1 != a0) dM = 0.5 * (std::sqrt(mu / (a1 * a1 * a1)) - std::sqrt(mu / (a0 * a0 * a0))) * dt;
-        reshape = (a1 != a0 || k_e != 1.0 || dM != 0.0);
+        reshape = true;
+    } else {
+        kepler_drift(r, v, mu, dt);
     }
-
-    kepler_drift(r, v, mu, dt);
-    if (dw != 0.0) rotate_about(r, v, hhat, dw);
-    if (reshape) reshape_orbit(r, v, mu, a1, k_e, dM);
 
     // c.o.m. moves on a straight line (internal forces only); pos1 = cm + (m2 / M) r, pos2 = cm - (m1 / M) r
     for (int k = 0; k < 3; k++) {
