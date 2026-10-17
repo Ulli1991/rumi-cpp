@@ -162,9 +162,9 @@ int secular_evolve_pn(SecularPnState& s, double dt, double nu, double Gm, double
                 s.dw += h * dw; s.dM += h * dM;
             }
         }
-        // Coalescence: pericentre a (1 - e) < 6 G m / c^2, a = G m / (eps c^2), e = e_t
+        // Coalescence: pericentre a (1 - e) < 20 G m / c^2 (10 Schwarzschild radii, collision_distance), a = G m / (eps c^2)
         const double e = std::sqrt(std::max(secular_pn_et2(s.eps, s.j, nu, pn_order), 0.0));
-        if (!(s.eps > 0.0) || !(s.j > 0.0) || (1.0 - e) < 6.0 * s.eps) { s.merged = true; break; }
+        if (!(s.eps > 0.0) || !(s.j > 0.0) || (1.0 - e) < 20.0 * s.eps) { s.merged = true; break; }
     }
     return n_steps;
 }
@@ -509,7 +509,7 @@ int integrate_secular_binary(
         // Merger (pericentre inside 6 G m / c^2): leave the particles as they are (as before)
         if (s.merged) {
             printf("  [SEC] WARNING: binary merged during secular evolution "
-                   "(pericenter < ISCO)\n");
+                   "(pericentre < 10 Schwarzschild radii)\n");
             return n_sub;
         }
         const double a0 = mu / beta;

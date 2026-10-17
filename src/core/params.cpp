@@ -95,7 +95,7 @@ const std::vector<ParamSpec> kParams = {
     {"TDE_ACCRETION_FRACTION", D, "0.5", "Collisions and mergers", USER, "",
      "Fraction of a tidally disrupted star the BH accretes (FROST-CLUSTERS I, DRAGON-II)"},
     {"BH_MERGE_RADIUS", S, "total", "Collisions and mergers", USER, "total|max_single",
-     "BH-BH merger at r < 6 G (m1 + m2) / c^2 (total) or max(6 G m_i / c^2) (max_single, FROST-CLUSTERS I)"},
+     "BH-BH merger at r < 10 R_S = 20 G (m1 + m2) / c^2 (total) or max(6 G m_i / c^2) (max_single, FROST-CLUSTERS I)"},
 
     // ---- Escapers and tidal field ----
     {"R_ESCAPE_RH", D, "100.0", "Escapers and tidal field", EXPERT, "", "Escape radius in half-mass radii"},

@@ -55,11 +55,14 @@ double collision_distance(int kw1, double m1, double R1, int kw2, double m2, dou
                           MergerType& type) {
     const bool bh1 = (kw1 == 14), bh2 = (kw2 == 14);
     const double r_isco = c > 0.0 ? 6.0 * G * (m1 + m2) / (c * c) : 0.0;
-    // BH_MERGE_RADIUS = max_single: FROST-CLUSTERS I sec. 2.6.3, r_sep < max(r_ISCO,1, r_ISCO,2) with r_ISCO = 6 G m / c^2
-    // of each zero-spin BH (default total: the ISCO of the pair's total mass, the conventional plunge separation)
+    // BH pairs (default): 10 Schwarzschild radii of the total mass, 20 G (m1 + m2) / c^2, BIFROST sec. 3.14.1's
+    // conservative option (KETJU-GADGET4 12 R_S, Mannerkoski+2019, Rantala+2025 ~10 R_S): truncated PN fails inside,
+    // 3.5PN turns radiation reaction into an energy gain at pericentre x = G M / (r c^2) ~ 0.11-0.14 (CASES.md C8).
+    // BH_MERGE_RADIUS = max_single: FROST-CLUSTERS I sec. 2.6.3, r_sep < max(r_ISCO,1, r_ISCO,2), r_ISCO = 6 G m / c^2
     if (bh1 && bh2) {
         type = MergerType::ISCO;
-        return g_collisional.bh_merge_max_single && c > 0.0 ? 6.0 * G * std::max(m1, m2) / (c * c) : r_isco;
+        if (!(c > 0.0)) return 0.0;
+        return g_collisional.bh_merge_max_single ? 6.0 * G * std::max(m1, m2) / (c * c) : 20.0 * G * (m1 + m2) / (c * c);
     }
     if (bh1 || bh2) {
         const double m_s = bh1 ? m2 : m1, R_s = bh1 ? R2 : R1, M_bh = bh1 ? m1 : m2;

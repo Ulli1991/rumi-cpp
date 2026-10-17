@@ -50,7 +50,7 @@ SSE_NATAL_KICKS = hobbs                 # hobbs (Maxwellian 265 km/s x (1 - f_fb
 # ---- Collisions and mergers ----
 COLL_MASS_LOSS_C = 0                    # Stellar-collision mass loss C (Glebbeek 2013; FROST-CLUSTERS III: 0.3)
 TDE_ACCRETION_FRACTION = 0.5            # Fraction of a disrupted star the BH accretes
-BH_MERGE_RADIUS = total                 # BH-BH merger at 6 G M/c^2 of the total mass (total) or the larger BH (max_single)
+BH_MERGE_RADIUS = total                 # BH-BH merger at 10 R_S = 20 G M/c^2 of the total mass (total) or 6 G m/c^2 of the larger BH (max_single)
 
 # ---- Host galaxy tide ----
 TIDAL_FIELD = none                      # none / pointmass / loghalo (cluster on a circular orbit)

@@ -86,7 +86,7 @@ Levels:
 |---|---|---|---|---|---|
 | `COLL_MASS_LOSS_C` | double | `0.0` | user |  | Stellar-collision mass loss: m_rem = (m1 + m2)(1 - C q / (1 + q)^2) (Glebbeek 2013; FROST-CLUSTERS III: 0.3) |
 | `TDE_ACCRETION_FRACTION` | double | `0.5` | user |  | Fraction of a tidally disrupted star the BH accretes (FROST-CLUSTERS I, DRAGON-II) |
-| `BH_MERGE_RADIUS` | string | `total` | user | total\|max_single | BH-BH merger at r < 6 G (m1 + m2) / c^2 (total) or max(6 G m_i / c^2) (max_single, FROST-CLUSTERS I) |
+| `BH_MERGE_RADIUS` | string | `total` | user | total\|max_single | BH-BH merger at r < 10 R_S = 20 G (m1 + m2) / c^2 (total) or max(6 G m_i / c^2) (max_single, FROST-CLUSTERS I) |
 
 ## Escapers and tidal field
 

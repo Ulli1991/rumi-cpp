@@ -8,7 +8,7 @@
 
 enum class MergerType {
     GW_COALESCENCE,      // Peters timescale < dt
-    ISCO,                // r < 6 G M / c^2
+    ISCO,                // BH pair r < 20 G M / c^2 (10 R_S); BH swallowing a star whole r < 6 G M / c^2
     TIDAL_DISRUPTION,    // r_peri < R_td
     STELLAR_COLLISION,   // r < R1 + R2
     NONE
@@ -49,8 +49,8 @@ double gw_coalescence_time(double a, double e, double m1, double m2,
 double tidal_disruption_radius(double m_star, double R_star, double M_bh);
 
 // Collision distance r_coll of a pair (FROST-CLUSTERS I App. B3; lengths in pc, kw = stellar type) and the event
-// it gives when the pair comes closer: two BHs (kw 14) ISCO at 6 G (m1 + m2) / c^2 (the criterion detect_mergers
-// has always used; FC-I takes the larger single-BH ISCO, 6 G max(m) / c^2); a BH and any other body the tidal
+// it gives when the pair comes closer: two BHs (kw 14) type ISCO at 10 Schwarzschild radii, 20 G (m1 + m2) / c^2
+// (BIFROST's conservative option; FC-I's larger single-BH ISCO 6 G max(m) / c^2 with BH_MERGE_RADIUS); a BH and any other body the tidal
 // radius above, at least R_star (a BH lighter than ~0.46 m_star is inside the star before r_t), or the ISCO when
 // that is larger (swallowed whole, type ISCO); two non-BHs R1 + R2. c <= 0: no ISCO.
 double collision_distance(int kw1, double m1, double R1, int kw2, double m2, double R2, double G, double c,

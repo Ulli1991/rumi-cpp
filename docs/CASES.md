@@ -175,7 +175,7 @@ Status: **closed** (fixed, test, ensemble checked), **option** (fix kept as an o
 - **Next:** the PN energy check of PN subsystems can be switched on again for PN1 (E_N + E_1PN conserved to
   O(v^4/c^4)); higher orders need their energies (2PN) and the radiated flux (2.5PN).
 
-## C8 PN2, PN2.5, PN3, PN3.5 of the subsystem equations of motion wrong since 2026-02 (closed; strong field open)
+## C8 PN2, PN2.5, PN3, PN3.5 of the subsystem equations of motion wrong since 2026-02 (closed)
 
 - **Found by:** checking each order against Blanchet, Living Rev. Rel. 17, 2 (2014, v3 2024; on disk
   papers/pn/src/1310.1528), after Enzyme had found C7: the work of the dissipative orders on a circular binary
@@ -212,6 +212,16 @@ Status: **closed** (fixed, test, ensemble checked), **option** (fix kept as an o
   pumps energy at every pericentre; the ISCO test binary widened ~80 x with a star at 100 a and unbound with the star
   at 1000 a (books closed, |dE/E| 5e-16). Correct implementation of the formula outside its range. Options: 3.5PN
   only below some x, or the orbit-averaged correction; decide with the literature (what BIFROST / ARCHAIN do).
+  **Closed (2026-10-17):** no established code caps or tapers 3.5PN. All merge BH pairs at a fixed separation and
+  call PN unreliable inside it: BIFROST sec. 3.14.1 ISCO, with 10 R_S as the conservative option; KETJU-GADGET4 12 R_S;
+  Mannerkoski+2019 and Rantala+2025 ~10 R_S; Brem+2013 (NBODY6 PN) 5 R_S; NBODY7 4 R_S. Orbit-averaged, 2.5 + 3.5PN
+  flips sign at pericentre x_p = 0.11-0.14 (e = 0.5-0.9; 0.21 circular with the 1PN energy). The old distance
+  6 G M / c^2 (x = 1/6) lies beyond that. Now `collision_distance` merges BH pairs at 10 R_S = 20 G (m1 + m2) / c^2
+  (x = 0.05; BH_MERGE_RADIUS = max_single keeps FC-I's 6 G max(m) / c^2), and the secular path does the same at
+  pericentre. The existing t_gw < dt merger stays. `coll_bh_isco` / `bh_merge_radius_total` start at 1.5 x 10 R_S with
+  PN_ORDER 31 and merge (r_coll 1.9147e-11 pc). At 6 G M / c^2 the same run does not finish in 120 s. The max_single
+  test keeps PN_ORDER 7. With 3.5PN the binary gains energy before x = 1/3, and that run also breaks the books
+  (|dE/E| 1.6e-3, |dL/L| 5.7 in 8e-12 Myr): integration outside the PN range, which the 10 R_S rule now avoids.
 - **Open (b), secular rates (`secular.cpp`), closed as C9:** the 3.5PN correction of da/dt, de/dt uses Gm/(a c^2) where nu belongs
   and the flux coefficient -1247/336 where da/dt needs its own (-1751/336 - 7/4 nu for circular orbits, harmonic a;
   eccentric: 1PN-accurate orbit averages from the literature); the 2PN / 3PN periapsis advance has no nu terms.

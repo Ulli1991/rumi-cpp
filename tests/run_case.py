@@ -175,14 +175,17 @@ COLL_CONTACT = dict(F3_FLYBY, TRIPLE_E_IN="0.6", TRIPLE_A_OUT_PC="0.003", SDAR="
 COLL_TDE = dict(COLL_HEADON, TRIPLE_A_IN_PC="1e-7", TRIPLE_E_IN="1.0", TRIPLE_M1="100.0", TRIPLE_M2="1.0",
                 TRIPLE_A_OUT_PC="1e-4", TRIPLE_E_OUT="0.0", TRIPLE_M3="4.0", TOTAL_TIME_MYR="4e-9", DT_MAX_MYR="1e-9",
                 DT_MIN_MYR="1e-18", M_PN="5.0")
-# BH binary reaching the ISCO: 10+10 Msun at a = 1.5 r_ISCO (6 G M / c^2 = 5.74e-12 pc), circular, PN1 + PN2 + PN2.5:
-# the inspiral reaches r_ISCO within the first step; a 1 Msun star at 100 a makes it a 3-body subsystem. Not PN3.5:
-# at x ~ 0.1 on the eccentric orbit the 3.5PN term exceeds the 2.5PN one with the opposite sign at pericentre
-# (B_3.5 / B_2.5 ~ -12 x for v^2 = 2 G M / r), the binary gains energy and widens (with a star at 1000 a it even
-# unbinds; truncated PN outside its range, docs/CASES.md C8). Before the C8 fix the wrong 3.5PN (10 x Peters) merged it.
-COLL_ISCO = dict(COLL_HEADON, TRIPLE_A_IN_PC="8.6e-12", TRIPLE_E_IN="0.0", TRIPLE_M1="10.0", TRIPLE_M2="10.0",
-                 TRIPLE_A_OUT_PC="8.6e-10", TRIPLE_E_OUT="0.0", TRIPLE_M3="1.0", TOTAL_TIME_MYR="2e-14",
-                 DT_MAX_MYR="1e-15", DT_MIN_MYR="1e-24", PN_ORDER="7", M_PN="5.0", TEST_STELLAR_RADIUS_RSUN="0")
+# BH binary reaching the merger distance: 10+10 Msun, circular, full PN (PN_ORDER 31), at a = 1.5 r_m, r_m = 10 R_S =
+# 20 G M / c^2 = 1.915e-11 pc (BIFROST sec. 3.14.1's conservative option; inside, 3.5PN turns radiation reaction into an
+# energy gain at x ~ 0.11-0.14, docs/CASES.md C8); a 1 Msun star at 100 a makes it a 3-body subsystem. Merges within
+# 3e-12 Myr at r_sep / r_coll = 0.97 (measured).
+COLL_ISCO = dict(COLL_HEADON, TRIPLE_A_IN_PC="2.87e-11", TRIPLE_E_IN="0.0", TRIPLE_M1="10.0", TRIPLE_M2="10.0",
+                 TRIPLE_A_OUT_PC="2.87e-9", TRIPLE_E_OUT="0.0", TRIPLE_M3="1.0", TOTAL_TIME_MYR="3e-12",
+                 DT_MAX_MYR="1e-13", DT_MIN_MYR="1e-24", PN_ORDER="31", M_PN="5.0", TEST_STELLAR_RADIUS_RSUN="0")
+# FROST-CLUSTERS I merger distance (BH_MERGE_RADIUS = max_single, 6 G max(m) / c^2 = 2.87e-12 pc, x = 1/3 of the pair):
+# PN1 + PN2 + PN2.5 only, from a = 8.6e-12 pc; with PN3.5 the binary gains energy before it gets there (C8)
+COLL_ISCO_FC = dict(COLL_ISCO, TRIPLE_A_IN_PC="8.6e-12", TRIPLE_A_OUT_PC="8.6e-10", TOTAL_TIME_MYR="6e-14",
+                    DT_MAX_MYR="1e-15", PN_ORDER="7", BH_MERGE_RADIUS="max_single")
 
 # Wide stellar binary (0.97 + 0.97 Msun, a = 46 AU, e = 0.5, P = 220 yr) and a 46.5 Msun black hole passing at 1.6 mpc
 # (outside r_ngb = 1 mpc; e = 2.5, from 8 mpc): tidal ratio ~0.1 at pericentre. The 200k, 10 % binaries seed-42
@@ -1750,11 +1753,10 @@ CASES = {
                                                      PN_ORDER="0", SSE_ENABLED="false", PRINT_INTERVAL="10",
                                                      ETA_FF="10", ETA_FB="10", ETA_JERK="0", ETA="0", GRAD_FRESH="true"),
                                                 ["0.1", "0.05"], [4.7e-6, 2.4e-7], (3.8, 4.7)),
-    # BH_MERGE_RADIUS: total (default) 6 G (m1 + m2) / c^2 = 5.74e-12 pc for 10 + 10 Msun; max_single (FROST-CLUSTERS
-    # I sec. 2.6.3) 6 G max(m1, m2) / c^2 = 2.87e-12 pc (the inspiral runs longer)
-    "bh_merge_radius_fc": lambda exe: bh_merge_radius(exe, "max single ISCO", dict(COLL_ISCO, BH_MERGE_RADIUS="max_single",
-                                                                                   TOTAL_TIME_MYR="6e-14"), 2.8692e-12),
-    "bh_merge_radius_total": lambda exe: bh_merge_radius(exe, "total-mass ISCO", COLL_ISCO, 5.7384e-12),
+    # BH_MERGE_RADIUS: total (default) 10 R_S = 20 G (m1 + m2) / c^2 = 1.9147e-11 pc for 10 + 10 Msun; max_single
+    # (FROST-CLUSTERS I sec. 2.6.3) 6 G max(m1, m2) / c^2 = 2.87e-12 pc
+    "bh_merge_radius_fc": lambda exe: bh_merge_radius(exe, "max single ISCO", COLL_ISCO_FC, 2.8692e-12),
+    "bh_merge_radius_total": lambda exe: bh_merge_radius(exe, "10 Schwarzschild radii", COLL_ISCO, 1.9147e-11),
     # Glebbeek 2013 / FROST-CLUSTERS III collision mass loss (head-on 1 + 1 Msun: remnant 1.85 Msun)
     "coll_mass_loss": lambda exe: coll_mass_loss(exe, "head-on with mass loss", COLL_HEADON, 1.8e-12),
     # Natal kicks (2026-10-12): max |dE/E| with E_sse 4.3e-9 and 9.6e-9 (round-off of the ~1e7 kick energy against
