@@ -3,7 +3,8 @@
     python3 scripts/replay_ledger.py setup RUN.log [RUN2.log ...] --out DIR --exe nbody-kokkos [--submit]
     python3 scripts/replay_ledger.py classify DIR
 
-setup: for every "STALL energy step" block of a log whose restart was kept (STALL_RESTART), DIR/<run>_s<step>/ gets
+setup: for the largest "STALL energy step" blocks of each log (--max-per-run, default 10) whose restart was kept
+(STALL_RESTART), DIR/<run>_s<step>/ gets
 the run's config with RESTART_FILE = that stall_<step>.h5 and TOTAL_TIME_MYR = its time + DT_MAX_MYR (one step),
 and a one-rank GPU job (gpudev,gpu) running it with NBODY_ELEDGER=1 NBODY_EATTR=1; --submit sends the jobs.
 
@@ -61,9 +62,9 @@ def setup(a):
         for l in cfg_lines:
             if l.split("=")[0].strip() == "DT_MAX_MYR":
                 dt_max = float(l.split("=")[1].split("#")[0])
-        for step, val, rst, tidal in blocks(log):
-            if rst is None:
-                continue
+        kept = [b for b in blocks(log) if b[2] is not None]
+        kept = sorted(kept, key=lambda b: -abs(b[1]))[:a.max_per_run]   # the largest jumps of the run
+        for step, val, rst, tidal in kept:
             rst_path = Path(rst) if Path(rst).is_absolute() else run_dir / rst
             d = out / f"{run_dir.name}_s{step}"
             d.mkdir(exist_ok=True)
@@ -147,6 +148,7 @@ def main():
     s.add_argument("--out", required=True)
     s.add_argument("--exe", required=True)
     s.add_argument("--submit", action="store_true")
+    s.add_argument("--max-per-run", type=int, default=10, help="replay only the largest jumps of each run")
     c = sub.add_parser("classify")
     c.add_argument("dir")
     a = ap.parse_args()
