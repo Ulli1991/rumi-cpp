@@ -31,6 +31,7 @@ struct CollisionalConfig {
     double e_ref = 0.0;                //   |E0| of the run
     double tidal_step_res = 1.0;       // TIDAL_STEP_RES: floor of the FLYBY_CM_EPS step, this x P (1 - e)^(3/2) of a bound binary or
                                        // the shortest pair pericentre passage of other subsystems (0: none)
+    bool tidal_floor_adapt = false;    // TIDAL_FLOOR_ADAPT: floor x sqrt(share / local tidal estimate) for bound binaries above their share (C5)
     bool flyby_ngb_cm = true;
     double subsys_err_tol = 1e-11;     // SUBSYS_ERR_TOL: log subsystem advances with unbooked |dE| above this x |E0|
     double weak_split_gamma = 0.0;     // WEAK_SPLIT_GAMMA: tidal ratio below which a fly-by / unstable triple is split (0: off)

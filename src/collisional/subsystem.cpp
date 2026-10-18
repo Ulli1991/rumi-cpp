@@ -1129,6 +1129,36 @@ void SubsystemManager::fill_cm_velocity(const Particles& p, int lo, int hi, Kokk
     auto pm = raw(p.mass);
     auto px_ = raw(p.x), py_ = raw(p.y), pz_ = raw(p.z);
     const double G = G_CODE;
+    // TIDAL_FLOOR_ADAPT: per subsystem the factor on the floor (1 unless subsystem_timesteps found the binary's local
+    // tidal estimate above its share)
+    const bool adapt = g_collisional.tidal_floor_adapt && tol > 0.0;
+    static DualBuf<double> scale_buf("tidal_floor_scale");
+    static bool scale_hook = (Kokkos::push_finalize_hook([] { scale_buf.release(); }), true);
+    (void)scale_hook;
+    Kokkos::View<double*> scale_v;
+    if (adapt) {
+        std::vector<double> sc(n_sub, 1.0);
+        int q = 0;
+        for (const auto& sub : active) {
+            bool has = false;
+            for (int pid : sub.particle_ids) {
+                const int i = (pid >= 0 && pid < (int)p2i.size()) ? p2i[pid] : -1;
+                if (i >= 0 && i < N) { has = true; break; }
+            }
+            if (!has) continue;   // skipped above as well
+            if (sub.n_bodies == 2 && sub.particle_ids.size() == 2) {
+                auto it = tidal_floor_scale_.find(pair_key(sub.particle_ids[0], sub.particle_ids[1]));
+                if (it != tidal_floor_scale_.end()) sc[q] = it->second;
+            }
+            q++;
+        }
+        scale_v = scale_buf.get(n_sub);
+        if (host_exec()) std::copy(sc.begin(), sc.end(), scale_v.data());
+        else Kokkos::deep_copy(Kokkos::subview(scale_v, Kokkos::pair<int, int>(0, n_sub)),
+                               Kokkos::View<const double*, Kokkos::HostSpace, Kokkos::MemoryTraits<Kokkos::Unmanaged>>(
+                                   sc.data(), n_sub));
+    }
+    auto fscale = raw(scale_v);
     small_for("cm_vel_members", n_sub, KOKKOS_LAMBDA(int k) {
         const int a = base + buf(k), e = base + buf(k + 1);
         double M = 0, px = 0, py = 0, pz = 0, cx = 0, cy = 0, cz = 0;
@@ -1157,6 +1187,7 @@ void SubsystemManager::fill_cm_velocity(const Particles& p, int lo, int hi, Kokk
                     // resolve the pericentre passage: P (1 - e)^(3/2) = 2 pi (r_p^3 / mu)^(1/2)
                     const double rp = sa * (1.0 - ecc);
                     kfl = res * 2.0 * M_PI * Kokkos::sqrt(rp * rp * rp / mu);
+                    if (adapt) kfl *= fscale(k);   // C5: below 1 where the binary's tidal estimate exceeds its share
                     muv = pm(i) * pm(j) / M * Kokkos::sqrt(mu * (1.0 + ecc) / (sa * (1.0 - ecc)));
                 } else {
                     kfl = res * pericentre_passage_time(rx, ry, rz, ux, uy, uz, mu);
@@ -1266,7 +1297,8 @@ void SubsystemManager::enforce_shared_timestep(Particles& p) const {
 
 // Perturbation time step (BIFROST Eq. 30) on gathered member data; returns whether any member was clamped
 static bool perturbation_timestep_md(const std::vector<Subsystem>& active, const std::vector<int>& pid_to_idx,
-                                     MemberData& md, double G, double eta_pert, const Particles* p_dbg) {
+                                     MemberData& md, double G, double eta_pert, const Particles* p_dbg,
+                                     std::unordered_map<long long, double>* floor_scale) {
     auto h_x  = md.col(MemberData::X);
     auto h_y  = md.col(MemberData::Y);
     auto h_z  = md.col(MemberData::Z);
@@ -1407,6 +1439,29 @@ static bool perturbation_timestep_md(const std::vector<Subsystem>& active, const
                 dt_e = gn > 1e-30 ? en / gn : 1e30;
             }
             dt_pert = std::min(dt_a, dt_e) * eta_pert;
+            // TIDAL_FLOOR_ADAPT (C5, perturbed binaries sampled by the field kicks): the binary's local estimate of
+            // the energy one kick interval at its TIDAL_STEP_RES floor f = res P (1 - e)^(3/2) puts in, mu |T| v_p f
+            // (T the tidal acceleration of all perturbers now, as in the STALL lines), against its share of the step
+            // budget, FLYBY_CM_EPS x |E0| (the tolerance of the tidal-sampling step). Above it the floor shrinks by
+            // sqrt(share / est): below the floor the kicks resolve the orbit and the splitting error (the
+            // shadow-Hamiltonian term of the kick, bounded) scales as dt^2. Resolving the perturbed binary's orbit
+            // with the perturbers' forces is what KS regularisation does for perturbed binaries (NBODY6: perturbers
+            // down to gamma_min ~ 1e-6, forces at every KS step); pulling the perturber into the subsystem instead
+            // was slower and worse here (C5, 2026-10-17). Binaries within their share keep the floor (factor 1).
+            if (floor_scale && E_orb < 0.0 && g_collisional.e_ref > 0.0) {
+                const double share = g_collisional.flyby_cm_eps * g_collisional.e_ref;
+                const double res = g_collisional.tidal_step_res;
+                double scale = 1.0;
+                if (share > 0.0 && res > 0.0 && e < 1.0) {
+                    const double rp = a * (1.0 - e);
+                    const double fl = res * 2.0 * M_PI * std::sqrt(rp * rp * rp / mu);
+                    const double vp = std::sqrt(mu * (1.0 + e) / rp);
+                    const double mi = h_m(idx_i), mj = h_m(idx_j);
+                    const double est = mi * mj / (mi + mj) * f_mag * vp * fl;
+                    if (est > share) scale = std::sqrt(share / est);
+                }
+                (*floor_scale)[SubsystemManager::pair_key(sub.particle_ids[0], sub.particle_ids[1])] = scale;
+            }
             {
                 static const bool deep_log = std::getenv("NBODY_DEEP_LOG") != nullptr;
                 if (deep_log && dt_pert * TIME_UNIT_MYR < 1e-9)
@@ -1565,14 +1620,18 @@ static bool perturbation_timestep_md(const std::vector<Subsystem>& active, const
 void SubsystemManager::apply_perturbation_timestep(Particles& p, double G, double eta_pert) const {
     if (active.empty() || eta_pert <= 0.0) return;
     MemberData md(active, pid_to_idx_, p);
-    if (perturbation_timestep_md(active, pid_to_idx_, md, G, eta_pert, &p)) md.scatter_dt(p);
+    if (perturbation_timestep_md(active, pid_to_idx_, md, G, eta_pert, &p,
+                                 g_collisional.tidal_floor_adapt ? &tidal_floor_scale_ : nullptr))
+        md.scatter_dt(p);
 }
 
 void SubsystemManager::subsystem_timesteps(Particles& p, double G, double eta_pert) const {
     if (active.empty()) return;
     MemberData md(active, pid_to_idx_, p);   // one gather and one scatter for both passes
     shared_timestep_md(active, pid_to_idx_, md);
-    if (eta_pert > 0.0) perturbation_timestep_md(active, pid_to_idx_, md, G, eta_pert, &p);
+    if (eta_pert > 0.0)
+        perturbation_timestep_md(active, pid_to_idx_, md, G, eta_pert, &p,
+                                 g_collisional.tidal_floor_adapt ? &tidal_floor_scale_ : nullptr);
     md.scatter_dt(p);
 }
 

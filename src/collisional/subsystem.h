@@ -6,6 +6,7 @@
 #include <Kokkos_Core.hpp>
 #include <vector>
 #include <unordered_set>
+#include <unordered_map>
 #include <cmath>
 
 // Neighbor pair detected during pairwise force/timestep computation
@@ -70,6 +71,12 @@ struct SubsystemManager {
     Kokkos::View<int*> cm_buf_;                       // member offsets and slots of fill_cm_velocity
     Kokkos::View<int*>::host_mirror_type cm_buf_host_;
     std::vector<int> cm_host_;
+    // TIDAL_FLOOR_ADAPT (C5): per bound binary (key: pid pair) the factor on its TIDAL_STEP_RES floor, from its local
+    // tidal estimate in subsystem_timesteps; read by fill_cm_velocity
+    mutable std::unordered_map<long long, double> tidal_floor_scale_;
+    static long long pair_key(int a, int b) {
+        return ((long long)std::min(a, b) << 32) | (unsigned)std::max(a, b);
+    }
     Kokkos::View<int*> flag_buf_;                     // (index, sid) pairs uploaded by update_particle_flags
     std::vector<int> pid_scratch_;                    // pid -> local id inside detect_from_pairs (-1 between calls)
 
