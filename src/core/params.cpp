@@ -161,7 +161,11 @@ const std::vector<ParamSpec> kParams = {
 
     // ---- Output ----
     {"PRINT_INTERVAL", I, "1000", "Output", USER, "", "Diagnostics every this many steps"},
-    {"PROFILING", B, "true", "Output", USER, "", "Timers and the performance breakdown at each print"},
+    {"PROFILING", S, "on", "Output", USER, "off|on|detailed|true|false",
+     "off (false): no timers, counters or profiling fences (zero overhead); on (true): bucket tree of each print "
+     "interval (every second of wall time named, core/profiling.h) and the component table; detailed: also per-rank "
+     "min/max, calls, force pairs, work counters (copies, MPI bytes, subsystems, GBS steps, SSE stars) and per-depth sets. "
+     "on and detailed append every report to profile.jsonl in the run directory"},
     {"PROFILING_FENCES", B, "true", "Output", INTERNAL, "",
      "Fence the device at each timer stop (exact per-component times, ~4 % of a 200k step)"},
     {"RESTART_INTERVAL", I, "0", "Output", USER, "",

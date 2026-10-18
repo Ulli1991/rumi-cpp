@@ -50,6 +50,16 @@ void barrier() {
 #endif
 }
 
+void reduce_min_max_sum(const double* in, double* mn, double* mx, double* sum, int n) {
+#ifdef USE_MPI
+    MPI_CHECK(MPI_Allreduce(in, mn, n, MPI_DOUBLE, MPI_MIN, MPI_COMM_WORLD));
+    MPI_CHECK(MPI_Allreduce(in, mx, n, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD));
+    MPI_CHECK(MPI_Allreduce(in, sum, n, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD));
+#else
+    for (int i = 0; i < n; i++) mn[i] = mx[i] = sum[i] = in[i];
+#endif
+}
+
 bool is_distributed() {
 #ifdef USE_MPI
     return s_size > 1;
@@ -504,7 +514,7 @@ void DistributedParticles::allgather_fields(const int* seg_start, const int* seg
             std::fprintf(stderr, "ncclAllGather failed\n");
             MPI_Abort(MPI_COMM_WORLD, 1);
         }
-        g_profiler.mpi_stop();
+        g_profiler.mpi_stop(8.0 * (n_send_buf + n_recv_buf));   // bytes sent + received by this rank
 #endif
     } else if (stage) {
         if ((int)host_send_pinned.extent(0) < n_send) host_send_pinned = PinnedView("mpi_send_pinned", n_send);
@@ -514,7 +524,7 @@ void DistributedParticles::allgather_fields(const int* seg_start, const int* seg
         g_profiler.mpi_start();
         MPI_CHECK(MPI_Allgatherv(host_send_pinned.data(), n_send, MPI_DOUBLE, host_recv_pinned.data(),
                                  mpi_counts.data(), mpi_displs.data(), MPI_DOUBLE, MPI_COMM_WORLD));
-        g_profiler.mpi_stop();
+        g_profiler.mpi_stop(8.0 * (n_send_buf + n_recv_buf));   // bytes sent + received by this rank
         Kokkos::deep_copy(Kokkos::subview(mpi_acc_recv_buf, Kokkos::make_pair(0, n_recv)),
                           Kokkos::subview(host_recv_pinned, Kokkos::make_pair(0, n_recv)));
     } else {
@@ -522,7 +532,7 @@ void DistributedParticles::allgather_fields(const int* seg_start, const int* seg
         g_profiler.mpi_start();
         MPI_CHECK(MPI_Allgatherv(mpi_acc_send_buf.data(), n_send, MPI_DOUBLE, mpi_acc_recv_buf.data(),
                                  mpi_counts.data(), mpi_displs.data(), MPI_DOUBLE, MPI_COMM_WORLD));
-        g_profiler.mpi_stop();
+        g_profiler.mpi_stop(8.0 * (n_send_buf + n_recv_buf));   // bytes sent + received by this rank
     }
 
     const int nr = n_ranks;
@@ -616,7 +626,7 @@ void DistributedParticles::allreduce_accelerations_subset(int start, int count) 
     g_profiler.mpi_start();
     MPI_CHECK(MPI_Allreduce(MPI_IN_PLACE, buf.data(), 3 * count, MPI_DOUBLE,
                   MPI_SUM, MPI_COMM_WORLD));
-    g_profiler.mpi_stop();
+    g_profiler.mpi_stop(16.0 * 3 * count);   // bytes sent + received by this rank
 
     Kokkos::parallel_for("unpack_allreduce", count, KOKKOS_LAMBDA(int ii) {
         int i = st + ii;
@@ -645,7 +655,7 @@ void DistributedParticles::allreduce_accelerations_subset(int start, int count) 
     g_profiler.mpi_start();
     MPI_CHECK(MPI_Allreduce(MPI_IN_PLACE, buf.data(), 3 * count, MPI_DOUBLE,
                   MPI_SUM, MPI_COMM_WORLD));
-    g_profiler.mpi_stop();
+    g_profiler.mpi_stop(16.0 * 3 * count);   // bytes sent + received by this rank
 
     for (int i = 0; i < count; i++) {
         h_ax(i) = buf[3*i];
@@ -682,7 +692,7 @@ void DistributedParticles::allreduce_timestep_subset(int start, int count) {
     g_profiler.mpi_start();
     MPI_CHECK(MPI_Allreduce(MPI_IN_PLACE, buf.data(), count, MPI_DOUBLE,
                   MPI_MIN, MPI_COMM_WORLD));
-    g_profiler.mpi_stop();
+    g_profiler.mpi_stop(16.0 * count);   // bytes sent + received by this rank
 
     Kokkos::parallel_for("unpack_dt_allreduce", count, KOKKOS_LAMBDA(int ii) {
         dt_f(st + ii) = buf(ii);
@@ -700,7 +710,7 @@ void DistributedParticles::allreduce_timestep_subset(int start, int count) {
     g_profiler.mpi_start();
     MPI_CHECK(MPI_Allreduce(MPI_IN_PLACE, buf.data(), count, MPI_DOUBLE,
                   MPI_MIN, MPI_COMM_WORLD));
-    g_profiler.mpi_stop();
+    g_profiler.mpi_stop(16.0 * count);   // bytes sent + received by this rank
 
     for (int i = 0; i < count; i++) h_dt(i) = buf[i];
     Kokkos::deep_copy(Kokkos::subview(local.dt_adapt, Kokkos::make_pair(start, start + count)), h_dt);

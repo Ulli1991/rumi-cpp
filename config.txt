@@ -61,7 +61,7 @@ GALAXY_MASS_MSUN = 0                    # pointmass galaxy mass (Msun)
 
 # ---- Output (intervals in steps of DT_MAX_MYR; 0: off) ----
 PRINT_INTERVAL = 1                      # Diagnostics
-PROFILING = true                        # Performance breakdown at each print
+PROFILING = on                          # off | on | detailed: bucket tree of every print interval (+ counters, per-rank stats); profile.jsonl
 RESTART_INTERVAL = 0                    # Restart file (and one at the end; needs USE_HDF5)
 WALLTIME_LIMIT = 0                      # Hours: restart file and clean stop before this wall time
 RESTART_DIR = .                         # Directory of restart_<step>.h5

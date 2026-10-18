@@ -86,6 +86,9 @@ int size();
 // Barrier
 void barrier();
 
+// Element-wise min, max and sum over the ranks (profiler report)
+void reduce_min_max_sum(const double* in, double* mn, double* mx, double* sum, int n);
+
 // Check if MPI is active (compiled with MPI and size > 1)
 bool is_distributed();
 

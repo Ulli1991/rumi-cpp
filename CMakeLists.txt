@@ -261,7 +261,8 @@ foreach(case kepler_e09 kepler_e0 frost4_e09 frost4_e099 planets_hhs planets_fsi
              host_subtree_mergers host_subtree_binaries host_subtree_triples
              triple_stability ic_mass_size_rh ic_binary_com_virial ic_r_break
              secular_drift_e0 secular_drift_e1e-8
-             kepler2_norb05 kepler2_norb2 kepler2_hyperbolic kepler2_contact)
+             kepler2_norb05 kepler2_norb2 kepler2_hyperbolic kepler2_contact
+             profile_accounting)
     add_test(NAME ${case} COMMAND Python3::Interpreter ${CMAKE_SOURCE_DIR}/tests/run_case.py
              $<TARGET_FILE:nbody-kokkos> ${case})
     # Few-body cases: host threads only add overhead (and timeouts); every incremental pid-map update is

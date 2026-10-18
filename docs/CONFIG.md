@@ -144,7 +144,7 @@ Levels:
 | key | type | default | level | values | description |
 |---|---|---|---|---|---|
 | `PRINT_INTERVAL` | int | `1000` | user |  | Diagnostics every this many steps |
-| `PROFILING` | bool | `true` | user |  | Timers and the performance breakdown at each print |
+| `PROFILING` | string | `on` | user | off\|on\|detailed\|true\|false | off (false): no timers, counters or profiling fences (zero overhead); on (true): bucket tree of each print interval (every second of wall time named, core/profiling.h) and the component table; detailed: also per-rank min/max, calls, force pairs, work counters (copies, MPI bytes, subsystems, GBS steps, SSE stars) and per-depth sets. on and detailed append every report to profile.jsonl in the run directory |
 | `PROFILING_FENCES` | bool | `true` | internal |  | Fence the device at each timer stop (exact per-component times, ~4 % of a 200k step) |
 | `RESTART_INTERVAL` | int | `0` | user |  | Restart file every this many steps and at the end (0: off; needs USE_HDF5) |
 | `WALLTIME_LIMIT` | double | `0.0` | user |  | Hours: restart file and clean stop before this wall time (0: off) |

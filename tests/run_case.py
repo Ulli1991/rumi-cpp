@@ -255,10 +255,11 @@ def run(exe, cfg):
     return diagnostics(run_output(exe, cfg))
 
 
-def run_output(exe, cfg, env=None, dump=False):
+def run_output(exe, cfg, env=None, dump=False, read=None):
     """stdout of one run (env: extra environment variables); raises on a nonzero exit or a timeout. dump=True: also
     the particles of the last NBODY_DUMP snapshot (main.cpp dump_particles) as rows (pid, m, x, y, z, vx, vy, vz)
-    sorted by pid, returned as (stdout, rows)."""
+    sorted by pid, returned as (stdout, rows). read: file name in the run directory whose text (None if absent) is
+    returned last, as (stdout, rows, text) or (stdout, text)."""
     with tempfile.TemporaryDirectory() as d:
         if dump:
             env = {**(env or {}), "NBODY_DUMP": "1"}
@@ -273,15 +274,18 @@ def run_output(exe, cfg, env=None, dump=False):
             raise SystemExit(f"FAIL: no result within {TIMEOUT_S} s (hung or stuck in time)")
         if out.returncode != 0:
             raise SystemExit(f"FAIL: exit {out.returncode}\n{out.stdout[-2000:]}{out.stderr[-2000:]}")
+        text = None
+        if read is not None and Path(d, read).exists():
+            text = Path(d, read).read_text()
         if not dump:
-            return out.stdout
+            return (out.stdout, text) if read is not None else out.stdout
         files = sorted(Path(d).glob("dump_*.bin"))
         if not files:
             raise SystemExit("FAIL: no NBODY_DUMP snapshot written")
         raw = files[-1].read_bytes()
         n = struct.unpack_from("i", raw)[0]
         rows = [struct.unpack_from("9d", raw, 4 + 72 * i)[:8] for i in range(n)]
-        return out.stdout, sorted(rows)
+        return (out.stdout, sorted(rows), text) if read is not None else (out.stdout, sorted(rows))
 
 
 def diagnostics(stdout):
@@ -1405,6 +1409,60 @@ def kepler_unit(exe, bounds):
     return ok
 
 
+def profile_accounting(exe, label, cfg, unacc_bound, self_bound):
+    """PROFILING = detailed: every interval prints its bucket tree (core/profiling.h); the time no bucket covers
+    (unaccounted) and the containers' own time (the "(self)" rows: step, hhs, ... outside their named children) stay
+    below the bounds [% of the interval wall], the paths of the step are named, the work counters are printed and
+    profile.jsonl holds one line per report. PROFILING = on: the tree without counters; off: no profile output and
+    no profile.jsonl. The particles end bit-identical at all three levels (timers never change the integration)."""
+    out, rows_on, jl = run_output(exe, {**cfg, "PROFILING": "detailed"}, dump=True, read="profile.jsonl")
+    out_on, rows_mid, jl_on = run_output(exe, {**cfg, "PROFILING": "on"}, dump=True, read="profile.jsonl")
+    out_off, rows_off, jl_off = run_output(exe, {**cfg, "PROFILING": "off"}, dump=True, read="profile.jsonl")
+    blocks = out.split("--- Profile interval")[1:]
+    ok = check(f"{label} profiled intervals", len(blocks), 2, lower=True)
+    if not blocks:
+        return False
+    unacc = max(float(re.search(r"PROF_UNACCOUNTED \S+ s = (\S+) %", b).group(1)) for b in blocks)
+    self_pct = max(sum(float(m) for m in re.findall(r"PROF\s+\(self\)\s+\S+\s+(\S+)%", b)) for b in blocks)
+    names = set(re.findall(r"PROF\s+(\w[\w ()/-]*?)\s{2,}", "".join(blocks)))
+    need = {"step", "hhs", "stellar_evolution", "Energy check", "diagnostics", "diag_forces", "diag_print",
+            "profile_report", "Subsystem integ"}
+    missing = need - names
+    print(f"{'ok  ' if not missing else 'FAIL'} {label} buckets present (missing: {sorted(missing)})")
+    ok &= not missing
+    unbalanced = "PROF_UNBALANCED" in out
+    print(f"{'FAIL' if unbalanced else 'ok  '} {label} every timer frame closed")
+    ok &= not unbalanced
+    ok &= check(f"{label} max unaccounted [% of interval]", unacc, unacc_bound)
+    ok &= check(f"{label} max containers' own time [% of interval]", self_pct, self_bound)
+    # work counters, and "Total wall" = the interval wall (report to report, diagnostics included)
+    counters = set(re.findall(r"PROF_COUNT (\w+)", out))
+    lacking = {"steps", "sse_stars_evolved", "deep_copies", "secular_binary_advances"} - counters
+    print(f"{'ok  ' if not lacking else 'FAIL'} {label} work counters printed (missing: {sorted(lacking)})")
+    ok &= not lacking and "PROF_DEPTH" in out
+    walls = [float(w) for w in re.findall(r"PROF interval wall\s+(\S+)", out)]
+    totals = [float(t) for t in re.findall(r"^  Total wall\s+(\S+)", out, re.M)]
+    dev = max((abs(t - w) for t, w in zip(totals, walls[1:])), default=1.0)   # walls[0]: the set-up
+    ok &= check(f"{label} max |Total wall - interval wall| [s]", dev, 6e-4)   # the same time, printed to 1e-3 s
+    # profile.jsonl: set-up + one line per interval at detailed and on, with the buckets; nothing at off
+    import json
+    recs = [json.loads(line) for line in (jl or "").splitlines()]
+    good = (len(recs) == len(blocks) + 1 and recs[0]["kind"] == "setup" and all("hhs" in r["buckets"] and "counters" in r
+                                                                               for r in recs[1:]))
+    on_recs = [json.loads(line) for line in (jl_on or "").splitlines()]
+    good &= len(on_recs) == len(recs) and all("counters" not in r for r in on_recs) and jl_off is None
+    print(f"{'ok  ' if good else 'FAIL'} {label} profile.jsonl: {len(recs)} records (detailed), {len(on_recs)} (on), "
+          f"{'none' if jl_off is None else 'some'} (off)")
+    ok &= good
+    levels = ("--- Profile interval" in out_on and "PROF_COUNT" not in out_on and "PROF" not in out_off
+              and "--- Performance" not in out_off)
+    print(f"{'ok  ' if levels else 'FAIL'} {label} on: tree without counters; off: no profile output")
+    ok &= levels
+    same = rows_on == rows_off and rows_mid == rows_off
+    print(f"{'ok  ' if same else 'FAIL'} {label} particles bit-identical with PROFILING off/on/detailed")
+    return ok and same
+
+
 def check(name, value, bound, lower=False):
     ok = value >= bound if lower else value <= bound
     print(f"{'ok  ' if ok else 'FAIL'} {name} = {value:.3e} ({'>=' if lower else '<='} {bound:.3e})")
@@ -1699,6 +1757,15 @@ CASES = {
                                                      BINARY_A_MAX_AU="450", TOTAL_TIME_MYR="2e-3", FLYBY_CM_EPS="1e-11",
                                                      TIDAL_STEP_RES="1", FLYBY_NGB_CM="true", NGB_WIDE_FAC="2.5"),
                                                 1.3e-8),
+    # Step profiler (core/profiling.h): no unnamed time. Before: no bucket tree (runtime SSE, checkpoints, global PN,
+    # per-step output, diagnostics and the report itself unprofiled; fig7 "Other" 17-45 %). Measured (host, 1 thread):
+    # unaccounted 0.007 % (A100: 0.004 %), containers' own time < 0.05 %; bounds = the 3 % goal, not 1.3x (measured ~ 0).
+    # fig7 f=0.1 on 4 A100 (2026-10-18): unaccounted < 0.001 % per interval at 1e4, 1e5, 1e6 and 200k bf0.1
+    "profile_accounting": lambda exe: profile_accounting(exe, "500 stars, 10 % binaries, SSE, PN",
+                                                         dict(BINARIES, PLUMMER_N="500", PLUMMER_M_TOTAL="250",
+                                                              PLUMMER_MASS_DIST="kroupa_evolved", PLUMMER_AGE_GYR="0.01",
+                                                              SSE_ENABLED="true", PN_ORDER="31",
+                                                              TOTAL_TIME_MYR="3e-3"), 3.0, 3.0),
     # Cluster diagnostics (HARD_PROBLEMS G2): 10k stars, r_h 1 pc (20k: radii within 1.3 % of Plummer, centre
     # 1.1 % of a; 999 of 1000 binaries); Kroupa with 10 % of stars in binaries of 0.1-100 AU (500)
     "cluster_diag": lambda exe: cluster_diag(exe, "Plummer 10k", dict(BINARIES, PLUMMER_N="10000", PLUMMER_M_TOTAL="4000",

@@ -336,6 +336,15 @@ struct SubsystemPhaseTimes {
     void add(int phase, double dt) {
         t[phase] += dt;
         td[depth()][phase] += dt;
+        // the wall-time phases (not the batch split *_xfer, integ, crit, work) are buckets of the step profiler
+        static constexpr int bucket[N] = {
+            StepProfiler::SUBSYS_MIRROR, StepProfiler::SUBSYS_MAP, StepProfiler::SUBSYS_SECULAR,
+            StepProfiler::SUBSYS_SEC_TRIPLE, StepProfiler::SUBSYS_LOGH_PREP, StepProfiler::SUBSYS_LOGH_PACK,
+            StepProfiler::SUBSYS_LOGH, StepProfiler::SUBSYS_LOGH_UNPACK, StepProfiler::SUBSYS_LOGH_POST,
+            -1, -1, -1, -1, -1, -1,
+            StepProfiler::DET_NGB, StepProfiler::DET_PAIRS, StepProfiler::DET_FLAGS,
+            StepProfiler::DT_WAIT, StepProfiler::DT_SUBSYS, StepProfiler::DT_MERGE};
+        if (bucket[phase] >= 0) g_profiler.add_child_time((StepProfiler::Timer)bucket[phase], dt);
     }
     void count(int c, long long n) { cnt[depth()][c] += n; }
     void take_batch_prof() {   // the batch calls' split since the last take
@@ -1458,7 +1467,7 @@ void fsi_step(Particles& p, int start, int count,
     } else {
         g_profiler.start();
         self_acceleration(p, start, count, G, soft2);
-        g_profiler.stop(StepProfiler::SELF_FORCE);
+        g_profiler.stop(StepProfiler::SELF_FORCE, (long long)count * count);
         g_profiler.start();
         force_err_inject(p, start, count, count);
         kick_velocities(p, start, count, dt * FSI_KICK);
@@ -1507,10 +1516,10 @@ void fsi_step(Particles& p, int start, int count,
     } else {
         g_profiler.start();
         self_acceleration(p, start, count, G, soft2);
-        g_profiler.stop(StepProfiler::SELF_FORCE);
+        g_profiler.stop(StepProfiler::SELF_FORCE, (long long)count * count);
         g_profiler.start();
         self_gradient_correction(p, start, count, G, soft2, dt);
-        g_profiler.stop(StepProfiler::SELF_GRAD);
+        g_profiler.stop(StepProfiler::SELF_GRAD, (long long)count * count);
         g_profiler.start();
         force_err_inject(p, start, count, count);
         kick_velocities(p, start, count, dt * FSI_MOD_KICK);
@@ -1547,7 +1556,7 @@ void fsi_step(Particles& p, int start, int count,
     } else {
         g_profiler.start();
         self_acceleration(p, start, count, G, soft2);
-        g_profiler.stop(StepProfiler::SELF_FORCE);
+        g_profiler.stop(StepProfiler::SELF_FORCE, (long long)count * count);
         g_profiler.start();
         force_err_inject(p, start, count, count);
         kick_velocities(p, start, count, dt * FSI_KICK);
@@ -1753,6 +1762,22 @@ static bool range_has_ghost(const Particles& p, int start, int count) {
 }
 #endif
 
+#ifdef ENABLE_COLLISIONAL
+// Work counters of the step for the profiler (the subsystem manager's per-step statistics)
+static void profile_subsystem_counters() {
+    const auto& m = g_subsystem_mgr;
+    g_profiler.count(StepProfiler::C_SUBSYS_ACTIVE, (double)m.active.size());
+    g_profiler.count(StepProfiler::C_LOGH_SUBSYS, m.step_logh_calls);
+    g_profiler.count(StepProfiler::C_GBS_STEPS, m.step_logh_gbs_total);
+    g_profiler.count(StepProfiler::C_SDAR_CALLS, m.step_sdar_calls);
+    g_profiler.count(StepProfiler::C_SECULAR, m.step_secular_evolved);
+    g_profiler.count(StepProfiler::C_SEC_SUBSTEPS, (double)m.step_secular_substeps);
+    g_profiler.count(StepProfiler::C_KEPLER2, m.step_kepler2);
+    g_profiler.count(StepProfiler::C_SEC_TRIPLE, m.step_secular_triples);
+    g_profiler.count(StepProfiler::C_MERGERS, m.step_mergers);
+}
+#endif
+
 void hhs_fsi_step_dynamic(Particles& p, int start, int count, double pivot_dt,
                           double G, double soft2, double dt_min,
                           double eta) {
@@ -1760,18 +1785,25 @@ void hhs_fsi_step_dynamic(Particles& p, int start, int count, double pivot_dt,
     if (p.collisional) g_subsystem_mgr.reset_step_diagnostics();
     // Global PN1.0 half-kicks around the FSI step (BIFROST Section 3.7), as in hhs_fsi_step_distributed
     bool do_global_pn = p.collisional && (g_collisional.pn_order & 1) && g_collisional.c_code > 0.0;
-    if (do_global_pn)
+    if (do_global_pn) {
+        StepProfiler::Region r_(g_profiler, StepProfiler::GLOBAL_PN);
         global_pn1_kick(p, start, count, G, g_collisional.c_code, g_collisional.m_pn, pivot_dt * 0.5);
+    }
 #endif
     if (hhs_cc) g_hhs_counters.reset();
     int n_removed = hhs_fsi_recursive(p, nullptr, start, count, pivot_dt, G, soft2, dt_min, eta, false);
 #ifdef ENABLE_COLLISIONAL
     // Placeholders still left (merged in a range not entered again this step) go before the diagnostics
     if (p.collisional && range_has_ghost(p, start, count - n_removed)) {
+        StepProfiler::Region r_(g_profiler, StepProfiler::GHOST_COMPACT);
         const int k = compact_zero_mass_range(p, start, count - n_removed);
         if (k > 0) { sync_after_removal(p, nullptr); g_subsystem_mgr.update_particle_flags(p); n_removed += k; }
     }
 #endif
+#ifdef ENABLE_COLLISIONAL
+    if (p.collisional) profile_subsystem_counters();
+#endif
+    StepProfiler::Region r_print_(g_profiler, StepProfiler::STEP_PRINT);   // to the end: output, and global PN
     if (hhs_cc) {   // component statistics per depth
         std::printf("  HHS_CC components:");
         for (int d = 0; d < HHSCounters::MAX_DEPTH; d++)
@@ -1782,8 +1814,10 @@ void hhs_fsi_step_dynamic(Particles& p, int start, int count, double pivot_dt,
         std::printf("\n");
     }
 #ifdef ENABLE_COLLISIONAL
-    if (do_global_pn)
+    if (do_global_pn) {
+        StepProfiler::Region r_(g_profiler, StepProfiler::GLOBAL_PN);
         global_pn1_kick(p, start, count - n_removed, G, g_collisional.c_code, g_collisional.m_pn, pivot_dt * 0.5);
+    }
     // Per-step subsystem summary, as hhs_fsi_step_distributed prints it (tests read its counters)
     if (p.collisional) g_subsystem_mgr.print_step_summary();
     if (p.collisional && g_subsys_phase.any()) g_subsys_phase.report_and_reset();
@@ -2684,6 +2718,7 @@ static int hhs_fsi_host_subtree(Particles& p, DistributedParticles* dp, int star
                                 double G, double soft2, double dt_min, double eta, bool dt_valid, int depth) {
     HostSubtree& hs = host_subtree();
     NvtxScope nvtx_hostsub("HOSTSUB");
+    StepProfiler::Region prof_hostsub(g_profiler, StepProfiler::HOST_SUBTREE);
     g_host_subtree_stats.calls++;
     g_host_subtree_stats.particles += count;
     g_profiler.start();
@@ -3055,6 +3090,7 @@ static int hhs_fsi_recursive_impl(
     }
 
     // Counters
+    g_profiler.record_set(depth, count);
     if (use_mpi) g_hhs_counters.distributed++;
     else g_hhs_counters.local++;
     if (depth > g_hhs_counters.max_depth) g_hhs_counters.max_depth = depth;
@@ -3363,7 +3399,11 @@ static int hhs_fsi_recursive_impl(
                     sync_after_removal(p, dp);
                     n_removed += k;
                     count -= k;
-                    if (count <= 0) return n_removed;
+                    if (count <= 0) {
+                        g_subsys_phase.add(SubsystemPhaseTimes::DT_MERGE, dt_clock.lap());
+                        g_profiler.stop(StepProfiler::SUBSYSTEM_DT);
+                        return n_removed;
+                    }
                     g_subsystem_mgr.update_particle_flags(p);
                 }
             }
@@ -3667,6 +3707,7 @@ void hhs_fsi_step_distributed(DistributedParticles& dp, double pivot_dt,
     bool do_global_pn = dp.local.collisional && (g_collisional.pn_order & 1) &&
                         g_collisional.c_code > 0.0;
     if (do_global_pn) {
+        StepProfiler::Region r_(g_profiler, StepProfiler::GLOBAL_PN);
         global_pn1_kick(dp.local, 0, dp.N_total, G, g_collisional.c_code,
                         g_collisional.m_pn, pivot_dt * 0.5);
     }
@@ -3679,6 +3720,7 @@ void hhs_fsi_step_distributed(DistributedParticles& dp, double pivot_dt,
 #ifdef ENABLE_COLLISIONAL
     // Placeholders still left (merged in a range not entered again this step) go before the diagnostics
     if (dp.local.collisional && range_has_ghost(dp.local, 0, dp.local.N)) {
+        StepProfiler::Region r_(g_profiler, StepProfiler::GHOST_COMPACT);
         if (compact_zero_mass_range(dp.local, 0, dp.local.N) > 0) {
             sync_after_removal(dp.local, &dp);
             g_subsystem_mgr.update_particle_flags(dp.local);
@@ -3689,13 +3731,18 @@ void hhs_fsi_step_distributed(DistributedParticles& dp, double pivot_dt,
     // Global PN1.0 half-kick after FSI (BIFROST Section 3.7)
 #ifdef ENABLE_COLLISIONAL
     if (do_global_pn) {
+        StepProfiler::Region r_(g_profiler, StepProfiler::GLOBAL_PN);
         global_pn1_kick(dp.local, 0, dp.N_total, G, g_collisional.c_code,
                         g_collisional.m_pn, pivot_dt * 0.5);
     }
     // print_step_summary moved into unified block below
 #endif
 
+#ifdef ENABLE_COLLISIONAL
+    if (dp.local.collisional) profile_subsystem_counters();
+#endif
     // Unified post-step summary: HHS hierarchy + subsystem stats
+    StepProfiler::Region r_print_(g_profiler, StepProfiler::STEP_PRINT);
 #ifdef USE_MPI
     if (MPIComm::rank() == 0)
 #endif

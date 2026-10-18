@@ -444,6 +444,13 @@ static void print_usage(const char* prog) {
     std::printf("  -h, --help        Show this help\n");
 }
 
+// PROFILING = detailed: bytes of every Kokkos deep copy by direction (Kokkos Tools callback; chains NBODY_FENCE_STATS)
+static void profile_deep_copy(Kokkos::Tools::SpaceHandle dst, const char* dn, const void* dp, Kokkos::Tools::SpaceHandle src,
+                              const char* sn, const void* sp, uint64_t size) {
+    g_profiler.record_copy(dst.name, src.name, size);
+    if (fence_stats::on()) fence_stats::begin_dc(dst, dn, dp, src, sn, sp, size);
+}
+
 static const char* outer_planet_names[] = {"Sun", "Jupiter", "Saturn", "Uranus", "Neptune"};
 
 int main(int argc, char** argv) {
@@ -552,9 +559,14 @@ int main(int argc, char** argv) {
                                                 sse_ppisn_str, sse_ecsn_str,
                                                 sse_mxns_val, sse_flbv_val);
 
-        bool profiling_enabled = cfg.get_bool("PROFILING");
-        g_profiler.enabled = profiling_enabled;   // PROFILING = false: no timers and no device fences
+        // PROFILING = off | on | detailed (true = on, false = off): off has no timers, counters or device fences
+        const std::string profiling_mode = cfg.get_str("PROFILING");
+        bool profiling_enabled = profiling_mode != "off" && profiling_mode != "false";
+        g_profiler.enabled = profiling_enabled;
+        g_profiler.detailed = profiling_mode == "detailed";
         g_profiler.fence = profiling_enabled && cfg.get_bool("PROFILING_FENCES");
+        g_profiler.reset();   // the set-up profile starts here
+        if (g_profiler.detailed) Kokkos::Tools::Experimental::set_begin_deep_copy_callback(profile_deep_copy);
         serial_n2_gpu = cfg.get_int("SERIAL_N2_GPU");
         host_subtree_max = cfg.get_int("HOST_SUBTREE_MAX");
         hhs_cc = cfg.get_bool("HHS_CC");
@@ -728,6 +740,7 @@ int main(int argc, char** argv) {
             std::printf("Initializing particles...\n"); std::fflush(stdout);
         }
         auto t_init0 = std::chrono::high_resolution_clock::now();
+        g_profiler.start();
 
         // Initialize particles on rank 0 (or all ranks for single-GPU)
         // Binary test parameters
@@ -875,6 +888,7 @@ int main(int argc, char** argv) {
             // Rank 0's 'p' is no longer valid - use dp for all operations
         }
 
+        g_profiler.stop(StepProfiler::SETUP_IC);
         auto t_init1 = std::chrono::high_resolution_clock::now();
         if (my_rank == 0) {
             std::printf("Particle init: %.3f s\n", std::chrono::duration<double>(t_init1-t_init0).count());
@@ -1022,6 +1036,7 @@ int main(int argc, char** argv) {
                 std::printf("Computing initial forces...\n"); std::fflush(stdout);
             }
             auto t0 = std::chrono::high_resolution_clock::now();
+            g_profiler.start();
 
             if (use_distributed) {
                 compute_acceleration_and_timestep_distributed(dp, G, soft2, eta);
@@ -1053,6 +1068,7 @@ int main(int argc, char** argv) {
 
             assign_levels(work_p, levels);
             work_p.partition_by_level();
+            g_profiler.stop(StepProfiler::SETUP_FORCES);
         }
 #ifdef ENABLE_COLLISIONAL
         if (resuming && work_p.collisional) g_subsystem_mgr.rebuild_pid_to_idx(work_p);
@@ -1102,13 +1118,20 @@ int main(int argc, char** argv) {
         }
 #endif
 
+        g_profiler.start();
         auto diag0 = compute_diagnostics(work_p, G, soft2);   // collective under MPI: every rank, also on a restart
+        g_profiler.stop(StepProfiler::SETUP_DIAG);
 #ifdef USE_HDF5
         if (resuming) diag0 = rs.diag0;
         else rs.diag0 = diag0;
 #endif
         if (my_rank == 0 && !resuming) dump_particles(work_p, 0);
 
+        g_profiler.report_step = 0; g_profiler.report_t_myr = 0.0;   // the state the run starts from
+#ifdef USE_HDF5
+        if (resuming) { g_profiler.report_step = rs.step; g_profiler.report_t_myr = rs.t * TIME_UNIT_MYR; }
+#endif
+        if (profiling_enabled) g_profiler.print_setup();   // collective; the first interval starts here
         if (my_rank == 0) {
             std::printf("Running...\n"); std::fflush(stdout);
         }
@@ -1150,6 +1173,7 @@ int main(int argc, char** argv) {
         const double cluster_diag_rpair = cfg.get_double("CLUSTER_DIAG_RPAIR_PC");
         auto cluster_diag_now = [&](double t_now, int step_now) {
             if (cluster_diag_interval <= 0 || step_now % cluster_diag_interval != 0 || my_rank != 0) return;
+            StepProfiler::Region r_(g_profiler, StepProfiler::CLUSTER_DIAG);
             append_cluster_diag(cluster_diag_file, step_now,
                                 compute_cluster_diag(work_p, G, t_now * TIME_UNIT_MYR, cluster_diag_rpair));
         };
@@ -1165,6 +1189,7 @@ int main(int argc, char** argv) {
         const bool snapshot_cluster_diag = cfg.get_bool("SNAPSHOT_CLUSTER_DIAG");
         auto write_snapshot_now = [&](double t_now, int step_now) {
             if (snapshot_interval <= 0 || last_snapshot_step == step_now) return;
+            StepProfiler::Region r_(g_profiler, StepProfiler::SNAPSHOT_IO);
             SnapshotMeta sm;
             sm.t = t_now; sm.step = step_now; sm.index = rs.snapshot_index; sm.G = G; sm.soft2 = soft2;
             sm.diag = compute_diagnostics(work_p, G, soft2);
@@ -1184,6 +1209,7 @@ int main(int argc, char** argv) {
         };
         auto write_restart_now = [&](double t_now, int step_now) {
             if (last_restart_step == step_now && last_restart_snap == rs.snapshot_index) return;
+            StepProfiler::Region r_(g_profiler, StepProfiler::RESTART_IO);
             save_run_state(t_now, step_now);
             // Replicated MPI state: every rank must hold the same state, rank 0 writes it
             bool agree = !use_distributed || dp.replicas_agree(step_now);
@@ -1201,6 +1227,7 @@ int main(int argc, char** argv) {
         };
         // After every step: snapshots, periodic restart files, and the wall-clock / SIGUSR1 stop
         auto after_step_io = [&](double t_now, int step_now, double step_wall) {
+            StepProfiler::Region r_(g_profiler, StepProfiler::OUTPUT_IO);
             if (snapshot_interval > 0 && step_now % snapshot_interval == 0) write_snapshot_now(t_now, step_now);
             if (!restart_output) return;
             max_step_wall = std::max(max_step_wall, step_wall);
@@ -1224,6 +1251,7 @@ int main(int argc, char** argv) {
         roll_opt.keep = 1;
         auto write_roll = [&](double t_now, int step_now) {
             if (!stall_restart) return;
+            StepProfiler::Region r_(g_profiler, StepProfiler::RESTART_IO);
             save_run_state(t_now, step_now);
             if (my_rank == 0) {
                 std::filesystem::create_directories(roll_opt.dir);
@@ -1363,11 +1391,12 @@ int main(int argc, char** argv) {
             g_step_in_progress = step + 1;
             while (t < t_final) {
                 auto step_t0 = std::chrono::high_resolution_clock::now();
-                tidal_kick(work_p, 0.5 * dt_global, G, g_energy_books);
+                g_profiler.start();   // STEP
+                { StepProfiler::Region r_(g_profiler, StepProfiler::TIDAL); tidal_kick(work_p, 0.5 * dt_global, G, g_energy_books); }
                 // In replicated mode, work_p contains all particles on all ranks
-                fsi_step(work_p, 0, work_p.N, G, soft2, dt_global);
+                { StepProfiler::Region r_(g_profiler, StepProfiler::HHS); fsi_step(work_p, 0, work_p.N, G, soft2, dt_global); }
                 tidal_drift_reference(dt_global);
-                tidal_kick(work_p, 0.5 * dt_global, G, g_energy_books);
+                { StepProfiler::Region r_(g_profiler, StepProfiler::TIDAL); tidal_kick(work_p, 0.5 * dt_global, G, g_energy_books); }
 #ifdef ENABLE_COLLISIONAL
                 // Placeholders of bodies merged inside subsystem integrations
                 if (work_p.collisional && !g_subsystem_mgr.ghost_pids.empty() &&
@@ -1381,18 +1410,26 @@ int main(int argc, char** argv) {
                 step++;
                 g_step_in_progress = step + 1;
                 tidal_print(step);
+                g_profiler.stop(StepProfiler::STEP);
                 auto step_t1 = std::chrono::high_resolution_clock::now();
                 double step_wall = std::chrono::duration<double>(step_t1 - step_t0).count();
                 g_profiler.step_wall_total += step_wall;
                 g_profiler.step_count++;
+                g_profiler.count(StepProfiler::C_STEPS, 1);
                 if (step % print_interval == 0) {
-                    compute_acceleration_and_timestep(work_p, G, soft2, eta);
-                    assign_levels(work_p, levels);
-                    work_p.partition_by_level();
-                    print_progress(t, step);
-                    if (my_rank == 0 && profiling_enabled) {
-                        g_profiler.print_report(N_display, n_ranks);
+                    {
+                        StepProfiler::Region r_diag_(g_profiler, StepProfiler::DIAG);
+                        {
+                            StepProfiler::Region r_(g_profiler, StepProfiler::DIAG_FORCES);
+                            compute_acceleration_and_timestep(work_p, G, soft2, eta);
+                            assign_levels(work_p, levels);
+                            work_p.partition_by_level();
+                        }
+                        StepProfiler::Region r_(g_profiler, StepProfiler::DIAG_PRINT);
+                        print_progress(t, step);
                     }
+                    g_profiler.report_step = step; g_profiler.report_t_myr = t * TIME_UNIT_MYR;
+                    if (profiling_enabled) g_profiler.print_report(N_display, n_ranks);   // collective
                     g_profiler.reset();
                     g_subset_hist.reset();
                 }
@@ -1426,6 +1463,7 @@ int main(int argc, char** argv) {
                 NBODY_NVTX_PUSH("STEP");
                 fence_stats::report(step, false);   // reset: count only this step
                 auto step_t0 = std::chrono::high_resolution_clock::now();
+                g_profiler.start();   // STEP
                 g_stall.reset();
 #ifdef ENABLE_COLLISIONAL
                 pe_chk_valid = false;
@@ -1434,13 +1472,15 @@ int main(int argc, char** argv) {
 #ifdef ENABLE_COLLISIONAL
                 g_sim_time = t;
 #endif
-                tidal_kick(work_p, 0.5 * dt_max, G, g_energy_books);
+                { StepProfiler::Region r_(g_profiler, StepProfiler::TIDAL); tidal_kick(work_p, 0.5 * dt_max, G, g_energy_books); }
 
 #ifdef ENABLE_COLLISIONAL
                 // Runtime stellar evolution before each step
                 if (g_collisional.enabled && g_collisional.sse_enabled && g_sse_ctx) {
+                    StepProfiler::Region r_(g_profiler, StepProfiler::STELLAR_EVOLUTION);
                     E_carry_N = -1;
                     double dt_sse_myr = dt_max * TIME_UNIT_MYR;
+                    g_profiler.count(StepProfiler::C_SSE_STARS, work_p.N);
                     advance_stellar_evolution(work_p, *g_sse_ctx, dt_sse_myr,
                                               g_energy_books, G);
                     // Massless remnants (kw = 15) leave now: inside the step, compaction must only ever
@@ -1486,10 +1526,11 @@ int main(int argc, char** argv) {
 
                     for (int restart = 0; restart <= max_restarts; restart++) {
                         // Save checkpoint
-                        { NvtxScope nv_("CKPT"); checkpoint.save(work_p, g_subsystem_mgr, g_energy_books); }
+                        { NvtxScope nv_("CKPT"); StepProfiler::Region r_(g_profiler, StepProfiler::CHECKPOINT);
+                          checkpoint.save(work_p, g_subsystem_mgr, g_energy_books); }
 
                         // Run HHS step
-                        { NvtxScope nv_("HHS");
+                        { NvtxScope nv_("HHS"); StepProfiler::Region r_(g_profiler, StepProfiler::HHS);
                         if (use_distributed) {
                             hhs_fsi_step_distributed(dp, dt_max, G, soft2, dt_min, eta, 2);
                         } else {
@@ -1520,6 +1561,7 @@ int main(int argc, char** argv) {
                             // Max retries exhausted, or the error grew again (BIFROST: accept the
                             // attempt with the smallest error rather than the last one)
                             if (dE > best_dE) {
+                                StepProfiler::Region r_(g_profiler, StepProfiler::CHECKPOINT);
                                 best.restore(work_p, g_subsystem_mgr, g_energy_books);
                                 if (use_distributed) dp.sync_count();
                             }
@@ -1538,12 +1580,16 @@ int main(int argc, char** argv) {
                         if (dE < best_dE) {
                             best_dE = dE;
                             best_Epart = E_part;
+                            StepProfiler::Region r_(g_profiler, StepProfiler::CHECKPOINT);
                             best.save(work_p, g_subsystem_mgr, g_energy_books);
                         }
 
                         // Restore checkpoint
-                        checkpoint.restore(work_p, g_subsystem_mgr, g_energy_books);
-                        if (use_distributed) dp.sync_count();
+                        {
+                            StepProfiler::Region r_(g_profiler, StepProfiler::CHECKPOINT);
+                            checkpoint.restore(work_p, g_subsystem_mgr, g_energy_books);
+                            if (use_distributed) dp.sync_count();
+                        }
 
                         // Reduce ALL eta parameters by 50% (BIFROST §3.19)
                         g_collisional.eta_ff   *= 0.5;
@@ -1554,6 +1600,7 @@ int main(int argc, char** argv) {
                         g_collisional.eta_va   *= 0.5;
                         g_collisional.eta_pert *= 0.5;
 
+                        g_profiler.count(StepProfiler::C_RESTART_RETRIES, 1);
                         // Increase r_ngb by 15%
                         g_collisional.r_ngb *= 1.15;
                         g_collisional.r_ngb_sq = g_collisional.r_ngb * g_collisional.r_ngb;
@@ -1577,16 +1624,19 @@ int main(int argc, char** argv) {
                 } else {
 #endif
                     // Non-collisional or eta_restart disabled: single step, no restart
-                    if (use_distributed) {
-                        hhs_fsi_step_distributed(dp, dt_max, G, soft2, dt_min, eta, 2);
-                    } else {
-                        hhs_fsi_step_dynamic(p, 0, p.N, dt_max, G, soft2, dt_min, eta);
+                    {
+                        StepProfiler::Region r_(g_profiler, StepProfiler::HHS);
+                        if (use_distributed) {
+                            hhs_fsi_step_distributed(dp, dt_max, G, soft2, dt_min, eta, 2);
+                        } else {
+                            hhs_fsi_step_dynamic(p, 0, p.N, dt_max, G, soft2, dt_min, eta);
+                        }
                     }
 #ifdef ENABLE_COLLISIONAL
                 }
 #endif
                 tidal_drift_reference(dt_max);
-                tidal_kick(work_p, 0.5 * dt_max, G, g_energy_books);
+                { StepProfiler::Region r_(g_profiler, StepProfiler::TIDAL); tidal_kick(work_p, 0.5 * dt_max, G, g_energy_books); }
 
                 t += dt_max;
                 step++;
@@ -1594,28 +1644,40 @@ int main(int argc, char** argv) {
                 tidal_print(step);
 
                 // Replicated MPI state must stay bitwise identical; stop instead of diverging silently
-                if (use_distributed && replica_check_interval > 0 && step % replica_check_interval == 0 &&
-                    !dp.replicas_agree(step)) {
-                    exit_code = 3;
-                    break;
+                if (use_distributed && replica_check_interval > 0 && step % replica_check_interval == 0) {
+                    g_profiler.start();
+                    const bool agree = dp.replicas_agree(step);
+                    g_profiler.stop(StepProfiler::REPLICA_CHECK);
+                    if (!agree) {
+                        exit_code = 3;
+                        g_profiler.stop(StepProfiler::STEP);
+                        break;
+                    }
                 }
 
+                g_profiler.stop(StepProfiler::STEP);
                 auto step_t1 = std::chrono::high_resolution_clock::now();
                 double step_wall = std::chrono::duration<double>(step_t1 - step_t0).count();
                 g_profiler.step_wall_total += step_wall;
                 g_profiler.step_count++;
-                stall_check(step, step_wall, step_de);
+                g_profiler.count(StepProfiler::C_STEPS, 1);
 
-                fence_stats::report(step, my_rank == 0);
-                if (my_rank == 0 && step <= 5) {
-                    std::printf("Step %d: %.3fs, dt=%.2e Myr\n",
-                        step, step_wall, dt_max*TIME_UNIT_MYR);
-                    std::fflush(stdout);
+                {
+                    StepProfiler::Region r_(g_profiler, StepProfiler::STEP_PRINT);
+                    stall_check(step, step_wall, step_de);
+                    fence_stats::report(step, my_rank == 0);
+                    if (my_rank == 0 && step <= 5) {
+                        std::printf("Step %d: %.3fs, dt=%.2e Myr\n",
+                            step, step_wall, dt_max*TIME_UNIT_MYR);
+                        std::fflush(stdout);
+                    }
                 }
 
                 NBODY_NVTX_PUSH("DIAG");
                 if (step % print_interval == 0) {
+                    g_profiler.start();   // DIAG
                     // Recompute forces + timestep only for diagnostics
+                    g_profiler.start();
                     if (use_distributed) {
                         compute_acceleration_and_timestep_distributed(dp, G, soft2, eta);
                     } else {
@@ -1623,6 +1685,8 @@ int main(int argc, char** argv) {
                     }
                     assign_levels(work_p, levels);
                     work_p.partition_by_level();
+                    g_profiler.stop(StepProfiler::DIAG_FORCES);
+                    g_profiler.start();
 #ifdef ENABLE_COLLISIONAL
                     {
                         // NBODY_PE_REUSE=0: always recompute; =check: recompute and compare the bits (debug)
@@ -1644,13 +1708,16 @@ int main(int argc, char** argv) {
 #else
                     print_progress(t, step);
 #endif
+                    g_profiler.stop(StepProfiler::DIAG_PRINT);
 #ifdef ENABLE_COLLISIONAL
                     // Periodic escaper removal
                     if (g_collisional.enabled && is_cluster && g_collisional.r_escape_rh > 0) {
+                        StepProfiler::Region r_(g_profiler, StepProfiler::ESCAPERS);
                         int n_esc = remove_escapers(work_p, G, g_collisional.r_escape_rh,
                                                      g_subsystem_mgr, g_energy_books);
                         if (n_esc > 0) {
                             g_subsystem_mgr.step_escapers += n_esc;
+                            g_profiler.count(StepProfiler::C_ESCAPERS, n_esc);
                             work_p.compact_remove_zero_mass();
                             if (use_distributed) dp.sync_count();
                             for (int pid : work_p.removed_pid_log) { g_subsystem_mgr.removed_pids.insert(pid); g_subsystem_mgr.ghost_pids.erase(pid); }
@@ -1658,13 +1725,14 @@ int main(int argc, char** argv) {
                     }
                     // Write event logs at snapshot intervals
                     if (my_rank == 0) {
+                        StepProfiler::Region r_(g_profiler, StepProfiler::EVENT_LOGS);
                         g_merger_tree.write_ascii("merger_tree.dat");
                         g_escaper_log.write_ascii("escaper_log.dat");
                     }
 #endif
-                    if (my_rank == 0 && profiling_enabled) {
-                        g_profiler.print_report(N_display, n_ranks);
-                    }
+                    g_profiler.stop(StepProfiler::DIAG);
+                    g_profiler.report_step = step; g_profiler.report_t_myr = t * TIME_UNIT_MYR;
+                    if (profiling_enabled) g_profiler.print_report(N_display, n_ranks);   // collective
                     g_profiler.reset();
                     g_subset_hist.reset();
                 }
@@ -1702,9 +1770,8 @@ int main(int argc, char** argv) {
             work_p.partition_by_level();
         }
         print_progress(t, step);
-        if (my_rank == 0 && profiling_enabled && g_profiler.step_count > 0) {
-            g_profiler.print_report(N_display, n_ranks);
-        }
+        g_profiler.report_step = step; g_profiler.report_t_myr = t * TIME_UNIT_MYR;
+        if (profiling_enabled && g_profiler.step_count > 0) g_profiler.print_report(N_display, n_ranks);   // collective
         g_profiler.reset();
         g_subset_hist.reset();
 
