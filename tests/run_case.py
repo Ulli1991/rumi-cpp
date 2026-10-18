@@ -489,6 +489,20 @@ def host_subtree(exe, label, cfg, de_ratio, hs_max=64):
     return ok
 
 
+def stage_par_identical(exe, label, cfg, threads="4"):
+    """GBS stages of one step on several host threads (logh_batch.cpp serial_subs, gbs.cpp compute_stages) or one
+    after the other (NBODY_GBS_STAGE_PAR=0): the same arithmetic per stage, so bit-identical diagnostics and particles.
+    Needs LogH batches of <= 2 subsystems (deep levels)."""
+    env = {"OMP_NUM_THREADS": threads}
+    out0, dump0 = run_output(exe, cfg, env={**env, "NBODY_GBS_STAGE_PAR": "0"}, dump=True)
+    out1, dump1 = run_output(exe, cfg, env=env, dump=True)
+    logh = sum(int(a) for a in re.findall(r"Integration: LogH=(\d+) \(gbs=", out1))
+    ok = check(f"{label}: LogH calls", float(logh), 1, lower=True)
+    ok &= check(f"{label}: diagnostics differ (0 = identical)", float(diagnostics(out0) != diagnostics(out1)), 0)
+    ok &= check(f"{label}: particles differ (0 = identical)", float(dump0 != dump1), 0)
+    return ok
+
+
 def paths_same_steps(exe, label, cfg, min_logh, gbs_rel=0.0):
     """The CPU small-set path against the device path: the same LogH calls per step, GBS steps per step equal to
     within `gbs_rel` (relative; the two paths sum forces in other orders, and the GBS step count of a LogH call can
@@ -1810,6 +1824,8 @@ CASES = {
     # levels without any TREE_* key (no tree search ran before), bit-identical to the O(N^2) run
     # Host-resident subtrees (GPU, 2026-10-16: max |dE/E| ratio 1.000 in all three; bound 1.3x): mergers compact the host copy mid-recursion (every set of the 400 stars on the host);
     # binaries with subsystems at every level
+    "gbs_stage_par_identical": lambda exe: stage_par_identical(exe, "stage-parallel GBS, dense core",
+                                                               dict(TRIPLES, PN_ORDER="31")),
     "host_subtree_mergers": lambda exe: host_subtree(exe, "host subtrees, mergers", MERGERS, 1.3, hs_max=512),
     "host_subtree_binaries": lambda exe: host_subtree(exe, "host subtrees, 10 % binaries", BINARIES, 1.3),
     "host_subtree_triples": lambda exe: host_subtree(exe, "host subtrees, dense core", TRIPLES, 1.3),

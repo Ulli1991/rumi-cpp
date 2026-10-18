@@ -258,7 +258,7 @@ foreach(case kepler_e09 kepler_e0 frost4_e09 frost4_e099 planets_hhs planets_fsi
              coll_headon_triple coll_contact_flyby coll_contact_flyby_logh coll_tde_parabolic coll_tde_accretion fryer_rapid_gap pn_boost_logh pn_boost_secular wide_binaries_ngb gbs_deuflhard_pn cluster_diag tidal_ref_orbit tidal_energy_books tidal_jacobi_escapers ss_companion_flyby int_pos_flyby quad22_sdar particle_file_roundtrip grad_only_planets bh_merge_radius_fc bh_merge_radius_total coll_mass_loss coll_bh_isco natal_kicks_ns natal_kicks_fallback
              tree_dt_binaries tree_dt_binaries_host tree_dt_binaries_cm tree_dt_binaries50 tree_dt_triples tree_dt_mergers tree_dt_softened tree_default_on
              tree_dt_tidal tree_dt_tidal_host tree_dt_tidal_cm
-             host_subtree_mergers host_subtree_binaries host_subtree_triples
+             host_subtree_mergers host_subtree_binaries host_subtree_triples gbs_stage_par_identical
              triple_stability ic_mass_size_rh ic_binary_com_virial ic_r_break
              secular_drift_e0 secular_drift_e1e-8
              kepler2_norb05 kepler2_norb2 kepler2_hyperbolic kepler2_contact)
