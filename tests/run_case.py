@@ -459,15 +459,23 @@ def paths_agree(exe, label, cfg, bound):
 def force_err(exe, label, cfg, ratio):
     """NBODY_FORCE_ERR (synthetic far-field force errors, plan I-1): eps = 0 leaves the run bit-identical to no
     variable (diagnostics and every particle); eps = 1e-3 on every set of >= 256 particles must raise max |dE/E| by
-    at least `ratio` in every error model."""
+    at least `ratio` in every error model; the momentum-conserving ones (smooth, cell, random with
+    NBODY_FORCE_ERR_PFIX=1) keep max |dP|/M within 100x of the unperturbed run."""
     out0, dump0 = run_output(exe, cfg, dump=True)
     out1, dump1 = run_output(exe, cfg, env={"NBODY_FORCE_ERR": "0", "NBODY_FORCE_ERR_MIN": "256"}, dump=True)
     ok = check(f"{label} eps = 0: diagnostics differ (0 = identical)", float(diagnostics(out0) != diagnostics(out1)), 0)
     ok &= check(f"{label} eps = 0: particles differ (0 = identical)", float(dump0 != dump1), 0)
     base = max(r[0] for r in diagnostics(out0))
-    for model in ("random", "frozen", "smooth"):
-        out = run_output(exe, cfg, env={"NBODY_FORCE_ERR": "1e-3", "NBODY_FORCE_ERR_MIN": "256",
-                                        "NBODY_FORCE_ERR_MODEL": model})
+    dp0 = max(r[1] for r in diagnostics(out0))
+    for model in ("random", "frozen", "smooth", "cell", "random_pfix"):
+        env = {"NBODY_FORCE_ERR": "1e-3", "NBODY_FORCE_ERR_MIN": "256", "NBODY_FORCE_ERR_MODEL": model.split("_")[0]}
+        if model.endswith("_pfix"):
+            env["NBODY_FORCE_ERR_PFIX"] = "1"
+        out = run_output(exe, cfg, env=env)
+        if model in ("smooth", "cell", "random_pfix"):   # momentum-conserving models: |dP| stays at round-off
+            dp = max(r[1] for r in diagnostics(out))
+            print(f"   {model}: max|dP|/M {dp:.3e} (no errors {dp0:.3e})")
+            ok &= check(f"{label} {model}: max|dP|/M / unperturbed", dp / max(dp0, 1e-300), 100.0)
         ok &= check(f"{label} {model}: injection announced", float("NBODY_FORCE_ERR: eps" in out), 1, lower=True)
         de = max(r[0] for r in diagnostics(out))
         print(f"   {model}: max|dE/E| {de:.3e} (no errors {base:.3e})")
