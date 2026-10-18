@@ -766,6 +766,16 @@ def tree_exact(exe, label, cfg, need_dt=False):
     return ok
 
 
+def tree_default(exe, label, cfg, cfg_device):
+    """The tree searches on by default (no TREE_* key): cfg on host builds, cfg_device on GPU / APU builds, whose
+    default break-even set sizes (main.cpp: neighbours 32768, time steps 65536) lie above cfg's particle number;
+    cfg_device must exceed both, so both searches run (need_dt)."""
+    probe = run_output(exe, dict(KEP_2B, TOTAL_TIME_MYR=KEP_2B["DT_MAX_MYR"]))
+    if "KOKKOS_ENABLE_CUDA: yes" in probe or "KOKKOS_ENABLE_HIP: yes" in probe:
+        return tree_exact(exe, label + " (device build)", cfg_device, need_dt=True)
+    return tree_exact(exe, label, cfg)
+
+
 def no_fsi_groups(exe, label, cfg, bound):
     """Neighbour chains in a dense core must be split along bound pairs, not left whole to the FSI."""
     out = run_output(exe, cfg)
@@ -1918,9 +1928,12 @@ CASES = {
                                                    DT_MAX_MYR=f"{2.0 * P_SEC_MYR:.15e}"), (1e-15, 1e-15)),
     "kepler2_hyperbolic": lambda exe: kepler_exact(exe, "hyperbolic encounter", KEP_2B_HYP, (3.1e-15, 2.6e-15)),
     # Grazing contact binary: two Kepler drifts, then the drift containing the pericentre goes to LogH, whose step is
-    # aimed at the pericentre and merges there (r_sep / r_coll = 0.9997); measured |dE/E| 1.0e-15 with the merger sink
+    # aimed at the pericentre and merges there (r_sep / r_coll = 0.9997). |dE/E| with the merger sink is the GBS
+    # round-off up to the collision (the booking is exact): 1.0e-15 with gcc 13, 1.35e-14 with gcc 15 (CPU and GPU
+    # builds); 240 runs with e or a shifted by i * 1e-9 (relative, i < 60) on gcc 13, gcc 15 and gcc 15 without FMA
+    # scatter from 2e-16 to 3.1e-14 (median 8e-15) on every build (C16); bound 1.3x that max
     "kepler2_contact": lambda exe: subsys_collision(exe, "contact binary via the Kepler path", KEP_2B_CONTACT, "STELLAR",
-                                                    1.4e-15, min_kepler2=1),
+                                                    4e-14, min_kepler2=1),
     "logh_big_group": lambda exe: big_group(exe, "big group", BIG_GROUP, (1.2e-5, 1e-12)),
     # Exact tree searches (M7.4), forced at every set size, each search checked bitwise against O(N^2)
     # Tree searches on by default above the break-even set size (host builds 2048): 5000 stars use them at the top
@@ -1932,7 +1945,9 @@ CASES = {
     "host_subtree_mergers": lambda exe: host_subtree(exe, "host subtrees, mergers", MERGERS, 1.3, hs_max=512),
     "host_subtree_binaries": lambda exe: host_subtree(exe, "host subtrees, 10 % binaries", BINARIES, 1.3),
     "host_subtree_triples": lambda exe: host_subtree(exe, "host subtrees, dense core", TRIPLES, 1.3),
-    "tree_default_on": lambda exe: tree_exact(exe, "tree default, 50 % binaries", BINARIES50),
+    # Device builds (break-even 32768 / 65536, C17): 70000 stars at the same mean mass, both searches at the top level
+    "tree_default_on": lambda exe: tree_default(exe, "tree default, 50 % binaries", BINARIES50,
+                                                dict(BINARIES50, PLUMMER_N="70000", PLUMMER_M_TOTAL="28000")),
     "tree_dt_binaries": lambda exe: tree_exact(exe, "tree, 10 % binaries", dict(BINARIES, TREE_DT_MIN_N="2")),
     # host-thread tree (TREE_DT_CPU_MAX; component velocities; tree_dt_binaries_cm with the c.o.m. ones)
     "tree_dt_binaries_host": lambda exe: tree_exact(exe, "host tree, 10 % binaries",

@@ -383,6 +383,38 @@ Status: **closed** (fixed, test, ensemble checked), **option** (fix kept as an o
   3.2e-11 -> 1.8e-10, s42 3.1e-11 -> 2.5e-11. Merged as a correctness fix (user decision 2026-10-18) despite s21.
 - **Open:** cmv stays off: s7 (C5-type jump at step 1, 77x base) and s3/s42 (1.8-2.3x) still fail the energy rule.
 
+## C16 kepler2_contact: bound set from one lucky round-off sample (closed)
+
+- **Found by:** `kepler2_contact` failing on GPU builds and gcc 15 host builds: max |dE/E| 1.353e-14 against 1.4e-15.
+  It passes with gcc 13 (1.025e-15).
+- **No regression:** the gcc 15 host build of 311eb01, where the test was added, gives 1.72e-14 (bound 1.6e-14,
+  comment "measured 1.2e-14"). 806a676 changed the Kepler drift write-back. That moved the state handed to LogH by
+  a few ulps, gcc 13 then happened to give 1.0e-15, and the bound was cut to 1.4e-15 on that one sample.
+- **Where the error comes from:** the two Kepler drifts give 2e-16. LogH's dE is (E_before - E0) / |E0|, the GBS
+  energy error up to the collision; the merger booking (dE_int into B and E_ref) cancels exactly. Per GBS step
+  (normalised units, E = -0.186), T + U + B is 6e-16, -5e-16, -2.4e-15 (gcc 15) against 9e-16, -1e-16, 0 (gcc 13).
+  The third step reaches r = 0.269, near the pericentre, where |U| = 0.93 ~ 5 |E|. A 1-ulp position error per
+  leapfrog substep (12 substeps at stage 4), times dU/dr ~ 3.4 and the extrapolation's Lebesgue constant 6.3
+  (sequence 2, 4, 6, 8, 12), gives ~2e-15 absolute, i.e. ~1e-14 of |E|.
+- **Proof that this is round-off of a correct computation:** shift the IC by i * 1e-9 (relative, i = 0..59) in e
+  (gcc 13, gcc 15, gcc 15 with -ffp-contract=off) and in a (gcc 13). Each set of 60 runs scatters non-smoothly
+  between 2e-16 and 2.3-3.1e-14 (medians 7-9e-15), and neighbouring ICs differ by 10-100x. Truncation error would be
+  smooth over 6e-8 in e, so it lies below the smallest values (~2e-16). With FMA off, the nominal IC gives 1.5e-15
+  in LogH and 0 in total. Compensated sums in the LogH chain (R3) were already tried and rejected by the cluster A/B.
+- **Fix:** bound 4e-14 = 1.3 x the largest of the 240 runs (3.1e-14). The test comment records the scatter.
+
+## C17 tree_default_on: host-only set size, so no default tree search on GPU builds (closed)
+
+- **Found by:** GPU ctest, "FAIL: no tree searches ran". Failing since the test was added (915ddc4, 2026-10-11).
+- **Cause:** a test bug. 915ddc4 switches the exact tree searches on by default above the measured break-even set
+  sizes (main.cpp): 2048 on host builds, and on GPU builds 32768 for neighbours and 65536 for time steps (300000
+  with FLYBY_CM_VELOCITY). The test's 5000 stars lie above the host defaults only, so a GPU build never starts a
+  default tree search. The code does what it should.
+- **Fix:** `tree_default` probes the build (KOKKOS_ENABLE_CUDA / HIP in the header of a 0.2 s binary run). Device
+  builds run 70000 stars at the same mean mass (BINARIES50 with PLUMMER_M_TOTAL 28000) and also require a
+  time-step search. GPU (A100): 1 time-step and 16 neighbour searches, all bitwise equal to O(N^2), diagnostics
+  identical to the run without tree, 73 s. Host builds keep the 5000-star case.
+
 ## Verified building blocks (checked against an independent derivation, no bug found)
 
 | Building block | Check | Result | Test |
