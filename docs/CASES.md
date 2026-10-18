@@ -331,6 +331,42 @@ Status: **closed** (fixed, test, ensemble checked), **option** (fix kept as an o
   mergers in triples, had wrong signs, and results depended on the orientation of the coordinate frame. Triple-driven
   merger rates from runs before this fix are not reliable.
 
+## C13 Runtime SSE: 14.5 s of a 42 s interval at N = 1e6, unprofiled (closed)
+
+- **Found by:** the BIFROST Fig. 7 rerun (fig7-2026-10-17). The unprofiled "Other" bucket was 32 % of an interval at
+  N = 1e6, f_bin = 0.1, 45 % at 2e6 on 16 GPUs and 17-26 % at 1e4/1e5. With SSE_ENABLED = false it went away.
+- **System:** every run with SSE_ENABLED = true. `advance_stellar_evolution` runs once per interval.
+- **Measured (3e15078, 4 A100 ranks, 1e6 f = 0.1, per call):**
+  - serial `SSEContext::evolve` loop over all stars on every rank: 9.1 s (9 us per star; evolve re-integrates the
+    track from age 0);
+  - E_sse from PE(before) - PE(after): two full unsoftened triangle sums, replicated on every rank, 2 x 2.7 s;
+  - host mirrors and copies back: 0.03 s.
+
+  Only 4179 of 1e6 stars (0.4 %) change mass per interval. At 1e4 and 1e5 it was 0.10 s and 0.98 s, almost all in
+  the loop.
+- **Fix:**
+  - (a) The evolve loop runs as a Kokkos host-parallel for. With MPI each rank takes a contiguous slice and the
+    results are allgathered (MPI_BYTE). evolve is a pure const function, so every rank applies the same bits.
+  - (b) The potential change comes from the touched stars T alone:
+    dU = -G sum_{i in T} d_i sum_{j != i} mbar_j / r_ij, with d = m' - m and mbar = (m + m') / 2. This is exact,
+    because m'_i m'_j - m_i m_j = d_i mbar_j + mbar_i d_j, so there is no T x T pair term. It costs |T| N pairs on
+    the device. Each rank sums a slice of T; the per-star terms are allreduced (one nonzero term each, so the sum is
+    exact) and added in T order, giving the same bits for any rank count. Nothing cancels between two O(|U|) sums.
+  - (c) New profiler bucket "Stellar evolution".
+
+  The physics is unchanged: every star is still evolved every interval. FROST-CLUSTERS I (arXiv 2403.10602, "Interfacing SEVN with BIFROST") instead evolves
+  each star only at its own SEVN step and freezes stars below 2.2 Msun. That would change the dynamics (radii), so it
+  was not adopted.
+- **Test:** `sse_books` (NATAL_MIX, winds + 89 NS + 27 BH). With NBODY_SSE_CHECK (debug) the booked dU is compared
+  with the difference of two full triangle sums, to 1.8e-15 |U| (the reference's own round-off). It also checks
+  max |dE/E| with E_sse at 5.7e-9 and the presence of the timer. It fails before the fix (no check rows, no timer).
+  `rankcount_natal_kicks` (1 vs 2 ranks) stays bit-identical.
+- **Dynamics:** bit-identical to 3e15078. NATAL_MIX and NATAL_NS dumps are identical on the host at 1 and 4 threads.
+  In the GPU runs the per-interval |dE/E| rows agree to the 6th digit (only E_sse round-off differs).
+- **Interval wall time** (4 A100, f = 0.1, 12 intervals, median, base -> new): 1e4 0.476 -> 0.387 s, 1e5 3.94 ->
+  3.03 s, 1e6 41.8 -> 27.4 s. "Stellar evolution" is 0.009 / 0.031 / 0.24 s per call; at 1e6, 0.05 s of that is
+  MPI.
+
 ## Verified building blocks (checked against an independent derivation, no bug found)
 
 | Building block | Check | Result | Test |
