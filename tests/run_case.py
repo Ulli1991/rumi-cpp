@@ -47,6 +47,7 @@ SPIN_IMBH = dict(TEST_CASE="plummer", INTEGRATOR="hhs", TOTAL_TIME_MYR="2e-3", D
                  ADD_IMBH="true", IMBH_M1="500", IMBH_M2="500", IMBH_A_PC="2e-5", IMBH_E="0.5", IMBH_SPIN="0.9",
                  PRINT_INTERVAL="5", PROFILING="false")
 # 2000 Kroupa stars, 10 % primordial binaries (a = 0.1-100 AU, thermal e), two 1e-3 Myr steps
+CMV_RECOIL_DE = 9.4e-14   # cmv_recoil_remnant: 7.19e-14 measured (host build; 3.44e-9 before the fix)
 WEAK_SPLIT_GBS = 1000     # weak_split_bh_binary: 0 measured (3.3M without the split)
 WEAK_SPLIT_DE = 1.23e-11  # weak_split_bh_binary: 9.43e-12 measured (host build; 1.35e-11 without the split)
 WEAK_SPLIT_DL = 3.6e-13   # weak_split_bh_binary: 2.76e-13 measured (secular PN of C9); 1.31e-14 before was one lucky
@@ -555,6 +556,21 @@ def weak_split_bh_binary(exe):
     ok &= check("weak split: LogH GBS steps", gbs, WEAK_SPLIT_GBS)
     ok &= check("weak split: max|dE/E|", max(r[0] for r in rows), WEAK_SPLIT_DE)
     return ok & check("weak split: max|dL/L|", max(r[2] for r in rows), WEAK_SPLIT_DL)
+
+
+def cmv_recoil_remnant(exe):
+    """A BH-BH binary coalesces (GW_COAL, per-level merger) at the start of the interval and the remnant gets a 110 km/s
+    recoil. With FLYBY_CM_VELOCITY the progenitors carried the c.o.m. fly-by step (slow set at depth 0): the remnant
+    must get a step of its own, not cross 0.1 pc in one step of the slow set (CASES C13: |dE/E| 3.4e-9 without)."""
+    cfg = dict(TEST_CASE="particle_file", IC_FILE=str(Path(__file__).parent / "data" / "cmv_recoil_remnant.txt"),
+               TOTAL_TIME_MYR="1.0e-3", DT_MAX_MYR="1.0e-3", DT_MIN_MYR="1.0e-14", ETA="0", ETA_GRAD="0.2",
+               ETA_JERK="0", ETA_RESTART="1e-8", FLYBY_CM_EPS="1e-11", NGB_MASS_SCALING="true", SERIAL_N2_GPU="16384",
+               TREE_THRESHOLD="100000", TREE_THETA="0.7", SDAR="true", COLLISIONAL="true", PN_ORDER="31",
+               SSE_ENABLED="false", PRINT_INTERVAL="1", PROFILING="false", FLYBY_CM_VELOCITY="true",
+               E_REF="423541907.8055117", NGB_MREF="0.4034228975375781")
+    out = run_output(exe, cfg)
+    ok = check("recoil remnant: GW coalescences", len(re.findall(r"GW_COAL", out)), 1, lower=True)
+    return ok & check("recoil remnant: max|dE/E|", max(r[0] for r in diagnostics(out)), CMV_RECOIL_DE)
 
 
 def pn_bh_only(exe):
@@ -1653,6 +1669,7 @@ CASES = {
     "flyby_group_floor": lambda exe: flyby_group_floor(exe),
     # WEAK_SPLIT_GAMMA: the 200k seed-3 stall (scripts/cutout.py of stall step 48), split binary + field star
     "weak_split_bh_binary": lambda exe: weak_split_bh_binary(exe),
+    "cmv_recoil_remnant": lambda exe: cmv_recoil_remnant(exe),
     # PN_BH_ONLY false: the PN binaries of massive stars give the LogH calls the two paths are compared on
     "cm_eps_cpu_vs_device": lambda exe: paths_same_steps(exe, "fly-by step with tidal sampling",
                                                          dict(BINARIES, FLYBY_CM_EPS="1e-11", PN_ORDER="31",

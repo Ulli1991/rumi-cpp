@@ -3124,7 +3124,13 @@ static int hhs_fsi_recursive_impl(
     // BIFROST Section 3.5: fresh neighbor search + detection, then timestep
     bool forces_valid = false;
     bool tree_built_for_subset = false;
-    if (!dt_valid && count > 1) {
+    // A merger detected below (per-level, BIFROST sec. 3.14) leaves the remnant with the time step of its progenitors
+    // although its mass and velocity changed (GW recoil kick, up to ~1e3 km/s): the set's neighbours, subsystems and
+    // time steps are computed again with the remnant. With FLYBY_CM_VELOCITY the progenitors' step is the c.o.m.
+    // fly-by step (slow set), and a kicked remnant crossed 0.1 pc in one step of the slow set (200k seed 21 step 38:
+    // dE/E -1.55e-9, docs/CASES.md C13); with component velocities it was the fast set's, recomputed one depth down.
+    for (int dt_pass = 0; !dt_valid && count > 1; dt_pass++) {
+        bool merged_here = false;
 #ifdef ENABLE_COLLISIONAL
         // Step 1: Standalone neighbor search + detection (before timestep)
         if (p.collisional) {
@@ -3394,6 +3400,7 @@ static int hhs_fsi_recursive_impl(
                 }
                 g_subsystem_mgr.step_mergers += (int)mergers.size();
                 if (!mergers.empty()) {
+                    merged_here = true;
                     // Compaction of this range only; the tail shifts down, which callers see as a shorter range
                     int k = compact_zero_mass_range(p, start, count);
                     sync_after_removal(p, dp);
@@ -3411,6 +3418,7 @@ static int hhs_fsi_recursive_impl(
             g_profiler.stop(StepProfiler::SUBSYSTEM_DT);
         }
 #endif
+        if (!merged_here || dt_pass >= 3) break;
     }
 
 #ifdef ENABLE_COLLISIONAL
