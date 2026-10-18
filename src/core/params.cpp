@@ -285,6 +285,7 @@ const std::vector<DebugEnvSpec> kDebugEnv = {
     {"NBODY_FORCE_ERR_MIN", "=n: smallest HHS set that gets NBODY_FORCE_ERR (default 16384)"},
     {"NBODY_FORCE_ERR_MODEL", "=random (default; eps |a_i| times an isotropic unit vector per particle and call) / frozen (the same vector per particle at every call) / smooth (eps a_rms times a random linear field in position over the set, per call)"},
     {"NBODY_MERGE_CHECK", "=1: total energy and books before and after each per-level merger (merger energy booking check)"},
+    {"NBODY_SSE_CHECK", "=1: runtime SSE potential change booked against two full triangle sums (SSE energy booking check)"},
     {"NBODY_LEAN_SYNC", "=0: keep every device fence of the original code (default on: lean copies, bit-identical)"},
     {"NBODY_DUMP", "Particle state at each print to dump_<step>.bin"},
     {"NBODY_DUMP_DT", "=n: pid, dt_adapt, grad_mag, ax of the set after the time-step criteria, first n calls"},

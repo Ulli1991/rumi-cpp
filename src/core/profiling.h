@@ -44,6 +44,7 @@ struct StepProfiler {
         ENERGY_CHECK,
         PACK_DATA,
         CPU_PATH,
+        STELLAR_EVOL,   // runtime SSE (advance_stellar_evolution): evolve, books, copies
         NUM_TIMERS
     };
 
@@ -63,7 +64,8 @@ struct StepProfiler {
             "Subsystem bookkeep",
             "Energy check",
             "Pack data",
-            "CPU small-set path"
+            "CPU small-set path",
+            "Stellar evolution"
         };
         return names[i];
     }

@@ -1068,6 +1068,20 @@ def natal_kicks_ns(exe, label, cfg, bound):
     return ok & check(f"{label} SSE_NATAL_KICKS = none: NSs formed", none.count(" 500 type changes"), 2, lower=True)
 
 
+def sse_books(exe, label, cfg, rel_bound, dE_bound):
+    """Runtime SSE energy booking: the potential change of each SSE call, booked from the touched stars alone
+    (runtime_sse.cpp potential_change), against the difference of two full triangle sums (NBODY_SSE_CHECK), to
+    round-off of |U|; E with the E_sse sink conserved; the SSE time in its own profiler bucket "Stellar evolution"
+    (before 2026-10-18 it was the unprofiled "Other", 32 % of an interval at N = 1e6)."""
+    out = run_output(exe, dict(cfg, PROFILING="true"), env={"NBODY_SSE_CHECK": "1"})
+    rel = [abs(float(v)) for v in re.findall(r"^SSE_CHECK .* rel (\S+)$", out, re.M)]
+    ok = check(f"{label} SSE calls checked", len(rel), 50, lower=True)
+    ok &= check(f"{label} max |dU_booked - dU_full| / |U|", max(rel, default=1.0), rel_bound)
+    ok &= check(f"{label} max|dE/E| with E_sse", max(r[0] for r in diagnostics(out)), dE_bound)
+    return ok & check(f"{label} 'Stellar evolution' profiler rows", len(re.findall(r"^\s+Stellar evolution\s", out, re.M)),
+                      1, lower=True)
+
+
 def natal_kicks_fallback(exe, label, cfg, bound):
     """Fallback scaling (Banerjee et al. 2020 eq. 1; Fryer et al. 2012 rapid f_fb): direct-collapse BHs (f_fb = 1)
     exactly unkicked; BHs with partial fallback kicked; <|v|/(1 - f_fb)> of all non-ECSN NSs and BHs = 423 km/s
@@ -1765,6 +1779,11 @@ CASES = {
     # of them, <n_k> up to 0.86)
     "natal_kicks_ns": lambda exe: natal_kicks_ns(exe, "500 NSs", NATAL_NS, 5.6e-9),
     "natal_kicks_fallback": lambda exe: natal_kicks_fallback(exe, "rapid + ECSN", NATAL_MIX, 1.25e-8),
+    # Runtime SSE booking (2026-10-18, potential change from the touched stars, C13): max |dU - dU_full| / |U| measured
+    # 1.82e-15 / 1.38e-15 / 6.6e-16 / 3.7e-16 at 1 / 2 / 4 / 8 host threads, 3.6e-16 on an A100 (the round-off of the
+    # reference's two full sums, which depends on the summation order); max |dE/E| 5.67e-9 host, 4.36e-9 A100.
+    # Bounds 1.3x. Fails before C13: no SSE_CHECK rows and no "Stellar evolution" timer
+    "sse_books": lambda exe: sse_books(exe, "winds + SNe", NATAL_MIX, 2.4e-15, 7.4e-9),
     "coll_tde_accretion": lambda exe: tde_accretion(exe, "TDE accretion fraction", COLL_TDE),
     "coll_tde_parabolic": lambda exe: subsys_collision(exe, "TDE, parabolic", COLL_TDE, "TDE", 1.5e-12),
     # 1.32e-14 measured (C11: the GW angular momentum of the secular triple booked, the energy fix through a_out and

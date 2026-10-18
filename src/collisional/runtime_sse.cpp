@@ -3,11 +3,18 @@
 #include "constants.h"
 #include "diagnostics.h"
 #include "collisional_config.h"
+#include "mpi_comm.h"
+#include "profiling.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
+#include <type_traits>
 #include <vector>
+#ifdef USE_MPI
+#include <mpi.h>
+#endif
 
 // ============================================================================
 // Natal kicks of new neutron stars and black holes: the "standard, fallback-controlled" kick of Banerjee et al. 2020
@@ -53,13 +60,69 @@ void natal_kick(int pid, int seed, int kw_new, double fbfac, bool ecsn, double d
     dv[1] = scale * r1 * std::sin(two_pi * u[1]);
     dv[2] = scale * r2 * std::cos(two_pi * u[3]);
 }
+
+// Potential-energy change of a mass update m -> m' that touches the stars T (d_i = m'_i - m_i, zero elsewhere):
+//   U' - U = -G sum_{i<j} (m'_i m'_j - m_i m_j) / r_ij,   m'_i m'_j - m_i m_j = d_i mbar_j + mbar_i d_j  (exact),
+// mbar = (m + m') / 2, hence
+//   dU = -G sum_{i in T} d_i sum_{j != i} mbar_j / r_ij,
+// one pass over T x N instead of two full triangles (N^2), and no cancellation of two O(|U|) sums. Each rank sums a
+// contiguous slice of T on its device; the per-star terms are allreduced (one nonzero contribution per entry, so the
+// reduction is exact) and added on the host in T order: every rank count gives the same bits. Unsoftened, as the
+// energy books (E_sse) always were.
+double potential_change(const Particles& p, const std::vector<int>& touched, const std::vector<double>& d,
+                        const std::vector<double>& mbar_t, double G) {
+    const int nT = (int)touched.size(), N = p.N;
+    if (nT == 0) return 0.0;
+    int k0 = 0, k1 = nT;
+#ifdef USE_MPI
+    const int n_ranks = MPIComm::size(), r = MPIComm::rank();
+    if (n_ranks > 1) { k0 = (int)((long long)r * nT / n_ranks); k1 = (int)((long long)(r + 1) * nT / n_ranks); }
+#endif
+    std::vector<double> term(nT, 0.0);
+    if (k1 > k0) {
+        Kokkos::View<int*> idx("sse_du_idx", nT);
+        Kokkos::View<double*> mbt("sse_du_mbt", nT), out("sse_du_out", k1 - k0);
+        Kokkos::deep_copy(idx, Kokkos::View<const int*, Kokkos::HostSpace, Kokkos::MemoryUnmanaged>(touched.data(), nT));
+        Kokkos::deep_copy(mbt, Kokkos::View<const double*, Kokkos::HostSpace, Kokkos::MemoryUnmanaged>(mbar_t.data(), nT));
+        Kokkos::View<double*> mbar("sse_du_mbar", N);
+        Kokkos::deep_copy(mbar, Kokkos::subview(p.mass, std::make_pair(0, N)));   // the new masses (views hold capacity >= N)
+        Kokkos::parallel_for("sse_du_mbar_set", nT, KOKKOS_LAMBDA(int k) { mbar(idx(k)) = mbt(k); });
+        auto px = p.x; auto py = p.y; auto pz = p.z;
+        using team_policy = Kokkos::TeamPolicy<>;
+        using member_type = team_policy::member_type;
+        Kokkos::parallel_for("sse_du", team_policy(k1 - k0, Kokkos::AUTO),
+            KOKKOS_LAMBDA(const member_type& team) {
+                const int i = idx(k0 + team.league_rank());
+                const double xi = px(i), yi = py(i), zi = pz(i);
+                double phi = 0.0;
+                Kokkos::parallel_reduce(Kokkos::TeamThreadRange(team, N), [&](int j, double& s) {
+                    if (j == i) return;
+                    const double dx = px(j) - xi, dy = py(j) - yi, dz = pz(j) - zi;
+                    s += mbar(j) * fast_rsqrt(dx*dx + dy*dy + dz*dz);
+                }, phi);
+                Kokkos::single(Kokkos::PerTeam(team), [&]() { out(team.league_rank()) = phi; });
+            });
+        auto h_out = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), out);
+        for (int k = k0; k < k1; k++) term[k] = -G * d[k] * h_out(k - k0);
+    }
+#ifdef USE_MPI
+    if (n_ranks > 1) MPI_Allreduce(MPI_IN_PLACE, term.data(), nT, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+#endif
+    double dU = 0.0;
+    for (double t : term) dU += t;
+    return dU;
+}
 }  // namespace
 
 void advance_stellar_evolution(Particles& p, SSEContext& sse, double dt_myr,
                                 EnergyBookkeeping& books, double G) {
     if (dt_myr <= 0.0) return;
+    g_profiler.start(StepProfiler::STELLAR_EVOL);
 
     int N = p.N;
+    // NBODY_SSE_CHECK (debug): the booked potential change against the difference of two full triangle sums
+    static const bool sse_check = std::getenv("NBODY_SSE_CHECK") != nullptr;
+    const double PE_ref0 = sse_check ? compute_potential_energy_tiled(p, G, 0.0, 0, N) : 0.0;
     auto h_x     = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.x);
     auto h_y     = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.y);
     auto h_z     = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.z);
@@ -77,37 +140,62 @@ void advance_stellar_evolution(Particles& p, SSEContext& sse, double dt_myr,
     auto h_cmass = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.core_mass);
     auto h_pid   = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.particle_id);
 
+    // The SSE evaluations, in parallel on the host threads: SSEContext::evolve is a const, pure function of
+    // (m_zams, age) (it re-integrates the track from age 0), so each star's result does not depend on the thread
+    // count. Before 2026-10-18 this loop was serial on every rank (9.1 s per call at N = 1e6, 9 us per star) and, with
+    // the two replicated full potential-energy sums below (2 x 2.7 s on an A100), made the unprofiled "Other" 32 % of
+    // an interval at N = 1e6 (fig7-2026-10-17 rerun; docs/CASES.md C13)
+    std::vector<int> evo;
+    evo.reserve(N);
+    for (int i = 0; i < N; i++)
+        if (h_stype(i) < 10) evo.push_back(i);   // remnants (WD=10-12, NS=13, BH=14, massless=15) are not evolved
+    // With MPI (particles replicated) each rank evaluates a contiguous slice and the results are allgathered, so every
+    // rank applies the same results (SSEResult is trivially copyable; byte counts fit an int up to ~3.8e7 stars)
+    const int n_evo = (int)evo.size();
+    int e0 = 0, e1 = n_evo;
+#ifdef USE_MPI
+    const int n_ranks = MPIComm::size(), my_rank = MPIComm::rank();
+    auto slice = [&](int r) { return (int)((long long)r * n_evo / n_ranks); };
+    if (n_ranks > 1) { e0 = slice(my_rank); e1 = slice(my_rank + 1); }
+#endif
+    std::vector<SSEResult> evo_res(n_evo);
+    Kokkos::parallel_for("sse_evolve", Kokkos::RangePolicy<Kokkos::DefaultHostExecutionSpace>(e0, e1),
+                         [&](int k) { const int i = evo[k]; evo_res[k] = sse.evolve(h_mzams(i), h_sage(i) + dt_myr); });
+    Kokkos::DefaultHostExecutionSpace().fence();
+#ifdef USE_MPI
+    if (n_ranks > 1) {
+        static_assert(std::is_trivially_copyable<SSEResult>::value, "SSEResult is sent as bytes");
+        std::vector<int> cnt(n_ranks), dsp(n_ranks);
+        for (int r = 0; r < n_ranks; r++) {
+            dsp[r] = slice(r) * (int)sizeof(SSEResult);
+            cnt[r] = (slice(r + 1) - slice(r)) * (int)sizeof(SSEResult);
+        }
+        g_profiler.mpi_start();
+        MPI_Allgatherv(MPI_IN_PLACE, 0, MPI_DATATYPE_NULL, evo_res.data(), cnt.data(), dsp.data(), MPI_BYTE,
+                       MPI_COMM_WORLD);
+        g_profiler.mpi_stop();
+    }
+#endif
+
     bool changed = false;
     double total_dm = 0;
     int n_type_change = 0;
     // State before the update, for the exact energy, momentum and angular momentum sinks
     std::vector<int> touched;
     std::vector<double> m_before, v_before;
-    double PE_before = 0.0;
 
-    for (int i = 0; i < N; i++) {
+    for (size_t k = 0; k < evo.size(); k++) {
+        const int i = evo[k];
         int kw = h_stype(i);
-
-        // Skip remnants (WD=10-12, NS=13, BH=14, massless=15)
-        if (kw >= 10) continue;
-
-        double m_zams = h_mzams(i);
         double age_old = h_sage(i);
         double m_old = h_m(i);
         double age_new = age_old + dt_myr;
-
-        // Evolve using SSE fitting formulae
-        SSEResult res = sse.evolve(m_zams, age_new);
+        const SSEResult& res = evo_res[k];
 
         // Mass loss
         double dm = m_old - res.mass;
         if (dm > 0) total_dm += dm;
         if (dm != 0.0 || res.kw != kw) {
-            // PE before the first change: on a host build the mirrors ARE the particle views, so the masses of p
-            // change with h_m below. Before 2026-10-12 PE_before was taken after the loop: on host builds it already
-            // saw the new masses and E_sse missed the potential-energy change (|dE/E| 1.4e-3 per 1 Myr of winds
-            // in a 500-star cluster of 12 Msun stars, 2 after their supernovae); GPU builds were right
-            if (touched.empty()) PE_before = compute_potential_energy_tiled(p, G, 0.0, 0, N);
             touched.push_back(i);
             m_before.push_back(m_old);
             v_before.insert(v_before.end(), {h_vx(i), h_vy(i), h_vz(i)});
@@ -141,11 +229,12 @@ void advance_stellar_evolution(Particles& p, SSEContext& sse, double dt_myr,
         changed = true;
     }
 
-    if (!changed) return;
+    if (!changed) { g_profiler.stop(StepProfiler::STELLAR_EVOL); return; }
 
     // Exact sinks: E_sse = E(before) - E(after) with the potential of every pair, so E_total + sinks is
     // conserved through winds and natal kicks; P and L carried off by the lost mass (and the kick recoil)
     double KE_change = 0.0;
+    std::vector<double> dmass(touched.size()), mbar_t(touched.size());
     for (size_t k = 0; k < touched.size(); k++) {
         int i = touched[k];
         const double* vb = &v_before[3 * k];
@@ -154,6 +243,8 @@ void advance_stellar_evolution(Particles& p, SSEContext& sse, double dt_myr,
                    - 0.5 * m_before[k] * (vb[0]*vb[0] + vb[1]*vb[1] + vb[2]*vb[2]);
         books.sink_PL(m_before[k], r, vb);
         books.sink_PL(h_m(i), r, va, -1.0);
+        dmass[k] = h_m(i) - m_before[k];
+        mbar_t[k] = 0.5 * (h_m(i) + m_before[k]);
     }
 
     // Copy back to device
@@ -162,17 +253,28 @@ void advance_stellar_evolution(Particles& p, SSEContext& sse, double dt_myr,
     Kokkos::deep_copy(p.vy, h_vy);
     Kokkos::deep_copy(p.vz, h_vz);
     p.zero_kick_compensation();   // kicked velocities are new
-    if (!touched.empty())
-        books.E_sse += -KE_change + PE_before - compute_potential_energy_tiled(p, G, 0.0, 0, N);
+    // Potential change from the touched stars only (potential_change above), on the devices of all ranks. Before
+    // 2026-10-18: PE(before) - PE(after) from two full O(N^2) triangle sums, replicated on every rank and carrying
+    // the round-off of two O(|U|) sums
+    if (!touched.empty()) {
+        const double dU = potential_change(p, touched, dmass, mbar_t, G);
+        books.E_sse += -KE_change - dU;
+        if (sse_check && MPIComm::rank() == 0) {
+            const double full = compute_potential_energy_tiled(p, G, 0.0, 0, N) - PE_ref0;
+            std::printf("SSE_CHECK touched %zu dU %.17g full %.17g rel %.3e\n", touched.size(), dU, full,
+                        (dU - full) / std::fabs(PE_ref0));
+        }
+    }
     Kokkos::deep_copy(p.stellar_type, h_stype);
     Kokkos::deep_copy(p.stellar_age, h_sage);
     Kokkos::deep_copy(p.core_mass, h_cmass);
     Kokkos::deep_copy(p.stellar_radius, h_srad);
     Kokkos::deep_copy(p.luminosity, h_lum);
     StellarPropsCache::get().invalidate();   // types and radii changed
+    g_profiler.stop(StepProfiler::STELLAR_EVOL);
 
     if (total_dm > 0 || n_type_change > 0) {
-        std::printf("SSE: dm_total=%.4e M_sun, %d type changes, E_sse=%.4e\n",
-                    total_dm, n_type_change, books.E_sse);
+        std::printf("SSE: dm_total=%.4e M_sun, %d type changes, %zu stars changed mass, E_sse=%.4e\n",
+                    total_dm, n_type_change, touched.size(), books.E_sse);
     }
 }
