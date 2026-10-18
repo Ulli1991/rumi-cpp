@@ -467,12 +467,22 @@ def force_err(exe, label, cfg, ratio):
     ok &= check(f"{label} eps = 0: particles differ (0 = identical)", float(dump0 != dump1), 0)
     base = max(r[0] for r in diagnostics(out0))
     dp0 = max(r[1] for r in diagnostics(out0))
-    for model in ("random", "frozen", "smooth", "cell", "random_pfix"):
+    dl0 = max(r[2] for r in diagnostics(out0))
+    for model in ("random", "frozen", "smooth", "cell", "random_pfix", "cell_lfix"):
         env = {"NBODY_FORCE_ERR": "1e-3", "NBODY_FORCE_ERR_MIN": "256", "NBODY_FORCE_ERR_MODEL": model.split("_")[0]}
         if model.endswith("_pfix"):
             env["NBODY_FORCE_ERR_PFIX"] = "1"
+        if model.endswith("_lfix"):
+            env["NBODY_FORCE_ERR_LFIX"] = "1"
         out = run_output(exe, cfg, env=env)
-        if model in ("smooth", "cell", "random_pfix"):   # momentum-conserving models: |dP| stays at round-off
+        if model in ("cell", "cell_lfix"):   # the cell errors torque the cluster; LFIX removes the torque
+            dl = max(r[2] for r in diagnostics(out))
+            print(f"   {model}: max|dL/L| {dl:.3e} (no errors {dl0:.3e})")
+            if model == "cell":
+                ok &= check(f"{label} {model}: max|dL/L| / unperturbed", dl / max(dl0, 1e-300), 1000.0, lower=True)
+            else:
+                ok &= check(f"{label} {model}: max|dL/L| / unperturbed", dl / max(dl0, 1e-300), 100.0)
+        if model in ("smooth", "cell", "random_pfix", "cell_lfix"):   # momentum-conserving models: |dP| stays at round-off
             dp = max(r[1] for r in diagnostics(out))
             print(f"   {model}: max|dP|/M {dp:.3e} (no errors {dp0:.3e})")
             ok &= check(f"{label} {model}: max|dP|/M / unperturbed", dp / max(dp0, 1e-300), 100.0)
