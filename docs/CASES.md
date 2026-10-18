@@ -367,6 +367,22 @@ Status: **closed** (fixed, test, ensemble checked), **option** (fix kept as an o
   3.03 s, 1e6 41.8 -> 27.4 s. "Stellar evolution" is 0.009 / 0.031 / 0.24 s per call; at 1e6, 0.05 s of that is
   MPI.
 
+## C14 Merger remnant keeps its progenitors' time step (GW recoil unresolved with FLYBY_CM_VELOCITY) (closed)
+
+- **Found by:** the C5 A/B with FLYBY_CM_VELOCITY (tidfloor-2026-10-17): energy jumps exactly on BH-BH GW_COAL
+  steps, ledger "merger inside": 200k seed 21 step 38 dE/E -1.55e-9; same coalescences without a jump when cmv is off.
+- **Cause:** a merger detected in the time-step block left the remnant with its progenitors' time step although its
+  mass and velocity changed (GW recoil ~110 km/s). With cmv that step is the binary's c.o.m. fly-by step (slow set,
+  depth 0, 1e-3 Myr): the remnant crossed 0.1 pc in one unresolved step. Without cmv the members' internal steps were
+  tiny, so the remnant landed in the fast set and was re-timed by chance. The merger booking itself was exact.
+- **Fix (0a3ff1d):** after a merger at a level the set's neighbours, subsystems and time steps are computed again
+  (a few times per run). Test `cmv_recoil_remnant` (79 bodies cut out of s21 stall_38): |dE/E| 3.44e-9 -> 7.19e-14.
+- **A/B (200k, 61 steps, final |dE/E|; cmvcoal-2026-10-18):** cmv on, main -> fix: s3 2.7e-11 -> 2.0e-11, s7 4.0e-10
+  -> 4.0e-10, s13 timeout at 59 both, s21 1.6e-9 -> 2.7e-11, s42 4.2e-11 -> 5.6e-11. cmv off, main -> fix (not
+  bit-identical: remnants re-timed): s3 8.6e-12 -> 3.1e-14, s7 5.2e-12 -> 7.5e-12, s13 6.6e-11 -> 6.6e-11, s21
+  3.2e-11 -> 1.8e-10, s42 3.1e-11 -> 2.5e-11. Merged as a correctness fix (user decision 2026-10-18) despite s21.
+- **Open:** cmv stays off: s7 (C5-type jump at step 1, 77x base) and s3/s42 (1.8-2.3x) still fail the energy rule.
+
 ## Verified building blocks (checked against an independent derivation, no bug found)
 
 | Building block | Check | Result | Test |
