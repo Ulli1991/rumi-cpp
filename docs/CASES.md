@@ -383,6 +383,29 @@ Status: **closed** (fixed, test, ensemble checked), **option** (fix kept as an o
   3.2e-11 -> 1.8e-10, s42 3.1e-11 -> 2.5e-11. Merged as a correctness fix (user decision 2026-10-18) despite s21.
 - **Open:** cmv stays off: s7 (C5-type jump at step 1, 77x base) and s3/s42 (1.8-2.3x) still fail the energy rule.
 
+## C19 Near-radial BH binary in the secular PN path: unbooked dE ~1e-3 E0 (open)
+
+- **Found by:** the FMM force-error gate (ferr-gate-2026-10-18, 1e6 f0.1 seed 42, SSE off, 4 GPUs, binary 3c7c8b9).
+  Two runs whose trajectories the injected far-field errors had nudged (NBODY_FORCE_ERR cell 1e-5 and 1e-7) reached
+  the same BH binary, pids 353706 + 888286 (14.69 + 28.26 Msun, kw 14), a = 1.72-1.80e-5 pc (3.6 AU), e = 0.99933-
+  0.99936, r_p ~ 2800 R_S, P = 1.1 yr, and logged `SUBSYS_ERR secular_pn dE/E0` 7.3e-4 / 2.8e-3 (cell 1e-5, step 15,
+  dt 3.1e-5 / 1.6e-5 Myr) and 1.4e-3 / 1.25e-3 (cell 1e-7, step 25, dt 7.8e-6 Myr). That is 2-6x the binary's
+  whole binding energy (E_bin ~ 4.5e-4 |E0|), while its GW loss over such a step is ~7e-5 E_bin (t_GW 4.6e5 yr).
+- **Effect:** cell 1e-7: the restart loop recovered (RESTART[1], [2], then r_ngb 1.32e-3 changed the path).
+  Cell 1e-5: the retry was worse (2.8e-3), so "dE not decreasing" accepted 7.27e-4: |dE/E| 3e-10 -> 7.3e-4 in one
+  step. Unrelated to the injected forces (their own effect is < 1e-10 per interval); any run can reach this state.
+- **Isolated replay** (`scripts/subsys_cases.py`, the logged state, one interval): 1.5e-16, does not reproduce
+  (lesson 3: state-dependent).
+- **Ledger on the run's state:** rerun with STALL_RESTART = true reproduces it bit-identically and keeps
+  `/raven/ptmp/uli/cpp-nbody-runs/ferr-gate-2026-10-18/runs/cap_m42_c1e-5/stall_15.h5`; the one-step replay
+  without any injected error (`ledger/cap_m42_c1e-5_s15`, NBODY_ELEDGER) gives root 7.256e-4 = own error of one depth-3
+  call, class **booking:secular binaries**: `sub dE_int 7.256e-4 type 0 n 2 secular 1 pids 353706 888286` (PN path),
+  every other secular binary < 7e-6 and cancelling in pairs. So the secular PN advance of this binary changes its
+  members' T + U by ~1.6 E_bin without booking it. Suspects: the C9 fixed-point reshape at j = sqrt(1 - e^2) = 0.036,
+  or the 1PN phase offset near pericentre (v_p/c ~ 0.02, Newtonian T at pericentre ~ 3000 E_bin: an O(x) phase
+  error moves the Newtonian energy by ~E_bin) with E_gw booked from elements instead of the state (lesson 1).
+- **Next:** cut-out test from stall_15.h5 (the binary plus its neighbours, parent E_REF), then fix and A/B.
+
 ## Verified building blocks (checked against an independent derivation, no bug found)
 
 | Building block | Check | Result | Test |
