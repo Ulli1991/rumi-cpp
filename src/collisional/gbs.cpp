@@ -32,16 +32,44 @@ struct GbsStats {
 } g_gbs_stats;
 }  // namespace
 
-// Midpoint results of stages k0..k1 into tab.table[] on the host threads, the largest stage handed out first
+// Midpoint results of stages k0..k1 into tab.table[] on the host threads. The stages (cost ~ substeps) go largest
+// first to the least loaded of n_thr threads (LPT), n_thr the fewest that keep every thread at or below the largest
+// stage (the critical path; 3 for stages 0..4 of 2,4,6,8,12), with a static schedule. The dynamic schedule over all
+// host threads it replaced cost as much work-sharing time as the stages of a 2-body PN step (perf, fig7 1e4 / 1e5:
+// gomp_iter_dynamic_next, work_share_start); a team of n_thr threads only (omp num_threads) was slower still on
+// mixed batches (the team size alternates with the full-team subsystem batches). Each stage is computed exactly as
+// before: same result
 void GBSIntegrator::compute_stages(const LogHState& state, int k0, int k1, double ds, double G,
                                    double c_code, int pn_order, const LogHStepStart* start) {
-    using Policy = Kokkos::RangePolicy<Kokkos::DefaultHostExecutionSpace, Kokkos::Schedule<Kokkos::Dynamic>>;
-    Kokkos::parallel_for("gbs_stages", Policy(0, k1 - k0 + 1).set_chunk_size(1), [&](int i) {
-        const int k = k1 - i;
+    auto one = [&](int k) {
         LogHState result;   // midpoint copies state into it
         gbs_midpoint(state, result, seq()[k], ds, G, c_code, pn_order, start);
         int d = 0;
         gbs_pack_state(result, tab.table[k], d);
+    };
+    const int t_max = std::min(k1 - k0 + 1, Kokkos::DefaultHostExecutionSpace().concurrency());
+    int owner[MAX_STAGES], n_thr = 1;
+    for (; n_thr <= t_max; n_thr++) {
+        int load[MAX_STAGES] = {};
+        bool fits = true;
+        for (int k = k1; k >= k0; k--) {   // seq() increases with k: largest first
+            int t = 0;
+            for (int u = 1; u < n_thr; u++)
+                if (load[u] < load[t]) t = u;
+            load[t] += seq()[k];
+            owner[k] = t;
+            if (load[t] > seq()[k1]) fits = false;
+        }
+        if (fits || n_thr == t_max) break;
+    }
+    if (n_thr <= 1) {
+        for (int k = k1; k >= k0; k--) one(k);
+        return;
+    }
+    using Policy = Kokkos::RangePolicy<Kokkos::DefaultHostExecutionSpace, Kokkos::Schedule<Kokkos::Static>>;
+    Kokkos::parallel_for("gbs_stages", Policy(0, n_thr).set_chunk_size(1), [&](int t) {
+        for (int k = k1; k >= k0; k--)
+            if (owner[k] == t) one(k);
     });
 }
 
