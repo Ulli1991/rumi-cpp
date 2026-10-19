@@ -755,6 +755,16 @@ void advance_subsystems_in_range_impl(Particles& p, int start, int count,
                 // with >= 1 orbit per step always has its pericentre inside: unchanged for the secular binaries).
                 // The margin covers the O(|1 - e|) of the near-parabolic pericentre time
                 if (rp < rc && (tau <= dt * (1.0 + 1e-5) || r_now < rc)) to_logh[sec_subs[q]] = 1;
+                // A PN binary whose pericentre is too relativistic for the Newtonian write-back of the secular step
+                // (secular_pn_peri_shift, CASES.md C19) goes to LogH as well
+                const double mA = h_m(ia), mB = h_m(ib);
+                if (g_subsystem_mgr.active[sec_subs[q]].n_bodies == 2 &&
+                    (g_collisional.pn_body(mA, kw_of(qa)) || g_collisional.pn_body(mB, kw_of(qb))) &&
+                    secular_pn_peri_shift(r, v, G * (mA + mB), mA * mB / ((mA + mB) * (mA + mB)), g_collisional.c_code,
+                                          g_collisional.pn_order) > SECULAR_PN_PERI_SHIFT_MAX) {
+                    if (!to_logh[sec_subs[q]]) g_subsystem_mgr.step_secular_peri_logh++;
+                    to_logh[sec_subs[q]] = 1;
+                }
             }
         }
     }
@@ -818,12 +828,17 @@ void advance_subsystems_in_range_impl(Particles& p, int start, int count,
             sec_pn[k] = pn_binary;
             const int pn_b = pn_binary ? g_collisional.pn_order : 0;
 
-            // GW energy bookkeeping (PN evolution only): energy radiated = E_orb_before - E_orb_after. Without PN
-            // the drift conserves E_orb exactly; booking its round-off as "GW" energy hid the drift's error from
-            // the energy check (and cost two element conversions per binary)
-            double r_rel_pre[3] = {p2[0]-p1[0], p2[1]-p1[1], p2[2]-p1[2]};
-            double v_rel_pre[3] = {v2[0]-v1[0], v2[1]-v1[1], v2[2]-v1[2]};
-            const double a_pre = pn_b ? cartesian_to_elements(r_rel_pre, v_rel_pre, mu_sec).a : 0.0;
+            // GW energy bookkeeping (PN evolution only): energy radiated = E_orb_before - E_orb_after, from the
+            // states (any sign of the orbital energy: 043190d-C19 booked it from a > 0 only, so an orbit written back
+            // unbound left its whole change unbooked). Without PN the drift conserves E_orb exactly; booking its
+            // round-off as "GW" energy hid the drift's error from the energy check
+            auto e_orb = [&](const double* q1, const double* w1, const double* q2, const double* w2) {
+                const double dr[3] = {q2[0]-q1[0], q2[1]-q1[1], q2[2]-q1[2]}, dv[3] = {w2[0]-w1[0], w2[1]-w1[1], w2[2]-w1[2]};
+                const double mred = m1_sec * m2_sec / (m1_sec + m2_sec);
+                return mred * (0.5 * (dv[0]*dv[0] + dv[1]*dv[1] + dv[2]*dv[2])
+                               - mu_sec / std::sqrt(dr[0]*dr[0] + dr[1]*dr[1] + dr[2]*dr[2]));
+            };
+            const double eorb_pre = pn_b ? e_orb(p1, v1, p2, v2) : 0.0;
 
             static const bool led_sec = std::getenv("NBODY_ELEDGER") != nullptr;
             const bool err_log = g_collisional.subsys_err_tol > 0.0 && g_collisional.e_ref > 0.0;
@@ -834,14 +849,13 @@ void advance_subsystems_in_range_impl(Particles& p, int start, int count,
                 for (int c = 0; c < 3; c++) { q[1 + c] = p1[c]; q[4 + c] = v1[c]; q[8 + c] = p2[c]; q[11 + c] = v2[c]; }
             }
             substeps[k] = integrate_secular_binary(p1, v1, m1_sec, p2, v2, m2_sec, G, g_collisional.c_code, pn_b, dt);
-
-            if (pn_b) {
-                double r_rel_post[3] = {p2[0]-p1[0], p2[1]-p1[1], p2[2]-p1[2]};
-                double v_rel_post[3] = {v2[0]-v1[0], v2[1]-v1[1], v2[2]-v1[2]};
-                const double a_post = cartesian_to_elements(r_rel_post, v_rel_post, mu_sec).a;
-                if (a_post > 0.0 && a_pre > 0.0)
-                    dE_gw[k] = -G * m1_sec * m2_sec / (2.0 * a_pre) + G * m1_sec * m2_sec / (2.0 * a_post);
+            if (substeps[k] < 0) {   // PN write-back not possible (C19): unchanged, integrated by LogH below
+                substeps[k] = 0;
+                evolved[k] = 0;
+                return;
             }
+
+            if (pn_b) dE_gw[k] = eorb_pre - e_orb(p1, v1, p2, v2);
             if (led_sec || err_log) sec_res[k] = pair_energy(m1_sec, p1, v1, m2_sec, p2, v2, G) - e_sec0 + dE_gw[k];
 
             // P and L moved by the evolution (Kepler motion and the CoM drift conserve both)
@@ -900,6 +914,14 @@ void advance_subsystems_in_range_impl(Particles& p, int start, int count,
                 (sk.orb.E_orb >= 0.0 || sk.n_orb_per_dt < g_collisional.n_orb_secular))
                 g_subsystem_mgr.step_kepler2++;
         }
+
+        // Pairs the secular write-back refused (integrate_secular_binary -1, members unchanged) go to LogH
+        for (int k = 0; k < n_sec; k++)
+            if (!evolved[k] && g_subsystem_mgr.safe_pid_to_idx(g_subsystem_mgr.active[secular_idx[k]].particle_ids[0]) >= 0 &&
+                g_subsystem_mgr.safe_pid_to_idx(g_subsystem_mgr.active[secular_idx[k]].particle_ids[1]) >= 0) {
+                logh_idx.push_back(secular_idx[k]);
+                g_subsystem_mgr.step_secular_peri_logh++;
+            }
 
         // Copy modified host subviews back to device
         mirror.push(p);

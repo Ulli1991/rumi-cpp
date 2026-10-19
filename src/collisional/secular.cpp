@@ -57,6 +57,22 @@ void secular_pn_eps_j(const double r[3], const double v[3], double Gm, double nu
     j = -2.0 * E * J2 / (Gm * Gm);
 }
 
+double secular_pn_peri_shift(const double r[3], const double v[3], double Gm, double nu, double c, int pn_order) {
+    const double rr = std::sqrt(r[0]*r[0] + r[1]*r[1] + r[2]*r[2]);
+    const double v2 = v[0]*v[0] + v[1]*v[1] + v[2]*v[2];
+    const double beta = 2.0 * Gm / rr - v2;   // Gm / a
+    const double h[3] = {r[1]*v[2] - r[2]*v[1], r[2]*v[0] - r[0]*v[2], r[0]*v[1] - r[1]*v[0]};
+    const double h2 = h[0]*h[0] + h[1]*h[1] + h[2]*h[2];
+    if (!(beta > 0.0) || !(h2 > 0.0)) return INFINITY;
+    // e from 1 - e^2 = h^2 beta / (Gm)^2, r_p = h^2 / (Gm (1 + e)), v_p = h / r_p (no cancellation as e -> 1)
+    const double e = std::sqrt(std::max(0.0, 1.0 - h2 * beta / (Gm * Gm)));
+    const double rp = h2 / (Gm * (1.0 + e)), vp = std::sqrt(h2) / rp;
+    const double xp[3] = {rp, 0.0, 0.0}, vpv[3] = {0.0, vp, 0.0};
+    double eps, j;
+    secular_pn_eps_j(xp, vpv, Gm, nu, c, pn_order, eps, j);
+    return std::fabs(1.0 - eps * c * c / beta);
+}
+
 double secular_pn_n(double eps, double j, double nu, double Gm, double c, int pn_order) {
     double s = 1.0;
     if (pn_order & 1) s += eps / 8.0 * (-15.0 + nu);
@@ -513,6 +529,7 @@ int integrate_secular_binary(
         if (!(beta > 0.0) || e0 >= 1.0 || !(hn > 0.0)) return 0;   // unbound or radial: not a secular binary
         for (int c = 0; c < 3; c++) hhat[c] = h[c] / hn;
         const double nu = m1 * m2 / (M_tot * M_tot);
+        if (secular_pn_peri_shift(r, v, mu, nu, c_code, pn_order) > SECULAR_PN_PERI_SHIFT_MAX) return -1;
         SecularPnState s;
         secular_pn_eps_j(r, v, mu, nu, c_code, pn_order, s.eps, s.j);
         if (!(s.eps > 0.0) || !(s.j > 0.0)) return 0;
@@ -534,6 +551,9 @@ int integrate_secular_binary(
         const double r_d[3] = {r[0], r[1], r[2]}, v_d[3] = {v[0], v[1], v[2]};
         double eN2 = e2;
         a1 = a0;
+        // Fixed-point residual of the state written back; the iteration contracts by ~ the peri shift (<= 0.1 here),
+        // and the eps of a state near the pericentre carries round-off ~ 1e-16 v^2 / |E| ~ 1e-16 / (1 - e)
+        double fp_res = INFINITY;
         for (int it = 0; it < 60; it++) {
             for (int c = 0; c < 3; c++) { r[c] = r_d[c]; v[c] = v_d[c]; }
             reshape_orbit(r, v, mu, a1, e0 > 0.0 ? std::sqrt(eN2) / e0 : 1.0, dM);
@@ -541,9 +561,16 @@ int integrate_secular_binary(
             secular_pn_eps_j(r, v, mu, nu, c_code, pn_order, eps, j);
             const double d_et2 = et2_1 - secular_pn_et2(eps, j, nu, pn_order);
             const double f_eps = eps / s.eps;
+            fp_res = (a1 > 0.0 && eps > 0.0) ? std::fabs(f_eps - 1.0) + std::fabs(d_et2) : INFINITY;
             if (std::fabs(f_eps - 1.0) < 1e-15 && (std::fabs(d_et2) < 1e-15 || !(e0 > 0.0) || (eN2 == 0.0 && d_et2 < 0.0))) break;
             a1 *= f_eps;
             eN2 = std::min(std::max(eN2 + d_et2, 0.0), 1.0 - 1e-12);
+        }
+        // No Newtonian orbit at this phase carries the evolved eps, j (the write-back diverged, C19): leave the pair
+        // unchanged for LogH instead of writing an orbit of the wrong (possibly positive) energy
+        if (!(fp_res < 1e-6)) {
+            for (int c = 0; c < 3; c++) { r[c] = r_in[c]; v[c] = v_in[c]; }
+            return -1;
         }
         reshape = true;
     } else {

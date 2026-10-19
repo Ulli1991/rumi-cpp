@@ -10,11 +10,16 @@
 //      PN2.5 alone equal to Peters (1964).
 //  (4) integrate_secular_binary with PN1 + PN2 over 200 orbits against the integrated orbit: orbital phase and
 //      pericentre angle.
+//  (5) write-back near the pericentre (CASES.md C19): the 1e6-run BH binary (e = 0.99936, peri shift 2.4) whose step
+//      ended at the pericentre was written back unbound; now refused (-1, unchanged, LogH). Steps ending within 5
+//      pericentre times of the pericentre for a = 0.36-36 AU, 1 - e = 0.1-3e-4: every admitted pair stays bound with
+//      eps of the written state = the evolved eps.
 // Up to 2026-10 the secular path used Peters with a 3.5PN factor -(1247/336 + 35/12 G m / (a c^2)) (flux coefficient
 // for da/dt, G m / (a c^2) in place of nu, no eccentricity terms), test-mass 2PN/3PN precession and the Newtonian mean
 // motion of the osculating a (docs/CASES.md C9).
 #include "post_newtonian_core.h"
 #include "secular.h"
+#include "kepler.h"
 #include <cmath>
 #include <cstdio>
 #include <initializer_list>
@@ -250,6 +255,65 @@ int main() {
         const double dt = std::remainder(ts - tr, P) / P, dphi = std::remainder(ps - pr, 2.0 * M_PI);
         std::printf("secular binary after 400 orbits: pericentre time offset %.3e P, angle offset %.3e rad\n", dt, dphi);
         check(std::fabs(dt) < 1.3e-3 && std::fabs(dphi) < 3.4e-3, "secular binary phase drifts from the PN orbit");
+    }
+    // (5) write-back near the pericentre (C19), cluster units (pc, km/s, Msun)
+    {
+        const double G = 4.302194e-3, c = 299792.458, TU = 0.977792, AU = 1.0 / 206264.8;
+        double m1 = 14.694904891331355, m2 = 28.264946521763406;
+        double p1[3] = {-3.9550400154575258, 2.2288385523949472, 0.89460482231650418};
+        double v1[3] = {-22.459788311977473, 15.07638740297981, -3.0364789183732142};
+        double p2[3] = {-3.9550192408087899, 2.2288195873655932, 0.8946205442104429};
+        double v2[3] = {0.88019094481315097, -5.2667128343914067, 12.101863391992737};
+        const double q0[12] = {p1[0], p1[1], p1[2], v1[0], v1[1], v1[2], p2[0], p2[1], p2[2], v2[0], v2[1], v2[2]};
+        const int n = integrate_secular_binary(p1, v1, m1, p2, v2, m2, G, c, 31, 3.125e-5 / TU);
+        const double q1[12] = {p1[0], p1[1], p1[2], v1[0], v1[1], v1[2], p2[0], p2[1], p2[2], v2[0], v2[1], v2[2]};
+        bool same = true;
+        for (int k = 0; k < 12; k++) same = same && q0[k] == q1[k];
+        double r[3], v[3];
+        for (int k = 0; k < 3; k++) { r[k] = q0[6 + k] - q0[k]; v[k] = q0[9 + k] - q0[3 + k]; }
+        const double M = m1 + m2, nu = m1 * m2 / (M * M);
+        const double shift = secular_pn_peri_shift(r, v, G * M, nu, c, 31);
+        std::printf("C19 binary: peri shift %.3f, integrate_secular_binary %d, state %s\n", shift, n, same ? "unchanged" : "changed");
+        check(n == -1 && same, "C19 binary: secular write-back at the pericentre not refused");
+
+        m1 = 14.69; m2 = 28.26;
+        const double Mt = m1 + m2, mu = G * Mt, nut = m1 * m2 / (Mt * Mt);
+        unsigned long long rng = 12345;
+        auto U = [&]() { rng = rng * 6364136223846793005ULL + 1442695040888963407ULL; return (rng >> 11) * 0x1.0p-53; };
+        double worst = 0.0;
+        int admitted = 0, refused = 0, unbound = 0;
+        for (double a_au : {0.36, 3.6, 36.0})
+            for (double om : {1e-1, 1e-2, 3e-3, 1e-3, 6.4e-4, 3e-4})
+                for (int t = 0; t < 200; t++) {
+                    const double a = a_au * AU, e = 1.0 - om;
+                    double x[3], w[3];
+                    elements_to_cartesian(a, e, 0.3, 1.0, 2.0, 2.0 * M_PI * U(), mu, x, w);
+                    const double P = 2.0 * M_PI * std::sqrt(a * a * a / mu), tp = std::sqrt(std::pow(a * om, 3) / mu);
+                    const double dt = kepler_time_to_pericentre(x, w, mu) + P * (3 + (int)(30 * U())) + 10.0 * tp * (U() - 0.5);
+                    SecularPnState st;
+                    secular_pn_eps_j(x, w, mu, nut, c, 31, st.eps, st.j);
+                    secular_evolve_pn(st, dt, nut, mu, c, 31);
+                    double a1[3], b1[3], a2[3], b2[3];
+                    for (int k = 0; k < 3; k++) {
+                        a1[k] = -m2 / Mt * x[k]; a2[k] = m1 / Mt * x[k]; b1[k] = -m2 / Mt * w[k]; b2[k] = m1 / Mt * w[k];
+                    }
+                    const int ns = integrate_secular_binary(a2, b2, m1, a1, b1, m2, G, c, 31, dt);
+                    if (ns < 0) { refused++; continue; }
+                    if (st.merged) continue;
+                    admitted++;
+                    double xr[3], wr[3];
+                    for (int k = 0; k < 3; k++) { xr[k] = a2[k] - a1[k]; wr[k] = b2[k] - b1[k]; }
+                    const double E = 0.5 * (wr[0]*wr[0] + wr[1]*wr[1] + wr[2]*wr[2]) - mu / std::sqrt(xr[0]*xr[0] + xr[1]*xr[1] + xr[2]*xr[2]);
+                    if (!(E < 0.0)) { unbound++; continue; }
+                    double eps, j;
+                    secular_pn_eps_j(xr, wr, mu, nut, c, 31, eps, j);
+                    worst = std::max(worst, std::fabs(eps / st.eps - 1.0));
+                }
+        std::printf("pericentre write-back: %d admitted, %d refused, %d unbound, max |eps / eps_evolved - 1| %.3e\n",
+                    admitted, refused, unbound, worst);
+        // 3.71e-10 measured (round-off of eps at the pericentre, ~1e-16 / (1 - e) per term, and the fixed point); before
+        // the fix this grid (other phases) wrote 10 of 7200 pairs back unbound, all at peri shift >= 1
+        check(unbound == 0 && worst < 4.8e-10, "pericentre write-back: unbound or eps off the evolved one");
     }
     return fails;
 }

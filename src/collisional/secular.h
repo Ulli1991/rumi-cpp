@@ -42,6 +42,13 @@ double secular_pn_k(double eps, double j, double nu, int pn_order);
 double secular_pn_et2(double eps, double j, double nu, int pn_order);
 void secular_pn_fluxes(double x, double et2, double nu, double Gm, double c, int pn_order, double& F, double& Gf);
 void secular_pn_rates(double eps, double j, double nu, double Gm, double c, int pn_order, double& deps, double& dj);
+// PN size of the osculating orbit's pericentre: |1 - eps(r_p, v_p) / eps_N| with eps of the osculating Newtonian
+// pericentre state and eps_N = G m / (a c^2); ~ 8 x / (1 - e)^2 for x = G m / (a c^2). It is the amplitude of the
+// osculating-a oscillation along the PN orbit and the contraction factor of integrate_secular_binary's write-back (a
+// Newtonian orbit with given eps, j at a given phase): above SECULAR_PN_PERI_SHIFT_MAX the pair goes to LogH
+// (CASES.md C19: delta 2.4, the write-back diverged when the step ended at the pericentre). Infinity if unbound.
+double secular_pn_peri_shift(const double r[3], const double v[3], double Gm, double nu, double c, int pn_order);
+constexpr double SECULAR_PN_PERI_SHIFT_MAX = 0.1;
 // Secular-triple inner orbit: (a, e) as mean-motion semi-major axis and e_t -> da/dt, de/dt, d omega/dt
 void secular_pn_inner_rates(double a, double e, double nu, double Gm, double c, int pn_order,
                             double& da, double& de, double& dw);
@@ -55,7 +62,9 @@ void secular_to_cartesian(const SecularBinary& bin, double G,
                           double mean_anomaly, double r[3], double v[3]);
 
 // Full secular integration of a binary: Cartesian -> elements -> secular evolve -> advance M -> Cartesian
-// Works in absolute coordinates (handles CM frame internally); returns the number of internal steps
+// Works in absolute coordinates (handles CM frame internally); returns the number of internal steps, or -1 with the
+// particles unchanged when the PN write-back is not possible (peri shift above SECULAR_PN_PERI_SHIFT_MAX, or the
+// write-back did not converge): the caller then integrates the pair with LogH
 int integrate_secular_binary(
     double pos1[3], double vel1[3], double m1,
     double pos2[3], double vel2[3], double m2,

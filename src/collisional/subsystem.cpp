@@ -1603,6 +1603,7 @@ void SubsystemManager::reset_step_diagnostics() {
     step_secular_substeps = 0;
     step_kepler2 = 0;
     step_secular_triples = 0;
+    step_secular_peri_logh = 0;
     step_mergers = 0;
     step_subsys_collisions = 0;
     step_peri_landings = 0;
@@ -1666,6 +1667,7 @@ void SubsystemManager::print_step_summary() const {
     std::printf("  Secular=%d", step_secular_evolved);
     if (step_secular_evolved > 0) std::printf(" (substeps=%lld)", step_secular_substeps);
     if (step_kepler2 > 0) std::printf("  Kepler2=%d", step_kepler2);
+    if (step_secular_peri_logh > 0) std::printf("  SecPeriLogH=%d", step_secular_peri_logh);
     std::printf("  SecTriple=%d\n", step_secular_triples);
 
     // Events

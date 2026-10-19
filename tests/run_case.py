@@ -54,6 +54,7 @@ WEAK_SPLIT_DL = 3.6e-13   # weak_split_bh_binary: 2.76e-13 measured (secular PN 
                           # sample: with DT_MAX 1e-4 the old code reaches 1.9e-13, without PN both 1.6e-13 (CASES.md C10)
 FLYBY_GROUP_STEPS = 39400  # flyby_group_floor: 30304 measured (host build)
 FLYBY_GROUP_DE = 5.8e-10   # flyby_group_floor: 4.42e-10 measured (host build)
+C19_PERI_DE = 1e-15       # c19_secular_peri: 7.65e-16 measured (host build; 1.22 of the pair, 6.7e-4 E_REF, before the fix)
 PN_BH_ONLY_DE = 7.7e-10   # pn_bh_only: 5.93e-10 measured (host build)
 BINARIES = dict(TEST_CASE="plummer", INTEGRATOR="hhs", TOTAL_TIME_MYR="2e-3", DT_MAX_MYR="1e-3", DT_MIN_MYR="1e-14",
                 ETA_FF="0.2", ETA_FB="0.2", ETA_GRAD="0.1", ETA_JERK="0.1", SOFTENING_PC="0", COLLISIONAL="true",
@@ -556,6 +557,23 @@ def weak_split_bh_binary(exe):
     ok &= check("weak split: LogH GBS steps", gbs, WEAK_SPLIT_GBS)
     ok &= check("weak split: max|dE/E|", max(r[0] for r in rows), WEAK_SPLIT_DE)
     return ok & check("weak split: max|dL/L|", max(r[2] for r in rows), WEAK_SPLIT_DL)
+
+
+def c19_secular_peri(exe):
+    """CASES.md C19: the 1e6-run BH binary (14.7 + 28.3 Msun, a = 3.6 AU, e = 0.99936) at its depth-5 call, one
+    3.125e-5 Myr interval (two L1 halves; the second ended at the pericentre). The secular write-back diverged there
+    (peri shift 2.4) and wrote the pair back unbound, 6.7e-4 E_REF unbooked; now the pair goes to LogH."""
+    cfg = dict(TEST_CASE="particle_file", IC_FILE=str(Path(__file__).parent / "data" / "c19_secular_peri.txt"),
+               INTEGRATOR="hhs", TOTAL_TIME_MYR="3.125e-5", DT_MAX_MYR="3.125e-5", DT_MIN_MYR="1e-14", ETA_FF="0.2",
+               ETA_FB="0.2", ETA_GRAD="0.1", ETA_JERK="0.1", ETA_PERT="0.02", ETA_GBS="1e-10", ETA_RESTART="1e-8",
+               N_ORB_SECULAR="3", R_NGB="1e-3", SOFTENING_PC="0", COLLISIONAL="true", PN_ORDER="31", M_PN="5.0",
+               SSE_ENABLED="false", PRINT_INTERVAL="1", PROFILING="false",
+               E_REF="86900020.66048184", NGB_MREF="0.40020455708861097")
+    out = run_output(exe, cfg)
+    moved = sum(int(a) for a in re.findall(r"SecPeriLogH=(\d+)", out))
+    rows = diagnostics(out)
+    ok = check("c19: pair sent to LogH", moved, 1, lower=True)
+    return ok & check("c19: max|dE/E|", max(r[0] for r in rows), C19_PERI_DE)
 
 
 def cmv_recoil_remnant(exe):
@@ -1680,6 +1698,8 @@ CASES = {
     # WEAK_SPLIT_GAMMA: the 200k seed-3 stall (scripts/cutout.py of stall step 48), split binary + field star
     "weak_split_bh_binary": lambda exe: weak_split_bh_binary(exe),
     "cmv_recoil_remnant": lambda exe: cmv_recoil_remnant(exe),
+    # C19: secular PN write-back at the pericentre of a near-radial BH binary (1e6 run, stall_15.h5)
+    "c19_secular_peri": lambda exe: c19_secular_peri(exe),
     # PN_BH_ONLY false: the PN binaries of massive stars give the LogH calls the two paths are compared on
     "cm_eps_cpu_vs_device": lambda exe: paths_same_steps(exe, "fly-by step with tidal sampling",
                                                          dict(BINARIES, FLYBY_CM_EPS="1e-11", PN_ORDER="31",

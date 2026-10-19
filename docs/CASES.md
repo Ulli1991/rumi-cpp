@@ -415,6 +415,66 @@ Status: **closed** (fixed, test, ensemble checked), **option** (fix kept as an o
   time-step search. GPU (A100): 1 time-step and 16 neighbour searches, all bitwise equal to O(N^2), diagnostics
   identical to the run without tree, 73 s. Host builds keep the 5000-star case.
 
+## C19 Near-radial BH binary in the secular PN path: unbooked dE ~1e-3 E0 (closed)
+
+- **Found by:** the FMM force-error gate (ferr-gate-2026-10-18, 1e6 f0.1 seed 42, SSE off, 4 GPUs, binary 3c7c8b9).
+  Two runs whose trajectories the injected far-field errors had nudged (NBODY_FORCE_ERR cell 1e-5 and 1e-7) reached
+  the same BH binary, pids 353706 + 888286 (14.69 + 28.26 Msun, kw 14), a = 1.72-1.80e-5 pc (3.6 AU), e = 0.99933-
+  0.99936, r_p ~ 2800 R_S, P = 1.1 yr, and logged `SUBSYS_ERR secular_pn dE/E0` 7.3e-4 / 2.8e-3 (cell 1e-5, step 15,
+  dt 3.1e-5 / 1.6e-5 Myr) and 1.4e-3 / 1.25e-3 (cell 1e-7, step 25, dt 7.8e-6 Myr). That is 2-6x the binary's
+  whole binding energy (E_bin ~ 4.5e-4 |E0|), while its GW loss over such a step is ~7e-5 E_bin (t_GW 4.6e5 yr).
+- **Effect:** cell 1e-7: the restart loop recovered (RESTART[1], [2], then r_ngb 1.32e-3 changed the path).
+  Cell 1e-5: the retry was worse (2.8e-3), so "dE not decreasing" accepted 7.27e-4: |dE/E| 3e-10 -> 7.3e-4 in one
+  step. Unrelated to the injected forces (their own effect is < 1e-10 per interval); any run can reach this state.
+- **Isolated replay** (`scripts/subsys_cases.py`, the logged state, one interval): 1.5e-16, does not reproduce
+  (lesson 3: state-dependent).
+- **Ledger on the run's state:** rerun with STALL_RESTART = true reproduces it bit-identically and keeps
+  `/raven/ptmp/uli/cpp-nbody-runs/ferr-gate-2026-10-18/runs/cap_m42_c1e-5/stall_15.h5`; the one-step replay
+  without any injected error (`ledger/cap_m42_c1e-5_s15`, NBODY_ELEDGER) gives root 7.256e-4 = own error of one depth-3
+  call, class **booking:secular binaries**: `sub dE_int 7.256e-4 type 0 n 2 secular 1 pids 353706 888286` (PN path),
+  every other secular binary < 7e-6 and cancelling in pairs. So the secular PN advance of this binary changes its
+  members' T + U by ~1.6 E_bin without booking it. Suspects: the C9 fixed-point reshape at j = sqrt(1 - e^2) = 0.036,
+  or the 1PN phase offset near pericentre (v_p/c ~ 0.02, Newtonian T at pericentre ~ 3000 E_bin: an O(x) phase
+  error moves the Newtonian energy by ~E_bin) with E_gw booked from elements instead of the state (lesson 1).
+
+- **Cause:** the PN write-back of `integrate_secular_binary`. After the Kepler drift it looks for a Newtonian orbit
+  (a1, e1) at the advanced phase whose eps, j (Kidder E, J) are the evolved ones, by the fixed point a1 *= eps /
+  eps_target. Near the pericentre the 1PN part of eps(state) is about delta = |1 - eps(r_p, v_p) / eps_N| ~ 8 x /
+  (1 - e)^2 of eps, and delta is also the contraction factor of that iteration. For this binary delta = 2.4: the
+  osculating Newtonian energy of the real PN orbit changes by more than E_bin between apocentre and pericentre. The
+  depth-5 call (dt 3.125e-5 Myr, second L1 half) ended 3.9e-3 AU from the centre (r_p 2.3e-3 AU). The iteration went
+  to a1 < 0, `reshape_orbit` returned without changing the state, and the energy correction to -mu / (2 a1) > 0
+  wrote the pair back **unbound** (1.27 E_bin). integrator.cpp booked E_gw only when a_post > 0, so the whole change
+  stayed unbooked. Not the merge rule ((1 - e) = 6.4e-4 vs 20 eps = 2.3e-6), not the 1 - e cancellation, not the
+  Kepler drift.
+- **Why the isolated replay missed it:** the failure needs the step to end within a few pericentre times
+  sqrt(r_p^3 / G m) (time fraction ~ (1 - e)^1.5 ~ 1e-5 of the orbit), so it depends on the step length. The logged
+  state with the logged dt reproduces on the host (2 particles, `tests/data/c19_secular_peri.txt`, one 3.125e-5 Myr
+  interval: |dE/E| of the pair 1.22, 6.7e-4 E_REF). Steps ending near the pericentre write the pair back unbound for
+  delta >~ 1 (10 of 7200 in a scan over a = 0.36-36 AU, 1 - e = 0.1-3e-4).
+- **Fix:**
+  - PN 2-body secular candidates with delta > SECULAR_PN_PERI_SHIFT_MAX = 0.1 go to LogH
+    (`secular_pn_peri_shift`, from the osculating pericentre state, which does not depend on the phase). There the
+    write-back of a Newtonian orbit is not a small correction any more. The iteration contracts by at most 0.1 per
+    step, against failures at delta ~ 1.
+  - `integrate_secular_binary` returns -1 and leaves the pair unchanged when the write-back has not converged
+    (residual > 1e-6, a1 <= 0 or eps <= 0). The caller then sends the pair to LogH in the same call.
+  - E_gw is booked from the states, E_orb(before) - E_orb(after) of any sign, so no secular step can leave a change
+    unbooked.
+  - Counter `SecPeriLogH` in the step summary.
+  - Literature: PN orbits are quasi-Keplerian with different a_r, e_r, e_t, e_phi (Damour & Deruelle 1985; Memmesheimer
+    et al. 2004). Osculating Newtonian elements oscillate at O(x a / r) along such an orbit, so a Newtonian write-back
+    is valid only while that is small. BIFROST and KETJU integrate PN binaries with regularised integrators.
+- **Tests:**
+  - `c19_secular_peri` (run_case, E_REF / NGB_MREF of the parent): before the fix 1.22, now 7.65e-16 (bound 1e-15),
+    the pair in LogH (1487 GBS steps).
+  - `secular_pn` (5): the C19 call is refused with the state unchanged. Steps ending within +-5 pericentre times on
+    that grid leave no admitted pair unbound, and eps of the written state = the evolved eps to 3.7e-10 (bound
+    4.8e-10).
+  - All 141 host ctests pass (secular_pn, coll_bh_isco, sec_triple_energy, adv_kozai_triple).
+- **Cost:** bound PN pairs (nearest neighbours, a < 1e-3 pc) above delta 0.1: 4 of 949 in the 1e6 run (stall_15),
+  0 of 186 / 172 / 174 in camp3-200k s404 / s202 / s303. The C19 pair costs 1487 GBS steps per 3.1e-5 Myr in LogH.
+
 ## Verified building blocks (checked against an independent derivation, no bug found)
 
 | Building block | Check | Result | Test |

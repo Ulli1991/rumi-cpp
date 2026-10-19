@@ -205,6 +205,7 @@ struct SubsystemManager {
     long long step_secular_substeps = 0;  // internal steps of the secular binary integrator
     int step_kepler2 = 0;              // ... of them on the Kepler drift only as non-PN pairs (unbound, or < N_ORB_SECULAR orbits)
     int step_secular_triples = 0;      // secular triples evolved
+    int step_secular_peri_logh = 0;    // PN secular binaries sent to LogH (secular_pn_peri_shift, CASES.md C19)
 
     // Step-level merger and escaper counters
     int step_mergers = 0;              // mergers executed this step
