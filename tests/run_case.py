@@ -52,6 +52,8 @@ WEAK_SPLIT_GBS = 1000     # weak_split_bh_binary: 0 measured (3.3M without the s
 WEAK_SPLIT_DE = 1.23e-11  # weak_split_bh_binary: 9.43e-12 measured (host build; 1.35e-11 without the split)
 WEAK_SPLIT_DL = 3.6e-13   # weak_split_bh_binary: 2.76e-13 measured (secular PN of C9); 1.31e-14 before was one lucky
                           # sample: with DT_MAX 1e-4 the old code reaches 1.9e-13, without PN both 1.6e-13 (CASES.md C10)
+TIDAL_FLOOR_DE = 3.07e-9    # tidal_floor_bh_binary: 2.36e-9 measured (host build; 2.28e-6 with the fixed floor)
+TIDAL_FLOOR_LOGH = 8200     # tidal_floor_bh_binary: 6308 LogH calls measured (1024 with the fixed floor)
 FLYBY_GROUP_STEPS = 39400  # flyby_group_floor: 30304 measured (host build)
 FLYBY_GROUP_DE = 5.8e-10   # flyby_group_floor: 4.42e-10 measured (host build)
 C19_PERI_DE = 1e-15       # c19_secular_peri: 7.65e-16 measured (host build; 1.22 of the pair, 6.7e-4 E_REF, before the fix)
@@ -556,6 +558,24 @@ def flyby_group_floor(exe):
     steps = sum(int(a) for a in re.findall(r"Secular=(\d+) \(substeps=", out))
     ok = check("fly-by group: secular steps", steps, FLYBY_GROUP_STEPS)
     return ok & check("fly-by group: max|dE/E|", max(r[0] for r in diagnostics(out)), FLYBY_GROUP_DE)
+
+
+def tidal_floor_bh_binary(exe):
+    """C5, TIDAL_FLOOR_ADAPT: a 45 + 10.8 Msun BH binary (P = 1.96e-5 Myr, e = 0.50) with a 1.49 Msun star passing at
+    1300 AU (200k seed 13, step 56). At the fixed TIDAL_STEP_RES floor its field kicks sample the star's tide 3 times
+    per orbit and the interval heats it by 6.6e-11 of the cluster's |E0| (the run's jump, reproduced to 4 digits);
+    with the floor scaled by sqrt(share / estimate) |dE/E| drops 1000x. No restarts (ETA_RESTART 1): one attempt."""
+    cfg = dict(TEST_CASE="particle_file", IC_FILE=str(Path(__file__).parent / "data" / "tidal_floor_bh_binary.txt"),
+               TOTAL_TIME_MYR="1.0e-3", DT_MAX_MYR="1.0e-3", DT_MIN_MYR="1.0e-14", ETA="0", ETA_GRAD="0.2", ETA_JERK="0",
+               ETA_RESTART="1", FLYBY_CM_EPS="1e-11", NGB_MASS_SCALING="true", SERIAL_N2_GPU="16384",
+               TREE_THRESHOLD="100000", TREE_THETA="0.7", SDAR="true", COLLISIONAL="true", PN_ORDER="31",
+               SSE_ENABLED="false", COLL_MASS_LOSS_C="0", PRINT_INTERVAL="1", PROFILING="false",
+               E_REF="271184796.59960103", NGB_MREF="0.4032134687647248", TIDAL_FLOOR_ADAPT="true")
+    out = run_output(exe, cfg)
+    logh = sum(int(a) for a in re.findall(r"Integration: LogH=(\d+) \(gbs=", out))
+    rows = diagnostics(out)
+    ok = check("tidal floor: max|dE/E|", max(r[0] for r in rows), TIDAL_FLOOR_DE)
+    return ok & check("tidal floor: LogH calls", logh, TIDAL_FLOOR_LOGH)
 
 
 def weak_split_bh_binary(exe):
@@ -1721,6 +1741,7 @@ CASES = {
     "cmv_recoil_remnant": lambda exe: cmv_recoil_remnant(exe),
     # C19: secular PN write-back at the pericentre of a near-radial BH binary (1e6 run, stall_15.h5)
     "c19_secular_peri": lambda exe: c19_secular_peri(exe),
+    "tidal_floor_bh_binary": lambda exe: tidal_floor_bh_binary(exe),
     # PN_BH_ONLY false: the PN binaries of massive stars give the LogH calls the two paths are compared on
     "cm_eps_cpu_vs_device": lambda exe: paths_same_steps(exe, "fly-by step with tidal sampling",
                                                          dict(BINARIES, FLYBY_CM_EPS="1e-11", PN_ORDER="31",

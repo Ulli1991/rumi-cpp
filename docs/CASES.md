@@ -115,7 +115,7 @@ Status: **closed** (fixed, test, ensemble checked), **option** (fix kept as an o
 - **Cluster:** subsystem paths book to 7e-14 per step. 200k seed 13: 7.5e-10 -> 2.7e-10 (secular triples off: 2.4e-11);
   B seeds 42 / 7 / 13: 2.0e-10 -> 1.5e-10, 4.2e-10 -> 4.3e-10, equal. Runs without secular triples bit-identical.
 
-## C5 Perturbed binaries sampled by the field kicks (open)
+## C5 Perturbed binaries sampled by the field kicks (option)
 
 - **System:** B seed 42, step 14: 25.5 + 35.3 Msun binary (a = 64 AU, e = 0.40, P = 6.6e-5 Myr) perturbed by a 1.5 Msun
   star at 640 AU (tidal ratio up to ~1e-4); 200k seed 13 step 60 after C4: a 13.5 + 13.8 Msun binary whose field step
@@ -130,9 +130,27 @@ Status: **closed** (fixed, test, ensemble checked), **option** (fix kept as an o
 - **Tried (2026-10-17):** perturbers into the subsystem: R_NGB 2e-3 / 3e-3 pc with NGB_MASS_GAMMA 1e-6: the step 6x slower,
   its error larger (-6.0e-9 / -3.6e-9 vs -2.2e-9 cumulative), and the binary still sampled by the kicks at 3e-3 pc.
   Not the answer in this form.
-- **Next:** count the binaries per jump with the STALL tidal lines over the campaign; literature (BIFROST sec. 6 lists
-  slow-down for perturbed binaries as missing; PeTar/SDAR perturbers in the regularised step; NBODY6 KS perturber
-  lists down to gamma ~1e-6), then a method proposal.
+- **Fix (2026-10-18, option `TIDAL_FLOOR_ADAPT`):** per bound binary, from its local estimate in subsystem_timesteps:
+  est = mu |T| v_p f (T the tidal acceleration of all perturbers now, f = TIDAL_STEP_RES P (1 - e)^(3/2) the floor)
+  against its share FLYBY_CM_EPS |E0|; above it the floor becomes f sqrt(share / est) (below the floor the kicks
+  resolve the orbit and the splitting error is the bounded dt^2 shadow term). Binaries within their share are
+  untouched; no global feedback. Literature: KS-regularised perturbed binaries in NBODY6 get their perturbers' forces at
+  every KS step (~30 per orbit, perturbers down to gamma ~1e-6), i.e. the perturbed orbit is resolved; pulling the
+  perturber into the subsystem (SDAR/PeTar style) was slower and worse here (above). A first variant that scaled the
+  floor from the pair bound k r^3 instead of the measured tide was 6x pessimistic (144x the LogH calls in the test).
+- **Test:** `tidal_floor_bh_binary` (3 particles from the s13 step-56 restart: 45 + 10.8 Msun BH binary, a = 28 AU,
+  e = 0.50, 1.49 Msun star at 1300 AU): the ledger reproduces the cluster's own errors to 4 digits (6.60e-11 |E0|).
+  |dE/E| 2.28e-6 -> 2.36e-9, LogH calls 1024 -> 6308; global FLYBY_CM_EPS 1e-12 + RES 0.25: 7.3e-9.
+- **Cluster (200k, 61 steps, 5 seeds, final |dE/E| base -> fix):** s3 7.9e-12 -> 2.5e-11, s7 5.1e-12 -> 1.8e-12,
+  s13 6.6e-11 -> 2.9e-11 (largest step 6.55e-11 -> 1.3e-11), s21 3.2e-11 -> 1.5e-10, s42 3.1e-11 -> 1.7e-11; rms per
+  step better on 3, median s/step within 2 %. Kept off by default (mixed ensemble). s21 worse (3.2e-11 -> 1.5e-10) by trajectory divergence from step 3: its jump
+  steps 36/37 replayed from the fix run's own restarts give identical errors with the switch on and off (a 45 + 23
+  Msun binary, P = 3.3e-7 Myr, field step 11 P, estimate below its share; open). |dL/L| better on s3/s13/s21.
+  FLYBY_CM_VELOCITY s7 step 1 (-3.7e-10, sets of 150-360 at depth 4) is this case: the fix gives +1.9e-12; the
+  FLYBY_CM_VELOCITY s21 step 38 (-1.55e-9) is a BH-BH GW coalescence ("merger inside", own errors -2.5e-12): not C5.
+  With fix + FLYBY_CM_VELOCITY the remaining jumps (s3 step 26 -1.1e-10, s42 step 35 +5.2e-10) are also GW_COAL steps,
+  identical with the switch on and off; the same coalescences happen without a jump in the runs without
+  FLYBY_CM_VELOCITY (open: energy around a coalescence with c.o.m. fly-by velocities).
 
 ## C6 Secular triple: angular momentum of the frozen outer orbit (closed)
 

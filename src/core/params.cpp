@@ -142,6 +142,10 @@ const std::vector<ParamSpec> kParams = {
      "Tidal-sampling pair step: energy a slow particle's kicks put into a subsystem per step <= this x |E0| (0: off)"},
     {"TIDAL_STEP_RES", D, "1.0", "Subsystems", INTERNAL, "",
      "Floor of the FLYBY_CM_EPS step: this x P (1 - e)^(3/2) of a bound binary, this x the shortest pair pericentre passage 2 pi r_p / v_p of an unbound pair or larger subsystem (0: none)"},
+    {"TIDAL_FLOOR_ADAPT", B, "false", "Subsystems", INTERNAL, "",
+     "Bound binaries whose local tidal estimate at the TIDAL_STEP_RES floor, mu |T| v_p floor (T: tidal acceleration "
+     "of all perturbers), exceeds their share FLYBY_CM_EPS x |E0| take the floor x sqrt(share / estimate) (resolved "
+     "kicks: error ~ dt^2; C5); others unchanged"},
     {"FLYBY_NGB_CM", B, "true", "Subsystems", INTERNAL, "",
      "Distant fly-by neighbour test of a binary member against the binary's c.o.m."},
     {"NGB_MASS_SCALING", B, "true", "Subsystems", INTERNAL, "",

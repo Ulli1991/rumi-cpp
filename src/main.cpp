@@ -636,6 +636,7 @@ int main(int argc, char** argv) {
             g_collisional.weak_split_gamma = cfg.get_double("WEAK_SPLIT_GAMMA");
             g_collisional.subsys_err_tol = cfg.get_double("SUBSYS_ERR_TOL");
             g_collisional.tidal_step_res  = cfg.get_double("TIDAL_STEP_RES");
+            g_collisional.tidal_floor_adapt = cfg.get_bool("TIDAL_FLOOR_ADAPT");
             g_collisional.secular_triples = cfg.get_bool("SECULAR_TRIPLES");
             g_collisional.sdar            = cfg.get_bool("SDAR");
             if (const char* e = std::getenv("NBODY_SDAR")) g_collisional.sdar = std::atoi(e) != 0;
