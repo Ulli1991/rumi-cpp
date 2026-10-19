@@ -474,6 +474,10 @@ Status: **closed** (fixed, test, ensemble checked), **option** (fix kept as an o
   - All 141 host ctests pass (secular_pn, coll_bh_isco, sec_triple_energy, adv_kozai_triple).
 - **Cost:** bound PN pairs (nearest neighbours, a < 1e-3 pc) above delta 0.1: 4 of 949 in the 1e6 run (stall_15),
   0 of 186 / 172 / 174 in camp3-200k s404 / s202 / s303. The C19 pair costs 1487 GBS steps per 3.1e-5 Myr in LogH.
+- **GPU replay** of stall_15.h5 (1 node gpudev, NBODY_ELEDGER, `ledger/c19fix_s15`): ELEDGER root step 15
+  8.7e-11 (before 7.26e-4), step 16 -1.4e-11, no SUBSYS_ERR, no restart; SecPeriLogH = 32 calls per step;
+  subsys_logh 8.1 s vs 6.8 s of 126 s in step 16 (the step's wall 126 s vs 106 s; the trajectories differ after
+  step 15).
 
 ## Verified building blocks (checked against an independent derivation, no bug found)
 
