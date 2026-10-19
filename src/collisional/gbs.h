@@ -6,6 +6,17 @@
 // GBS (Gragg-Bulirsch-Stoer) extrapolation integrator
 // for high-accuracy integration of LogH equations of motion
 
+// Secular inner binaries of a PN subsystem (logh_batch.cpp, docs/CASES.md C20): body com[q] stands for a binary whose
+// internal orbit is advanced secularly; the binary is expanded again when the tide on it grows: hit when
+// qf[q] x sum_k m_com m_k / d_k^3 > 1, with qf = r_apo^3 n_orb / (m_a m_b k_ref) (the collapse criterion
+// gamma n_orb <= k_ref at the current distances)
+struct SecWatch {
+    int n = 0;
+    int com[LOGH_MAX_BODIES / 2];
+    double qf[LOGH_MAX_BODIES / 2];
+};
+bool sec_watch_hit(const LogHState& state, const SecWatch& w);
+
 struct GBSIntegrator {
     // Bulirsch-Stoer step sequence (even numbers for symmetric methods)
     static constexpr int STEP_SEQ[] = {2, 4, 6, 8, 12, 16, 24, 32, 48, 64};
@@ -19,6 +30,10 @@ struct GBSIntegrator {
     // SDAR (nullptr: plain LogH): kappa re-evaluated after every accepted GBS step (jumping kappa, Wang+2020
     // sec. 2.4); the caller sets the initial kappa and removes the slow-down at the end (logh_sd_update)
     const SdarParams* sdar = nullptr;
+    // Secular inner binaries (nullptr: none): checked after every accepted step; a hit stops integrate_to_time with
+    // sec_hit set (the caller expands the binaries and continues)
+    const SecWatch* sec_watch = nullptr;
+    bool sec_hit = false;
     bool reached = false;   // integrate_to_time reached t_target (within its tolerance)
 
     // Collisions inside the integration (FROST-CLUSTERS I, Rantala et al. 2024, App. B3; nullptr: off): pair

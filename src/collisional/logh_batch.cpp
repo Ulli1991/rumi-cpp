@@ -8,6 +8,8 @@
 #include "gbs.h"
 #include "collisional_config.h"
 #include "post_newtonian.h"
+#include "secular.h"
+#include "kepler.h"
 #include "profiling.h"
 #include "stall.h"
 #include <Kokkos_Core.hpp>
@@ -473,6 +475,7 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
     int cap_hit = 0;
     batch.sd_jump.assign(n_sub, 0.0);
     std::vector<double> sd_kappa_sub(n_sub, 0.0);
+    std::vector<int> sec_used_sub(n_sub, 0);   // secular inner binaries collapsed per integration
     batch.collisions.assign(n_sub, {});
     batch.coll_dE.assign(n_sub, 0.0);
     std::vector<int> peri_land(n_sub, 0), peri_miss(n_sub, 0);
@@ -676,17 +679,231 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
         double coll0[LOGH_MAX_BODIES * LOGH_MAX_BODIES];
         std::memcpy(coll0, coll, sizeof(coll));
 
+        // Secular inner binaries of PN subsystems (docs/CASES.md C20). A bound pair, the tightest of both members,
+        // with n_orb >= N_ORB_SECULAR orbits in the call whose omitted tide stays small over the whole call,
+        //   gamma n_orb <= k_ref,  gamma = (r_apo^3 / (m_a m_b)) sum_k m_ab m_k / r_close,k^3          (W20 Eq. 22)
+        // (r_close: the closest approach of perturber k in its current two-body orbit about the pair's c.o.m.), is
+        // replaced by one body at its c.o.m. for the call: the limit kappa -> n_orb of SDAR (W20: kappa_org = k_ref /
+        // gamma >= n_orb, the call is shorter than one slowed orbit), as NBODY6 treats unperturbed KS binaries and
+        // stable hierarchies (Aarseth 2003 sec. 8, 11). The internal orbit is advanced at the end by the 2-body secular
+        // path (integrate_secular_binary: orbit-averaged PN of PN pairs, Kepler drift of the others), which also
+        // checks the PN write-back (C19) and the merger in a dry run before the collapse. FROST-CLUSTERS I (App. A2)
+        // keeps kappa = 1 in PN subsystems, so LogH follows every orbit: 2.5-4.5 M GBS steps for one interval of a
+        // 3-6 body set with a 0.02-0.05 AU BH binary (harvest-2026-10-19). The tide is watched after every GBS step
+        // (SecWatch); above the same bound at the current distances the binary is expanded and LogH continues.
+        // Energy: the collapse and the expansion change T + U of the state at a fixed phase-space point; those jumps
+        // (minus the binary's internal energy, which is carried) go to B, as the SDAR kappa jumps (W20 Eq. 24), and
+        // to sd_jump (booked as E_sd); the internal energy change by the secular PN is E_pn as all PN work.
+        // NBODY_SEC_INNER=0 switches it off (A/B).
+        static const bool sec_inner_on = [] { const char* e = std::getenv("NBODY_SEC_INNER"); return !e || std::atoi(e) != 0; }();
+        struct SecRec { int com, live_b, kw_b, pn; double m_a, m_b, rad_b, r[3], v[3], t0, E_int0, qf; };
+        SecRec sec[LOGH_MAX_BODIES / 2];
+        int n_secr = 0, n_sec_used = 0;
+        SecWatch sec_w;
+        auto sec_watch_build = [&]() {
+            sec_w.n = n_secr;
+            for (int q = 0; q < n_secr; q++) { sec_w.com[q] = sec[q].com; sec_w.qf[q] = sec[q].qf; }
+        };
+        auto zero_com_coll = [&]() {   // a collapsed binary never collides (the watch expands it long before)
+            for (int q = 0; q < n_secr; q++)
+                for (int k = 0; k < state.n_bodies; k++) {
+                    const int lo = std::min(k, sec[q].com), hi = std::max(k, sec[q].com);
+                    if (lo != hi) coll[lo * LOGH_MAX_BODIES + hi] = 0.0;
+                }
+        };
+        auto e_int = [&](double ma, double mb, const double* r, const double* v) {
+            const double M = ma + mb;
+            return ma * mb / M * (0.5 * (v[0]*v[0] + v[1]*v[1] + v[2]*v[2]) -
+                                  G_norm * M / std::sqrt(r[0]*r[0] + r[1]*r[1] + r[2]*r[2]));
+        };
+        // Body j joins body i at their c.o.m. (i keeps the slot, j is removed)
+        auto sec_collapse = [&](int i, int j, int pn_b, double qf) {
+            const double E0s = logh_total_energy(state, G_norm);
+            SecRec q;
+            q.m_a = state.mass[i]; q.m_b = state.mass[j];
+            const double M = q.m_a + q.m_b;
+            for (int c = 0; c < 3; c++) {
+                q.r[c] = state.pos[j*3+c] - state.pos[i*3+c];
+                q.v[c] = state.vel[j*3+c] - state.vel[i*3+c];
+            }
+            q.E_int0 = e_int(q.m_a, q.m_b, q.r, q.v);
+            q.t0 = state.t; q.live_b = live[j]; q.kw_b = kw[j]; q.rad_b = rad_pc[j]; q.pn = pn_b; q.qf = qf;
+            for (int c = 0; c < 3; c++) {
+                state.pos[i*3+c] = (q.m_a * state.pos[i*3+c] + q.m_b * state.pos[j*3+c]) / M;
+                state.vel[i*3+c] = (q.m_a * state.vel[i*3+c] + q.m_b * state.vel[j*3+c]) / M;
+                state.aux_vel[i*3+c] = (q.m_a * state.aux_vel[i*3+c] + q.m_b * state.aux_vel[j*3+c]) / M;
+            }
+            state.mass[i] = M;
+            for (int k = j; k + 1 < state.n_bodies; k++) {
+                for (int c = 0; c < 3; c++) {
+                    state.pos[k*3+c] = state.pos[(k+1)*3+c];
+                    state.vel[k*3+c] = state.vel[(k+1)*3+c];
+                    state.aux_vel[k*3+c] = state.aux_vel[(k+1)*3+c];
+                }
+                state.mass[k] = state.mass[k+1];
+                kw[k] = kw[k+1]; rad_pc[k] = rad_pc[k+1]; live[k] = live[k+1];
+            }
+            state.n_bodies--;
+            n_live = state.n_bodies;
+            for (int r = 0; r < n_secr; r++) if (sec[r].com > j) sec[r].com--;
+            q.com = i > j ? i - 1 : i;
+            sec[n_secr++] = q;
+            const double dE = logh_total_energy(state, G_norm) - E0s;
+            state.B -= dE;
+            state.sd_jump += dE + q.E_int0;
+            n_sec_used++;
+        };
+        // Record qi: its internal orbit advanced secularly over the time since the collapse, the members restored
+        // (member a in the c.o.m. slot, member b appended)
+        auto sec_expand = [&](int qi) {
+            const SecRec q = sec[qi];
+            for (int r = qi; r + 1 < n_secr; r++) sec[r] = sec[r + 1];
+            n_secr--;
+            const int c0 = q.com;
+            const double M = q.m_a + q.m_b;
+            double p1[3], v1[3], p2[3], v2[3];
+            auto split = [&]() {
+                for (int c = 0; c < 3; c++) {
+                    p1[c] = -q.m_b / M * q.r[c]; p2[c] = q.m_a / M * q.r[c];
+                    v1[c] = -q.m_b / M * q.v[c]; v2[c] = q.m_a / M * q.v[c];
+                }
+            };
+            split();
+            const double dts = state.t - q.t0;
+            if (dts != 0.0 &&
+                integrate_secular_binary(p1, v1, q.m_a, p2, v2, q.m_b, G_norm, q.pn ? c_norm : 0.0, q.pn, dts) < 0) {
+                split();   // PN write-back refused although the dry run passed: Kepler drift (booked as E_pn all the same)
+                integrate_secular_binary(p1, v1, q.m_a, p2, v2, q.m_b, G_norm, 0.0, 0, dts);
+            }
+            double rr[3], vv[3];
+            for (int c = 0; c < 3; c++) { rr[c] = p2[c] - p1[c]; vv[c] = v2[c] - v1[c]; }
+            const double E_int1 = e_int(q.m_a, q.m_b, rr, vv);
+            const double E0s = logh_total_energy(state, G_norm);
+            const int nn = state.n_bodies;
+            for (int c = 0; c < 3; c++) {
+                const double xc = state.pos[c0*3+c], vc = state.vel[c0*3+c], wc = state.aux_vel[c0*3+c];
+                state.pos[c0*3+c] = xc + p1[c]; state.vel[c0*3+c] = vc + v1[c]; state.aux_vel[c0*3+c] = wc + v1[c];
+                state.pos[nn*3+c] = xc + p2[c]; state.vel[nn*3+c] = vc + v2[c]; state.aux_vel[nn*3+c] = wc + v2[c];
+                state.ext_accel[nn*3+c] = 0.0;
+            }
+            state.mass[c0] = q.m_a;
+            state.mass[nn] = q.m_b;
+            kw[nn] = q.kw_b; rad_pc[nn] = q.rad_b; live[nn] = q.live_b;
+            state.n_bodies++;
+            n_live = state.n_bodies;
+            const double dE = logh_total_energy(state, G_norm) - E0s;
+            state.B -= dE;
+            state.sd_jump += dE - E_int1;
+        };
+        if (sec_inner_on && state.use_aux_vel && n_live >= 3 && dt_norm > 0.0) {
+            struct Cand { double a, e; int i, j; };
+            Cand cand[LOGH_MAX_BODIES * (LOGH_MAX_BODIES - 1) / 2];
+            int nc = 0;
+            for (int i = 0; i < n_live; i++)
+                for (int j = i + 1; j < n_live; j++) {
+                    double r[3], v[3];
+                    for (int c = 0; c < 3; c++) {
+                        r[c] = state.pos[j*3+c] - state.pos[i*3+c];
+                        v[c] = state.vel[j*3+c] - state.vel[i*3+c];
+                    }
+                    const double mu = G_norm * (state.mass[i] + state.mass[j]);
+                    const double r2 = r[0]*r[0] + r[1]*r[1] + r[2]*r[2];
+                    const double eps = 0.5 * (v[0]*v[0] + v[1]*v[1] + v[2]*v[2]) - mu / std::sqrt(r2);
+                    if (!(eps < 0.0)) continue;
+                    const double hx = r[1]*v[2] - r[2]*v[1], hy = r[2]*v[0] - r[0]*v[2], hz = r[0]*v[1] - r[1]*v[0];
+                    const double e2 = 1.0 + 2.0 * eps * (hx*hx + hy*hy + hz*hz) / (mu * mu);
+                    cand[nc++] = {-mu / (2.0 * eps), std::sqrt(std::max(0.0, e2)), i, j};
+                }
+            std::sort(cand, cand + nc, [](const Cand& x, const Cand& y) { return x.a < y.a; });
+            bool used[LOGH_MAX_BODIES] = {};
+            int sel_a[LOGH_MAX_BODIES / 2], sel_b[LOGH_MAX_BODIES / 2], sel_pn[LOGH_MAX_BODIES / 2], n_sel = 0;
+            double sel_qf[LOGH_MAX_BODIES / 2];
+            for (int q = 0; q < nc; q++) {
+                const int i = cand[q].i, j = cand[q].j;
+                if (used[i] || used[j]) continue;
+                used[i] = used[j] = true;   // the tightest pair of a body is its inner orbit
+                if (n_live - n_sel - 1 < 2) break;
+                const double a = cand[q].a, e = cand[q].e;
+                const double mi = state.mass[i], mj = state.mass[j], mb = mi + mj;
+                const double P = 2.0 * M_PI * std::sqrt(a * a * a / (G_norm * mb));
+                const double n_orb = dt_norm / P;
+                if (n_orb < g_collisional.n_orb_secular) continue;
+                const double r_coll = coll[i * LOGH_MAX_BODIES + j];
+                if (r_coll > 0.0 && a * (1.0 - e) < r_coll) continue;   // collision candidate: LogH (FC-I App. B3)
+                double xcm[3], vcm[3];
+                for (int c = 0; c < 3; c++) {
+                    xcm[c] = (mi * state.pos[i*3+c] + mj * state.pos[j*3+c]) / mb;
+                    vcm[c] = (mi * state.vel[i*3+c] + mj * state.vel[j*3+c]) / mb;
+                }
+                double pert = 0.0;
+                for (int k = 0; k < n_live; k++) {
+                    if (k == i || k == j) continue;
+                    double d[3], u[3];
+                    for (int c = 0; c < 3; c++) { d[c] = state.pos[k*3+c] - xcm[c]; u[c] = state.vel[k*3+c] - vcm[c]; }
+                    const double rn = std::sqrt(d[0]*d[0] + d[1]*d[1] + d[2]*d[2]);
+                    // Closest approach within the call: the pericentre if it comes before the end, else the nearer
+                    // end point (the distance falls monotonically up to the pericentre)
+                    const double mu_k = G_norm * (mb + state.mass[k]);
+                    double rp_k = 0.0;
+                    const double tau = kepler_time_to_pericentre(d, u, mu_k, &rp_k);
+                    double r_close = std::min(rn, rp_k);
+                    if (!(tau <= dt_norm)) {
+                        kepler_drift(d, u, mu_k, dt_norm);
+                        r_close = std::min(rn, std::sqrt(d[0]*d[0] + d[1]*d[1] + d[2]*d[2]));
+                    }
+                    pert += mb * state.mass[k] / (r_close * r_close * r_close);
+                }
+                const double r_apo = a * (1.0 + e);
+                const double gamma = pert * r_apo * r_apo * r_apo / (mi * mj);
+                const double k_ref = g_collisional.sdar_kref;
+                if (!(gamma * n_orb <= k_ref)) continue;
+                const bool pn_pair = g_collisional.pn_body(state.mass[i] * M_total, kw[i]) ||
+                                     g_collisional.pn_body(state.mass[j] * M_total, kw[j]);
+                const int pn_b = pn_pair ? pn_order : 0;
+                // Dry run of the secular advance over the whole call: a refused write-back (C19), a merger (members
+                // left unchanged) or a non-finite result keep the pair in LogH
+                double p1[3], v1[3], p2[3], v2[3];
+                for (int c = 0; c < 3; c++) {
+                    p1[c] = state.pos[i*3+c] - xcm[c]; v1[c] = state.vel[i*3+c] - vcm[c];
+                    p2[c] = state.pos[j*3+c] - xcm[c]; v2[c] = state.vel[j*3+c] - vcm[c];
+                }
+                const double p1_0 = p1[0];
+                if (integrate_secular_binary(p1, v1, mi, p2, v2, mj, G_norm, pn_b ? c_norm : 0.0, pn_b, dt_norm) < 0) continue;
+                if (!std::isfinite(p1[0] + p1[1] + p1[2] + v1[0] + v1[1] + v1[2]) || p1[0] == p1_0) continue;
+                sel_a[n_sel] = live[i]; sel_b[n_sel] = live[j]; sel_pn[n_sel] = pn_b;
+                sel_qf[n_sel] = r_apo * r_apo * r_apo * n_orb / (mi * mj * k_ref);
+                n_sel++;
+            }
+            for (int q = 0; q < n_sel; q++) {
+                int i = -1, j = -1;
+                for (int k = 0; k < n_live; k++) { if (live[k] == sel_a[q]) i = k; if (live[k] == sel_b[q]) j = k; }
+                if (i >= 0 && j >= 0) sec_collapse(i, j, sel_pn[q], sel_qf[q]);
+            }
+            if (n_secr > 0) {
+                build_coll();
+                zero_com_coll();
+                sec_watch_build();
+            }
+        }
+
         // SDAR (FROST-CLUSTERS I App. A2): slow-down of weakly perturbed inner binaries; kappa = 1 for 2-body
         // subsystems (no perturber inside the subsystem: the external tide comes from the FSI kicks, which need the
         // true phase) and for collision candidates (osculating pericentre inside the collision distance, FC-I App.
-        // B3). FC-I sets kappa = 1 for whole PN subsystems; NBODY_SDAR_PN=1 (PLAN item 4c) keeps kappa = 1 only for
+        // B3). FC-I sets kappa = 1 for whole PN subsystems; since C20 (PLAN item 4c; NBODY_SDAR_PN=0: off) the code keeps kappa = 1 only for
         // pairs with a member above M_PN and slows the other inner binaries of PN subsystems
-        static const bool sdar_pn = [] { const char* e = std::getenv("NBODY_SDAR_PN"); return e && std::atoi(e) != 0; }();
+        static const bool sdar_pn = [] { const char* e = std::getenv("NBODY_SDAR_PN"); return !e || std::atoi(e) != 0; }();
         const bool sd_on = g_collisional.sdar && (sdar_pn || !state.use_aux_vel) && n_live >= 3;
         SdarParams sd_par;
-        if (sd_on && state.use_aux_vel)
-            for (int k = 0; k < n_live; k++)
+        auto sd_pn_build = [&]() {   // PN bodies by state slot (a collapsed binary: either member)
+            for (int k = 0; k < n_live; k++) {
                 sd_par.pn[k] = g_collisional.pn_body(h_mass(off + live[k]), batch.flat_stype[off + live[k]]);
+                for (int q = 0; q < n_secr; q++)
+                    if (sec[q].com == k &&
+                        g_collisional.pn_body(h_mass(off + sec[q].live_b), batch.flat_stype[off + sec[q].live_b]))
+                        sd_par.pn[k] = true;
+            }
+        };
+        if (sd_on && state.use_aux_vel) sd_pn_build();
         if (sd_on) {
             sd_par.k_ref = g_collisional.sdar_kref;
             sd_par.c = g_collisional.sdar_c;
@@ -719,12 +936,22 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
             gbs.par_stages = serial_subs && stage_par_max > 0 && host_threads > 1;
             if (sd_on) gbs.sdar = &sd_par;
             if (coll_on) gbs.coll = coll;
+            if (n_secr > 0) gbs.sec_watch = &sec_w;
             double Omega_cur = logh_omega(state);
             double ds_est = (Omega_cur > 1e-30) ? (t_stop - state.t) * Omega_cur : (t_stop - state.t);
             const int n_seg = gbs.integrate_to_time(state, t_stop, G_norm, ds_est, c_norm, pn_order, seg_limit);
             n_gbs_steps += n_seg;
             peri_land[s] += gbs.peri_landings;
             peri_miss[s] += gbs.peri_misses;
+            if (gbs.coll_i < 0 && gbs.sec_hit) {   // the tide on a collapsed binary grew: expand all, continue
+                if (sd_on) logh_sd_update(state, G_norm, sd_par, true);
+                while (n_secr > 0) sec_expand(n_secr - 1);
+                sec_w.n = 0;
+                build_coll();
+                if (sd_on && state.use_aux_vel) sd_pn_build();
+                if (sd_on && state.n_bodies >= 3) logh_sd_update(state, G_norm, sd_par);
+                continue;
+            }
             if (gbs.coll_i < 0) {
                 reached = gbs.reached;
                 limit_hit = n_seg >= seg_limit;
@@ -788,6 +1015,7 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
             }
             state.n_bodies--;
             n_live = state.n_bodies;
+            for (int q = 0; q < n_secr; q++) if (sec[q].com > kg) sec[q].com--;
             const double dE = logh_total_energy(state, G_norm) - E_before;
             rec.dE_int = dE * E_scale;
             batch.coll_dE[s] += rec.dE_int;
@@ -801,15 +1029,18 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
                 break;
             }
             build_coll();
+            zero_com_coll();
+            sec_watch_build();
+            if (sd_on && state.use_aux_vel) sd_pn_build();
             if (sd_on && state.n_bodies >= 3) logh_sd_update(state, G_norm, sd_par);
         }
         // Remove the slow-down: the last jump back to H (W20 Eq. 24); then T + U + B is the integration error of
         // the slowed Hamiltonian over the call (W20 Eq. 25), and sd_jump the booked physical energy change
-        if (sd_on) {
-            logh_sd_update(state, G_norm, sd_par, true);
-            batch.sd_jump[s] = state.sd_jump * E_scale;
-            sd_kappa_sub[s] = state.sd_kappa_peak;
-        }
+        if (sd_on) logh_sd_update(state, G_norm, sd_par, true);
+        while (n_secr > 0) sec_expand(n_secr - 1);   // secular inner binaries: internal orbits advanced to the end
+        if (sd_on || n_sec_used > 0) batch.sd_jump[s] = state.sd_jump * E_scale;
+        if (sd_on) sd_kappa_sub[s] = state.sd_kappa_peak;
+        sec_used_sub[s] = n_sec_used;
 
         // ==================================================================
         // Step 4: Denormalize and store results
@@ -944,8 +1175,8 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
         static const int slow_log = std::getenv("NBODY_LOGH_SLOW") ? std::atoi(std::getenv("NBODY_LOGH_SLOW")) : 0;
         if (slow_log > 0 && n_gbs_steps >= slow_log) {
             char head[200];
-            std::snprintf(head, sizeof(head), "      LogH slow: gbs=%d dt=%.3e Myr sd=%d kappa_peak=%.3g colls=%zu n=%d m[Msun]=",
-                          n_gbs_steps, dt_norm * T_scale * TIME_UNIT_MYR, (int)sd_on, state.sd_kappa_peak,
+            std::snprintf(head, sizeof(head), "      LogH slow: gbs=%d dt=%.3e Myr sd=%d kappa_peak=%.3g secinner=%d colls=%zu n=%d m[Msun]=",
+                          n_gbs_steps, dt_norm * T_scale * TIME_UNIT_MYR, (int)sd_on, state.sd_kappa_peak, n_sec_used,
                           colls.size(), nb);
             std::printf("%s\n", describe(head).c_str());
             std::fflush(stdout);
@@ -1076,6 +1307,8 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
         batch.stat_peri_landings += peri_land[s2];
         batch.stat_peri_misses += peri_miss[s2];
     }
+    batch.stat_sec_inner = 0;
+    for (int u : sec_used_sub) batch.stat_sec_inner += u;
     for (double k : sd_kappa_sub) {
         if (k > 1.0) batch.stat_sd_calls++;
         batch.stat_sd_kappa_max = std::max(batch.stat_sd_kappa_max, k);
