@@ -2981,6 +2981,17 @@ struct EnergyLedger {
     std::vector<Rec> top;   // largest |own| first
     double root = 0.0, sum_own = 0.0, eref = 0.0;
     int calls = 0;
+    // budget diagnostics: own errors and subsystem-advance residues per depth (frame depth), per-class internal
+    // energy changes of the advances, book deltas made inside the advances
+    static constexpr int MD = 40;
+    double depth_own[MD] = {}, depth_adv[MD] = {};
+    int depth_calls[MD] = {};
+    double adv_unattr = 0.0;   // advances whose subsystem list changed (not attributed per class)
+    // classes: 0 sec2 nonPN, 1 sec2 PN, 2 sec3, 3 LogH n2 nonPN, 4 LogH n3 nonPN, 5 LogH n4+ nonPN, 6 LogH PN (any n)
+    static constexpr int NC = 7;
+    double cls_dE[NC] = {}, cls_abs[NC] = {};
+    long long cls_n[NC] = {};
+    double bk_gw = 0.0, bk_pn = 0.0, bk_sd = 0.0, bk_merge = 0.0, bk_other = 0.0;
     // subsystem advances (advance_subsystems_in_range): change of the members' internal energy (T + U among the
     // members of each subsystem) minus the books' change, summed; the subsystems with the largest internal change
     double adv_unbooked = 0.0;
@@ -3035,7 +3046,7 @@ double set_energy(const Particles& p, int s, int n, double G) {
 
 #ifdef ENABLE_COLLISIONAL
 // T + U among the members of each subsystem fully inside [start, start + count), by subsystem position in active
-std::vector<double> member_energies(const Particles& p, int start, int count, double G) {
+std::vector<double> member_energies(const Particles& p, int start, int count, double G, std::vector<char>* pn_flag = nullptr) {
     const auto& subs = g_subsystem_mgr.active;
     std::vector<double> out(subs.size(), std::nan(""));
     g_subsystem_mgr.rebuild_pid_to_idx(p);
@@ -3060,6 +3071,13 @@ std::vector<double> member_energies(const Particles& p, int start, int count, do
             idx[b] = i - start;
         }
         if (!in) continue;
+        if (pn_flag) {
+            if (pn_flag->size() != subs.size()) pn_flag->assign(subs.size(), 0);
+            const bool pn_on = g_collisional.pn_order > 0 && g_collisional.c_code > 0.0;
+            for (int b = 0; b < nb && pn_on; b++)
+                if (g_collisional.pn_body(hm[idx[b]], StellarPropsCache::get().type_of(p, subs[s].particle_ids[b])))
+                    (*pn_flag)[s] = 1;
+        }
         double E = 0.0;
         for (int b = 0; b < nb; b++) {
             const int i = idx[b];
@@ -3087,10 +3105,19 @@ void advance_subsystems_in_range(Particles& p, int start, int count, double G, d
         return;
     }
     const std::vector<Subsystem> before_subs = g_subsystem_mgr.active;
-    const std::vector<double> e0 = member_energies(p, start, count, G);
+    std::vector<char> pnf(before_subs.size(), 0);
+    const std::vector<double> e0 = member_energies(p, start, count, G, &pnf);
     const double b0 = g_energy_books.total_sink();
+    const EnergyBookkeeping bk0 = g_energy_books;
     advance_subsystems_in_range_impl(p, start, count, G, dt);
     const double db = g_energy_books.total_sink() - b0;
+    {
+        const double er0 = g_ledger.eref > 0.0 ? g_ledger.eref : 1.0;
+        const auto& b1 = g_energy_books;
+        g_ledger.bk_gw += (b1.E_gw - bk0.E_gw) / er0; g_ledger.bk_pn += (b1.E_pn - bk0.E_pn) / er0;
+        g_ledger.bk_sd += (b1.E_sd - bk0.E_sd) / er0; g_ledger.bk_merge += (b1.E_merge - bk0.E_merge) / er0;
+        g_ledger.bk_other += ((b1.E_escape - bk0.E_escape) + (b1.E_sse - bk0.E_sse) + (b1.E_tidal - bk0.E_tidal)) / er0;
+    }
     const double eref = g_ledger.eref > 0.0 ? g_ledger.eref : 1.0;
     // the same subsystems after the advance (by member list; the advance may reclassify, not regroup)
     const std::vector<double> e1 = member_energies(p, start, count, G);
@@ -3104,7 +3131,22 @@ void advance_subsystems_in_range(Particles& p, int start, int count, double G, d
         EnergyLedger::SubRec r;
         r.dE = d; r.type = (int)before_subs[s].type; r.n = before_subs[s].n_bodies; r.secular = before_subs[s].is_secular;
         r.pids = before_subs[s].particle_ids;
+        {
+            const auto& sa = g_subsystem_mgr.active[s];   // classification after the advance (re-evaluated in it)
+            const int nb = sa.n_bodies;
+            int c;
+            if (sa.is_secular && nb == 2) c = pnf[s] ? 1 : 0;
+            else if (sa.is_secular && sa.type == SubsystemType::TRIPLE_STABLE) c = 2;
+            else if (pnf[s]) c = 6;
+            else c = nb == 2 ? 3 : nb == 3 ? 4 : 5;
+            g_ledger.cls_dE[c] += d; g_ledger.cls_abs[c] += std::fabs(d); g_ledger.cls_n[c]++;
+        }
         g_ledger.note_sub(std::move(r));
+    }
+    {
+        const int dd = std::min((int)g_ledger.stack.size() - 1, EnergyLedger::MD - 1);
+        if (all) g_ledger.depth_adv[std::max(dd, 0)] += dsum + db / eref;
+        else g_ledger.adv_unattr += db / eref;
     }
     if (all) {
         g_ledger.adv_unbooked += dsum + db / eref;
@@ -3149,6 +3191,10 @@ static int hhs_fsi_recursive(
     if (k == 0 && fr.valid) {
         EnergyLedger::Rec r;
         r.depth = depth; r.n = count; r.pivot = pivot_dt * TIME_UNIT_MYR; r.total = dE; r.own = dE - fr.child;
+        {
+            const int dd = std::min((int)g_ledger.stack.size(), EnergyLedger::MD - 1);   // frame depth (root 0)
+            g_ledger.depth_own[dd] += r.own; g_ledger.depth_calls[dd]++;
+        }
         if (count <= 32) {
             if (host_exec()) {
                 r.pids.assign(p.particle_id.data() + start, p.particle_id.data() + start + count);
@@ -3172,6 +3218,20 @@ static int hhs_fsi_recursive(
             for (int pid : r.pids) std::printf(" %d", pid);
             std::printf("\n");
         }
+        std::printf("ELEDGER depth (own error incl. subsystem residue made there | subsystem residue | calls):");
+        for (int d = 0; d < EnergyLedger::MD; d++)
+            if (g_ledger.depth_calls[d] > 0 || g_ledger.depth_adv[d] != 0.0)
+                std::printf(" d%d %.4e %.4e %d", d, g_ledger.depth_own[d], g_ledger.depth_adv[d], g_ledger.depth_calls[d]);
+        std::printf(" unattr_adv_books %.4e\n", g_ledger.adv_unattr);
+        std::printf("ELEDGER classes (sum dE_int | sum |dE_int| | n): sec2 %.4e %.4e %lld  sec2pn %.4e %.4e %lld  sec3 %.4e %.4e %lld"
+                    "  logh2 %.4e %.4e %lld  logh3 %.4e %.4e %lld  logh4p %.4e %.4e %lld  loghpn %.4e %.4e %lld\n",
+                    g_ledger.cls_dE[0], g_ledger.cls_abs[0], g_ledger.cls_n[0], g_ledger.cls_dE[1], g_ledger.cls_abs[1],
+                    g_ledger.cls_n[1], g_ledger.cls_dE[2], g_ledger.cls_abs[2], g_ledger.cls_n[2], g_ledger.cls_dE[3],
+                    g_ledger.cls_abs[3], g_ledger.cls_n[3], g_ledger.cls_dE[4], g_ledger.cls_abs[4], g_ledger.cls_n[4],
+                    g_ledger.cls_dE[5], g_ledger.cls_abs[5], g_ledger.cls_n[5], g_ledger.cls_dE[6], g_ledger.cls_abs[6],
+                    g_ledger.cls_n[6]);
+        std::printf("ELEDGER books in advances: gw %.4e pn %.4e sd %.4e merge %.4e other %.4e\n", g_ledger.bk_gw,
+                    g_ledger.bk_pn, g_ledger.bk_sd, g_ledger.bk_merge, g_ledger.bk_other);
         std::printf("ELEDGER subsystem advances: members' energy change + books change %.6e (types: 0 binary, 1 fly-by, "
                     "2 stable triple, 3 unstable triple, 4 multiple)\n", g_ledger.adv_unbooked);
         {
