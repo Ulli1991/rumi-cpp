@@ -252,12 +252,12 @@ NATAL_MIX = dict(NATAL_NS, TOTAL_TIME_MYR="60", PLUMMER_MASS_DIST="kroupa", PLUM
                  PLUMMER_R_HALF="2000", SSE_METALLICITY="0.0002", SSE_ECSN_MODEL="ON", SSE_PPISN_MODEL="STRONG")
 
 
-def run(exe, cfg):
+def run(exe, cfg, timeout=None):
     """L0 diagnostic rows (|dE/E|, |dP|/M, |dL/L|) of one run; raises on a nonzero exit."""
-    return diagnostics(run_output(exe, cfg))
+    return diagnostics(run_output(exe, cfg, timeout=timeout))
 
 
-def run_output(exe, cfg, env=None, dump=False, read=None):
+def run_output(exe, cfg, env=None, dump=False, read=None, timeout=None):
     """stdout of one run (env: extra environment variables); raises on a nonzero exit or a timeout. dump=True: also
     the particles of the last NBODY_DUMP snapshot (main.cpp dump_particles) as rows (pid, m, x, y, z, vx, vy, vz)
     sorted by pid, returned as (stdout, rows). read: file name in the run directory whose text (None if absent) is
@@ -270,10 +270,10 @@ def run_output(exe, cfg, env=None, dump=False, read=None):
         Path(d, "config.txt").write_text("".join(f"{k} = {v}\n" for k, v in {**OLD_DEFAULTS, **cfg, **extra}.items()))
         try:
             launcher = os.environ.get("NBODY_TEST_LAUNCHER", "").split()  # e.g. "mpirun -n 2"
-            out = subprocess.run(launcher + [exe], cwd=d, capture_output=True, text=True, timeout=TIMEOUT_S,
-                                 env={**os.environ, **(env or {})})
+            out = subprocess.run(launcher + [exe], cwd=d, capture_output=True, text=True,
+                                 timeout=timeout or TIMEOUT_S, env={**os.environ, **(env or {})})
         except subprocess.TimeoutExpired:
-            raise SystemExit(f"FAIL: no result within {TIMEOUT_S} s (hung or stuck in time)")
+            raise SystemExit(f"FAIL: no result within {timeout or TIMEOUT_S} s (hung or stuck in time)")
         if out.returncode != 0:
             raise SystemExit(f"FAIL: exit {out.returncode}\n{out.stdout[-2000:]}{out.stderr[-2000:]}")
         text = None
@@ -304,9 +304,9 @@ def endpoint(exe, label, base, eta, bound, literature):
     return ok & check(f"{label} eta={eta} |dE/E| at 1000 P, FROST Fig. 4 upper end", rows[-1][0], literature)
 
 
-def floor(exe, label, cfg, bounds):
+def floor(exe, label, cfg, bounds, timeout=None):
     """Round-off floor at small eta: endpoint and max |dE/E|, max |dP|/M and |dL/L| against bounds."""
-    rows = run(exe, cfg)
+    rows = run(exe, cfg, timeout=timeout)
     vals = (rows[-1][0], max(r[0] for r in rows), max(r[1] for r in rows), max(r[2] for r in rows))
     names = ("|dE/E| at end", "max|dE/E|", "max|dP|/M [km/s]", "max|dL/L|")
     return all([check(f"{label} {n}", v, b) for n, v, b in zip(names, vals, bounds)])
@@ -460,15 +460,33 @@ def paths_agree(exe, label, cfg, bound):
 def force_err(exe, label, cfg, ratio):
     """NBODY_FORCE_ERR (synthetic far-field force errors, plan I-1): eps = 0 leaves the run bit-identical to no
     variable (diagnostics and every particle); eps = 1e-3 on every set of >= 256 particles must raise max |dE/E| by
-    at least `ratio` in every error model."""
+    at least `ratio` in every error model; the momentum-conserving ones (smooth, cell, random with
+    NBODY_FORCE_ERR_PFIX=1) keep max |dP|/M within 100x of the unperturbed run."""
     out0, dump0 = run_output(exe, cfg, dump=True)
     out1, dump1 = run_output(exe, cfg, env={"NBODY_FORCE_ERR": "0", "NBODY_FORCE_ERR_MIN": "256"}, dump=True)
     ok = check(f"{label} eps = 0: diagnostics differ (0 = identical)", float(diagnostics(out0) != diagnostics(out1)), 0)
     ok &= check(f"{label} eps = 0: particles differ (0 = identical)", float(dump0 != dump1), 0)
     base = max(r[0] for r in diagnostics(out0))
-    for model in ("random", "frozen", "smooth"):
-        out = run_output(exe, cfg, env={"NBODY_FORCE_ERR": "1e-3", "NBODY_FORCE_ERR_MIN": "256",
-                                        "NBODY_FORCE_ERR_MODEL": model})
+    dp0 = max(r[1] for r in diagnostics(out0))
+    dl0 = max(r[2] for r in diagnostics(out0))
+    for model in ("random", "frozen", "smooth", "cell", "random_pfix", "cell_lfix"):
+        env = {"NBODY_FORCE_ERR": "1e-3", "NBODY_FORCE_ERR_MIN": "256", "NBODY_FORCE_ERR_MODEL": model.split("_")[0]}
+        if model.endswith("_pfix"):
+            env["NBODY_FORCE_ERR_PFIX"] = "1"
+        if model.endswith("_lfix"):
+            env["NBODY_FORCE_ERR_LFIX"] = "1"
+        out = run_output(exe, cfg, env=env)
+        if model in ("cell", "cell_lfix"):   # the cell errors torque the cluster; LFIX removes the torque
+            dl = max(r[2] for r in diagnostics(out))
+            print(f"   {model}: max|dL/L| {dl:.3e} (no errors {dl0:.3e})")
+            if model == "cell":
+                ok &= check(f"{label} {model}: max|dL/L| / unperturbed", dl / max(dl0, 1e-300), 1000.0, lower=True)
+            else:
+                ok &= check(f"{label} {model}: max|dL/L| / unperturbed", dl / max(dl0, 1e-300), 100.0)
+        if model in ("smooth", "cell", "random_pfix", "cell_lfix"):   # momentum-conserving models: |dP| stays at round-off
+            dp = max(r[1] for r in diagnostics(out))
+            print(f"   {model}: max|dP|/M {dp:.3e} (no errors {dp0:.3e})")
+            ok &= check(f"{label} {model}: max|dP|/M / unperturbed", dp / max(dp0, 1e-300), 100.0)
         ok &= check(f"{label} {model}: injection announced", float("NBODY_FORCE_ERR: eps" in out), 1, lower=True)
         de = max(r[0] for r in diagnostics(out))
         print(f"   {model}: max|dE/E| {de:.3e} (no errors {base:.3e})")
@@ -1595,7 +1613,10 @@ CASES = {
     # bounds are 1.3x the largest of these, not of the single e = 0 draw.
     "floor_binary_e0": lambda exe: floor(exe, "floor e=0", dict(FROST4, BINARY_E="0.0", ETA="0.004", ETA_FF="0.004",
                                           ETA_FB="0.004", INTEGER_POSITIONS="true", DOMAIN_HALFSIZE_PC="1e-3"),
-                                         (4.5e-14, 5.2e-14, 1e-14, 2.6e-14)),
+                                         (4.5e-14, 5.2e-14, 1e-14, 2.6e-14),
+                                         # eta 0.004: 5.4 min on an A100 (kernel launch latency of ~1e6 tiny
+                                         # steps), < 2 min on one CPU core; 1.3x the GPU time
+                                         timeout=max(TIMEOUT_S, 420)),
     "floor_planets": lambda exe: floor(exe, "floor planets", dict(PLANETS, ETA="0.004", ETA_FF="0.004", ETA_FB="0.004",
                                         INTEGER_POSITIONS="true", DOMAIN_HALFSIZE_PC="1e-3"),
                                        (1.25e-13, 1.5e-13, 1.0e-17, 3.3e-15)),

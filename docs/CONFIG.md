@@ -244,7 +244,10 @@ Levels:
 | `NBODY_FENCE_STATS` | =1/2: count device fences and copies per call site (fence_stats.h; NVTX ranges for nsys) |
 | `NBODY_FORCE_ERR` | =eps: synthetic relative force error before every field kick of HHS sets >= NBODY_FORCE_ERR_MIN (FMM accuracy study; not bit-identical) |
 | `NBODY_FORCE_ERR_MIN` | =n: smallest HHS set that gets NBODY_FORCE_ERR (default 16384) |
-| `NBODY_FORCE_ERR_MODEL` | =random (default; eps \|a_i\| times an isotropic unit vector per particle and call) / frozen (the same vector per particle at every call) / smooth (eps a_rms times a random linear field in position over the set, per call) |
+| `NBODY_FORCE_ERR_MODEL` | =random (default; eps \|a_i\| times an isotropic unit vector per particle and call) / frozen (the same vector per particle at every call) / smooth (eps a_rms times a random linear field in position over the set, per call) / cell (eps \|a_i\| times hashed unit vectors of NBODY_FORCE_ERR_LEVELS nested grid cells, frozen in space: FMM-like) |
+| `NBODY_FORCE_ERR_LEVELS` | =L: nested grids of the cell model (default 6; edges r_rms 2^-l) |
+| `NBODY_FORCE_ERR_LFIX` | =1: also remove the net torque of the error over each kicked range (angular momentum exact; implies PFIX) |
+| `NBODY_FORCE_ERR_PFIX` | =1: remove the mass-weighted mean error over each kicked range (momentum exact; default 1 for cell, 0 otherwise) |
 | `NBODY_MERGE_CHECK` | =1: total energy and books before and after each per-level merger (merger energy booking check) |
 | `NBODY_SSE_CHECK` | =1: runtime SSE potential change booked against two full triangle sums (SSE energy booking check) |
 | `NBODY_LEAN_SYNC` | =0: keep every device fence of the original code (default on: lean copies, bit-identical) |

@@ -97,6 +97,18 @@ void release_integrator_globals() { g_octree = Octree(); }  // before Kokkos::fi
 //     rms |delta_a| is ~eps a_rms): a spatially smooth error field like the truncation error of a low-order multipole
 //     expansion (Dehnen 2014 sec. 2-3: correlated, not white). sum_i m_i delta_a_i = 0 (momentum conserved, as
 //     Dehnen's FMM); the antisymmetric part of M exerts a torque.
+//   cell: an FMM-like error that is correlated in space and coherent in time: delta_a_i = eps |a_i| sum_l u_{c_l(i)} /
+//     sqrt(L), over L = NBODY_FORCE_ERR_LEVELS (default 6) nested cubic grids of edge r0 2^-l (l = 0..L-1; r0 = the
+//     mass-weighted rms radius of the first perturbed set, then fixed; grids anchored at the origin), u_c an isotropic
+//     unit vector from a hash of (level, cell): all sinks in a cell share the error of that level (the error of one
+//     M2L/L2P chain is the same smooth field for the sinks of a cell, Dehnen 2014 sec. 3), the field is frozen while
+//     the configuration is (time-coherent), and it jumps when a particle crosses a cell face (Dehnen 2014 App. B3).
+// NBODY_FORCE_ERR_PFIX = 1 (default for cell, 0 for random/frozen): subtract the mass-weighted mean of delta_a over
+//   the kicked range (rank 0's mean, broadcast), so sum_i m_i delta_a_i = 0 and the momentum stays exact, as a
+//   mutual (momentum-conserving) FMM keeps it (Dehnen 2000/2002 falcON; Zhu 2021 Taichi).
+// NBODY_FORCE_ERR_LFIX = 1 (implies PFIX; random/frozen/cell): also remove the rigid-rotation part alpha x (x_i - x_c),
+//   I alpha = sum_i m_i (x_i - x_c) x delta_a_i (I the inertia tensor of the range about its mass centre), so the
+//   error exerts no net torque either: an FMM with a global torque correction (Marcello 2017 corrects pairwise).
 // Off (unset or 0): no code runs, bit-identical.
 // =============================================================================
 namespace {
@@ -105,6 +117,10 @@ struct ForceErr {
     int nmin = 16384;
     bool smooth = false;
     bool frozen = false;   // random directions fixed per particle for the whole run (time-correlated)
+    bool cell = false;     // nested-grid cell errors, frozen in space (FMM-like)
+    int levels = 6;        // cell model: number of nested grids
+    int pfix = -1;         // subtract the mass-weighted mean (momentum exact); -1: model default
+    int lfix = 0;          // also remove the net torque of the error (angular momentum exact)
 };
 const ForceErr& force_err_cfg() {
     static const ForceErr f = [] {
@@ -115,14 +131,21 @@ const ForceErr& force_err_cfg() {
             const std::string m(v);
             if (m == "smooth") c.smooth = true;
             else if (m == "frozen") c.frozen = true;
+            else if (m == "cell") c.cell = true;
             else if (m != "random" && !m.empty()) {
-                std::fprintf(stderr, "NBODY_FORCE_ERR_MODEL = '%s': random, frozen or smooth\n", v);
+                std::fprintf(stderr, "NBODY_FORCE_ERR_MODEL = '%s': random, frozen, smooth or cell\n", v);
                 std::exit(1);
             }
         }
+        if (const char* v = std::getenv("NBODY_FORCE_ERR_LEVELS")) c.levels = std::max(1, std::atoi(v));
+        if (const char* v = std::getenv("NBODY_FORCE_ERR_PFIX")) c.pfix = std::atoi(v);
+        if (const char* v = std::getenv("NBODY_FORCE_ERR_LFIX")) c.lfix = std::atoi(v);
+        if (c.pfix < 0) c.pfix = c.cell ? 1 : 0;
+        if (c.lfix) c.pfix = 1;
         if (c.eps > 0.0 && MPIComm::rank() == 0)
-            std::printf("NBODY_FORCE_ERR: eps %.3e model %s for HHS sets >= %d\n", c.eps,
-                        c.smooth ? "smooth" : c.frozen ? "frozen" : "random", c.nmin);
+            std::printf("NBODY_FORCE_ERR: eps %.3e model %s for HHS sets >= %d (momentum fix %d, torque fix %d%s)\n", c.eps,
+                        c.smooth ? "smooth" : c.frozen ? "frozen" : c.cell ? "cell" : "random", c.nmin, c.pfix, c.lfix,
+                        c.cell ? (", levels " + std::to_string(c.levels)).c_str() : "");
         return c;
     }();
     return f;
@@ -137,6 +160,44 @@ KOKKOS_INLINE_FUNCTION std::uint64_t ferr_mix(std::uint64_t z) {   // splitmix64
 }
 KOKKOS_INLINE_FUNCTION double ferr_u01(std::uint64_t h) { return ((double)(h >> 11) + 0.5) * 0x1.0p-53; }
 
+KOKKOS_INLINE_FUNCTION void ferr_unit(std::uint64_t h1, double& ux, double& uy, double& uz) {
+    const std::uint64_t h2 = ferr_mix(h1);
+    const double cz = 2.0 * ferr_u01(h1) - 1.0, phi = 6.283185307179586 * ferr_u01(h2);
+    const double sz = Kokkos::sqrt(Kokkos::fmax(0.0, 1.0 - cz * cz));
+    ux = sz * Kokkos::cos(phi); uy = sz * Kokkos::sin(phi); uz = cz;
+}
+double g_force_err_r0 = 0.0;   // cell model: coarsest grid edge (rms radius of the first perturbed set, then fixed)
+
+// The perturbation of particle i for the random / frozen / cell models (a pure function of the state: evaluated
+// twice when the mass-weighted mean is removed).
+struct FerrField {
+    Kokkos::View<double*> ax, ay, az, x, y, z;
+    Kokkos::View<int*> pid;
+    std::uint64_t key;
+    double eps, inv_h0, norm;
+    int levels;
+    bool cell;
+    KOKKOS_INLINE_FUNCTION void operator()(int i, double& dx, double& dy, double& dz) const {
+        const double a = eps * Kokkos::sqrt(ax(i) * ax(i) + ay(i) * ay(i) + az(i) * az(i));
+        double ux, uy, uz;
+        if (!cell) {
+            ferr_unit(ferr_mix(key ^ (std::uint64_t)(unsigned)pid(i)), ux, uy, uz);
+            dx = a * ux; dy = a * uy; dz = a * uz;
+            return;
+        }
+        double sx = 0.0, sy = 0.0, sz = 0.0, s = inv_h0;
+        for (int l = 0; l < levels; ++l, s *= 2.0) {
+            const std::uint64_t cx = (std::uint64_t)(long long)Kokkos::floor(x(i) * s);
+            const std::uint64_t cy = (std::uint64_t)(long long)Kokkos::floor(y(i) * s);
+            const std::uint64_t cz = (std::uint64_t)(long long)Kokkos::floor(z(i) * s);
+            const std::uint64_t h = ferr_mix(key ^ ferr_mix((std::uint64_t)l ^ ferr_mix(cx ^ ferr_mix(cy ^ ferr_mix(cz)))));
+            ferr_unit(h, ux, uy, uz);
+            sx += ux; sy += uy; sz += uz;
+        }
+        dx = a * norm * sx; dy = a * norm * sy; dz = a * norm * sz;
+    }
+};
+
 void force_err_inject(Particles& p, int start, int count, int set_count) {
     const ForceErr& c = force_err_cfg();
     if (!(c.eps > 0.0) || set_count < c.nmin || count <= 0) return;
@@ -144,18 +205,91 @@ void force_err_inject(Particles& p, int start, int count, int set_count) {
     const double eps = c.eps;
     auto ax = p.ax, ay = p.ay, az = p.az;
     if (!c.smooth) {
-        auto pid = p.particle_id;
-        const std::uint64_t key = ferr_mix((c.frozen ? 0 : call) ^ 0x46455252ULL);
+        auto x = p.x, y = p.y, z = p.z, m = p.mass;
+        if (c.cell && !(g_force_err_r0 > 0.0)) {   // coarsest grid from the first perturbed set (rank 0's value)
+            double s[4] = {0, 0, 0, 0}, r2 = 0.0;
+            Kokkos::parallel_reduce("force_err_cm", count, KOKKOS_LAMBDA(int ii, double& sm, double& sx, double& sy,
+                                                                          double& sz) {
+                const int i = start + ii;
+                sm += m(i); sx += m(i) * x(i); sy += m(i) * y(i); sz += m(i) * z(i);
+            }, s[0], s[1], s[2], s[3]);
+            const double xc = s[1] / s[0], yc = s[2] / s[0], zc = s[3] / s[0];
+            Kokkos::parallel_reduce("force_err_r0", count, KOKKOS_LAMBDA(int ii, double& acc) {
+                const int i = start + ii;
+                const double dx = x(i) - xc, dy = y(i) - yc, dz = z(i) - zc;
+                acc += m(i) * (dx * dx + dy * dy + dz * dz);
+            }, r2);
+            double r0 = std::sqrt(r2 / s[0]);
+#ifdef USE_MPI
+            MPI_CHECK(MPI_Bcast(&r0, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD));
+#endif
+            g_force_err_r0 = r0 > 0.0 ? r0 : 1.0;
+            if (MPIComm::rank() == 0) std::printf("NBODY_FORCE_ERR: cell grids of edge %.4e / 2^l\n", g_force_err_r0);
+        }
+        FerrField F{ax, ay, az, x, y, z, p.particle_id,
+                    ferr_mix(((c.frozen || c.cell) ? 0 : call) ^ 0x46455252ULL), eps,
+                    c.cell ? 1.0 / g_force_err_r0 : 0.0, 1.0 / std::sqrt((double)c.levels), c.levels, c.cell};
+        double mean[3] = {0.0, 0.0, 0.0};
+        if (c.pfix) {
+            double s[4] = {0, 0, 0, 0};
+            Kokkos::parallel_reduce("force_err_mean", count, KOKKOS_LAMBDA(int ii, double& sm, double& sx, double& sy,
+                                                                            double& sz) {
+                const int i = start + ii;
+                double dx, dy, dz;
+                F(i, dx, dy, dz);
+                sm += m(i); sx += m(i) * dx; sy += m(i) * dy; sz += m(i) * dz;
+            }, s[0], s[1], s[2], s[3]);
+            if (s[0] > 0.0) { mean[0] = s[1] / s[0]; mean[1] = s[2] / s[0]; mean[2] = s[3] / s[0]; }
+#ifdef USE_MPI
+            MPI_CHECK(MPI_Bcast(mean, 3, MPI_DOUBLE, 0, MPI_COMM_WORLD));
+#endif
+        }
+        const double m0 = mean[0], m1 = mean[1], m2 = mean[2];
+        double al[6] = {0, 0, 0, 0, 0, 0};   // alpha, mass centre
+        if (c.lfix) {
+            double cm[4] = {0, 0, 0, 0};
+            Kokkos::parallel_reduce("force_err_lcm", count, KOKKOS_LAMBDA(int ii, double& sm, double& sx, double& sy,
+                                                                           double& sz) {
+                const int i = start + ii;
+                sm += m(i); sx += m(i) * x(i); sy += m(i) * y(i); sz += m(i) * z(i);
+            }, cm[0], cm[1], cm[2], cm[3]);
+            const double xc = cm[1] / cm[0], yc = cm[2] / cm[0], zc = cm[3] / cm[0];
+            double t[9] = {0, 0, 0, 0, 0, 0, 0, 0, 0};   // torque (3), Ixx Iyy Izz Ixy Ixz Iyz
+            Kokkos::parallel_reduce("force_err_torque", count, KOKKOS_LAMBDA(int ii, double& tx, double& ty, double& tz,
+                    double& ixx, double& iyy, double& izz, double& ixy, double& ixz, double& iyz) {
+                const int i = start + ii;
+                double dx, dy, dz;
+                F(i, dx, dy, dz);
+                dx -= m0; dy -= m1; dz -= m2;
+                const double rx = x(i) - xc, ry = y(i) - yc, rz = z(i) - zc, mi = m(i);
+                tx += mi * (ry * dz - rz * dy); ty += mi * (rz * dx - rx * dz); tz += mi * (rx * dy - ry * dx);
+                ixx += mi * (ry * ry + rz * rz); iyy += mi * (rx * rx + rz * rz); izz += mi * (rx * rx + ry * ry);
+                ixy -= mi * rx * ry; ixz -= mi * rx * rz; iyz -= mi * ry * rz;
+            }, t[0], t[1], t[2], t[3], t[4], t[5], t[6], t[7], t[8]);
+            // alpha = I^-1 T (Cramer)
+            const double a = t[3], b = t[6], cc = t[7], d = t[4], e = t[8], g = t[5];   // [[a b c][b d e][c e g]]
+            const double c00 = d * g - e * e, c01 = cc * e - b * g, c02 = b * e - cc * d;
+            const double c11 = a * g - cc * cc, c12 = b * cc - a * e, c22 = a * d - b * b;
+            const double det = a * c00 + b * c01 + cc * c02;
+            if (det > 0.0) {
+                al[0] = (c00 * t[0] + c01 * t[1] + c02 * t[2]) / det;
+                al[1] = (c01 * t[0] + c11 * t[1] + c12 * t[2]) / det;
+                al[2] = (c02 * t[0] + c12 * t[1] + c22 * t[2]) / det;
+            }
+            al[3] = xc; al[4] = yc; al[5] = zc;
+#ifdef USE_MPI
+            MPI_CHECK(MPI_Bcast(al, 6, MPI_DOUBLE, 0, MPI_COMM_WORLD));
+#endif
+        }
+        const double wx = al[0], wy = al[1], wz = al[2], xc = al[3], yc = al[4], zc = al[5];
         Kokkos::parallel_for("force_err_random", count, KOKKOS_LAMBDA(int ii) {
             const int i = start + ii;
-            const std::uint64_t h1 = ferr_mix(key ^ (std::uint64_t)(unsigned)pid(i));
-            const std::uint64_t h2 = ferr_mix(h1);
-            const double cz = 2.0 * ferr_u01(h1) - 1.0, phi = 6.283185307179586 * ferr_u01(h2);
-            const double sz = Kokkos::sqrt(Kokkos::fmax(0.0, 1.0 - cz * cz));
-            const double a = eps * Kokkos::sqrt(ax(i) * ax(i) + ay(i) * ay(i) + az(i) * az(i));
-            ax(i) += a * sz * Kokkos::cos(phi);
-            ay(i) += a * sz * Kokkos::sin(phi);
-            az(i) += a * cz;
+            double dx, dy, dz;
+            F(i, dx, dy, dz);
+            const double rx = x(i) - xc, ry = y(i) - yc, rz = z(i) - zc;
+            ax(i) += dx - m0 - (wy * rz - wz * ry);
+            ay(i) += dy - m1 - (wz * rx - wx * rz);
+            az(i) += dz - m2 - (wx * ry - wy * rx);
         });
         return;
     }
