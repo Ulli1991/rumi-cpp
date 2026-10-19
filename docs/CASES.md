@@ -536,6 +536,9 @@ Status: **closed** (fixed, test, ensemble checked), **option** (fix kept as an o
 - **Decision:** the energy rule (equal or better on every seed) fails, so the implicit kick stays. Open: why the
   non-symplectic kick does as well in clusters. Likely the energy error there is dominated by the FSI/field, and
   LogH steps are short.
+- **Guard (2026-10-19):** ctest `logh_symplectic` (tests/symplectic_test.cpp, Enzyme versions in
+  tests/enzyme/symplectic/) keeps the 1/Omega kick's symplectic defect at its measured O(ds) value (4.0e-2 / 4.9e-2
+  at ds = 1e-2, bound 1.3x) and checks reversibility, P/L equivariance and the symplectic kepler_drift to round-off.
 
 ## R1 FLYBY_CM_KICK, c.o.m. kicks of weakly perturbed binaries (rejected)
 
