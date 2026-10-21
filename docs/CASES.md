@@ -698,6 +698,12 @@ Status: **closed** (fixed, test, ensemble checked), **option** (fix kept as an o
   production once PN subsystems are covered (2-3.5PN terms in the Poincare form, or splitting PN out of the IRK
   flow).
 - **Open:** the default decision; PN subsystems.
+- **W10 guards (R4 side finding):** `std::max(dmax, NaN) = dmax` hid NaN stage values in the fixed-point and Newton
+  increments, so a NaN iterate could pass the HMR08 rule (increment 0). Now every stage value is tested for finiteness
+  in the fixed point, the Newton iterate and the final L; an increment growing over 3 successive iterations above 1e-13
+  counts as non-contracting. Either is failure (fail 2, state unchanged, GBS fallback). Test `gauss_irk` section 5
+  (third body 4e-12 from a binary member): old code fail 4 after accepted steps, now fail 2; all earlier bounds unchanged.
+
 
 ## E2 Gravitational-wave observables of compact binaries and mergers: gw_events.dat (added, on by default)
 

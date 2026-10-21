@@ -161,6 +161,26 @@ int main() {
         gauss_irk_integrate(s, 10 * P, 1.0, GaussIrkOpts(), 5, nullptr, o, nullptr);
         ok &= check("step limit: fail code 1", o.ok ? 0.0 : (double)o.fail, 1.0, true);
     }
+    // 5. W10 guards (CASES.md C22): a non-finite stage value or an increment growing over successive iterations is a
+    // failure (fail 2, state unchanged, GBS fallback), never an accepted step. Third body 1e-12 from a bound pair's
+    // member: std::max(dmax, NaN) = dmax hid the NaN stages and the old code counted steps with them (fail 4 later)
+    {
+        LogHState s{};
+        s.n_bodies = 3;
+        s.mass[0] = s.mass[1] = 0.5; s.mass[2] = 1.0;
+        s.pos[0] = 0.5; s.pos[3] = -0.5; s.pos[6] = 0.5 + 4e-12;
+        s.t = 0.0; s.B = 0.0;
+        LogHState s0 = s;
+        GaussIrkOut o;
+        GaussIrkStats st;
+        gauss_irk_integrate(s, 5.0, 1.0, GaussIrkOpts(), 2000, nullptr, o, &st);
+        ok &= check("W10 coincident bodies: fail code 2 (stage not finite, not 4)", o.ok ? 0.0 : (double)o.fail, 2.0, true);
+        ok &= check("... fail code <= 2", (double)o.fail, 2.0);
+        ok &= check("... state unchanged", std::memcmp(&s, &s0, sizeof(s)) == 0 ? 0.0 : 1.0, 0.0);
+        bool fin = true;
+        for (int i = 0; i < 9; i++) fin &= std::isfinite(s.pos[i]) && std::isfinite(s.vel[i]);
+        ok &= check("... state finite", fin ? 0.0 : 1.0, 0.0);
+    }
     std::printf("     wall %.1f s\n", std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
     std::printf("%s\n", ok ? "PASS" : "FAIL");
     return ok ? 0 : 1;

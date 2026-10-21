@@ -203,12 +203,14 @@ bool newton_stages(const Coeffs& k, const Sys& sys, const double* y, const doubl
             }
         lu_solve(M, piv, N, R.data());
         double nrm = 0.0;
+        bool nrm_ok = true;
         for (int i = 0; i < S; i++)
             for (int r = 0; r < d; r++) {
                 Z[i * d + r] += R[i * d + r];
+                if (!std::isfinite(Z[i * d + r])) nrm_ok = false;
                 nrm = std::max(nrm, std::fabs(R[i * d + r]) / (std::fabs(y[r]) + std::fabs(Z[i * d + r]) + 1e-300));
             }
-        if (!std::isfinite(nrm)) return false;
+        if (!std::isfinite(nrm) || !(nrm_ok)) return false;   // NaN in a stage (std::max ignores NaN)
         const bool done = nrm < 1e-15 || (nrm >= prev && nrm < 1e-12);
         if (done) {
             for (int i = 0; i < S; i++)
@@ -227,6 +229,7 @@ bool gauss_stages(const Coeffs& k, const Sys& sys, const double* y, const double
     const int d = sys.d;
     double F[DMAX];
     double dprev = 1e300;
+    int ngrow = 0;   // successive iterations with a growing increment
     Stages Y0;
     std::memcpy(Y0, Y, sizeof(Stages));
     bool conv = false;
@@ -238,6 +241,7 @@ bool gauss_stages(const Coeffs& k, const Sys& sys, const double* y, const double
         st.rhs += S;
         st.iters++;
         double dmax = 0.0;
+        bool finite = true;   // std::max(dmax, NaN) = dmax would hide a NaN stage value: test every one
         for (int i = 0; i < S; i++)
             for (int r = 0; r < d; r++) {
                 double inc = 0.0;   // sum the small mu_ij L_j first, then add to y (AMM17)
@@ -245,17 +249,27 @@ bool gauss_stages(const Coeffs& k, const Sys& sys, const double* y, const double
                 const double v = y[r] + (inc + lo[r]);
                 dmax = std::max(dmax, std::fabs(v - Y[i][r]) / (std::fabs(y[r]) + std::fabs(inc) + 1e-300));
                 Y[i][r] = v;
+                if (!std::isfinite(v)) finite = false;
             }
-        if (!std::isfinite(dmax)) break;
+        if (!finite || !std::isfinite(dmax)) break;
         // HMR08: stop when the increment vanishes or stops decreasing near round-off
         if (dmax == 0.0 || (dmax >= dprev && dmax < 1e-13)) {
             conv = true;
             break;
         }
         if (it >= 3 && dmax >= dprev && dmax > 1e-6) break;   // not contracting (h L > 1)
+        // W10: an increment growing over successive iterations above round-off is divergence, not the HMR08 plateau
+        ngrow = (dmax > dprev) ? ngrow + 1 : 0;
+        if (ngrow >= 3 && dmax > 1e-13) break;
         dprev = dmax;
     }
-    if (conv && !force_newton) return true;
+    auto finite_L = [&]() {   // W10: never accept a non-finite stage value
+        for (int i = 0; i < S; i++)
+            for (int r = 0; r < d; r++)
+                if (!std::isfinite(L[i][r])) return false;
+        return true;
+    };
+    if (conv && !force_newton) return finite_L();
     // Simplified Newton from the original starting values
     std::memcpy(Y, Y0, sizeof(Stages));
     if (!newton_stages(k, sys, y, lo, h, Y, st)) return false;
@@ -265,7 +279,7 @@ bool gauss_stages(const Coeffs& k, const Sys& sys, const double* y, const double
         for (int r = 0; r < d; r++) L[i][r] = (h * k.b[i]) * F[r];
     }
     st.rhs += S;
-    return true;
+    return finite_L();
 }
 
 // y_{n+1} = y_n + sum L_k, compensated (Kahan): the result is hi + lo
