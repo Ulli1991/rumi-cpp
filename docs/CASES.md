@@ -681,16 +681,23 @@ Status: **closed** (fixed, test, ensemble checked), **option** (fix kept as an o
 - **Tests:** gauss_irk (unit), gauss_irk_quad22, gauss_irk_s1744; host ctest all pass (login-node 120 s timeouts
   pass alone).
 - **200k A/B (gpudev, prod200k bf0.1 config from the C20 A/B restarts, ~80 steps, 2026-10-21,
-  /raven/ptmp/uli/cpp-nbody-runs/girkab-2026-10-21/):** base vs NBODY_GAUSS_IRK=1, 112 IRK calls per run, 0
-  fallbacks, 0 Newton steps, s/step median 5.5 / 10.4 / 5.4 unchanged.
+  /raven/ptmp/uli/cpp-nbody-runs/girkab-2026-10-21/):** base vs NBODY_GAUSS_IRK=1, same CUDA binary (404a33f).
+  Gauss-IRK calls / all LogH calls: s101 112 / 807k, s202 101 / 459k, s303 370 / 766k (16 GBS fallbacks, no
+  convergence). 0 Newton steps. s/step median 5.5 / 10.4 / 5.4 unchanged.
   - final |dE/E|: s101 4.97e-11 -> 2.21e-11, s202 6.43e-11 -> 1.59e-11, s303 2.63e-11 -> 3.66e-11;
   - max |dE/E|: s101 5.07e-11 -> 2.43e-11, s202 6.71e-11 -> 2.61e-11, s303 8.26e-11 -> 8.79e-11.
   Better on two seeds, equal within noise on s303 (max) with a worse final value. Not yet decided as default: under
   the energy rule (equal or better on every seed) s303 needs a longer run or more seeds. The runs finished after the
   Raven login-node crash of 2026-10-21 and were evaluated from Viper; the exit stats of the three IRK runs are in
   their run.log.
-- **Open:** default decision (longer A/B, add s404); why IRK is "not chosen" per reason at 200k (counters added
-  69ac4c7, not yet run); PN subsystems (would need the 2-3.5PN terms in the Poincare form).
+  IRK takes 0.01-0.05 % of the LogH calls, so the seed-to-seed differences are the chaotic spread of the
+  trajectories, not the integrator (R2 has the same spread).
+- **Why so few calls (counters 69ac4c7):** a host run of the same config at N = 20k (r_h 1 pc, 3 intervals) had 39304
+  LogH calls, and all of them were "not chosen: PN member". In the bf 0.1 cluster the stellar binaries go to the
+  secular / Kepler paths, and the LogH subsystems are the groups that contain a BH. Gauss-IRK can only matter in
+  production once PN subsystems are covered (2-3.5PN terms in the Poincare form, or splitting PN out of the IRK
+  flow).
+- **Open:** the default decision; PN subsystems.
 
 ## Verified building blocks (checked against an independent derivation, no bug found)
 
