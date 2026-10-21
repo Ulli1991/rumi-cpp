@@ -86,27 +86,32 @@ static bool gauss_irk_on() {
 // Totals over the run, printed at exit when NBODY_GAUSS_IRK is on
 namespace {
 struct IrkTotals {
-    std::atomic<long long> calls{0}, fallbacks{0}, steps{0}, rhs{0}, newton{0}, fail[5] = {};
+    std::atomic<long long> calls{0}, fallbacks{0}, steps{0}, rhs{0}, newton{0}, fail[5] = {}, not_chosen[8] = {};
     ~IrkTotals() {
         if (!gauss_irk_on()) return;
         std::printf("Gauss-IRK stats: %lld calls, %lld fell back to GBS (step limit %lld, no convergence %lld, "
                     "collision watch %lld, other %lld), %lld steps, %lld force evaluations, %lld Newton steps\n",
                     calls.load(), fallbacks.load(), fail[1].load(), fail[2].load(), fail[3].load(),
                     fail[4].load() + fail[0].load(), steps.load(), rhs.load(), newton.load());
+        std::printf("Gauss-IRK not chosen: size %lld, collision candidate %lld, e >= 0.99 %lld, hard encounter %lld, "
+                    "stable hierarchy %lld, PN member %lld, SDAR slow-down %lld\n", not_chosen[1].load(),
+                    not_chosen[2].load(), not_chosen[3].load(), not_chosen[4].load(), not_chosen[5].load(),
+                    not_chosen[6].load(), not_chosen[7].load());
     }
 } g_irk_totals;
 }  // namespace
 
-// Classification, local criteria only (normalised state, G = 1): 2-4 bodies, no collision candidate (osculating
+// Classification, local criteria only (normalised state, G = 1); returns 0 (Gauss-IRK) or the reason against it:
+// 1 size, 2 collision candidate, 3 hard pericentre, 4 hard encounter, 5 stable hierarchy (6 PN member, 7 SDAR: caller): 2-4 bodies, no collision candidate (osculating
 // pericentre inside the collision distance), no hard pericentre (bound pair with e >= 0.99) or hard encounter (an
 // approaching unbound pair reaching r_p < 0.01 r within the call), and no stable hierarchy by the Mardling & Aarseth
 // test of the triple classification (n = 3: tightest pair + third body; n = 4 with an unbound second pair: tightest
 // pair + the body nearest to it; a 2+2 quadruple has no MA test in the code and qualifies). Gauss-IRK loses on
 // strongly hierarchical systems (prototype: Kozai triple 4x the evaluations of LogH+GBS), and those are the SDAR /
 // secular cases; PN members and SDAR slow-downs are excluded by the caller.
-static bool gauss_irk_choose(const LogHState& st, double G, double dt, const double* coll) {
+static int gauss_irk_choose(const LogHState& st, double G, double dt, const double* coll) {
     const int n = st.n_bodies;
-    if (n < 2 || n > 4) return false;
+    if (n < 2 || n > 4) return 1;
     int bi = -1, bj = -1;
     double a_min = 1e300;
     bool bound[LOGH_MAX_BODIES][LOGH_MAX_BODIES] = {};
@@ -122,21 +127,21 @@ static bool gauss_irk_choose(const LogHState& st, double G, double dt, const dou
             const double e = std::sqrt(std::max(0.0, 1.0 + 2.0 * eps * h2 / (mu * mu)));
             const double rp = h2 / (mu * (1.0 + e));
             const double rc = coll ? coll[i * LOGH_MAX_BODIES + j] : 0.0;
-            if (rc > 0.0 && rp < rc) return false;                    // collision candidate
+            if (rc > 0.0 && rp < rc) return 2;                        // collision candidate
             if (eps < 0.0) {
-                if (e >= 0.99) return false;                          // hard pericentre
+                if (e >= 0.99) return 3;                              // hard pericentre
                 bound[i][j] = true;
                 const double a = -mu / (2.0 * eps);
                 if (a < a_min) { a_min = a; bi = i; bj = j; }
             } else if (rv < 0.0 && rp < 1e-2 * rr) {                  // hard encounter within the call
                 double d[3] = {r[0], r[1], r[2]}, u[3] = {v[0], v[1], v[2]}, rpk = 0.0;
-                if (kepler_time_to_pericentre(d, u, mu, &rpk) < dt) return false;
+                if (kepler_time_to_pericentre(d, u, mu, &rpk) < dt) return 4;
             }
         }
-    if (n == 2 || bi < 0) return true;
+    if (n == 2 || bi < 0) return 0;
     int rest[2], nr = 0;
     for (int k = 0; k < n; k++) if (k != bi && k != bj) rest[nr++] = k;
-    if (n == 4 && bound[std::min(rest[0], rest[1])][std::max(rest[0], rest[1])]) return true;   // 2+2
+    if (n == 4 && bound[std::min(rest[0], rest[1])][std::max(rest[0], rest[1])]) return 0;   // 2+2
     const double m1 = st.mass[bi], m2 = st.mass[bj], Mi = m1 + m2;
     double xc[3], vc[3];
     for (int c = 0; c < 3; c++) {
@@ -161,12 +166,12 @@ static bool gauss_irk_choose(const LogHState& st, double G, double dt, const dou
     const double ro = std::sqrt(r_out[0]*r_out[0] + r_out[1]*r_out[1] + r_out[2]*r_out[2]);
     const double vo2 = v_out[0]*v_out[0] + v_out[1]*v_out[1] + v_out[2]*v_out[2];
     const double eps_o = 0.5 * vo2 - mu_o / ro;
-    if (!(eps_o < 0.0)) return true;   // unbound outer body: no hierarchy
+    if (!(eps_o < 0.0)) return 0;   // unbound outer body: no hierarchy
     const double a_o = -mu_o / (2.0 * eps_o);
     const double rvo = r_out[0]*v_out[0] + r_out[1]*v_out[1] + r_out[2]*v_out[2];
     const double e_o = std::sqrt(std::max(0.0, 1.0 + 2.0 * eps_o * (ro * ro * vo2 - rvo * rvo) / (mu_o * mu_o)));
-    return !SubsystemManager::mardling_stability(a_min, a_o, e_o, m1, m2, st.mass[ko],
-                                                 SubsystemManager::mutual_inclination(r_in, v_in, r_out, v_out));
+    return SubsystemManager::mardling_stability(a_min, a_o, e_o, m1, m2, st.mass[ko],
+                                                 SubsystemManager::mutual_inclination(r_in, v_in, r_out, v_out)) ? 5 : 0;
 }
 
 // ============================================================================
@@ -988,9 +993,10 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
         // not slow are integrated by the symplectic Gauss-Legendre method; if it does not finish (no convergence,
         // collision watch, step limit) the call starts again from the same state with LogH+GBS below
         bool irk_done = false;
-        if (gauss_irk_on() && !state.use_aux_vel && n_secr == 0 && n_live >= 2 && n_live <= 4 && dt_norm > 0.0) {
+        if (gauss_irk_on() && state.use_aux_vel) g_irk_totals.not_chosen[6]++;
+        if (gauss_irk_on() && !state.use_aux_vel && n_secr == 0 && n_live >= 2 && dt_norm > 0.0) {
             bool slowed = false;
-            if (g_collisional.sdar && n_live >= 3) {
+            if (g_collisional.sdar && n_live >= 3 && n_live <= 4) {
                 LogHState probe = state;
                 SdarParams sp;
                 sp.k_ref = g_collisional.sdar_kref;
@@ -999,7 +1005,9 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
                 logh_sd_update(probe, G_norm, sp);
                 for (int q = 0; q < probe.n_sd; q++) if (probe.sd_kappa[q] > 1.0) slowed = true;
             }
-            if (!slowed && gauss_irk_choose(state, G_norm, dt_norm, coll_on ? coll : nullptr)) {
+            const int why = slowed ? 7 : gauss_irk_choose(state, G_norm, dt_norm, coll_on ? coll : nullptr);
+            if (why > 0) g_irk_totals.not_chosen[why]++;
+            if (why == 0) {
                 LogHState trial = state;
                 GaussIrkOut io;
                 GaussIrkStats ist;
