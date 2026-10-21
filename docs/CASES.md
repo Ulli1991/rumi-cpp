@@ -767,6 +767,42 @@ Status: **closed** (fixed, test, ensemble checked), **option** (fix kept as an o
 | PN1 EIH acceleration, 2 bodies | energy consistency, Euler-Lagrange of the EIH Lagrangian (Enzyme) | c^-4; O(v^2/c^2) | `pn1_energy_consistency` |
 | Spin PN (leading SO 1.5PN, SS + Kerr quadrupole 2PN, precession, Kidder 1995) | dE/dt and dJ/dt along the code's flow, precession vs Poisson bracket of the spin Hamiltonian (Enzyme, q 1 to 1e-3, random spins, bound and unbound) | leftovers c^-5 / c^-6 (ratios 32.0 / 64.0: the next spin orders the code does not include); precession 6e-16; integrated &#124;S&#124; drift 1.9e-15. Gap: spin terms stay at leading order with PN to 3.5; frozen in 3+ body and secular paths | `spin_pn_consistency` |
 
+## R5 FSI error budget at 200k bf 0.1: eta scans and time-step attribution (analysis; no production change)
+
+- **Question:** the ledger puts 99 % of the per-step error in the FSI (C22). Which criterion, level or class sets it,
+  and which cheap local change reduces it most per cost?
+- **Diagnostics (4f45cbb, default off, bit-identical vs main on bin10 / bin10+PN incl. the switches at neutral):**
+  `NBODY_DT_SCALE=<class>:<f>` (final step of bh / sub / single / all / deep<L> / shallow<L> times f, at every depth:
+  attribution by intervention), `NBODY_DT_ATTR=1` (one rank: criterion that set each step per level and class, DTATTR
+  lines), ELEDGER call types and |own| per depth; `scripts/step_err.py` (per-step |dE/E0|, s/step from run.log).
+- **5 Myr budget (prod200k bf0.1, 3 seeds, 5000 steps):** final |dE/E| 1.25e-8 / 1.26e-8 / 1.36e-8. Steps above 10x
+  the median (3e-12) carry 1.5e-8 / 1.3e-8 / 7.5e-9 (s101: one hierarchical BH triple, pids 45751 160657 128932,
+  2.07-2.46 Myr, jumps of 3e-10 to 1.8e-9 every ~9 steps; s303: 166 moderate steps of one sign); the background
+  (|dE| < 10x median) sums to 2.6e-9 / -0.8e-9 / 6.1e-9 (biased, ~1e-12 per step). Ledger (led_base_s101): the
+  background own errors sit in large sets (1e4-1e5 particles) at depths 2-7, signs alternating.
+- **Eta scan (s101 restart step 80, 37 steps, 4 A100, nbody-fsi = 4f45cbb):**
+
+  | run | mean \|dE/E0\| per step | rms | max | s/step (median) |
+  |---|---|---|---|---|
+  | base (FF FB GRAD 0.2, JERK 0) | 3.54e-12 | 4.67e-12 | 1.09e-11 | 5.46 |
+  | ETA_FF 0.1 | bit-identical to base | | | 5.47 |
+  | ETA_FB 0.1 | 3.03e-12 | 3.94e-12 | 1.10e-11 | 10.26 |
+  | ETA_GRAD 0.1 | 3.19e-12 | 4.37e-12 | 1.09e-11 | 5.41 |
+  | FF FB GRAD 0.1 | 2.83e-12 | 3.85e-12 | 1.12e-11 | 10.45 |
+
+  ETA_FF never sets a step (pair fly-by step < free-fall step for every unbound field pair; bound pairs are
+  subsystems). Halving all etas: -20 % per step at 1.9x cost; a 4th-order truncation error would drop 16x
+  (BIFROST Eq. 51, its Fig. 10: 3e-7 -> 5e-9 total). The background is therefore not eta-limited FSI truncation.
+  Remaining eta-independent suspects: the tidal-sampling budget FLYBY_CM_EPS (1e-11 |E0| per pair and step, the
+  same scale; the EATTR_TID / STALL tidal estimates are 2-6e-12 per binary) and its TIDAL_STEP_RES floor (C5).
+- **Prepared, not yet run (session limit):** 0.7x scans, ETA_JERK 0.1, ETA 0.2 (v/a); class interventions
+  bh / sub / single / deep5 x 0.5; FLYBY_CM_EPS 1e-12; TIDAL_FLOOR_ADAPT; one-rank ledger + DT_ATTR
+  (`/raven/ptmp/uli/cpp-nbody-runs/fsibudget-2026-10-22/*/job.sh`).
+- **Decision so far:** no eta default change (no gain per cost). ETA_GRAD 0.1 costs nothing measurable (-10 %, within
+  noise; BIFROST's value) and is a candidate after a 3-seed check. The 5 Myr error is set by episodes (one triple in
+  s101); the next lever is per-episode (ledger replay of a stall restart), and FLYBY_CM_EPS / TIDAL_FLOOR_ADAPT for
+  the background.
+
 ## R4 Gauss-IRK on the ADM PN Hamiltonian for PN binaries (research prototype, tests/proto_admpn; no production change)
 
 - **Question (user):** C22 showed that 8-stage Gauss-IRK beats LogH+GBS on Newtonian compact subsystems, but in
