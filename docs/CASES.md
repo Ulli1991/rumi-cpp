@@ -767,6 +767,141 @@ Status: **closed** (fixed, test, ensemble checked), **option** (fix kept as an o
 | PN1 EIH acceleration, 2 bodies | energy consistency, Euler-Lagrange of the EIH Lagrangian (Enzyme) | c^-4; O(v^2/c^2) | `pn1_energy_consistency` |
 | Spin PN (leading SO 1.5PN, SS + Kerr quadrupole 2PN, precession, Kidder 1995) | dE/dt and dJ/dt along the code's flow, precession vs Poisson bracket of the spin Hamiltonian (Enzyme, q 1 to 1e-3, random spins, bound and unbound) | leftovers c^-5 / c^-6 (ratios 32.0 / 64.0: the next spin orders the code does not include); precession 6e-16; integrated &#124;S&#124; drift 1.9e-15. Gap: spin terms stay at leading order with PN to 3.5; frozen in 3+ body and secular paths | `spin_pn_consistency` |
 
+## R4 Gauss-IRK on the ADM PN Hamiltonian for PN binaries (research prototype, tests/proto_admpn; no production change)
+
+- **Question (user):** C22 showed that 8-stage Gauss-IRK beats LogH+GBS on Newtonian compact subsystems, but in
+  production every LogH subsystem contains a PN pair. Does an ADM Hamiltonian formulation (to 3PN, plus radiation
+  reaction) let Gauss-IRK take over the PN binaries, and is it worth a production path?
+- **Literature.**
+  - Conservative two-body ADM H to 3PN: Damour, Jaranowski & Schaefer 2000 (PRD 62, 044024, Eqs. 3.3-3.6), with
+    omega_static = 0 and omega_kinetic = 41/24 from DJS 2001 (dim. reg.). Also Schaefer & Jaranowski LRR 2018 and
+    Blanchet LRR 2014 (HADMcm).
+  - N-body ADM 1PN: Schaefer 1985. The 3-body 2PN H (Schaefer 1987, typos corrected by Lousto & Nakano 2008,
+    CQG 25, 195019) is not implemented.
+  - RR in ADM gauge: 2.5PN Hamiltonian of Schaefer 1985 and 3.5PN of Jaranowski & Schaefer 1997. The relative
+    acceleration is Koenigsdoerffer, Faye & Schaefer 2003 (PRD 68, 044004) Eq. 5.3, i.e. Iyer & Will 1995 with
+    alpha = 5/3, beta = 3 and KFS's delta_i. Harmonic (the production code, Blanchet LRR): alpha = -1, beta = 0.
+  - ADM <-> harmonic contact transformation: Andrade, Blanchet & Faye 2001; DJS 2001.
+  - Integrators: Seyrich 2013 (arXiv 1302.4580) Gauss collocation on ADM PN Hamiltonians with spins; Tsang et al.
+    2015 slimplectic (non-conservative variational) with a PN binary; Wu et al. explicit splittings for PN
+    Hamiltonians (2026, arXiv 2607.01596).
+  - Regularised few-body codes (Mikkola & Merritt 2008, MSTAR/KETJU, BIFROST, SDAR, SpaceHub) all integrate the
+    harmonic EOM with auxiliary velocities (R2).
+  - Splitting with a small perturbation: Laskar & Robutel 2001 SBAB_n, error O(eps h^2n + eps^2 h^2).
+  - DJS 2000 (arXiv gr-qc/9912092v1) Eq. 4.16 prints 3 i3 E^2 in k(E, j). Their own radial action Eq. 4.12, and
+    Blanchet LRR (= secular_pn_k), give i3 E^2.
+- **Prototype (tests/proto_admpn).**
+  - adm_pn.h:
+    - H_ADM as monomial tables, with hand-coded gradient and p-Hessian.
+    - N-body: Newton + N-body ADM 1PN (proto_symrk) + pair 2PN/3PN in the pair's relative variables. This is the
+      same c.o.m. approximation as production.
+    - RR: KFS a_RR applied as a force on p, F = H_pp^-1 a_RR, so the (x, v) dynamics is exactly KFS's.
+    - Poincare form K = g (H + p_t) with p_t tracking the radiated work, so Q = H + p_t is the energy-books
+      residual.
+    - Variant A: RR inside the Gauss collocation.
+    - Variant S: Strang split (RR half kick, IRK step, RR half kick); the kick is RK4 at fixed x, and p_t books
+      the exact change of H.
+    - Variant S2: SBAB2.
+  - derive_contact.py (sympy) derives the ADM -> modified-harmonic map through 3PN. contact_coeffs.h holds the
+    result.
+  - bench_admpn.cpp provides the verify, test, cons, rr and h2h modes. The GBS side is production gbs_step with
+    the bench.cpp step control, k_max 10.
+  - tests/enzyme/pn_rr_balance.cpp holds the RR energy balance below.
+  - Not in ctest. Bounds are 1.3x the measured values; run with `admpn test`.
+- **Checks (all pass).**
+  - Gradient and Hessian vs FD: 2e-10 and 1e-11. Enzyme gradient of the scalar H_ADM vs the hand-coded one, per
+    order: 5e-16 to 3e-14.
+  - Map. The 48 equations for 13 unknowns are consistent: the DJS 3PN H and Blanchet's MH 3PN acceleration (the
+    production one) are the same dynamics. Coefficients:
+    - 2PN: (5/8 nu p^2 - nu/8 pr^2 + (1/4 + 3 nu) u) n - 9/4 nu pr p. The test-mass limit u/4 is the isotropic ->
+      harmonic Schwarzschild radius.
+    - 3PN: 9 more, including -(2773/280 + 21/32 pi^2) nu u^2.
+    - Round trip 2e-16.
+  - Circular E(x) vs Blanchet 3PN: residual ~x^4. Test-mass limit vs isotropic Schwarzschild: residual ratio 25.5
+    per factor 1.5 in c (c^-8).
+  - Periastron advance, e = 0.9 conservative. Relative residual vs DJS k(E, j) at x = 1e-3 / 5e-4 / 2.5e-4 /
+    1.25e-4: 1.00e-4 / 1.26e-5 / 1.57e-6 / 1.97e-7, i.e. exactly x^3 (4PN).
+    - Failing-first: without the 3PN terms the residual is -4.2e-4.
+    - The production MH run (LogH+GBS, E and j through the map) gives 8.9e-5 / 1.20e-5 / 1.68e-6. Same x^3, so
+      both truncations reproduce the 3PN invariants.
+  - H_ADM, e = 0.9, 30 steps per orbit: max |dH/H| 3.5e-12 over 1e4 orbits and 4.4e-11 over 1e5. This is a
+    round-off-level linear drift (slope 0.96), as in the Newtonian prototype (C22).
+  - RR energy books: Q = H + p_t stays at 1e-13 to 3e-13 of |E0| over a whole inspiral (all variants).
+  - KFS RR vs Iyer-Will(5/3, 3, delta_i): 4e-14. Production harmonic 3.5PN is Iyer-Will consistent too (unique
+    delta_i, sympy).
+- **Inspiral, e = 0.5, x = 0.01 -> 0.05 (965 orbits).**
+  - t_insp vs the Peters + 1PN secular track: A 3.3e-4.
+  - Error vs A, at 16 / 24 / 32 / 64 steps per orbit:
+    - Strang (S): 1.1e-3 / 5.2e-4 / 2.9e-4 / 7.8e-5 (h^2).
+    - SBAB2 (S2): 5.3e-6 / 1.3e-6 / 4.0e-7 / 2.6e-8 (h^4).
+  - A is converged to 11 digits already at 16 steps per orbit, with 2600 evaluations per orbit; S2 at 16 needs 4400.
+  - At e = 0.9 the splits need many more steps: the RR force is peaked at the pericentre, and the end-point kicks
+    under-sample it (h2h table below).
+  - **Decision: RR inside the collocation (A).**
+- **The 1.1 % inspiral difference vs production (Enzyme, user request): not a bug.**
+  - At full PN, t_insp of LogH+GBS (harmonic) exceeds ADM by 1.07 % (x0 = 0.01) and 0.23 % (x0 = 0.005): ratio
+    4.7, i.e. x^2.
+  - With 2.5PN only: production agrees with Peters to 6e-4, and ADM to 9e-6.
+  - pn_rr_balance (Enzyme): orbit-averaged RR power along the conservative 3PN orbit / gauge-invariant <F> - 1, at
+    c = 10 / 20 / 40:
+
+    | dynamics | e | c = 10 | c = 20 | c = 40 | scaling |
+    |---|---|---|---|---|---|
+    | production harmonic | 0.5 | -5.9e-3 | -2.4e-4 | -1.3e-5 | c^-4 or faster |
+    | production harmonic | 0.8 | -7.2e-2 | -1.1e-3 | -3.9e-5 | c^-4 or faster |
+    | ADM | 0.5 | +1.7e-3 | +1.4e-4 | +9.4e-6 | ratios 12-15 |
+    | 2.5PN only | 0.5 | | | | c^-2 (ratio 4) |
+
+  - So both 3.5PN implementations satisfy the 1PN flux balance. Each misses the 2PN flux (4.5PN RR) with a
+    gauge-dependent remainder: harmonic -0.6 % and ADM +0.2 % at x = 0.01.
+  - The 1.5PN tail (4 pi x^1.5 ~ 1.3 % at x = 0.01) is missing in both.
+- **Head-to-head (1000 inner orbits, PN_ORDER 31 unless noted).**
+  - Errors are against each scheme's own converged reference (Gauss-A at 160 steps per orbit; GBS at eta 1e-14).
+  - dphi is the pair phase at T. Evaluations are rhs calls (Gauss) or leapfrog substeps (GBS).
+  - Wall times come from a loaded login node: compare ratios only.
+
+  | case | Gauss-A spo | dphi | evals/orb | LogH+GBS eta 1e-10 dphi | evals/orb |
+  |---|---|---|---|---|---|
+  | e = 0.9, x = 1e-3, conservative (11) | 24 | 6e-11 | 1990 | 7.8e-8 | 3270 |
+  | e = 0.9, x = 1e-3, with RR | 32 | 8.4e-10 | 5650 | 1.0e-6 | 6540 |
+  | e = 0.99, x = 1e-4 | 48 (<= 32 diverge) | 4.7e-7 | 28600 | 7.3e-8 | 29200 |
+  | s432 BH pair (45 + 12.2, a = 0.37 AU, e = 0.64) | 12 | 5.3e-10 | 1300 | 1.2e-8 | 670 |
+  | s1025 BH pair (45 + 35.5, a = 0.05 AU, e = 0.53) | 12 | 5.6e-11 | 1330 | 2.5e-9 | 650 |
+  | s3047 BH pair (27.8 + 24.7, a = 0.011 AU, e = 0.21) | 12 | 9.7e-11 | 1330 | 1.8e-9 | 610 |
+  | trip432 (s432 pair + 1.25 Msun star at 0.0076 pc) | 12 | 5.2e-10 | 1290 | 4.0e-9 | 690 |
+
+  - trip432 needs the origin at the pair's c.o.m. With the pair 1e-4 pc from the system c.o.m., the IRK fixed-point
+    increments stagnate at the round-off of the absolute positions and steps diverge at random.
+  - e = 0.99 Gauss (48 steps per orbit): its energy vs the reference is 8.6e-5 of |E_N| (GBS: 1.2e-5).
+  - Splits at e = 0.9 with RR, phase error at 24 / 48 steps per orbit:
+    - Strang: 0.3 rad / 4e-5 rad.
+    - SBAB2: 8e-2 rad / 3e-6 rad.
+  - Wall per orbit (same load): e = 0.9 conservative, Gauss 0.7 ms vs GBS 2.5 ms. Harvest pairs: Gauss spo 12 is
+    1.1-1.4 ms vs GBS 0.56-1.2 ms.
+  - Production quirk: at eta 1e-8 the GBS step control spends 13000-26000 evaluations per orbit in 3 of 6 cases
+    (e = 0.9, s1025, s3047), 4-20x more than at 1e-10. The other cases use about 530. Not followed up.
+  - Physics difference ADM vs MH, references mapped to MH:
+    - Conservative e = 0.9: dphi 1.2e-3 rad after 1000 orbits (4PN truncation difference, k differs by 1e-5).
+    - Harvest pairs (x = 1e-6 to 5e-5): 1e-9 to 2e-8 rad.
+    - With RR at x = 1e-3, e = 0.9: 21 rad, the accumulated 2PN-relative flux difference above.
+- **Verdict.**
+  - On isolated and weakly perturbed PN binaries with e <= 0.9, ADM + Gauss-A is 10-1000x more accurate in phase
+    and energy than LogH+GBS at eta 1e-10. On the harvest pairs (the production BH binaries) it needs about 2x the
+    evaluations for 20-50x smaller phase errors; at e = 0.9 it is cheaper and about 1000x more accurate.
+  - It does not help at e >= 0.99: the fixed-point iteration diverges at the pericentre below about 48 steps per
+    orbit, and then the cost equals GBS (as in R2/C22). It would need Newton iterations or adaptive ds.
+  - **A production path is not recommended now.**
+    - The cluster energy error is not set by the subsystem integrator (R2, R3, C22: IRK calls already 100x more
+      accurate per call left |dE/E| unchanged).
+    - The production books use Newtonian T + U from states, and are exact for either formulation.
+    - The ADM path would need the coordinate map at every subsystem entry and exit (positions differ by O(c^-4),
+      momenta by O(c^-2)), N-body 1PN only (2PN 3-body Schaefer 1987 for triples), a separate RR gauge, and a GBS
+      fallback for e >= 0.99 and collisions. The inspiral differs from the harmonic one by O(x^2) (1 % at
+      x = 0.01): within the PN truncation, but a visible physics change against the current runs.
+  - Worth revisiting if long-lived PN binaries in isolation (e.g. a separate few-body GR library) need phase
+    accuracy, or if C22's IRK becomes default and PN subsystems dominate
+    the cost.
+
 ## R3 Compensated (Kahan) sums in the LogH leapfrog chain (rejected by the cluster A/B)
 
 - **Motivation:** Verificarlo (Monte Carlo arithmetic) showed that the e = 0.999 LogH step is limited by the rounding
