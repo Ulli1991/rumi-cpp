@@ -603,9 +603,8 @@ Status: **closed** (fixed, test, ensemble checked), **option** (fix kept as an o
   s101 (91 steps): C20 1.51e-9, 1.5e-13, 1.7e-11, 4.61 / 5.22 / 18. Main is still queued on gpu (job 31366161, main_s101):
   its first step is the 1096 s stall and cannot fit in gpudev.
   Energy: equal on s202, 1.9x on s404 (noise level, user decision 2026-10-21: acceptable for the speed-up).
-- **Open:** a 3-body IC with the star moved to 5e-4 pc from a 60x shrunk BH binary (a = 1.3e-9 pc, v ~ 5000 km/s)
-  gives NaN at the first LogH call (dt = nan) in main as well. Not followed up: the 200k runs never reached it, and
-  the IC is artificial (`/raven/ptmp/uli/cpp-nbody-runs/secinner-ab-2026-10-19/nan_ic.txt`).
+- **Open (closed by C24):** a 3-body IC with the star moved to 5e-4 pc from a 60x shrunk BH binary (a = 1.3e-9 pc,
+  v ~ 5000 km/s) gave NaN at the first LogH call (dt = nan) in main as well.
 
 ## C21 SDAR slowed a binary whose tide comes from outside its LogH group: 8e-8 E_REF per interval (fixed)
 
@@ -704,6 +703,51 @@ Status: **closed** (fixed, test, ensemble checked), **option** (fix kept as an o
   counts as non-contracting. Either is failure (fail 2, state unchanged, GBS fallback). Test `gauss_irk` section 5
   (third body 4e-12 from a binary member): old code fail 4 after accepted steps, now fail 2; all earlier bounds unchanged.
 
+
+## C24 Secular triple: a BH inner binary that coalesces within the step came back NaN (closed)
+
+- **Found by:** C20's merger cut-out variant (`tests/data/c24_triple_gw.txt`: s101_s432_1 with the 32.3 + 9.7 Msun
+  BH binary shrunk 60x, a = 1.3e-9 pc, e = 0.26, and the 0.89 Msun star moved to 5e-4 pc). On the GPU build dt = nan
+  at the first LogH call; on the host build no result within 900 s.
+- **Cause:** the set is a Mardling-stable hierarchical triple (a_out / a_in = 2e5), so it went to the secular triple
+  step (dt = 2.6e-4 Myr). The inner binary's Peters time is ~0.08 yr, 3e-7 of the step.
+  - secular_evolve_triple took its internal step from the Kozai time alone (n_steps = 1 here). One explicit Euler
+    step of the PN2.5/3.5 rate da/dt took a_in below zero, the loop stopped, and secular_triple_step rebuilt the
+    members from a < 0: NaN positions and velocities. The NaNs reached LogH in the next call.
+  - The binary GW rule of detect_mergers (merge if t_GW < dt, Peters 1964) looked at 2-body subsystems only. A triple
+    sent straight to LogH ran into the 4e6 GBS-step limit about 1e5 orbits before the contact distance, then
+    restarted with halved eta (the host hang).
+- **Fix:**
+  1. detect_mergers also applies the binary GW rule (t_GW < dt, Peters 1964) to the inner pair of a secular
+     TRIPLE_STABLE subsystem, using the inner elements the classification keeps in sub.orb. It does so only when LogH
+     could not follow the inspiral in one call: t_GW > 62500 P_in, the 4e6-step ceiling at 64 GBS steps per orbit
+     (logh_batch.cpp gbs_step_limit). In a Mardling-stable triple the third body is the weak perturbation that the
+     2-body rule also ignores for a binary. The merger itself is the usual execute_merger (pairwise energy sink with
+     all other bodies, P / L sinks, recoil, merger tree, GW table). Contact stays with LogH's pericentre landing
+     (FC-I App. B3). A first version that applied contact and GW to all stable triples took the ISCO / BH_MERGE_RADIUS
+     / head-on triple tests away from that path (5 ctest failures), so it was narrowed.
+  2. secular_evolve_triple also takes eta_sec min(a / |da/dt|, e / |de/dt|) of the PN rates at the start of the call
+     (same eta_sec = 0.01 and the same 1e5 cap). It is bit-identical when the GW time is longer than the Kozai time
+     (n_gw <= n_kl).
+  3. secular_triple_step refuses an inner binary that reaches a <= 0, e >= 1 or a pericentre inside 10 R_S (20 G M12
+     / c^2, the coalescence test of secular_evolve_pn) within the step. The members are left unchanged and the
+     triple goes to LogH, where the collision / GW rules decide (coll_bh_isco: a few orbits to contact).
+  These are physical criteria, not a NaN clamp: once the step is refused before the rebuild, no NaN can arise.
+- **Side effect:** coll_bh_isco (10 + 10 Msun circular, star at 100 a) now takes 4-27 secular-triple substeps per call
+  instead of 1. |dE/E| is 2.43e-14 instead of 1.22e-14, and |dL/L| 7.4e-14 instead of 6e-16, both set in the first
+  call. They are within the round-off acceptance of the circular-orbit fallbacks of the secular triple rebuild
+  (energy fix |res| <= 1e-13 E_tri; outer e^2 = q accepted down to -1e-10 and used as 0, C11). Bound raised to 1.3x
+  the new value (3.2e-14). Path and merger unchanged (ISCO contact in LogH, r_sep / r_coll 0.970 vs 0.975).
+- **Result (host, cut-out, one interval):** before: no result in 900 s (GPU: NaN). After: 1 merger (GW_COAL, 41.6
+  Msun remnant, 170 km/s kick) at t = 0, then a 2-body fly-by. |dE/E| with merger sink 1.16e-16, |dP|/M 4.3e-14 km/s,
+  |dL/L| with L sink 1.08e-12, wall 0.02 s.
+- **Tests:** c24_triple_gw (the cut-out; 1 merger exactly, wall < 20 s, E / P / L at 1.3x measured; main: timeout
+  at 120 s). secular_triple (unit), new part (6): (a) the cut-out's step at dt = 2.6e-4 is refused with the members
+  unchanged (main: hierarchical, NaN members); (b) at dt = t_GW / 3, one step against two half steps gives the same
+  a_in to 1.44e-4 (bound 1.9e-4; main: 3.97e-3, one Euler step).
+- **Host ctest** (CPU node, 2026-10-22): 156 of 156 pass (luna_reader skipped).
+- **Not changed:** the 2-body secular path (secular_evolve_pn already resolves the GW time and tests coalescence),
+  LogH, PN, the energy booking.
 
 ## E2 Gravitational-wave observables of compact binaries and mergers: gw_events.dat (added, on by default)
 

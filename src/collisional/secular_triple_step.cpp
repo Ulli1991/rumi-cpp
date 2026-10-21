@@ -119,6 +119,14 @@ SecularTripleStep secular_triple_step(double M_[3], double X_[3][3], double V_[3
     const double E_tri0 = tri_energy();   // T + U of the three members before the secular step
 
     secular_evolve_triple(tri, dt, G, c_code, pn_order);
+    // An inner binary that coalesces within the step (pericentre inside 10 R_S of its total mass, as in the secular
+    // binary path secular_evolve_pn) is not evolved here: the members are left unchanged and the triple goes to LogH,
+    // whose collision / GW rules decide the merger (C24: a BH binary with t_GW << dt was stepped past a = 0, NaN)
+    if (!(tri.inner.a > 0.0) || !(tri.inner.e < 1.0) ||
+        (pn_order > 0 && c_code > 0.0 && tri.inner.a * (1.0 - tri.inner.e) < 20.0 * G * M12 / (c_code * c_code))) {
+        out.hierarchical = false;
+        return out;
+    }
 
     // GW energy bookkeeping for inner binary inspiral
     if (tri.inner.a > 0.0 && a_in_pre > 0.0) {
