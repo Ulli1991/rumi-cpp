@@ -378,3 +378,4 @@ W8 (research, parallel) ADM-Hamiltonian PN (to 3PN) + Gauss-IRK for PN binaries,
    symmetric RR-kick split (B), vs LogH+GBS; prototype only, verdict decides a production path.
 Also confirmed: Gauss-IRK (C22) gains nothing in production because 99.8 % of LogH calls are PN and 98.9-99.9 % of the
 visible error is FSI -> accuracy leverage is in FSI (step criteria, eta), next after W1-W7; MSTAR waits for W4.
+- W9 (low priority) 1.5PN tail (and 2PN) GW flux in the secular binary path via eccentric enhancement functions (Arun+2008, Loutrel & Yunes 2017): local, ~1 % on inspiral times at x~0.01. Hereditary tails in the direct EOM -> separate GR library. (R4: production 3.5PN verified by Enzyme flux balance; 1.1 % harmonic vs ADM inspiral gap = O(x^2) truncation.)
