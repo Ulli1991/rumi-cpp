@@ -767,6 +767,98 @@ Status: **closed** (fixed, test, ensemble checked), **option** (fix kept as an o
 | PN1 EIH acceleration, 2 bodies | energy consistency, Euler-Lagrange of the EIH Lagrangian (Enzyme) | c^-4; O(v^2/c^2) | `pn1_energy_consistency` |
 | Spin PN (leading SO 1.5PN, SS + Kerr quadrupole 2PN, precession, Kidder 1995) | dE/dt and dJ/dt along the code's flow, precession vs Poisson bracket of the spin Hamiltonian (Enzyme, q 1 to 1e-3, random spins, bound and unbound) | leftovers c^-5 / c^-6 (ratios 32.0 / 64.0: the next spin orders the code does not include); precession 6e-16; integrated &#124;S&#124; drift 1.9e-15. Gap: spin terms stay at leading order with PN to 3.5; frozen in 3+ body and secular paths | `spin_pn_consistency` |
 
+## R5 Energy episodes of the 200k production runs: binary period commensurate with the HHS block step (analysis; no production change)
+
+- **Question:** in the 200k, 5 Myr production runs (`prod200k-2026-10-17`, binary nbody-prod-0d5d511) |dE/E| grows in
+  episodes: bf0.1_s101 steps 2000-2500 (net -1.3e-8 E_REF of the final 1.25e-8), bf0.1_s202 steps 4540-4860 (+2.3e-8 net).
+  Outside the episodes the median per-step |dE| is 2-4e-12 E_REF.
+- **Replay not possible:** RESTART_INTERVAL = 50 rolls (only `restart_00005000/5001.h5` are kept) and
+  `STALL_RESTART = false`, so no state from inside an episode exists. A replay from step 0 with main
+  (C15/C20/C21 changed since 0d5d511) would not follow the same trajectory. The analysis below uses the log STALL lines,
+  cut-outs of the step-5000 restarts (code_version 0d5d511a7cc9-dirty; read with main 97644ec, particles only) and
+  controlled host runs.
+- **Largest per-step jumps (E_REF units; per-step value = difference of consecutive L0 rows; signed values from the
+  SDAR "unbooked_dE" line):**
+  - s101: 2086 (t = 2.086 Myr) +1.77e-9, 2134 +1.61e-9, 2453 +1.46e-9, 2228 +8.3e-10, 2076 +8.3e-10, 2153 +8.1e-10,
+    2416 +7.9e-10, 2322 +7.1e-10, 2200 -6.6e-10, 2444 +6.5e-10. In all ten the STALL deepest set (depth 16-17, pivot
+    1.5e-8 / 7.6e-9 Myr) is the same three particles: 45751 (12.2 Msun BH) + 160657 (45 Msun BH), a = 1.82e-6 pc
+    (0.38 AU), e = 0.652, P = 3.052e-8 Myr (11 d), and 128932, a 1.25 Msun MS star bound to the pair (a_out ~ 1800 AU,
+    e_out 0.95, inclination 82 deg; Mardling-Aarseth stable, r_p/a_in ~ 300). Usually on the secular-triple path,
+    sometimes as a binary plus field star. 194 of the run's 211 "STALL energy" events name this triple.
+    No SUBSYS_ERR or RESTART lines. Unrelated events in two windows: GW_COAL #28 (2228) and an escaper (2416).
+  - s202: 4590 +1.6e-9, 4563 +1.4e-9, 4636, 4630, 4761 (-1.4e-9), 4661, 4762, 4753, 4613, 4750 (all 1.2-1.4e-9, both
+    signs). The median per-step |dE| of the episode is 1-5e-10, a coherent noise of ~100x the floor rather than
+    isolated jumps. Deepest set: 108897 + 117644 (29.4 + 26.6 Msun BHs, a = 2.9e-6 pc, e = 0.66-0.69,
+    P = 6.10e-8 Myr) with 27182 (0.087 Msun star; a_out 257 AU, e_out 0.89, r_p/a_in ~ 49 at step 5000). No merger,
+    escaper, RESTART or SUBSYS_ERR line in any of the ten windows.
+- **The pattern: P_in / (DT_MAX / 2^k) ~ 1.** The inner period from the STALL tidal lines, against the HHS block step:
+  - s101, level 15 (3.0518e-8 Myr):
+    - steps 571-1157: P/dt 0.998-1.0017. Energy events in every 250-step window.
+    - 1371-1805: 0.979-0.992. No events in 1250-1750.
+    - 1865-2331: 0.998-1.0011. The main episode.
+    - after the hardening at ~2585 (a_in 1.82e-6 -> 1.57e-6 pc): 0.800 = 4/5, so the level-13 step is 5 P.
+      Weaker episodes in 2750-3750.
+    - 0.747 and 0.704: nearly quiet.
+  - s202, level 14 (6.1035e-8 Myr): steps 4550-4750 0.9988-1.0006 (the episode); 4912 1.047 and 4983 1.020 (quiet).
+    At step 5000 P = 5.54e-8 (0.908).
+- **Mechanism.** The binary's members get the field (here: the bound star's tide) as kicks at its block steps, and
+  between kicks the pair advances by its own path (secular binary / Kepler2 / LogH). When a block step is a multiple
+  of P, every kick hits the same orbital phase. The tidal work then adds up coherently instead of averaging out. This
+  is the step-size resonance of kick-drift splittings (Wisdom & Holman 1991; Rauch & Holman 1999, AJ 117, 1087). The
+  HHS power-of-two grid makes every coarser level an integer multiple too. FLYBY_CM_EPS bounds the energy of one kick
+  (est = mu |T| v dt <= 1e-11 E_REF; the STALL est of these pairs is 2-4e-12). There are 1e3-1e5 kicks per interval at
+  depths 10-17, so a coherent sum exceeds the per-kick bound by orders of magnitude. Off resonance the same kicks
+  random-walk at the floor.
+- **Controlled test (host, main 97644ec, PN off, NBODY_ELEDGER=1 NBODY_EATTR=1, 20 intervals, E_REF of the parent).**
+  Cut-outs of the triples at step 5000 (`cutout.py`, 3 bodies within 0.05 pc; 0.3 pc gives the same), with DT_MAX
+  set to P_in 2^14 (1 + x):
+
+  | case | x = 0 | +-1e-5 | 1e-4 | 1e-3 | 3e-2 (off) | DT_MAX 1e-3 (prod) |
+  |---|---|---|---|---|---|---|
+  | s202 triple, sum of per-step \|dE\| | 2.6e-9 | 2.8e-9 / 5.5e-9 | 5.9e-10 | 3.3e-10 | 4.9e-11 | 4.4e-11 |
+  | s202 largest step | 6.9e-10 | 1.1e-9 | | | 9.0e-12 | 7.6e-12 |
+  | s101 triple, sum | 8.1e-11 | 6.0e-11 / 5.6e-11 | 1.2e-11 | 1.1e-12 | 9.8e-13 | 3.9e-11 |
+
+  On resonance the per-step error reaches the episodes' 0.5-1.8e-9. The ledger puts all of it in the FSI own errors
+  of the three-body set at depths 10-14, ~2.5e-12 per call with one sign. The subsystem books balance (path residues
+  <= 1e-15). The run's own error restarts (ETA_RESTART, etas halved) do not help ("dE not decreasing"): halving the
+  step keeps it commensurate. The s101 state at 5000 is off resonance at the production DT_MAX, but its sign is
+  systematic: one ~-1.1e-11 kick error per outer pericentre passage.
+- **Excluded:** PN (same errors with PN_ORDER = 0). The secular-triple path: its residues are 0, and SECULAR_TRIPLES =
+  false gives the same order of error. TIDAL_FLOOR_ADAPT and TIDAL_STEP_RES = 0.1 / 0: bit-identical, since the
+  estimate is below its share and the steps are not at the floor. The outer pericentre (r_p 10-48 a_in, synthetic
+  variants): no trend at fixed DT_MAX. Mergers and escapers: none in the windows of the triple.
+- **FLYBY_CM_EPS (the per-kick tolerance), on resonance s202 x = -1e-5:**
+  - 1e-11: 5.5e-9.
+  - 1e-12: 1.0e-9, 5.5x the wall time.
+  - 1e-13: 2.1e-10, 20x the wall time.
+  - Off resonance 1e-12 gives 23x less error at 8x the wall time.
+  - It treats the symptom, not the commensurability.
+- **Classification:** a step-criterion limit, not a missing booking. The tidal-sampling criterion bounds the error per
+  kick, but in a commensurate case the errors add up linearly with the number of kicks per interval. Nothing checks
+  the phase relation between the block step and P.
+- **Proposed fixes (for the integrator owners; not implemented here):**
+  1. Kick only the c.o.m. when the kick step is > P / 4 (it neither resolves nor averages the orbit). This is NBODY6's
+     unperturbed KS treatment (Aarseth 2003, gamma < gamma_min ~ 1e-6; Mikkola & Aarseth 1996): the field sees and
+     kicks the c.o.m. These pairs have gamma 1e-11 to 1e-10. The tide's secular effect then goes into the
+     secular-binary step as an orbit-averaged quadrupole torque (Heggie & Rasio 1996; the secular-triple quadrupole
+     already exists). PeTar's tidal-tensor treatment of binaries is the same idea for the long-range part (Wang et
+     al. 2020). Caution R1: c.o.m. kicks broke L in the cluster (1.4e-9) through an undebugged path inconsistency.
+     The rebuild has to keep L exact (lessons 2 and 8).
+  2. Short of 1, a local resonance criterion: per binary, delta = |dt/P - round(dt/P)| (and P/dt for dt < P).
+     With N kicks per interval, a coherent sum costs N x est. Take N x est instead of est against the share (a
+     per-interval budget), and resolve with TIDAL_FLOOR_ADAPT (dt <= P/20) only when it is exceeded.
+  3. Production runs keep stall restarts (`STALL_RESTART = true`; the rolling restart of 50 steps lost every episode
+     state) so that the next episode can be replayed with the ledger.
+- **Cut-out for a test (fails today):** `episodes-2026-10-22/res_s202_-1e-5` (3 bodies, 20 intervals, 3-4 s host):
+  sum of per-step |dE| 5.5e-9 E_REF and largest step 1.1e-9 now. A fix should bring it to the off-resonance level
+  (<= 6.4e-11 sum = 1.3x the measured 4.9e-11) at equal or better wall time.
+- **Pending:** the gpudev replays of the step-5000 restarts with main (`gpu_bf0.1_s{101,202}_r5000`: restart
+  compatibility and the cluster ledger) had not run when this was written. bf0.5_s202's 2965 s stall was not analysed.
+- **Files:** `/raven/ptmp/uli/cpp-nbody-runs/episodes-2026-10-22/` holds cut_* (the step-5000 cut-outs and their
+  variants), syn_* (synthetic outer pericentres), eps_* (FLYBY_CM_EPS scan), res_* (DT_MAX commensurability scan) and
+  gpu_* (the cluster replays).
+
 ## R4 Gauss-IRK on the ADM PN Hamiltonian for PN binaries (research prototype, tests/proto_admpn; no production change)
 
 - **Question (user):** C22 showed that 8-stage Gauss-IRK beats LogH+GBS on Newtonian compact subsystems, but in
