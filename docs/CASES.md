@@ -699,6 +699,66 @@ Status: **closed** (fixed, test, ensemble checked), **option** (fix kept as an o
   flow).
 - **Open:** the default decision; PN subsystems.
 
+## E2 Gravitational-wave observables of compact binaries and mergers: gw_events.dat (added, on by default)
+
+- **Why:** runs must be comparable with LIGO/Virgo/KAGRA and LISA populations. merger_tree.dat had masses, a, e and
+  the remnant only (and, for mergers by detect_mergers, not even the remnant: the event was recorded before
+  execute_merger made it, m_rem = m1 + m2, no kick, no spin; fixed here, the tree is now written by execute_merger).
+- **Literature (what codes write, what population papers use):** CMC (Rodriguez et al. 2018 PRL 120, 151101 and PRD
+  98, 123005; Kremer et al. 2020 ApJS 247, 48): every BBH merger tagged in-cluster 2-body / 3-4-body (GW capture
+  during a resonant encounter) / ejected, ejected binaries with their Peters merger time, e at 10 Hz from the peak
+  frequency of Wen (2003) and Peters (1964) evolution, spins and recoil (Lousto 2012, as gw_recoil.h), chi_eff.
+  Samsing (2018, PRD 97, 103014): fraction with e_10Hz > 0.1 is the signature of 3-body GW captures. DRAGON-II
+  (Arca Sedda et al. 2023-24, arXiv 2307.04805-07): in-cluster vs ejected mergers, remnant mass/spin/kick, repeated
+  mergers. PeTar (Wang et al. 2020; src/ar_interaction.hpp "Dynamic_merge"): ids, period, a, e, pericentre distance
+  and time, slow-down factor, both stars before/after. MOCCA (Askar et al. 2017, Hong et al. 2018): escaped / in-
+  cluster / GW-capture channels. BIFROST / FROST-CLUSTERS (Rantala et al. 2023-2026, papers/rantala/src): masses,
+  remnant and recoil per IMBH merger, no frequency-domain output. KETJU: SMBH remnant mass/spin/kick (Zlochower &
+  Lousto 2015). Population inference uses chi_eff, chi_p (Schmidt et al. 2015 PRD 91, 024043), e at 10 Hz (LVK
+  eccentricity searches) and, for LISA, e at 10 mHz (Breivik et al. 2016, Nishizawa et al. 2016).
+- **What is written (src/collisional/gw_output.{h,cpp}; header of the file documents the 36 columns):** one table
+  `gw_events.dat`.
+  - MERGER row per NS/BH-NS/BH merger, at the moment the code decides it, from execute_merger (paths `contact`:
+    ISCO at a step boundary, `peters`: t_GW < dt, `secular`: the same for a secular binary) and
+    finalize_subsystem_collision (`subsys`: the LogH/GBS(/IRK) collision at the pericentre with PN): time, pids,
+    stellar types, masses, both spin vectors, Newtonian osculating a, e, f_orb, peak GW frequency (Wen 2003), e at
+    10 Hz and 10 mHz on the orbit-averaged Peters track through (a, e) (backward or forward; -1: the track never has
+    that frequency, the binary formed above it), Peters merger time (Mandel 2021 fit), chi_eff, chi_p, remnant mass,
+    spin vector and kick as the merger code made them, number of subsystem members, tidal strength of the strongest
+    other body relative to the pair at the separation, distance and speed of the pair from the cluster c.o.m., and a
+    channel: ejected (pair c.o.m. unbound from the cluster, point-mass potential: a sufficient condition) > capture
+    (e >= 1 at the decision) > fewbody (>= 3 members) > 2body.
+  - BINARY rows (census) at every snapshot: the mutually nearest bound NS/BH pairs of every subsystem with t_GW <
+    GW_CENSUS_TGW_MYR (default 13800 Myr; 0: none), with channel ejected / cluster. Ejected binaries are never removed
+    as escapers (remove_escapers skips subsystem members), so the census counts them and their t_gw dates their
+    merger after the run.
+  - Peters-track subtlety (found while testing): along a track the Wen peak frequency falls from infinity to a
+    minimum at e = 0.7497 and rises again by 1.2 % to e = 1, so a target frequency can have two roots; the code takes
+    the one below 0.7497 (the last entry into the band before the merger).
+  - Not available: primordial vs dynamically assembled (the IC pairing is not stored per particle); the decision time
+    is g_sim_time (start of the HHS step, as merger_tree.dat).
+- **Restart-safe:** rows are buffered (part of the step-restart checkpoint, so a rejected step leaves none), appended
+  at every print and before every restart / stall-roll file; the restart stores the row count (attribute gw_rows), a
+  resumed run truncates the file to it (older restart files: 0, new file).
+- **Read-only:** host copies only; `NBODY_GW_OUTPUT=0` turns it off.
+- **Tests (failing-first: gw_merger fails on main, no file):** `gw_merger` (one MERGER row for the PN 10+10 BH binary
+  of coll_bh_isco, e = 0.6 variant, and a t_GW < dt secular binary at a = 1e-8 pc, e = 0.9: masses exact, e_10Hz /
+  e_10mHz against an independent RK4 time integration of Peters' da/dt, de/dt to 1.1e-11 / 3.7e-11 (bound 4.8e-11;
+  with IAU G instead of the code's G_CODE the difference is 1.6e-4), -1 where the integration never reaches the
+  frequency, remnant mass / kick / spin equal to merger_tree.dat), `gw_restart` (2n steps vs a run to 1.5n that wrote
+  the restart at n, resumed in the same directory: 5 stale rows dropped, tables identical line for line),
+  `gw_off_identical` (final particle dumps bit-identical with the output on and off, with census rows each step: BH
+  inspiral and the IMBH cluster). Full host ctest (build-gw, gcc 15 + HDF5): all pass; 19 login-node 120 s timeouts passed when rerun alone
+  (luna_reader skipped, as on main).
+- **200k smoke run (gpudev):** prod200k bf0.1 config from the C22 A/B restart (base_s101, step 80, 0.08 Myr),
+  20 steps to 0.1 Myr with SNAPSHOT_INTERVAL 5, CUDA build 10f07a7, job 31378117,
+  /raven/ptmp/uli/cpp-nbody-runs/gw-smoke-2026-10-21/{on,off}: 4 snapshots, 228 census rows (57 BH-BH binaries
+  with t_gw < 13.8 Gyr per snapshot, none ejected yet; the hardest at a = 0.003 AU, e = 0.20, t_gw = 1.9e-3 Myr), no
+  merger in the interval. Output on vs off (NBODY_GW_OUTPUT=0): all 22 L0 rows identical; wall 130.9 vs 131.0 s,
+  step wall of the last three profile reports 5.67 / 5.74 / 5.56 vs 5.67 / 5.73 / 5.54 s.
+- **Open:** primordial / dynamical tag (needs the IC partner per particle); decision time at sub-step resolution;
+  spins of the census binaries are those the code tracks (BH spins from SSE are 0 unless set).
+
 ## Verified building blocks (checked against an independent derivation, no bug found)
 
 | Building block | Check | Result | Test |
