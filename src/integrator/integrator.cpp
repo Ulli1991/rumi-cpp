@@ -1258,7 +1258,7 @@ void advance_subsystems_in_range_impl(Particles& p, int start, int count,
         // SDAR: book the physical energy change of the slow-down (sum of kappa jumps, Wang+2020 Eq. 24) of the
         // accepted integrations; failed ones are booked from the accepted retry below. sd_J[si]: booked jump
         std::vector<double> sd_J(n_sub, 0.0);
-        if (g_collisional.sdar) {
+        {   // also the jumps of secular inner binaries (CASES.md C20), which do not need SDAR
             std::vector<char> is_failed(n_sub, 0);
             for (int si : failed) is_failed[si] = 1;
             for (int si = 0; si < n_sub; si++)
@@ -1266,6 +1266,7 @@ void advance_subsystems_in_range_impl(Particles& p, int start, int count,
             g_subsystem_mgr.step_sdar_calls += g_logh_batch.stat_sd_calls;
             g_subsystem_mgr.step_sdar_kappa_max = std::max(g_subsystem_mgr.step_sdar_kappa_max,
                                                            g_logh_batch.stat_sd_kappa_max);
+            g_subsystem_mgr.step_sec_inner += g_logh_batch.stat_sec_inner;
         }
 
         // Collisions decided inside the accepted integrations (FROST-CLUSTERS I App. B3); failed ones are taken from

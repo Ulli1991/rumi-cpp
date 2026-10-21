@@ -497,6 +497,78 @@ Status: **closed** (fixed, test, ensemble checked), **option** (fix kept as an o
   subsys_logh 8.1 s vs 6.8 s of 126 s in step 16 (the step's wall 126 s vs 106 s; the trajectories differ after
   step 15).
 
+## C20 Tight inner binaries of small PN subsystems: LogH followed every orbit (8-120 min intervals) (fixed, A/B below)
+
+- **Found by:** the stall harvest of 2026-10-19 (`/raven/ptmp/uli/cpp-nbody-runs/harvest-2026-10-19/`, host
+  replays, one interval, one thread). 6 of the 8 reproducing slow stalls of 200k bf 0.1 are 3-6 body LogH sets with
+  2.5-4.5 M GBS steps: s101_s432_1 (470 s), s404_s1025_1 (748 s), s404_s1408_1 (894 s), s101_s1340_0 (7224 s),
+  s404_s706_0 (4706 s) and s404_s3047_0 (4260 s). The last three were run to the end on the host (main 683263c).
+- **Cause:** every set has a BH, so it is a PN subsystem, and FROST-CLUSTERS I (App. A2) keeps kappa = 1 in all of it.
+  SDAR is therefore off for the whole set (NBODY_SDAR_PN was an A/B option, off by default).
+  - s432_1, s1025_1, s1340_0, s3047_0: the tight pair is a BH-BH binary of 0.016-0.05 AU (P 3e-4 to 1e-3 yr, 1e5-3e6
+    orbits per interval; e.g. 32.3 + 9.7 Msun, a = 7.9e-8 pc, e = 0.26). The tide on it is gamma ~ 1e-16 from stars
+    at > 1000 AU. The 2-body secular path does not apply because the set has 3-6 members. dyn_cap then holds each GBS
+    step to a fraction of the binary orbit.
+  - s706_0 and s1408_1: the slow pair is a 0.03-0.08 AU stellar binary (300-1e4 orbits per call) next to a BH binary.
+    It is slowed only with NBODY_SDAR_PN = 1.
+- **Literature:** FC-I sets kappa = 1 in PN subsystems without giving a reason. Mikkola & Aarseth (1996) slowed a
+  binary with a PN-type perturbation at constant kappa. A PN pair cannot be slowed at full PN strength for long:
+  kappa x GM/(c^2 r_p) is the amplitude of the short-period error, which forces kappa < ~30 here. NBODY6 integrates a
+  KS binary below gamma_min = 1e-6 as unperturbed (Aarseth 2003 sec. 8).
+- **Fix (local criteria):**
+  1. Secular inner binaries (logh_batch.cpp, NBODY_SEC_INNER = 0: off). A bound pair qualifies when it is the tightest
+     pair of both members, has n_orb >= N_ORB_SECULAR orbits in the call, and satisfies gamma n_orb <= k_ref = 1e-6.
+     Here gamma = (r_apo^3 / m_a m_b) sum_k m_ab m_k / r_close,k^3 (W20 Eq. 22), and r_close is the closest approach of
+     perturber k within the call in its two-body orbit about the pair. This is the kappa -> n_orb limit of SDAR.
+     - Such a pair becomes one LogH body at its c.o.m., carrying the total mass, momentum and auxiliary velocity.
+     - At the end of the call its internal orbit is advanced by integrate_secular_binary: orbit-averaged PN for PN
+       pairs, a Kepler drift otherwise.
+     - Before the collapse, a dry run of that advance over the whole call must succeed. A refused PN write-back (C19)
+       or a secular coalescence (r_p < 10 R_S) keeps the pair in LogH, where the collision / GW rules decide the
+       merger.
+     - After every GBS step a watch checks the same bound at the current distances. Above it, the binary is expanded
+       and LogH continues.
+     - Energy: the collapse and the expansion change T + U of the state at a fixed phase-space point. Those jumps,
+       minus the carried internal energy, go into B and sd_jump (booked as E_sd). The secular PN change of the
+       internal energy is E_pn, as is all PN work, with P / L sunk per member as before.
+  2. NBODY_SDAR_PN default on (PLAN item 4c): SDAR slows the non-PN inner binaries of PN subsystems. PN pairs keep
+     kappa = 1 (NBODY_SDAR_PN = 0: off).
+- **Cut-outs (host, one interval; main -> C20):**
+
+  | case | wall [s] | \|dE/E\| | \|dP\|/M [km/s] | \|dL/L\| |
+  |---|---|---|---|---|
+  | s432_1 | 470 -> 0.10 | 5.1e-10 -> 2.4e-10 | 3.5e-13 -> 1.3e-12 | 1.9e-13 -> 1.9e-13 |
+  | s1025_1 | 748 -> 0.12 | 1.8e-10 -> 2.4e-10 | 2.0e-12 -> 4.3e-12 | 3.2e-13 -> 1.1e-13 |
+  | s1340_0 | 7224 -> 0.03 | 4.4e-12 -> 4.4e-12 | 5.1e-13 -> 5.7e-13 | 1.1e-13 -> 1.1e-13 |
+  | s3047_0 | 4260 -> 0.09 | 1.4e-12 -> 3.9e-11 | 1.7e-12 -> 1.8e-12 | 8.9e-14 -> 3.8e-13 |
+  | s706_0 | 4706 -> 1.3 (37 without SDAR_PN) | 1.27e-9 -> 1.19e-9 (6.9e-10) | | |
+  | s1408_1 | 894 -> 15 (428) | 1.648e-8 -> 1.648e-8 | | |
+
+  The P and L changes are round-off (~10 ulp of the BH momenta).
+  - s3047_0, NBODY_ELEDGER: the error is the own error of the FSI steps of the star + binary at depths 12-14. Per
+    call it is the same in both (largest 1.6-1.9e-13, top-12 sum of |own| 1.91e-12 main vs 1.98e-12 C20). Only the
+    random-walk sum differs (root 1.0e-13 vs 2.8e-12): noise, not a bias of the collapse (LogH residues 8e-15 in both).
+  - s1408_1 still takes 15 s: its 12.5 AU BH binary (34 orbits per call, gamma n_orb 1e-5) is perturbed and stays in
+    full LogH, as it should.
+- **Mergers:** a binary about to merge is never collapsed (dry run). In the cut-outs a BH binary with t_GW < one step
+  is caught first by the binary GW rule at detection (test sec_inner_merge: s1025_1 with the binary shrunk 60x, one
+  merger, E / P / L at round-off).
+- **Tests:** sec_inner_s432, sec_inner_s1025, sec_inner_s3047 check the wall time (< 20 s; without the fix > 120 s:
+  timeout), at least 1 collapse, the GBS steps, and |dE/E|, |dP|/M, |dL/L| at 1.3x measured. sec_inner_merge is
+  described above.
+- **200k A/B** (bf 0.1, 60 intervals from stall_1340 (camp2 s101), stall_1025 (camp3 s404), stall_1117 (camp2 s202),
+  4 A100 each; `/raven/ptmp/uli/cpp-nbody-runs/secinner-ab-2026-10-19/`): final |dE/E| (run_summary.py, w.r.t. the restart), |dP|/M [km/s], |dL/L|,
+  s/step median / mean / max, main -> C20:
+  s404 (84 steps; main in 2 gpudev segments): 6.6e-11 -> 1.26e-10, 1.4e-13 -> 1.1e-13, 1.8e-12 -> 1.9e-12,
+  4.15 / 7.30 / 187 -> 4.11 / 4.55 / 20.
+  s202 (86 steps): 4.53e-9 -> 4.55e-9, 2.3e-13 -> 2.3e-13, 2.6e-12 -> 2.1e-12, 3.99 / 4.31 / 12 -> 3.95 / 4.22 / 8.
+  s101 (91 steps): C20 1.51e-9, 1.5e-13, 1.7e-11, 4.61 / 5.22 / 18. Main is still queued on gpu (job 31366161, main_s101):
+  its first step is the 1096 s stall and cannot fit in gpudev.
+  Energy: equal on s202, 1.9x on s404 (noise level, user decision 2026-10-21: acceptable for the speed-up).
+- **Open:** a 3-body IC with the star moved to 5e-4 pc from a 60x shrunk BH binary (a = 1.3e-9 pc, v ~ 5000 km/s)
+  gives NaN at the first LogH call (dt = nan) in main as well. Not followed up: the 200k runs never reached it, and
+  the IC is artificial (`/raven/ptmp/uli/cpp-nbody-runs/secinner-ab-2026-10-19/nan_ic.txt`).
+
 ## Verified building blocks (checked against an independent derivation, no bug found)
 
 | Building block | Check | Result | Test |

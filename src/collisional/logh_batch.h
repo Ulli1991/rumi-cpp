@@ -83,6 +83,7 @@ struct SubsystemBatch {
     int stat_cap_hit = 0;          // subsystems that hit GBS step limit
     int stat_sd_calls = 0;         // SDAR: integrations with a slowed binary at some step
     double stat_sd_kappa_max = 0;  // SDAR: largest slow-down factor
+    int stat_sec_inner = 0;        // secular inner binaries collapsed inside PN subsystems (CASES.md C20)
     std::vector<double> t_reached; // physical time each subsystem's GBS integration reached (code units)
     int stat_collisions = 0;       // collisions decided inside the integrations
     int stat_peri_landings = 0;    // candidate pericentres a step was forced onto

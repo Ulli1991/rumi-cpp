@@ -6,6 +6,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 # Code defaults of the keys whose default became the production value of config.txt when the parameter table
@@ -52,6 +53,9 @@ WEAK_SPLIT_GBS = 1000     # weak_split_bh_binary: 0 measured (3.3M without the s
 WEAK_SPLIT_DE = 1.23e-11  # weak_split_bh_binary: 9.43e-12 measured (host build; 1.35e-11 without the split)
 WEAK_SPLIT_DL = 3.6e-13   # weak_split_bh_binary: 2.76e-13 measured (secular PN of C9); 1.31e-14 before was one lucky
                           # sample: with DT_MAX 1e-4 the old code reaches 1.9e-13, without PN both 1.6e-13 (CASES.md C10)
+SEC_DE_432 = 3.1e-10       # sec_inner_s432: 2.35e-10 measured (host build; 5.09e-10 and 470 s before C20)
+SEC_DE_1025 = 3.1e-10      # sec_inner_s1025: 2.41e-10 measured (host build; 1.83e-10 and 748 s before C20)
+SEC_DE_3047 = 5.0e-11      # sec_inner_s3047: 3.87e-11 measured (host build; > 900 s before C20)
 TIDAL_FLOOR_DE = 3.07e-9    # tidal_floor_bh_binary: 2.36e-9 measured (host build; 2.28e-6 with the fixed floor)
 TIDAL_FLOOR_LOGH = 8200     # tidal_floor_bh_binary: 6308 LogH calls measured (1024 with the fixed floor)
 FLYBY_GROUP_STEPS = 39400  # flyby_group_floor: 30304 measured (host build)
@@ -576,6 +580,62 @@ def tidal_floor_bh_binary(exe):
     rows = diagnostics(out)
     ok = check("tidal floor: max|dE/E|", max(r[0] for r in rows), TIDAL_FLOOR_DE)
     return ok & check("tidal floor: LogH calls", logh, TIDAL_FLOOR_LOGH)
+
+
+# sec_inner_*: 200k bf 0.1 stall cut-outs (harvest-2026-10-19) with a tight BH binary inside a 3-5 body PN subsystem
+# (CASES.md C20). (E_REF, NGB_MREF, bounds 1.3 x measured on the host build: |dE/E|, |dP|/M [km/s], |dL/L| (with the
+# booked P / L sinks); GBS steps bound). Before C20: s432 |dP|/M 3.5e-13, |dL/L| 1.9e-13; s1025 2.0e-12, 3.2e-13
+SEC_INNER_CASES = {
+    "s101_s432_1": ("306584304.2034864", "0.4037126187872738", (SEC_DE_432, 1.64e-12, 2.5e-13), 1000),
+    "s404_s1025_1": ("367882904.67611593", "0.40210304758978715", (SEC_DE_1025, 5.6e-12, 1.45e-13), 5000),
+    "s404_s3047_0": ("367882904.67611593", "0.40210304758978715", (SEC_DE_3047, 2.3e-12, 4.9e-13), 2000),
+}
+SEC_INNER_WALL = 20.0   # s per run (0.03-0.11 s measured on the login node; 470 s, 748 s, > 900 s before)
+
+
+def sec_inner_cfg(e_ref, ngb_mref, ic):
+    """Production settings of the 200k campaign runs for a C20 cut-out (particle file tests/data/<ic>)."""
+    return dict(TEST_CASE="particle_file", IC_FILE=str(Path(__file__).parent / "data" / ic),
+                TOTAL_TIME_MYR="1.0e-3", DT_MAX_MYR="1.0e-3", DT_MIN_MYR="1.0e-14", ETA="0", ETA_GRAD="0.2",
+                ETA_JERK="0", ETA_RESTART="1e-8", FLYBY_CM_EPS="1e-11", NGB_MASS_SCALING="true", SERIAL_N2_GPU="16384",
+                TREE_THRESHOLD="100000", TREE_THETA="0.7", SDAR="true", COLLISIONAL="true", PN_ORDER="31",
+                SSE_ENABLED="false", COLL_MASS_LOSS_C="0", BH_MERGE_RADIUS="total", TDE_ACCRETION_FRACTION="0.5",
+                PRINT_INTERVAL="1", PROFILING="false", E_REF=e_ref, NGB_MREF=ngb_mref)
+
+
+def sec_inner_merge(exe):
+    """C20: the s1025 cut-out with its BH binary shrunk 60x (t_GW < one step): the merger must still happen exactly
+    once (a binary about to merge is never collapsed: the secular dry run refuses it, so the binary GW rule / LogH
+    collision decide it), with E (merger sink), P and L conserved. Bounds 1.3 x measured (host build)."""
+    e_ref, ngb_mref = SEC_INNER_CASES["s404_s1025_1"][:2]
+    out = run_output(exe, sec_inner_cfg(e_ref, ngb_mref, "sec_inner_merge.txt"))
+    rows = diagnostics(out)
+    ok = check("merger events", len(re.findall(r"\[MERGER #\d+\]", out)), 1, lower=True)
+    ok &= check("merger events (at most)", len(re.findall(r"\[MERGER #\d+\]", out)), 1)
+    ok &= check("max|dE/E| with merger sink", max(r[0] for r in rows), 2.3e-14)   # 1.73e-14 measured
+    ok &= check("max|dP|/M [km/s]", max(r[1] for r in rows), 7.8e-14)              # 6.03e-14 measured
+    return ok & check("max|dL/L| with L sink", max(r[2] for r in rows), 3.9e-12)   # 2.98e-12 measured
+
+
+def sec_inner_cutout(exe, case):
+    """C20: one 1e-3 Myr interval of a 200k cluster cut-out whose 0.016-0.05 AU BH binary (1e5-3e6 orbits per
+    interval, tide gamma ~ 1e-16 from stars at > 1000 AU) sat in a 3-5 body PN subsystem: kappa = 1 there, so LogH
+    followed every orbit (2.5-4.5 M GBS steps). The binary must be collapsed into its c.o.m. for the call (secular
+    inner binary), the interval must take < SEC_INNER_WALL s and the energy stay within the bound."""
+    e_ref, ngb_mref, (de_bound, dp_bound, dl_bound), gbs_bound = SEC_INNER_CASES[case]
+    cfg = sec_inner_cfg(e_ref, ngb_mref, f"sec_inner_{case}.txt")
+    t0 = time.time()
+    out = run_output(exe, cfg, timeout=max(TIMEOUT_S, 60))
+    wall = time.time() - t0
+    gbs = sum(int(a) for a in re.findall(r"LogH=\d+ \(gbs=(\d+)", out))
+    sec = sum(int(a) for a in re.findall(r"secinner=(\d+)", out))
+    ok = check(f"{case}: secular inner binaries", sec, 1, lower=True)
+    ok &= check(f"{case}: LogH GBS steps", gbs, gbs_bound)
+    ok &= check(f"{case}: wall time [s]", wall, SEC_INNER_WALL)
+    rows = diagnostics(out)
+    ok &= check(f"{case}: max|dE/E|", max(r[0] for r in rows), de_bound)
+    ok &= check(f"{case}: max|dP|/M [km/s]", max(r[1] for r in rows), dp_bound)
+    return ok & check(f"{case}: max|dL/L|", max(r[2] for r in rows), dl_bound)
 
 
 def weak_split_bh_binary(exe):
@@ -1742,6 +1802,10 @@ CASES = {
     # C19: secular PN write-back at the pericentre of a near-radial BH binary (1e6 run, stall_15.h5)
     "c19_secular_peri": lambda exe: c19_secular_peri(exe),
     "tidal_floor_bh_binary": lambda exe: tidal_floor_bh_binary(exe),
+    "sec_inner_s432": lambda exe: sec_inner_cutout(exe, "s101_s432_1"),
+    "sec_inner_s1025": lambda exe: sec_inner_cutout(exe, "s404_s1025_1"),
+    "sec_inner_s3047": lambda exe: sec_inner_cutout(exe, "s404_s3047_0"),
+    "sec_inner_merge": sec_inner_merge,
     # PN_BH_ONLY false: the PN binaries of massive stars give the LogH calls the two paths are compared on
     "cm_eps_cpu_vs_device": lambda exe: paths_same_steps(exe, "fly-by step with tidal sampling",
                                                          dict(BINARIES, FLYBY_CM_EPS="1e-11", PN_ORDER="31",

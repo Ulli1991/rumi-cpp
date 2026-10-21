@@ -166,6 +166,24 @@ void collision_scan(const LogHState& s, double G, const double* coll, int skip_i
 // Integrate to target physical time using GBS
 // ============================================================================
 
+bool sec_watch_hit(const LogHState& s, const SecWatch& w) {
+    for (int q = 0; q < w.n; q++) {
+        const int c = w.com[q];
+        double pert = 0.0;
+        for (int k = 0; k < s.n_bodies; k++) {
+            if (k == c) continue;
+            double d2 = 0.0;
+            for (int x = 0; x < 3; x++) {
+                const double d = s.pos[k*3+x] - s.pos[c*3+x];
+                d2 += d * d;
+            }
+            pert += s.mass[c] * s.mass[k] / (d2 * std::sqrt(d2));
+        }
+        if (w.qf[q] * pert > 1.0) return true;
+    }
+    return false;
+}
+
 int GBSIntegrator::integrate_to_time(LogHState& state, double t_target, double G,
                                       double ds_initial, double c_code, int pn_order,
                                       int max_iter) {
@@ -226,6 +244,7 @@ int GBSIntegrator::integrate_to_time(LogHState& state, double t_target, double G
     // step, so the landing iterates onto the actual pericentre (as NBODY6's chain, Aarseth 2003, DERQP / TPERI).
     // peri_tol: landing tolerance, 1e-3 of the pericentre passage time sqrt(r_p^3 / (G m)).
     coll_i = coll_j = -1;
+    sec_hit = false;
     double t_goal = t_target;
     int peri_i = -1, peri_j = -1, skip_i = -1, skip_j = -1, peri_aims = 0;
     double peri_tol = 0.0;
@@ -351,6 +370,7 @@ int GBSIntegrator::integrate_to_time(LogHState& state, double t_target, double G
             const double P_eff = logh_sd_update(state, G, *sdar);
             if (sd_P_eff > 0.0) sd_P_eff = P_eff;
         }
+        if (sec_watch && sec_watch_hit(state, *sec_watch)) { sec_hit = true; break; }
         // Collisions: a step that ended on the aimed pericentre, or past it (the aim moved), decides it; then
         // all pairs are scanned again
         if (coll) {
@@ -368,7 +388,7 @@ int GBSIntegrator::integrate_to_time(LogHState& state, double t_target, double G
     }
     double dt_remain = t_target - state.t;
     reached = std::fabs(dt_remain) < time_tol * std::fabs(t_target);
-    if (!reached && coll_i < 0) {
+    if (!reached && coll_i < 0 && !sec_hit) {
         double Omega_final = logh_omega(state);
         std::printf("      GBS: %d steps, t_final=%.6f/%.6f  Omega=%.3e  ds_range=[%.2e,%.2e]  fail=%d overshoot=%d"
                     " *** DID NOT REACH TARGET ***\n",
