@@ -59,3 +59,6 @@ tools/hip_bench/nbody_bench
 tools/hip_bench/bench.out.*
 tools/hip_bench/bench.err.*
 __pycache__/
+build-*.build.log
+build-*.cfg.log
+core.*

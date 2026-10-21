@@ -345,3 +345,12 @@ Order (gate in brackets; "exact" = bit-identical, host ctest + dump compare):
 8. 4c default, GBS Deuflhard / k_max 8 (energy rule). B LogH share.
 9. FMM far field after the force-error study (statistical equivalence + energy). A, C several x.
 10. Mixed precision (double-single) against the 1e-8 force-error limit (energy rule). A, C kernels 3-5x.
+
+## Status 2026-10-21 (Raven login crash; GPU work moves to Viper) — see docs/HANDOFF_2026-10-21.md
+- Merged today: C15 (diagnostics read-only), C21 (SDAR kappa with outside perturbers; 200k A/B owed), C22 (Gauss-IRK
+  for compact Newtonian subsystems, default off; 200k A/B done, s303 undecided). CASES.md has the numbers.
+- 4c/C20 (secular inner binaries of PN subsystems): the stall class behind 6 of 8 harvested stalls is gone (worst
+  step 187 s -> 20 s at 200k); the main-branch s101 comparison is still queued on Raven (job 31366161).
+- Next, in order: (1) C21 200k A/B on Viper apudev, (2) C22 default decision (longer A/B or 4th seed, "not chosen"
+  counters), (3) MSTAR for the 16-18 body dense-core groups (the remaining stall class), (4) items 2-7 above.
+- Rejected today, do not redo: R2 (1/(-U) kick) retest and R3 (Kahan) — energy rule; PN1 Hamiltonian for IRK.
