@@ -1267,6 +1267,8 @@ void advance_subsystems_in_range_impl(Particles& p, int start, int count,
             g_subsystem_mgr.step_sdar_kappa_max = std::max(g_subsystem_mgr.step_sdar_kappa_max,
                                                            g_logh_batch.stat_sd_kappa_max);
             g_subsystem_mgr.step_sec_inner += g_logh_batch.stat_sec_inner;
+            g_subsystem_mgr.step_irk += g_logh_batch.stat_irk;
+            g_subsystem_mgr.step_irk_fb += g_logh_batch.stat_irk_fb;
         }
 
         // Collisions decided inside the accepted integrations (FROST-CLUSTERS I App. B3); failed ones are taken from
@@ -1389,6 +1391,8 @@ void advance_subsystems_in_range_impl(Particles& p, int start, int count,
                         if (!retry_batch.collisions[r].empty()) mass_dirty[failed[r]] = 1;
                     }
                     g_subsystem_mgr.step_peri_landings += retry_batch.stat_peri_landings;
+                    g_subsystem_mgr.step_irk += retry_batch.stat_irk;
+                    g_subsystem_mgr.step_irk_fb += retry_batch.stat_irk_fb;
                     g_subsystem_mgr.step_peri_misses += retry_batch.stat_peri_misses;
 
                     // No point continuing if a sub-step failed, except on the last try: there the result stands,
@@ -1514,7 +1518,9 @@ void advance_subsystems_in_range_impl(Particles& p, int start, int count,
                     for (auto& c : sub_colls[si]) c.pl_booked = true;
                 } else {
                     const double d = E_post - E_pre - sd_J[si] - coll_J[si];   // unbooked part
-                    log_subsys(sub, nb, "unbooked", d, si);
+                    // Gauss-IRK integrations (CASES.md C21) logged as unbooked-irk (a retried one: as its retry left it)
+                    const bool irk = !any_retry && si < (int)g_logh_batch.irk_used.size() && g_logh_batch.irk_used[si];
+                    log_subsys(sub, nb, irk ? "unbooked-irk" : "unbooked", d, si);
                     g_eattr.logh += d; g_eattr.logh_abs += std::fabs(d); g_eattr.n_logh++;
                     if (std::fabs(d) > std::fabs(g_eattr.worst)) {
                         g_eattr.worst = d; g_eattr.worst_n = nb; g_eattr.worst_type = (int)sub.type;

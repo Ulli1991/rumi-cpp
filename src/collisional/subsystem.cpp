@@ -1659,6 +1659,7 @@ void SubsystemManager::reset_step_diagnostics() {
     step_sdar_calls = 0;
     step_sdar_kappa_max = 0.0;
     step_sec_inner = 0;
+    step_irk = step_irk_fb = 0;
     step_secular_evolved = 0;
     step_secular_substeps = 0;
     step_kepler2 = 0;
@@ -1724,6 +1725,8 @@ void SubsystemManager::print_step_summary() const {
             std::printf(", sdar=%d kappa_max=%.2e", step_sdar_calls, step_sdar_kappa_max);
         if (step_sec_inner > 0)
             std::printf(", secinner=%d", step_sec_inner);
+        if (step_irk > 0 || step_irk_fb > 0)
+            std::printf(", irk=%d irk_fb=%d", step_irk, step_irk_fb);
         std::printf(")");
     }
     std::printf("  Secular=%d", step_secular_evolved);

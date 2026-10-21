@@ -315,6 +315,7 @@ const std::vector<DebugEnvSpec> kDebugEnv = {
     {"NBODY_SDAR", "=0/1: overrides SDAR"},
     {"NBODY_SEC_INNER", "=0: no secular inner binaries in PN subsystems (CASES.md C20; A/B)"},
     {"NBODY_SDAR_PN", "=0: no SDAR slow-down of inner binaries without a PN member inside PN subsystems (default on since C20; PLAN item 4c)"},
+    {"NBODY_GAUSS_IRK", "=1: compact Newtonian subsystems (2-4 bodies, no PN member, no collision candidate, no e >= 0.99 pair or hard encounter, no stable MA hierarchy, no SDAR slow-down) by the symplectic 8-stage Gauss-Legendre IRK instead of LogH+GBS, LogH+GBS if it does not converge (CASES.md C21; default off, A/B). At exit: `Gauss-IRK stats` line; step summary `irk=` / `irk_fb=`; SUBSYS_ERR kind `unbooked-irk`"},
     {"NBODY_SLOW0_STATS", "Statistics of small all-fast HHS sets, printed at the end"},
     {"NBODY_SMALL_FOR", "Largest loop run on the host where it can access device memory (default 256; 0: off)"},
     {"NBODY_SMALL_N2", "Largest pair count run on the host where it can access device memory (default 4096)"},

@@ -6,6 +6,7 @@
 #include "stellar_cache.h"
 #include "logh.h"
 #include "gbs.h"
+#include "gauss_irk.h"
 #include "collisional_config.h"
 #include "post_newtonian.h"
 #include "secular.h"
@@ -21,6 +22,7 @@
 #include <cstdio>
 #include <string>
 #include <chrono>
+#include <atomic>
 
 SubsystemBatch g_logh_batch;
 LoghBatchProf g_logh_prof;
@@ -70,6 +72,101 @@ static int gbs_step_limit(const LogHState& st, double dt, double G) {
     if (per_orbit <= 0.0 || P_min == std::numeric_limits<double>::max()) return GBS_MAX_STEPS;
     const double n = per_orbit * std::fabs(dt) / P_min;
     return n > (double)GBS_MAX_STEPS ? (int)std::min(n, 4.0e6) : GBS_MAX_STEPS;
+}
+
+// ============================================================================
+// Gauss-IRK for compact Newtonian subsystems (docs/CASES.md C21; NBODY_GAUSS_IRK=1, default off)
+// ============================================================================
+
+static bool gauss_irk_on() {
+    static const bool on = [] { const char* e = std::getenv("NBODY_GAUSS_IRK"); return e && std::atoi(e) != 0; }();
+    return on;
+}
+
+// Totals over the run, printed at exit when NBODY_GAUSS_IRK is on
+namespace {
+struct IrkTotals {
+    std::atomic<long long> calls{0}, fallbacks{0}, steps{0}, rhs{0}, newton{0}, fail[5] = {};
+    ~IrkTotals() {
+        if (!gauss_irk_on()) return;
+        std::printf("Gauss-IRK stats: %lld calls, %lld fell back to GBS (step limit %lld, no convergence %lld, "
+                    "collision watch %lld, other %lld), %lld steps, %lld force evaluations, %lld Newton steps\n",
+                    calls.load(), fallbacks.load(), fail[1].load(), fail[2].load(), fail[3].load(),
+                    fail[4].load() + fail[0].load(), steps.load(), rhs.load(), newton.load());
+    }
+} g_irk_totals;
+}  // namespace
+
+// Classification, local criteria only (normalised state, G = 1): 2-4 bodies, no collision candidate (osculating
+// pericentre inside the collision distance), no hard pericentre (bound pair with e >= 0.99) or hard encounter (an
+// approaching unbound pair reaching r_p < 0.01 r within the call), and no stable hierarchy by the Mardling & Aarseth
+// test of the triple classification (n = 3: tightest pair + third body; n = 4 with an unbound second pair: tightest
+// pair + the body nearest to it; a 2+2 quadruple has no MA test in the code and qualifies). Gauss-IRK loses on
+// strongly hierarchical systems (prototype: Kozai triple 4x the evaluations of LogH+GBS), and those are the SDAR /
+// secular cases; PN members and SDAR slow-downs are excluded by the caller.
+static bool gauss_irk_choose(const LogHState& st, double G, double dt, const double* coll) {
+    const int n = st.n_bodies;
+    if (n < 2 || n > 4) return false;
+    int bi = -1, bj = -1;
+    double a_min = 1e300;
+    bool bound[LOGH_MAX_BODIES][LOGH_MAX_BODIES] = {};
+    for (int i = 0; i < n; i++)
+        for (int j = i + 1; j < n; j++) {
+            double r[3], v[3];
+            for (int c = 0; c < 3; c++) { r[c] = st.pos[j*3+c] - st.pos[i*3+c]; v[c] = st.vel[j*3+c] - st.vel[i*3+c]; }
+            const double rr = std::sqrt(r[0]*r[0] + r[1]*r[1] + r[2]*r[2]);
+            const double v2 = v[0]*v[0] + v[1]*v[1] + v[2]*v[2], rv = r[0]*v[0] + r[1]*v[1] + r[2]*v[2];
+            const double mu = G * (st.mass[i] + st.mass[j]);
+            const double eps = 0.5 * v2 - mu / rr;
+            const double h2 = rr * rr * v2 - rv * rv;
+            const double e = std::sqrt(std::max(0.0, 1.0 + 2.0 * eps * h2 / (mu * mu)));
+            const double rp = h2 / (mu * (1.0 + e));
+            const double rc = coll ? coll[i * LOGH_MAX_BODIES + j] : 0.0;
+            if (rc > 0.0 && rp < rc) return false;                    // collision candidate
+            if (eps < 0.0) {
+                if (e >= 0.99) return false;                          // hard pericentre
+                bound[i][j] = true;
+                const double a = -mu / (2.0 * eps);
+                if (a < a_min) { a_min = a; bi = i; bj = j; }
+            } else if (rv < 0.0 && rp < 1e-2 * rr) {                  // hard encounter within the call
+                double d[3] = {r[0], r[1], r[2]}, u[3] = {v[0], v[1], v[2]}, rpk = 0.0;
+                if (kepler_time_to_pericentre(d, u, mu, &rpk) < dt) return false;
+            }
+        }
+    if (n == 2 || bi < 0) return true;
+    int rest[2], nr = 0;
+    for (int k = 0; k < n; k++) if (k != bi && k != bj) rest[nr++] = k;
+    if (n == 4 && bound[std::min(rest[0], rest[1])][std::max(rest[0], rest[1])]) return true;   // 2+2
+    const double m1 = st.mass[bi], m2 = st.mass[bj], Mi = m1 + m2;
+    double xc[3], vc[3];
+    for (int c = 0; c < 3; c++) {
+        xc[c] = (m1 * st.pos[bi*3+c] + m2 * st.pos[bj*3+c]) / Mi;
+        vc[c] = (m1 * st.vel[bi*3+c] + m2 * st.vel[bj*3+c]) / Mi;
+    }
+    int ko = rest[0];
+    if (nr == 2) {
+        double d0 = 0.0, d1 = 0.0;
+        for (int c = 0; c < 3; c++) {
+            d0 += (st.pos[rest[0]*3+c] - xc[c]) * (st.pos[rest[0]*3+c] - xc[c]);
+            d1 += (st.pos[rest[1]*3+c] - xc[c]) * (st.pos[rest[1]*3+c] - xc[c]);
+        }
+        if (d1 < d0) ko = rest[1];
+    }
+    double r_in[3], v_in[3], r_out[3], v_out[3];
+    for (int c = 0; c < 3; c++) {
+        r_in[c] = st.pos[bj*3+c] - st.pos[bi*3+c]; v_in[c] = st.vel[bj*3+c] - st.vel[bi*3+c];
+        r_out[c] = st.pos[ko*3+c] - xc[c]; v_out[c] = st.vel[ko*3+c] - vc[c];
+    }
+    const double mu_o = G * (Mi + st.mass[ko]);
+    const double ro = std::sqrt(r_out[0]*r_out[0] + r_out[1]*r_out[1] + r_out[2]*r_out[2]);
+    const double vo2 = v_out[0]*v_out[0] + v_out[1]*v_out[1] + v_out[2]*v_out[2];
+    const double eps_o = 0.5 * vo2 - mu_o / ro;
+    if (!(eps_o < 0.0)) return true;   // unbound outer body: no hierarchy
+    const double a_o = -mu_o / (2.0 * eps_o);
+    const double rvo = r_out[0]*v_out[0] + r_out[1]*v_out[1] + r_out[2]*v_out[2];
+    const double e_o = std::sqrt(std::max(0.0, 1.0 + 2.0 * eps_o * (ro * ro * vo2 - rvo * rvo) / (mu_o * mu_o)));
+    return !SubsystemManager::mardling_stability(a_min, a_o, e_o, m1, m2, st.mass[ko],
+                                                 SubsystemManager::mutual_inclination(r_in, v_in, r_out, v_out));
 }
 
 // ============================================================================
@@ -479,6 +576,7 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
     batch.collisions.assign(n_sub, {});
     batch.coll_dE.assign(n_sub, 0.0);
     std::vector<int> peri_land(n_sub, 0), peri_miss(n_sub, 0);
+    std::vector<int> irk_sub(n_sub, 0);   // 1: Gauss-IRK, 2: Gauss-IRK fell back to LogH+GBS
 
     // Subsystems are independent: integrate them on all host threads (one GBS integration is long
     // serial work; dynamic scheduling balances binaries against multiplets)
@@ -886,13 +984,50 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
             }
         }
 
+        // Gauss-IRK (CASES.md C21, NBODY_GAUSS_IRK=1): compact Newtonian subsystems (gauss_irk_choose) that SDAR would
+        // not slow are integrated by the symplectic Gauss-Legendre method; if it does not finish (no convergence,
+        // collision watch, step limit) the call starts again from the same state with LogH+GBS below
+        bool irk_done = false;
+        if (gauss_irk_on() && !state.use_aux_vel && n_secr == 0 && n_live >= 2 && n_live <= 4 && dt_norm > 0.0) {
+            bool slowed = false;
+            if (g_collisional.sdar && n_live >= 3) {
+                LogHState probe = state;
+                SdarParams sp;
+                sp.k_ref = g_collisional.sdar_kref;
+                sp.c = g_collisional.sdar_c;
+                sp.coll_pair = coll;
+                logh_sd_update(probe, G_norm, sp);
+                for (int q = 0; q < probe.n_sd; q++) if (probe.sd_kappa[q] > 1.0) slowed = true;
+            }
+            if (!slowed && gauss_irk_choose(state, G_norm, dt_norm, coll_on ? coll : nullptr)) {
+                LogHState trial = state;
+                GaussIrkOut io;
+                GaussIrkStats ist;
+                gauss_irk_integrate(trial, dt_norm, G_norm, GaussIrkOpts(), 2LL * gbs_step_limit(state, dt_norm, G_norm) + 16,
+                                    coll_on ? coll : nullptr, io, &ist);
+                g_irk_totals.calls++;
+                g_irk_totals.steps += ist.steps;
+                g_irk_totals.rhs += ist.rhs;
+                g_irk_totals.newton += ist.newton;
+                if (io.ok) {
+                    state = trial;
+                    irk_done = true;
+                    irk_sub[s] = 1;
+                } else {
+                    g_irk_totals.fallbacks++;
+                    g_irk_totals.fail[std::min(std::max(io.fail, 0), 4)]++;
+                    irk_sub[s] = 2;
+                }
+            }
+        }
+
         // SDAR (FROST-CLUSTERS I App. A2): slow-down of weakly perturbed inner binaries; kappa = 1 for 2-body
         // subsystems (no perturber inside the subsystem: the external tide comes from the FSI kicks, which need the
         // true phase) and for collision candidates (osculating pericentre inside the collision distance, FC-I App.
         // B3). FC-I sets kappa = 1 for whole PN subsystems; since C20 (PLAN item 4c; NBODY_SDAR_PN=0: off) the code keeps kappa = 1 only for
         // pairs with a member above M_PN and slows the other inner binaries of PN subsystems
         static const bool sdar_pn = [] { const char* e = std::getenv("NBODY_SDAR_PN"); return !e || std::atoi(e) != 0; }();
-        const bool sd_on = g_collisional.sdar && (sdar_pn || !state.use_aux_vel) && n_live >= 3;
+        const bool sd_on = g_collisional.sdar && (sdar_pn || !state.use_aux_vel) && n_live >= 3 && !irk_done;
         SdarParams sd_par;
         auto sd_pn_build = [&]() {   // PN bodies by state slot (a collapsed binary: either member)
             for (int k = 0; k < n_live; k++) {
@@ -924,12 +1059,13 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
         for (int b = 0; b < nb; b++) ghost_of[b] = -1;
         auto& colls = batch.collisions[s];
         const double t_stop = dt_norm;
+        if (irk_done) reached = true;
         if (n_live <= 1) {   // one body left after a collision in an earlier call: a free drift
             for (int c = 0; c < 3 * n_live; c++) state.pos[c] += state.vel[c] * t_stop;
             state.t = t_stop;
             reached = true;
         }
-        while (n_live > 1) {
+        while (n_live > 1 && !irk_done) {
             const int seg_limit = gbs_step_limit(state, t_stop - state.t, G_norm);
             if (max_steps == 0) max_steps = seg_limit;
             GBSIntegrator gbs(eta_gbs);
@@ -1309,6 +1445,13 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
     }
     batch.stat_sec_inner = 0;
     for (int u : sec_used_sub) batch.stat_sec_inner += u;
+    batch.stat_irk = batch.stat_irk_fb = 0;
+    batch.irk_used.assign(n_sub, 0);
+    for (int s2 = 0; s2 < n_sub; s2++) {
+        batch.stat_irk += irk_sub[s2] == 1;
+        batch.stat_irk_fb += irk_sub[s2] == 2;
+        batch.irk_used[s2] = irk_sub[s2] == 1;
+    }
     for (double k : sd_kappa_sub) {
         if (k > 1.0) batch.stat_sd_calls++;
         batch.stat_sd_kappa_max = std::max(batch.stat_sd_kappa_max, k);
