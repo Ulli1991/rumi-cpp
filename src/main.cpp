@@ -1320,6 +1320,53 @@ int main(int argc, char** argv) {
             if (std::isfinite(ade)) stall_de_hist.push_back(ade);
         };
 
+        // Diagnostics are read-only on the integrator state (docs/CASES.md C15). The time-bin table needs the
+        // levels of the current state, so the print recomputes accelerations and time steps; it used to leave them
+        // in the particles and re-sort the particles by level (partition_by_level), so the next step started from
+        // another slot order (other summation orders) and other ax / dt_adapt / level: the trajectory depended on
+        // PRINT_INTERVAL. Now the overwritten fields are saved before and restored after the print, and the
+        // particles keep their slots (the table counts levels, it needs no partition).
+        struct DiagSave {
+            Kokkos::View<double*> ax, ay, az, dt;
+            Kokkos::View<int*> level;
+            int n = -1;
+        } diag_save;
+        auto diag_levels_begin = [&]() {
+            const int n = work_p.N;
+            auto keep = [n](auto& dst, const auto& src, const char* name) {
+                using V = std::decay_t<decltype(dst)>;
+                if ((int)dst.extent(0) < n) dst = V(name, n);
+                Kokkos::deep_copy(Kokkos::subview(dst, Kokkos::make_pair(0, n)),
+                                  Kokkos::subview(src, Kokkos::make_pair(0, n)));
+            };
+            keep(diag_save.ax, work_p.ax, "diag_ax");
+            keep(diag_save.ay, work_p.ay, "diag_ay");
+            keep(diag_save.az, work_p.az, "diag_az");
+            keep(diag_save.dt, work_p.dt_adapt, "diag_dt");
+            keep(diag_save.level, work_p.level, "diag_level");
+            diag_save.n = n;
+            if (use_distributed) {
+                compute_acceleration_and_timestep_distributed(dp, G, soft2, eta);
+            } else {
+                compute_acceleration_and_timestep(work_p, G, soft2, eta);
+            }
+            assign_levels(work_p, levels);
+        };
+        auto diag_levels_end = [&]() {
+            const int n = diag_save.n;
+            if (n != work_p.N) { std::fprintf(stderr, "diag_levels_end: N changed during the print\n"); std::abort(); }
+            auto back = [n](const auto& dst, const auto& src) {
+                Kokkos::deep_copy(Kokkos::subview(dst, Kokkos::make_pair(0, n)),
+                                  Kokkos::subview(src, Kokkos::make_pair(0, n)));
+            };
+            back(work_p.ax, diag_save.ax);
+            back(work_p.ay, diag_save.ay);
+            back(work_p.az, diag_save.az);
+            back(work_p.dt_adapt, diag_save.dt);
+            back(work_p.level, diag_save.level);
+            diag_save.n = -1;
+        };
+
         auto print_progress = [&](double t_now, int step_now, const double* pe_known = nullptr) {
             auto diag = compute_diagnostics(work_p, G, soft2, pe_known);
             double dE, dP, dL;
@@ -1422,12 +1469,11 @@ int main(int argc, char** argv) {
                         StepProfiler::Region r_diag_(g_profiler, StepProfiler::DIAG);
                         {
                             StepProfiler::Region r_(g_profiler, StepProfiler::DIAG_FORCES);
-                            compute_acceleration_and_timestep(work_p, G, soft2, eta);
-                            assign_levels(work_p, levels);
-                            work_p.partition_by_level();
+                            diag_levels_begin();
                         }
                         StepProfiler::Region r_(g_profiler, StepProfiler::DIAG_PRINT);
                         print_progress(t, step);
+                        diag_levels_end();
                     }
                     g_profiler.report_step = step; g_profiler.report_t_myr = t * TIME_UNIT_MYR;
                     if (profiling_enabled) g_profiler.print_report(N_display, n_ranks);   // collective
@@ -1679,13 +1725,7 @@ int main(int argc, char** argv) {
                     g_profiler.start();   // DIAG
                     // Recompute forces + timestep only for diagnostics
                     g_profiler.start();
-                    if (use_distributed) {
-                        compute_acceleration_and_timestep_distributed(dp, G, soft2, eta);
-                    } else {
-                        compute_acceleration_and_timestep(work_p, G, soft2, eta);
-                    }
-                    assign_levels(work_p, levels);
-                    work_p.partition_by_level();
+                    diag_levels_begin();
                     g_profiler.stop(StepProfiler::DIAG_FORCES);
                     g_profiler.start();
 #ifdef ENABLE_COLLISIONAL
@@ -1709,21 +1749,9 @@ int main(int argc, char** argv) {
 #else
                     print_progress(t, step);
 #endif
+                    diag_levels_end();
                     g_profiler.stop(StepProfiler::DIAG_PRINT);
 #ifdef ENABLE_COLLISIONAL
-                    // Periodic escaper removal
-                    if (g_collisional.enabled && is_cluster && g_collisional.r_escape_rh > 0) {
-                        StepProfiler::Region r_(g_profiler, StepProfiler::ESCAPERS);
-                        int n_esc = remove_escapers(work_p, G, g_collisional.r_escape_rh,
-                                                     g_subsystem_mgr, g_energy_books);
-                        if (n_esc > 0) {
-                            g_subsystem_mgr.step_escapers += n_esc;
-                            g_profiler.count(StepProfiler::C_ESCAPERS, n_esc);
-                            work_p.compact_remove_zero_mass();
-                            if (use_distributed) dp.sync_count();
-                            for (int pid : work_p.removed_pid_log) { g_subsystem_mgr.removed_pids.insert(pid); g_subsystem_mgr.ghost_pids.erase(pid); }
-                        }
-                    }
                     // Write event logs at snapshot intervals
                     if (my_rank == 0) {
                         StepProfiler::Region r_(g_profiler, StepProfiler::EVENT_LOGS);
@@ -1738,6 +1766,22 @@ int main(int argc, char** argv) {
                     g_subset_hist.reset();
                 }
                 NBODY_NVTX_POP();  // DIAG
+#ifdef ENABLE_COLLISIONAL
+                // Escaper removal after every step: it changes the dynamics, so it must not follow the print cadence
+                // (it ran at PRINT_INTERVAL before, docs/CASES.md C15). Production runs printed every step anyway.
+                if (g_collisional.enabled && is_cluster && g_collisional.r_escape_rh > 0) {
+                    StepProfiler::Region r_(g_profiler, StepProfiler::ESCAPERS);
+                    int n_esc = remove_escapers(work_p, G, g_collisional.r_escape_rh,
+                                                 g_subsystem_mgr, g_energy_books);
+                    if (n_esc > 0) {
+                        g_subsystem_mgr.step_escapers += n_esc;
+                        g_profiler.count(StepProfiler::C_ESCAPERS, n_esc);
+                        work_p.compact_remove_zero_mass();
+                        if (use_distributed) dp.sync_count();
+                        for (int pid : work_p.removed_pid_log) { g_subsystem_mgr.removed_pids.insert(pid); g_subsystem_mgr.ghost_pids.erase(pid); }
+                    }
+                }
+#endif
                 NBODY_NVTX_POP();  // STEP
                 cluster_diag_now(t, step);
 #ifdef USE_HDF5

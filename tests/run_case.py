@@ -533,6 +533,18 @@ def stage_par_identical(exe, label, cfg, threads="4"):
     return ok
 
 
+def print_interval_identical(exe, label, cfg, intervals=("1", "3")):
+    """Diagnostics are read-only on the integrator state (CASES.md C15): the same run printed every step and every
+    3rd step gives a bit-identical final particle dump (every run prints after its last step)."""
+    # rows without the id: non-collisional dumps carry the slot index, which a level partition may permute
+    dumps = [sorted(r[1:] for r in run_output(exe, {**cfg, "PRINT_INTERVAL": k}, dump=True)[1]) for k in intervals]
+    ok = check(f"{label}: particles", float(len(dumps[0])), 2, lower=True)
+    for k, d in zip(intervals[1:], dumps[1:]):
+        n = sum(a != b for a, b in zip(dumps[0], d)) + abs(len(d) - len(dumps[0]))
+        ok &= check(f"{label}: particles differing, PRINT_INTERVAL {intervals[0]} vs {k}", float(n), 0)
+    return ok
+
+
 def paths_same_steps(exe, label, cfg, min_logh, gbs_rel=0.0):
     """The CPU small-set path against the device path: the same LogH calls per step, GBS steps per step equal to
     within `gbs_rel` (relative; the two paths sum forces in other orders, and the GBS step count of a LogH call can
@@ -2017,7 +2029,9 @@ CASES = {
     # 1.82e-15 / 1.38e-15 / 6.6e-16 / 3.7e-16 at 1 / 2 / 4 / 8 host threads, 3.6e-16 on an A100 (the round-off of the
     # reference's two full sums, which depends on the summation order); max |dE/E| 5.67e-9 host, 4.36e-9 A100.
     # Bounds 1.3x. Fails before C13: no SSE_CHECK rows and no "Stellar evolution" timer
-    "sse_books": lambda exe: sse_books(exe, "winds + SNe", NATAL_MIX, 2.4e-15, 7.4e-9),
+    # dU bound: the reference (two full triangle sums) scatters with the slot order; seeds 3-8 on main and with the
+    # C15 fix (no level re-sort at prints) give 1.8e-15 - 3.0e-15 (main already above the old 2.4e-15 at seeds 5, 8)
+    "sse_books": lambda exe: sse_books(exe, "winds + SNe", NATAL_MIX, 3.9e-15, 7.4e-9),
     "coll_tde_accretion": lambda exe: tde_accretion(exe, "TDE accretion fraction", COLL_TDE),
     "coll_tde_parabolic": lambda exe: subsys_collision(exe, "TDE, parabolic", COLL_TDE, "TDE", 1.5e-12),
     # 1.32e-14 measured (C11: the GW angular momentum of the secular triple booked, the energy fix through a_out and
@@ -2071,6 +2085,15 @@ CASES = {
     "host_subtree_mergers": lambda exe: host_subtree(exe, "host subtrees, mergers", MERGERS, 1.3, hs_max=512),
     "host_subtree_binaries": lambda exe: host_subtree(exe, "host subtrees, 10 % binaries", BINARIES, 1.3),
     "host_subtree_triples": lambda exe: host_subtree(exe, "host subtrees, dense core", TRIPLES, 1.3),
+    # C15: diagnostics must not change the trajectory (PRINT_INTERVAL 1 vs 3): 10 % binaries (subsystems, restarts),
+    # the non-collisional HHS and FSI integrators, and escaper removal (tidal field, stars beyond 2 r_J)
+    "print_interval_identical": lambda exe: (
+        print_interval_identical(exe, "10 % binaries", dict(BINARIES, TOTAL_TIME_MYR="6e-3"))
+        & print_interval_identical(exe, "non-collisional HHS", dict(BINARIES, TOTAL_TIME_MYR="6e-3", COLLISIONAL="false",
+                                                                     BINARY_FRAC="0", SOFTENING_PC="1e-3"))
+        & print_interval_identical(exe, "FSI", dict(PLANETS, INTEGRATOR="fsi", TOTAL_TIME_MYR="6e-5"))
+        & print_interval_identical(exe, "tidal escapers", dict(BINARIES, TOTAL_TIME_MYR="5e-3", TIDAL_FIELD="loghalo",
+                                                               GALAXY_VC_KMS="220", GALAXY_R_PC="100"))),
     # Device builds (break-even 32768 / 65536, C17): 70000 stars at the same mean mass, both searches at the top level
     "tree_default_on": lambda exe: tree_default(exe, "tree default, 50 % binaries", BINARIES50,
                                                 dict(BINARIES50, PLUMMER_N="70000", PLUMMER_M_TOTAL="28000")),

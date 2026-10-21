@@ -401,6 +401,44 @@ Status: **closed** (fixed, test, ensemble checked), **option** (fix kept as an o
   3.2e-11 -> 1.8e-10, s42 3.1e-11 -> 2.5e-11. Merged as a correctness fix (user decision 2026-10-18) despite s21.
 - **Open:** cmv stays off: s7 (C5-type jump at step 1, 77x base) and s3/s42 (1.8-2.3x) still fail the energy rule.
 
+## C15 The diagnostics output changes the trajectory: results depend on PRINT_INTERVAL (closed)
+
+- **Found by:** N = 1e6 runs whose results differed by ~10 % in one quantity between PRINT_INTERVALs; an A/B with a
+  temporary NBODY_DIAG_FORCES switch (skip the force recompute of the print) changed the trajectory.
+- **System:** every HHS run (collisional or not). Physics output must be read-only on the integrator state.
+- **Cause (two):**
+  - (a) At a print, main.cpp recomputed accelerations and time steps for the time-bin table, assigned levels and
+    then called `partition_by_level()`, which re-sorts all particles by level. The next step started from another
+    slot order: other summation orders in the force sums, the neighbour and pair lists, the subsystem detection.
+    That is a round-off seed (host, 2000 stars with 10 % binaries, 6 steps, PRINT_INTERVAL 1 vs 3: 81 particles
+    differ, up to 4e-9 relative), which the chaotic N-body dynamics grows to macroscopic differences. Restoring
+    ax / dt_adapt / level alone does not remove it (tested), the slot order does; the overwritten ax / dt_adapt /
+    level themselves are recomputed by the next step (dt_valid = false at the root) and did not matter.
+  - (b) Escaper removal (`remove_escapers`, R_ESCAPE_RH / R_ESCAPE_RJ) ran inside the print block, i.e. every
+    PRINT_INTERVAL steps: a dynamics operation on the output cadence.
+- **Fix:**
+  - (a) `diag_levels_begin/end` (main.cpp): the print saves ax, ay, az, dt_adapt, level, recomputes them for the
+    table, and restores them afterwards. No partition: the table only counts levels. E, P, L are computed from the
+    same particle state as before (unchanged); the PE reuse of the energy check is now valid at more prints (layout
+    unchanged).
+  - (b) Escaper removal after every step, independent of the print. Production configs print every step
+    (PRINT_INTERVAL = 1), so their escaper cadence is unchanged; runs with a large PRINT_INTERVAL now check every step
+    (host O(N log N), the ESCAPERS profiler bucket). No new config key.
+  - The final print after the loop (after the last restart file) still recomputes and partitions; nothing follows it.
+- **Test:** `print_interval_identical`: PRINT_INTERVAL 1 vs 3, final particle dumps bit-identical, for 10 % binaries
+  (subsystems, restarts), non-collisional HHS, FSI, and a tidal field with 2 r_J escapers. On main: 81 and 1442
+  particles differ in the binaries and escaper cases (HHS non-collisional and FSI were already identical).
+- **Side effect:** `sse_books` compares the booked dU with the difference of two full triangle sums, whose round-off
+  depends on the slot order. Seeds 3-8: main 1.8-2.6e-15, fix 2.1-3.0e-15 (main above the old 2.4e-15 bound at seeds 5
+  and 8: the bound was one sample). Bound 3.9e-15 = 1.3 x 3.0e-15.
+- **Trajectories:** every default (PRINT_INTERVAL = 1) run changes at round-off from the first print on (no re-sort).
+- **GPU (c15-2026-10-21, 4 A100, gpudev):** 1e5 fig7 config (SSE, PN 31, f_bin 0.1), 4 steps, PRINT_INTERVAL 1 vs 2:
+  fix bit-identical final dumps; main 1414 particles differ (max |diff| 1.5e-6).
+- **Energy A/B (prod200k bf0.1 config, PRINT_INTERVAL 1, 8 steps, main a0840e5 -> fix):** max |dE/E| s101 6.97e-12 ->
+  7.06e-12, s202 7.60e-12 -> 7.18e-12, s303 1.89e-11 -> 1.89e-11; final s101 1.06e-12 -> 1.29e-12, s202 6.96e-12 ->
+  6.09e-12, s303 1.21e-11 -> 1.79e-11. The max is unchanged within 1 %. The final values scatter both ways, as
+  round-off-perturbed trajectories do (main itself gives other values at another PRINT_INTERVAL).
+
 ## C16 kepler2_contact: bound set from one lucky round-off sample (closed)
 
 - **Found by:** `kepler2_contact` failing on GPU builds and gcc 15 host builds: max |dE/E| 1.353e-14 against 1.4e-15.
