@@ -153,16 +153,36 @@ std::vector<MergerEvent> detect_mergers(const SubsystemManager& mgr,
 
     // Gather x, y, z, mass, stellar type and radius of the binaries' members only (rows 2j, 2j + 1 for the j-th
     // binary): one small transfer through persistent buffers instead of nine copies of the members' index range
+    // Also the inner binary of a secular (stable hierarchical, >= N_ORB_SECULAR inner orbits per step) triple, by the
+    // GW rule only and only when LogH could not follow the inspiral (C24; sub.orb holds the inner elements): its Peters
+    // time is the isolated pair's, as for a binary. Before, a BH inner binary with t_GW << dt went to the secular
+    // triple step (stepped past a = 0: NaN members) or to LogH, which stopped at its step ceiling ~1e5 orbits short of
+    // the contact distance. A shorter inspiral is refused by the secular triple step and decided by LogH's pericentre
+    // landing (FC-I App. B3), as before (coll_bh_isco, bh_merge_radius_*)
     std::vector<const Subsystem*> bins;
     std::vector<int> slots;
+    std::vector<int> pair_pids;   // the two members per entry of bins
     for (const auto& sub : mgr.active) {
-        if (sub.n_bodies != 2) continue;
-        int idx1 = pid_to_idx[sub.particle_ids[0]];
-        int idx2 = pid_to_idx[sub.particle_ids[1]];
+        int pid1, pid2;
+        if (sub.n_bodies == 2) {
+            pid1 = sub.particle_ids[0]; pid2 = sub.particle_ids[1];
+        } else if (sub.n_bodies == 3 && sub.type == SubsystemType::TRIPLE_STABLE && sub.is_secular &&
+                   sub.inner_binary_id >= 0 && sub.outer_companion_pid >= 0) {
+            pid1 = sub.inner_binary_id; pid2 = -1;
+            for (int pid : sub.particle_ids)
+                if (pid != sub.inner_binary_id && pid != sub.outer_companion_pid) pid2 = pid;
+            if (pid2 < 0) continue;
+        } else {
+            continue;
+        }
+        int idx1 = pid_to_idx[pid1];
+        int idx2 = pid_to_idx[pid2];
         if (idx1 < 0 || idx2 < 0) continue;
         bins.push_back(&sub);
         slots.push_back(idx1);
         slots.push_back(idx2);
+        pair_pids.push_back(pid1);
+        pair_pids.push_back(pid2);
     }
     if (bins.empty()) return events;
     constexpr int NF = 6;
@@ -210,8 +230,8 @@ std::vector<MergerEvent> detect_mergers(const SubsystemManager& mgr,
 
         MergerEvent ev{};
         ev.type = MergerType::NONE;
-        ev.pid1 = sub.particle_ids[0];
-        ev.pid2 = sub.particle_ids[1];
+        ev.pid1 = pair_pids[r1];
+        ev.pid2 = pair_pids[r2];
         ev.m1 = m1;
         ev.m2 = m2;
 
@@ -220,7 +240,7 @@ std::vector<MergerEvent> detect_mergers(const SubsystemManager& mgr,
         MergerType ctype;
         const double r_coll = collision_distance(stype1, m1, h_srad(r1) * R_sun_to_pc, stype2, m2,
                                                  h_srad(r2) * R_sun_to_pc, G, c_code, ctype);
-        if (r < r_coll) {
+        if (r < r_coll && sub.n_bodies == 2) {
             ev.type = ctype;
             ev.m_remnant = collision_remnant_mass(ctype, stype1, m1, stype2, m2);
         }
@@ -228,7 +248,11 @@ std::vector<MergerEvent> detect_mergers(const SubsystemManager& mgr,
         // GW coalescence timescale
         if (ev.type == MergerType::NONE && sub.orb.a > 0) {
             double t_gw = gw_coalescence_time(sub.orb.a, sub.orb.e, m1, m2, G, c_code);
-            if (t_gw < dt) {
+            // Triple: orbits to coalescence against LogH's per-call ceiling of 4e6 GBS steps at 64 per orbit
+            // (logh_batch.cpp gbs_step_limit)
+            const double P_in = 2.0 * M_PI * std::sqrt(sub.orb.a * sub.orb.a * sub.orb.a / (G * (m1 + m2)));
+            const bool logh_cannot = sub.n_bodies == 2 || t_gw > (4.0e6 / 64.0) * P_in;
+            if (t_gw < dt && logh_cannot) {
                 ev.type = MergerType::GW_COALESCENCE;
                 ev.m_remnant = m1 + m2;
             }

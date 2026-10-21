@@ -291,8 +291,61 @@ static void direct_test() {
     check(worst < 0.25, "direct 3-body: max |de_sec / de_direct - 1| over 2 P_out", worst, 0.25);
 }
 
+// (6) C24: a BH inner binary that inspirals within the step (32.3 + 9.7 Msun, a = 1.3e-9 pc, e = 0.26, a 0.9 Msun star
+// at 5e-4 pc; tests/data/c24_triple_gw.txt, Msun / pc / km/s). Before: one explicit Euler step of the GW rate (the
+// internal step resolved only the Kozai time) took a_in below zero and the members came back NaN. Now (a) a
+// coalescing inner binary is refused (not hierarchical, members unchanged) and (b) at dt ~ t_GW / 3 the GW shrinkage
+// is resolved: one step of dt and two of dt / 2 give the same a_in
+static void gw_inspiral_test() {
+    const double G = 4.3022e-3, c = 299792.458;
+    const double M0[3] = {32.25757742876609, 9.71455532449533, 0.8923533327774925};
+    const double X0[3][3] = {{-5.959546339583698e-05, -8.930875606109018e-05, -0.0001208677252956219},
+                             {-5.959604523024726e-05, -8.930752472264786e-05, -0.00012086866012152932},
+                             {0.00012471861650961642, 0.00018690019591856928, 0.0002529462402369464}};
+    const double V0[3][3] = {{-1712.792116164999, -1132.8258530676917, -328.2029913773072},
+                             {5687.442672988153, 3761.8731738040815, 1090.4253818986558},
+                             {-0.5067444137181205, -3.034002245605568, -6.683779578364142}};
+    const int pids[3] = {0, 2, 1};
+    auto a_inner = [&](const double x[3][3], const double v[3][3]) {
+        const double r[3] = {x[1][0] - x[0][0], x[1][1] - x[0][1], x[1][2] - x[0][2]};
+        const double u[3] = {v[1][0] - v[0][0], v[1][1] - v[0][1], v[1][2] - v[0][2]};
+        return cartesian_to_elements(r, u, G * (M0[0] + M0[1])).a;
+    };
+    auto step = [&](double x[3][3], double v[3][3], double dt) {
+        double m[3] = {M0[0], M0[1], M0[2]};
+        return secular_triple_step(m, x, v, pids, dt, G, c, 31);
+    };
+    {   // (a) the production step of the cut-out, dt = 2.5568e-4 (t_GW ~ 1e-8 of it)
+        double x[3][3], v[3][3];
+        for (int i = 0; i < 3; i++) for (int k = 0; k < 3; k++) { x[i][k] = X0[i][k]; v[i][k] = V0[i][k]; }
+        const SecularTripleStep st = step(x, v, 2.5568e-4);
+        bool same = true;
+        for (int i = 0; i < 3; i++) for (int k = 0; k < 3; k++) same &= x[i][k] == X0[i][k] && v[i][k] == V0[i][k];
+        check(!st.hierarchical && same, "GW: coalescing inner binary refused, members unchanged", st.hierarchical, 0.0);
+    }
+    {   // (b) dt = t_a / 12 with t_a = a / |da/dt| (circular Peters t_GW = t_a / 4)
+        const double a0 = a_inner(X0, V0), M12 = M0[0] + M0[1];
+        double da, de, dw;
+        secular_pn_inner_rates(a0, 0.2627, M0[0] * M0[1] / (M12 * M12), G * M12, c, 31, da, de, dw);
+        const double dt = a0 / std::fabs(da) / 12.0;
+        double x1[3][3], v1[3][3], x2[3][3], v2[3][3];
+        for (int i = 0; i < 3; i++) for (int k = 0; k < 3; k++) {
+            x1[i][k] = x2[i][k] = X0[i][k];
+            v1[i][k] = v2[i][k] = V0[i][k];
+        }
+        const bool h1 = step(x1, v1, dt).hierarchical;
+        const bool h2 = step(x2, v2, 0.5 * dt).hierarchical && step(x2, v2, 0.5 * dt).hierarchical;
+        const double a1 = a_inner(x1, v1), a2 = a_inner(x2, v2);
+        const double rel = std::fabs(a1 / a2 - 1.0);
+        std::printf("     GW: a0 %.6e  one step %.6e  two halves %.6e\n", a0, a1, a2);
+        check(h1 && h2 && std::isfinite(rel) && a1 < a0 && rel < 1.9e-4,
+              "GW: |a_in(dt) / a_in(2 x dt/2) - 1| at dt = t_GW / 3", rel, 1.9e-4);
+    }
+}
+
 int main() {
     std::mt19937_64 rng(20261017);
+    gw_inspiral_test();
     rates_test(false, rng);
     rates_test(true, rng);
     frame_test(rng);

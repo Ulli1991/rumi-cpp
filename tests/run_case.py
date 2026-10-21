@@ -640,6 +640,26 @@ def sec_inner_merge(exe):
     return ok & check("max|dL/L| with L sink", max(r[2] for r in rows), 3.9e-12)   # 2.98e-12 measured
 
 
+def c24_triple_gw(exe):
+    """C24: a stable hierarchical triple whose BH inner binary (a = 1.3e-9 pc, t_GW ~ 0.08 yr) coalesces within the
+    first step (2.6e-4 Myr), a star at 5e-4 pc. Before: the secular triple step took one explicit GW step past
+    a_in = 0 (NaN members, then dt = nan in LogH; on the host no result within 900 s), and LogH alone ran into its
+    4e6-step limit short of the contact distance. The inner binary must merge once by the binary GW rule
+    (detect_mergers), with E (merger sink), P and L conserved. Bounds 1.3 x measured (host build)."""
+    e_ref, ngb_mref = SEC_INNER_CASES["s101_s432_1"][:2]
+    t0 = time.time()
+    out = run_output(exe, sec_inner_cfg(e_ref, ngb_mref, "c24_triple_gw.txt"))
+    wall = time.time() - t0
+    rows = diagnostics(out)
+    n_merge = len(re.findall(r"\[MERGER #\d+\]", out))
+    ok = check("merger events", n_merge, 1, lower=True)
+    ok &= check("merger events (at most)", n_merge, 1)
+    ok &= check("wall time [s]", wall, SEC_INNER_WALL)                              # 0.01 s measured
+    ok &= check("max|dE/E| with merger sink", max(r[0] for r in rows), 1.5e-16)   # 1.16e-16 measured
+    ok &= check("max|dP|/M [km/s]", max(r[1] for r in rows), 5.6e-14)              # 4.33e-14 measured
+    return ok & check("max|dL/L| with L sink", max(r[2] for r in rows), 1.41e-12)  # 1.08e-12 measured
+
+
 def sec_inner_cutout(exe, case):
     """C20: one 1e-3 Myr interval of a 200k cluster cut-out whose 0.016-0.05 AU BH binary (1e5-3e6 orbits per
     interval, tide gamma ~ 1e-16 from stars at > 1000 AU) sat in a 3-5 body PN subsystem: kappa = 1 there, so LogH
@@ -2028,6 +2048,7 @@ CASES = {
     "sec_inner_s1025": lambda exe: sec_inner_cutout(exe, "s404_s1025_1"),
     "sec_inner_s3047": lambda exe: sec_inner_cutout(exe, "s404_s3047_0"),
     "sec_inner_merge": sec_inner_merge,
+    "c24_triple_gw": c24_triple_gw,
     # PN_BH_ONLY false: the PN binaries of massive stars give the LogH calls the two paths are compared on
     "cm_eps_cpu_vs_device": lambda exe: paths_same_steps(exe, "fly-by step with tidal sampling",
                                                          dict(BINARIES, FLYBY_CM_EPS="1e-11", PN_ORDER="31",
@@ -2256,7 +2277,10 @@ CASES = {
     "gw_merger": lambda exe: (gw_merger(exe, "BH binary to ISCO, PN", COLL_ISCO)
                               & gw_merger(exe, "eccentric BH binary to ISCO, PN", GW_ECC)
                               & gw_merger(exe, "BH binary with t_GW < dt, secular", GW_PETERS)),
-    "coll_bh_isco": lambda exe: subsys_collision(exe, "BH binary to ISCO, PN", COLL_ISCO, "ISCO", 1.7e-14),
+    # Bound 3.2e-14 = 1.3 x 2.43e-14 measured since C24 (1.22e-14 before: one Euler step per secular-triple call; now
+    # 4-27 steps resolve the GW shrinkage, a different inspiral). Both are the round-off acceptance of the secular
+    # triple's circular-orbit energy fix (|res| <= 1e-13 E_tri), set in the first call
+    "coll_bh_isco": lambda exe: subsys_collision(exe, "BH binary to ISCO, PN", COLL_ISCO, "ISCO", 3.2e-14),
     # Kepler drift (kepler_drift, subsystem audit #2): universal variables below e = 0.1 and near the parabola, the
     # perifocal construction from the anomaly otherwise. Bounds 1.3x measured (raven host, 2026-10-11); 043190d's
     # elements route: bound e < 0.5 1v16 = 2.0, ref = 1.2 (phase lost at e <= 1e-8), parabolic and hyperbolic

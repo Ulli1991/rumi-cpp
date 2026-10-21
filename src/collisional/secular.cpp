@@ -267,6 +267,17 @@ void secular_evolve_triple(SecularTriple& tri, double dt, double G, double c_cod
     double t_sec = (rate_est > 0.0) ? tri.inner.e / rate_est : 1e30;
     const double eta_sec = 0.01;
     int n_steps = std::max(1, (int)std::ceil(dt / (eta_sec * t_sec)));
+    // GW shrinkage of the inner orbit (C24): the step also resolves a / |da/dt| and e / |de/dt| of the PN rates. With
+    // the Kozai time alone a BH inner binary with t_GW << dt took one explicit step past a = 0 (NaN members).
+    // t_GW ~ a^4 only shortens within the call; a coalescing inner binary is refused by secular_triple_step
+    {
+        double da0 = 0.0, de0 = 0.0, dw0;
+        secular_pn_inner_rates(tri.inner.a, tri.inner.e, m1 * m2 / (M12 * M12), mu_in, c_code, pn_order, da0, de0, dw0);
+        double t_gw = 1e30;
+        if (std::fabs(da0) > 0.0) t_gw = std::min(t_gw, tri.inner.a / std::fabs(da0));
+        if (std::fabs(de0) > 0.0 && tri.inner.e > 1e-6) t_gw = std::min(t_gw, tri.inner.e / std::fabs(de0));
+        if (t_gw < 1e30) n_steps = std::max(n_steps, (int)std::min(std::ceil(dt / (eta_sec * t_gw)), 1e5));
+    }
     n_steps = std::min(n_steps, 100000);
     double h = dt / n_steps;
 
