@@ -539,6 +539,35 @@ Status: **closed** (fixed, test, ensemble checked), **option** (fix kept as an o
 - **Guard (2026-10-19):** ctest `logh_symplectic` (tests/symplectic_test.cpp, Enzyme versions in
   tests/enzyme/symplectic/) keeps the 1/Omega kick's symplectic defect at its measured O(ds) value (4.0e-2 / 4.9e-2
   at ds = 1e-2, bound 1.3x) and checks reversibility, P/L equivariance and the symplectic kepler_drift to round-off.
+- **Retest 2026-10-21 (user request; switch NBODY_KICK_U re-added on branch worktree-agent-a43c927618cc29a31, ctest
+  logh_symplectic_kick_u: defect 2.6e-12).** tests/proto_symrk/bench.cpp, production gbs_step, eta 1e-10, k_max 10,
+  max |dE/E| / force evaluations per orbit, 1/Omega vs 1/(-U):
+  - e = 0.9 (1e5 orbits) 1.7e-8 / 2851 vs 6.3e-9 / 2457; e = 0.99 (1e4) 3.3e-9 / 4372 vs 1.3e-8 / 3425; Kozai triple
+    (2e4) 1.9e-10 / 1315 vs 4.3e-9 / 1090; 2+2 quadruple 5.0e-11 / 3407 vs 1.1e-10 / 3115; harvest 5-body 3.9e-10 / 669
+    vs 2.0e-9 / 664; 1PN binary 1.87e-6 both (EIH truncation, below). Equal cost (1/(-U) at eta 1e-11): Kozai 2.8e-10 /
+    2040, harvest 6.2e-10 / 810, still worse. |dL/L| equal within 2x. 1/(-U): 15-25 % fewer evaluations, 25-55 % less
+    wall per orbit (no cubic), smaller end-of-run error on binaries (secular part), larger pericentre swing.
+  - Plain leapfrog at fixed ds (no GBS): both bounded (slope 0, same max swing 2e-2 at 200 steps per e = 0.9 orbit),
+    because both maps are time-reversible (reversible maps also keep the energy error bounded on near-integrable
+    orbits); symplecticity shows only in the smaller end-of-orbit error.
+  - Cluster smoke test (gpudev, 200k bf0.1 prod config, same binary, |dE/E| at the last common step):
+    s101 4.3e-11 vs 2.0e-11, s202 3.6e-11 vs 4.0e-11, s303 4.3e-11 vs 6.3e-11; per-interval median 2.5/1.5/2.0e-12 vs
+    2.8/1.2/2.4e-12; median s/step 5.5/10.4/5.5 vs 5.4/8.3/5.1.
+  - **Reading:** GBS extrapolation is not symplectic, so the symplectic base map buys nothing once the step is
+    extrapolated to eta; what remains is a different local error, better on isolated binaries and worse on the
+    hierarchical and pericentre-dominated cases. PN (identical) is not involved. The cluster differences (single seeds,
+    factor 1.5-8, both signs, equal per-interval medians) are the chaotic spread of two trajectories. **Decision
+    unchanged:** 1/Omega stays; no 5-seed A/B proposed (switch only on the branch).
+- **PN1 in LogH (same retest), no bug:** the EIH acceleration and `pn1_energy` are Poisson & Will eq. 9.127 / Blanchet
+  LRR eq. 233 (test pn1_energy_consistency, C7). RK4 of the exact EIH flow, e = 0.9: swing of E_N + E_1PN per orbit
+  2.26e-2 / 1.35e-3 / 8.3e-5 at c^2 = 1e3 / 4e3 / 1.6e4 (x c^4 = 2.2e4: O(1/c^4)), periodic (back to 7e-11 after one
+  orbit), 1.87e-6 at r > 1.5 a: exactly the LogH+GBS value, so the 1.9e-6 is the EIH truncation, not integrator error.
+  An ADM 1PN Hamiltonian (exact invariant, prototype 3.3e-13) is not adopted: no regularised code uses it (BIFROST
+  sec. 3.5, KETJU/MSTAR, Mikkola & Merritt 2008, SDAR all integrate harmonic-gauge EOM with auxiliary velocities); it
+  is non-separable (implicit Gauss or Pihajoki 2015 copies instead of the explicit leapfrog), its coordinates differ
+  from the harmonic ones of our 2PN-3.5PN terms at O(1/c^4), and 2.5/3.5PN are dissipative, so with PN_ORDER 31 there
+  is no exact invariant either way. The energy books are unaffected: paths book their members' Newtonian T + U change
+  from states, exact for any PN formulation.
 
 ## R1 FLYBY_CM_KICK, c.o.m. kicks of weakly perturbed binaries (rejected)
 
