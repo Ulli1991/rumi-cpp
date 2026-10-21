@@ -607,7 +607,7 @@ Status: **closed** (fixed, test, ensemble checked), **option** (fix kept as an o
   gives NaN at the first LogH call (dt = nan) in main as well. Not followed up: the 200k runs never reached it, and
   the IC is artificial (`/raven/ptmp/uli/cpp-nbody-runs/secinner-ab-2026-10-19/nan_ic.txt`).
 
-## C21 SDAR slowed a binary whose tide comes from outside its LogH group: 8e-8 E_REF per interval (fixed; GPU A/B pending)
+## C21 SDAR slowed a binary whose tide comes from outside its LogH group: 8e-8 E_REF per interval (fixed)
 
 - **Found by:** the stall harvest of 2026-10-19, cut-out s3_s324_0 (camp2-B seed 3, 110k, stall_324.h5, t = 0.323
   Myr; the 100 bodies within 0.05 pc of the deepest set). Host replay, one interval: |dE/E0| 1.81e-5 of the cut-out's
@@ -645,9 +645,18 @@ Status: **closed** (fixed, test, ensemble checked), **option** (fix kept as an o
   steps <= 19600 (1.3x measured). Fails on main (1.8e-5, 119579). The SDAR tests (sdar_kozai_triple, sdar_f3_flyby,
   sdar_pn_kappa1, quad22_sdar) and sec_inner_* are unchanged. Host ctest: all pass (6 login-node 120 s timeouts
   rerun individually: pass, results identical with NBODY_SDAR_EXT=0).
-- **200k A/B (pending, not run):** off (NBODY_SDAR_EXT=0) vs new, from the C20 A/B restarts (s101 stall_1340, s202
-  stall_1117, s404 stall_1025), gpudev, set up in `/raven/ptmp/uli/cpp-nbody-runs/sdarext-ab-2026-10-21/` (job.sh per
-  directory, binary nbody-c21). Submission is awaiting the user.
+- **200k A/B (Raven gpudev, 2026-10-21, 4 A100, ~85-91 intervals from the C20 A/B restarts, same binary nbody-c21,
+  off = NBODY_SDAR_EXT=0; `/raven/ptmp/uli/cpp-nbody-runs/sdarext-ab-2026-10-21/`):**
+
+  | seed | final \|dE/E\| off -> new | sum of \|per-step jumps\| | max jump | \|dL/L\| | s/step median/mean/max |
+  |---|---|---|---|---|---|
+  | s101 | 2.46e-10 -> 1.59e-9 | 3.60e-9 -> 2.84e-9 | 1.51e-9 = | 1.5e-11 -> 1.7e-11 | 4.42/5.08/16 -> 4.38/5.05/16 |
+  | s202 | 4.53e-9 -> 4.55e-9 | 4.95e-9 -> 4.94e-9 | 4.35e-9 = | 3.3e-12 -> 2.6e-12 | 3.91/4.16/8 -> 3.92/4.17/8 |
+  | s404 | 1.11e-10 -> 1.00e-10 | 1.04e-9 = | 3.05e-10 = | 2.5e-12 -> 1.9e-12 | 4.04/4.48/19 -> 4.03/4.50/19 |
+
+  The largest per-step jumps are identical in both arms (the same episodes); the s101 final difference is sign
+  cancellation of two episodes in the off arm (1.35e-9 -> 6.4e-10 -> 2.4e-10), while the summed jump size is smaller
+  with the fix. At bf 0.1 the outside-tide case is rare; C21 is neutral there and fixes the s3_s324_0 class.
 
 ## C22 Gauss-Legendre IRK (symplectic, 8 stages) for compact Newtonian subsystems (merged, default off; 200k A/B below)
 
