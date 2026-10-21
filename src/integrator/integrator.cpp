@@ -2982,7 +2982,8 @@ static int hhs_fsi_recursive_impl(Particles& p, DistributedParticles* dp, int st
 // sets of up to 32) are printed as ELEDGER lines, in units of |E0| (E_REF). Costs O(count^2) per call: replays only.
 namespace {
 struct EnergyLedger {
-    struct Frame { double child = 0.0; bool valid = true; };
+    // type: the branch the call took (NBODY_ELEDGER call types; set by hhs_fsi_recursive_impl through ledger_type)
+    struct Frame { double child = 0.0; bool valid = true; int type = 0; };
     struct Rec { int depth = 0, n = 0; double pivot = 0.0, own = 0.0, total = 0.0; std::vector<int> pids; };
     std::vector<Frame> stack;
     std::vector<Rec> top;   // largest |own| first
@@ -2994,6 +2995,11 @@ struct EnergyLedger {
     double depth_own[MD] = {}, depth_adv[MD] = {};
     int depth_calls[MD] = {};
     double adv_unattr = 0.0;   // advances whose subsystem list changed (not attributed per class)
+    // own errors per call type (0 other/early return, 1 min-dt FSI, 2 all slow, 3 all fast, 4 slow + fast
+    // (Algorithm 4), 5 one subsystem, 6 HHS_CC, 7 host subtree) and |own| per depth (signed sums cancel)
+    static constexpr int NT = 8;
+    double type_own[NT] = {}, type_abs[NT] = {}, depth_abs[MD] = {};
+    int type_calls[NT] = {};
     // classes: 0 sec2 nonPN, 1 sec2 PN, 2 sec3, 3 LogH n2 nonPN, 4 LogH n3 nonPN, 5 LogH n4+ nonPN, 6 LogH PN (any n)
     static constexpr int NC = 7;
     double cls_dE[NC] = {}, cls_abs[NC] = {};
@@ -3019,6 +3025,158 @@ struct EnergyLedger {
     }
 };
 EnergyLedger g_ledger;
+inline void ledger_type(int t) { if (!g_ledger.stack.empty()) g_ledger.stack.back().type = t; }
+
+// ---- FSI time-step experiments (debug; both unset: no-op, bit-identical) ------------------------------------------
+// NBODY_DT_SCALE=<class>:<f>[,<class>:<f>...]: the final time step of the particles of a class (after every criterion
+// and the subsystem adjustments, at every depth) times f, i.e. all criteria of that class with eta x f: attribution of
+// the FSI error by intervention. Classes: all, bh (stellar type 14), sub (subsystem members), single (neither),
+// deep<L> / shallow<L> (step below / at or above dt_max / 2^L before the scaling).
+// NBODY_DT_ATTR=1 (one rank): at depth 0, which criterion set each particle's step (pair free-fall, pair fly-by,
+// tidal sampling, gradient / v-a, subsystem adjustment, other) per level and class; DTATTR lines. The pair and
+// tidal-sampling steps are recomputed in fp64 over all pairs (O(N^2) once per step).
+struct DtScaleRule { int cls = 0; int lvl = 0; double f = 1.0; };   // cls: 0 all 1 bh 2 sub 3 single 4 deep 5 shallow
+const std::vector<DtScaleRule>& dt_scale_rules() {
+    static const std::vector<DtScaleRule> rules = [] {
+        std::vector<DtScaleRule> r;
+        const char* e = std::getenv("NBODY_DT_SCALE");
+        if (!e || !*e) return r;
+        std::string s(e);
+        size_t pos = 0;
+        while (pos < s.size()) {
+            size_t c = s.find(',', pos);
+            std::string tok = s.substr(pos, c == std::string::npos ? std::string::npos : c - pos);
+            pos = c == std::string::npos ? s.size() : c + 1;
+            const size_t k = tok.find(':');
+            if (k == std::string::npos) continue;
+            const std::string name = tok.substr(0, k);
+            DtScaleRule q;
+            q.f = std::atof(tok.c_str() + k + 1);
+            if (name == "all") q.cls = 0;
+            else if (name == "bh") q.cls = 1;
+            else if (name == "sub") q.cls = 2;
+            else if (name == "single") q.cls = 3;
+            else if (name.rfind("deep", 0) == 0) { q.cls = 4; q.lvl = std::atoi(name.c_str() + 4); }
+            else if (name.rfind("shallow", 0) == 0) { q.cls = 5; q.lvl = std::atoi(name.c_str() + 7); }
+            else { std::fprintf(stderr, "NBODY_DT_SCALE: unknown class %s\n", name.c_str()); std::abort(); }
+            if (!(q.f > 0.0)) { std::fprintf(stderr, "NBODY_DT_SCALE: factor of %s\n", name.c_str()); std::abort(); }
+            r.push_back(q);
+            if (MPIComm::rank() == 0) std::printf("NBODY_DT_SCALE rule %s x %g\n", name.c_str(), q.f);
+        }
+        return r;
+    }();
+    return rules;
+}
+bool dt_attr_on() { static const bool on = std::getenv("NBODY_DT_ATTR") != nullptr; return on; }
+double g_dt_root = 0.0;   // pivot of the depth-0 call (dt_max) of the current step
+
+void dt_scale_apply(Particles& p, int start, int count) {
+    const auto& rules = dt_scale_rules();
+    if (rules.empty() || count <= 0) return;
+    auto dt_f = raw(p.dt_adapt);
+    auto sid = raw(p.subsystem_id);
+    auto st = raw(p.stellar_type);
+    const bool coll = p.collisional;
+    const double root = g_dt_root;
+    for (const auto& q : rules) {
+        const int cls = q.cls;
+        const double f = q.f, thr = root > 0.0 ? std::ldexp(root, -q.lvl) : 0.0;
+        small_for("dt_scale", count, KOKKOS_LAMBDA(int ii) {
+            const int i = start + ii;
+            const bool bh = coll && st(i) == 14, sub = coll && sid(i) >= 0;
+            bool in = false;
+            switch (cls) {
+                case 0: in = true; break;
+                case 1: in = bh; break;
+                case 2: in = sub; break;
+                case 3: in = !bh && !sub; break;
+                case 4: in = dt_f(i) < thr; break;
+                default: in = dt_f(i) >= thr; break;
+            }
+            if (in) dt_f(i) *= f;
+        });
+    }
+}
+
+// NBODY_DT_ATTR snapshots of dt_adapt at depth 0: after the pair kernels (kern) and before the subsystem adjustments
+Kokkos::View<double*> g_dta_kern, g_dta_pre;
+void dt_attr_snap(Particles& p, int start, int count, Kokkos::View<double*>& dst) {
+    if (!dt_attr_on() || MPIComm::size() > 1 || host_exec()) return;
+    static bool hook = (Kokkos::push_finalize_hook([] { g_dta_kern = {}; g_dta_pre = {}; }), true);
+    (void)hook;
+    if ((int)dst.extent(0) < start + count) dst = Kokkos::View<double*>("dt_attr_snap", p.N);
+    Kokkos::deep_copy(Kokkos::subview(dst, Kokkos::make_pair(start, start + count)),
+                      Kokkos::subview(p.dt_adapt, Kokkos::make_pair(start, start + count)));
+}
+void dt_attr_report(Particles& p, int start, int count, double G, double soft2) {
+    if (!dt_attr_on() || MPIComm::size() > 1 || host_exec() || count <= 1) return;
+    const int e = start + count;
+    PairVelocities pv = pair_velocities(p, start, e);
+    const double eff = g_collisional.eta_ff, efb = g_collisional.eta_fb;
+    Kokkos::View<double*> mff("dta_ff", count), mfb("dta_fb", count), mtd("dta_td", count);
+    auto x = p.x, y = p.y, z = p.z, m = p.mass;
+    auto sid = p.subsystem_id;
+    RawView vx{pv.x}, vy{pv.y}, vz{pv.z};
+    const bool has_k = pv.k != nullptr;
+    RawView kk{pv.k}, kf{pv.kf};
+    Kokkos::parallel_for("dt_attr_pairs", count, KOKKOS_LAMBDA(int ii) {
+        const int i = start + ii;
+        double bff = 1e300, bfb = 1e300, btd = 1e300;
+        const int si = sid(i);
+        for (int j = start; j < e; j++) {
+            if (j == i || (si >= 0 && sid(j) == si)) continue;
+            const double dx = x(j) - x(i), dy = y(j) - y(i), dz = z(j) - z(i);
+            const double dvx = vx(j) - vx(i), dvy = vy(j) - vy(i), dvz = vz(j) - vz(i);
+            const double r2 = dx * dx + dy * dy + dz * dz + soft2;
+            const double ir = 1.0 / Kokkos::sqrt(r2);
+            double tff, tfb;
+            symmetrized_timestep(r2, ir, dx, dy, dz, dvx, dvy, dvz, G, m(i) + m(j), eff, efb, tff, tfb);
+            bff = Kokkos::fmin(bff, eff * tff);
+            bfb = Kokkos::fmin(bfb, efb * tfb);
+            if (has_k)
+                btd = Kokkos::fmin(btd, Kokkos::fmax(Kokkos::fmin(kk(i) / m(j), kk(j) / m(i)) * r2 * Kokkos::sqrt(r2),
+                                                     Kokkos::fmax(kf(i), kf(j))));
+        }
+        mff(ii) = bff; mfb(ii) = bfb; mtd(ii) = btd;
+    });
+    auto cp = [&](auto v) { return Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), v); };
+    auto r = Kokkos::make_pair(start, e);
+    auto hff = cp(mff), hfb = cp(mfb), htd = cp(mtd);
+    auto hk = cp(Kokkos::subview(g_dta_kern, r)), hp = cp(Kokkos::subview(g_dta_pre, r)), hf = cp(Kokkos::subview(p.dt_adapt, r));
+    auto hs = cp(Kokkos::subview(p.subsystem_id, r)), ht = cp(Kokkos::subview(p.stellar_type, r));
+    // criteria: 0 ff, 1 fb, 2 tidal sampling, 3 gradient / v-a, 4 subsystem adjustment, 5 other (kernel step not
+    // matched, e.g. tree path or jerk); classes 0 bh, 1 subsystem member, 2 single
+    constexpr int NL = 48, NCR = 6;
+    static long long cnt[NL][NCR][3];
+    std::memset(cnt, 0, sizeof cnt);
+    const double root = g_dt_root > 0.0 ? g_dt_root : 1.0;
+    for (int k = 0; k < count; k++) {
+        const double df = hf(k);
+        int lvl = df >= root ? 0 : (int)std::ceil(std::log2(root / df) - 1e-12);
+        lvl = std::min(std::max(lvl, 0), NL - 1);
+        const int cl = ht(k) == 14 ? 0 : hs(k) >= 0 ? 1 : 2;
+        int cr;
+        if (df < hp(k) * (1.0 - 1e-12)) cr = 4;
+        else if (hp(k) < hk(k) * (1.0 - 1e-12)) cr = 3;
+        else {
+            const double d = hk(k), c[3] = {hff(k), hfb(k), htd(k)};
+            int b = 0;
+            for (int q = 1; q < 3; q++) if (c[q] < c[b]) b = q;
+            cr = std::fabs(c[b] - d) <= 1e-4 * d ? b : 5;
+        }
+        cnt[lvl][cr][cl]++;
+    }
+    static const char* cn[NCR] = {"ff", "fb", "tid", "grad", "subadj", "other"};
+    for (int l = 0; l < NL; l++) {
+        long long n = 0;
+        for (int c = 0; c < NCR; c++) n += cnt[l][c][0] + cnt[l][c][1] + cnt[l][c][2];
+        if (n == 0) continue;
+        std::printf("DTATTR step %d L%d n %lld (bh/sub/single):", g_step_in_progress, l, n);
+        for (int c = 0; c < NCR; c++) std::printf(" %s %lld/%lld/%lld", cn[c], cnt[l][c][0], cnt[l][c][1], cnt[l][c][2]);
+        std::printf("\n");
+    }
+    std::fflush(stdout);
+}
 
 // KE + PE of the particles [s, s + n) among themselves
 double set_energy(const Particles& p, int s, int n, double G) {
@@ -3201,6 +3359,9 @@ static int hhs_fsi_recursive(
         {
             const int dd = std::min((int)g_ledger.stack.size(), EnergyLedger::MD - 1);   // frame depth (root 0)
             g_ledger.depth_own[dd] += r.own; g_ledger.depth_calls[dd]++;
+            g_ledger.depth_abs[dd] += std::fabs(r.own);
+            const int t = std::min(std::max(fr.type, 0), EnergyLedger::NT - 1);
+            g_ledger.type_own[t] += r.own; g_ledger.type_abs[t] += std::fabs(r.own); g_ledger.type_calls[t]++;
         }
         if (count <= 32) {
             if (host_exec()) {
@@ -3230,6 +3391,17 @@ static int hhs_fsi_recursive(
             if (g_ledger.depth_calls[d] > 0 || g_ledger.depth_adv[d] != 0.0)
                 std::printf(" d%d %.4e %.4e %d", d, g_ledger.depth_own[d], g_ledger.depth_adv[d], g_ledger.depth_calls[d]);
         std::printf(" unattr_adv_books %.4e\n", g_ledger.adv_unattr);
+        std::printf("ELEDGER depth_abs (sum |own| per depth):");
+        for (int d = 0; d < EnergyLedger::MD; d++)
+            if (g_ledger.depth_calls[d] > 0) std::printf(" d%d %.4e", d, g_ledger.depth_abs[d]);
+        std::printf("\n");
+        {
+            static const char* tn[EnergyLedger::NT] = {"other", "mindt", "allslow", "allfast", "mixed", "onesub", "cc", "hostsub"};
+            std::printf("ELEDGER types (sum own | sum |own| | calls):");
+            for (int t = 0; t < EnergyLedger::NT; t++)
+                std::printf(" %s %.4e %.4e %d", tn[t], g_ledger.type_own[t], g_ledger.type_abs[t], g_ledger.type_calls[t]);
+            std::printf("\n");
+        }
         std::printf("ELEDGER classes (sum dE_int | sum |dE_int| | n): sec2 %.4e %.4e %lld  sec2pn %.4e %.4e %lld  sec3 %.4e %.4e %lld"
                     "  logh2 %.4e %.4e %lld  logh3 %.4e %.4e %lld  logh4p %.4e %.4e %lld  loghpn %.4e %.4e %lld\n",
                     g_ledger.cls_dE[0], g_ledger.cls_abs[0], g_ledger.cls_n[0], g_ledger.cls_dE[1], g_ledger.cls_abs[1],
@@ -3309,6 +3481,7 @@ static int hhs_fsi_recursive_impl(
     // Host-resident subtree (HOST_SUBTREE_MAX): the whole sub-recursion of this set on the host
     if (host_subtree_eligible(p, count, use_mpi, tree_eligible)) {
         g_hhs_counters.cpu++;
+        ledger_type(7);
         return n_removed + hhs_fsi_host_subtree(p, dp, start, count, pivot_dt, G, soft2, dt_min, eta, dt_valid, depth);
     }
 
@@ -3331,6 +3504,7 @@ static int hhs_fsi_recursive_impl(
 
     // Base case: at minimum timestep, use FSI on the subset
     if (pivot_dt * 0.5 < dt_min) {
+        ledger_type(1);
         if (dp && global_tree_available && tree_eligible) {
             g_profiler.start();
             g_octree.update_subsets(p, start, count);
@@ -3352,6 +3526,7 @@ static int hhs_fsi_recursive_impl(
     // time steps are computed again with the remnant. With FLYBY_CM_VELOCITY the progenitors' step is the c.o.m.
     // fly-by step (slow set), and a kicked remnant crossed 0.1 pc in one step of the slow set (200k seed 21 step 38:
     // dE/E -1.55e-9, docs/CASES.md C13); with component velocities it was the fast set's, recomputed one depth down.
+    if (depth == 0) g_dt_root = pivot_dt;   // NBODY_DT_SCALE deep<L> / shallow<L>, NBODY_DT_ATTR levels
     for (int dt_pass = 0; !dt_valid && count > 1; dt_pass++) {
         bool merged_here = false;
 #ifdef ENABLE_COLLISIONAL
@@ -3405,6 +3580,7 @@ static int hhs_fsi_recursive_impl(
         } else {
             compute_timestep_subset(p, start, count, G, soft2, eta);
         }
+        if (depth == 0) dt_attr_snap(p, start, count, g_dta_kern);   // NBODY_DT_ATTR (off: no-op)
 #ifdef ENABLE_COLLISIONAL
         // Gradient + v/a timestep criteria (BIFROST Section 3.4.4, Eq. 24/26/27), each off at eta = 0
         if (p.collisional && (g_collisional.eta_grad > 0.0 || g_collisional.eta_va > 0.0)) {
@@ -3586,7 +3762,10 @@ static int hhs_fsi_recursive_impl(
             if (g_profiler.fence) Kokkos::fence();   // profile: the time-step kernels above are asynchronous
             g_subsys_phase.add(SubsystemPhaseTimes::DT_WAIT, dt_clock.lap());
             slow0().record_pre(p, start, count);
+            if (depth == 0) dt_attr_snap(p, start, count, g_dta_pre);   // NBODY_DT_ATTR (off: no-op)
             g_subsystem_mgr.subsystem_timesteps(p, G, g_collisional.eta_pert, depth == 0);
+            if (depth == 0) dt_attr_report(p, start, count, G, soft2);   // NBODY_DT_ATTR (off: no-op)
+            dt_scale_apply(p, start, count);                            // NBODY_DT_SCALE (unset: no-op)
             g_subsys_phase.add(SubsystemPhaseTimes::DT_SUBSYS, dt_clock.lap());
 
             // Level-0 store: capture dt AFTER subsystem adjustments
@@ -3664,6 +3843,7 @@ static int hhs_fsi_recursive_impl(
             one_subsystem = same && count != 3;
         }
         if (one_subsystem) {
+            ledger_type(5);
             if (depth < HHSCounters::MAX_DEPTH) g_hhs_counters.isolated_sets[depth]++;
             fsi_step(p, start, count, G, soft2, pivot_dt, false, true);
             return n_removed;
@@ -3684,6 +3864,7 @@ static int hhs_fsi_recursive_impl(
 
     // Base case: all particles are slow — reuse fused forces for first FSI kick
     if (fast_count == 0) {
+        ledger_type(2);
         // FROST Algorithm 3 with an empty fast set: fsi(S, tau/2) twice, on every path (one step of tau: 16x the
         // energy error at the same time, 6655494)
         const double h = pivot_dt * 0.5;
@@ -3711,6 +3892,7 @@ static int hhs_fsi_recursive_impl(
             g_hhs_counters.cc_comps[depth] += (long long)comps.size();
             g_hhs_counters.cc_largest[depth] += *std::max_element(comps.begin(), comps.end());
         }
+        if (comps.size() > 1) ledger_type(6);
         if (comps.size() > 1)
             return n_removed + hhs_cc_step(p, dp, slow_start, slow_count, fast_start, std::move(comps), pivot_dt,
                                            G, soft2, dt_min, eta, depth);
@@ -3718,6 +3900,7 @@ static int hhs_fsi_recursive_impl(
 
     // Base case: all particles are fast
     if (slow_count == 0) {
+        ledger_type(3);
         if (use_mpi) g_hhs_counters.slow0_dist++;
         else g_hhs_counters.slow0_local++;
 #ifdef ENABLE_COLLISIONAL
@@ -3733,6 +3916,7 @@ static int hhs_fsi_recursive_impl(
         return n_removed;
     }
 
+    ledger_type(4);
     long long cross_pairs = 2LL * slow_count * fast_count;
 
     // Re-sync packed positions after partition reorder (only needed for MPI)
