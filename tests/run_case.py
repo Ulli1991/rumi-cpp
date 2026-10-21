@@ -192,6 +192,15 @@ COLL_TDE = dict(COLL_HEADON, TRIPLE_A_IN_PC="1e-7", TRIPLE_E_IN="1.0", TRIPLE_M1
 COLL_ISCO = dict(COLL_HEADON, TRIPLE_A_IN_PC="2.87e-11", TRIPLE_E_IN="0.0", TRIPLE_M1="10.0", TRIPLE_M2="10.0",
                  TRIPLE_A_OUT_PC="2.87e-9", TRIPLE_E_OUT="0.0", TRIPLE_M3="1.0", TOTAL_TIME_MYR="3e-12",
                  DT_MAX_MYR="1e-13", DT_MIN_MYR="1e-24", PN_ORDER="31", M_PN="5.0", TEST_STELLAR_RADIUS_RSUN="0")
+# COLL_ISCO from 1.7 a: the Peters time 1.6e-12 Myr, ~16 steps of 1e-13 Myr before the merger (gw_restart)
+GW_INSPIRAL = dict(COLL_ISCO, TRIPLE_A_IN_PC="4.879e-11", TOTAL_TIME_MYR="2e-12")
+# e = 0.6 from a = 4e-11 pc: pericentre 1.6e-11 pc inside the collision distance 1.9e-11 pc, an eccentric decision
+GW_ECC = dict(COLL_ISCO, TRIPLE_A_IN_PC="4e-11", TRIPLE_E_IN="0.6")
+# 10 + 10 Msun, a = 1e-8 pc, e = 0.9 (Peters time 1.1e-5 Myr < DT_MAX): merged at the step start by the t_GW < dt rule of
+# detect_mergers (secular binary), f_GW 0.2 Hz: e_10Hz forward along the track, e_10mHz = -1
+GW_PETERS = dict(PN_LOGH, BINARY_A_PC="1e-8", BINARY_E="0.9", BINARY_M1="10", BINARY_M2="10", TOTAL_TIME_MYR="2e-4",
+                 DT_MAX_MYR="1e-4", TEST_STELLAR_RADIUS_RSUN="0")
+GW_E_REL = 4.8e-11   # gw_merger: |e_10Hz, e_10mHz / Peters time integration - 1|: 1.09e-11, 3.70e-11 measured (host build)
 # FROST-CLUSTERS I merger distance (BH_MERGE_RADIUS = max_single, 6 G max(m) / c^2 = 2.87e-12 pc, x = 1/3 of the pair):
 # PN1 + PN2 + PN2.5 only, from a = 8.6e-12 pc; with PN3.5 the binary gains energy before it gets there (C8)
 COLL_ISCO_FC = dict(COLL_ISCO, TRIPLE_A_IN_PC="8.6e-12", TRIPLE_A_OUT_PC="8.6e-10", TOTAL_TIME_MYR="6e-14",
@@ -1449,6 +1458,151 @@ def restart_identical(exe, label, cfg, n, stop="interval", snapshots=False):
         return ok
 
 
+GW_COLS = ("row kind t_myr path type channel pid1 pid2 kw1 kw2 m1 m2 chi1x chi1y chi1z chi2x chi2y chi2z a_au e f_orb_hz"
+           " f_gw_hz e_10Hz e_10mHz t_gw_myr chi_eff chi_p m_rem chi_rem_x chi_rem_y chi_rem_z v_kick_kms n_members tidal"
+           " r_cl_pc v_cl_kms").split()
+
+
+def gw_rows(text):
+    """Rows of gw_events.dat as dicts (numbers as float, names as str)."""
+    rows = []
+    for line in (text or "").splitlines():
+        if not line.strip() or line.startswith("#"):
+            continue
+        r = {}
+        for k, v in zip(GW_COLS, line.split()):
+            try:
+                r[k] = float(v)
+            except ValueError:
+                r[k] = v
+        rows.append(r)
+    return rows
+
+
+def peters_e_at_f(a_au, e, m_tot, f_target):
+    """Independent check of gw_e_at_f: integrate Peters (1964) Eqs. 5.6-5.7 in time (RK4 on ln a, ln e; the track does
+    not depend on the strength of the radiation, so beta = 1) from (a, e) towards the peak frequency f_target of Wen
+    (2003) Eq. 37 (backward in time if the orbit is above it) and bisect the step that crosses it. The code's units
+    (G = 4.302194e-3 pc (km/s)^2 / Msun, 1 AU = 4.84813681109536e-6 pc, time unit 1 pc / (km/s)): with IAU G M_sun
+    the frequencies differ by 1.5e-4 and e_10Hz by 1.6e-4 (G_CODE is 3e-4 above the IAU value)."""
+    GM = 4.302194e-3 * m_tot               # pc (km/s)^2
+    au = 4.84813681109536e-6               # pc
+    tu = 3.08567758e13                     # s
+
+    def f_peak(y):
+        a, ee = math.exp(y[0]) * au, math.exp(y[1])
+        return math.sqrt(GM) * (1 + ee) ** 1.1954 / (math.pi * (a * (1 - ee)) ** 1.5) / tu
+
+    def rhs(y):
+        a, ee = math.exp(y[0]), math.exp(y[1])
+        e2 = ee * ee
+        da = -64.0 / 5.0 / (a ** 3 * (1 - e2) ** 3.5) * (1 + 73.0 / 24.0 * e2 + 37.0 / 96.0 * e2 * e2)
+        de = -304.0 / 15.0 * ee / (a ** 4 * (1 - e2) ** 2.5) * (1 + 121.0 / 304.0 * e2)
+        return (da / a, de / ee)
+
+    def rk4(y, h):
+        k1 = rhs(y)
+        k2 = rhs((y[0] + 0.5 * h * k1[0], y[1] + 0.5 * h * k1[1]))
+        k3 = rhs((y[0] + 0.5 * h * k2[0], y[1] + 0.5 * h * k2[1]))
+        k4 = rhs((y[0] + h * k3[0], y[1] + h * k3[1]))
+        return (y[0] + h / 6 * (k1[0] + 2 * k2[0] + 2 * k3[0] + k4[0]),
+                y[1] + h / 6 * (k1[1] + 2 * k2[1] + 2 * k3[1] + k4[1]))
+
+    y = (math.log(a_au), math.log(e))
+    s0 = f_peak(y) - f_target
+    sign = -1.0 if s0 > 0 else 1.0      # backward in time while above the target
+    for _ in range(10 ** 6):
+        d = rhs(y)
+        h = sign * 2e-4 / max(abs(d[0]), abs(d[1]))
+        y1 = rk4(y, h)
+        if math.exp(y1[1]) > 1.0 - 1e-9:   # back to e -> 1 without reaching f_target (the code's -1)
+            return -1.0
+        if (f_peak(y1) - f_target) * s0 <= 0.0:
+            lo, hi = 0.0, h
+            for _ in range(60):
+                mid = 0.5 * (lo + hi)
+                if (f_peak(rk4(y, mid)) - f_target) * s0 > 0.0:
+                    lo = mid
+                else:
+                    hi = mid
+            return math.exp(rk4(y, 0.5 * (lo + hi))[1])
+        y = y1
+    return float("nan")
+
+
+def gw_merger(exe, label, cfg):
+    """gw_events.dat (src/collisional/gw_output.h, CASES.md E2) of a PN BH binary that merges inside its LogH
+    subsystem: exactly one MERGER row, its masses those of the configuration, e at 10 Hz and 10 mHz equal to an
+    independent time integration of Peters (1964) to < 1e-3, and the remnant columns those of the merger code
+    (merger_tree.dat, written by MergerTree::record from the same event)."""
+    with tempfile.TemporaryDirectory() as d:
+        out = run_in(exe, dict(cfg, PRINT_INTERVAL="1"), d)
+        gw, mt = Path(d, "gw_events.dat"), Path(d, "merger_tree.dat")
+        rows = gw_rows(gw.read_text() if gw.exists() else "")
+        tree = [l.split("\t") for l in (mt.read_text().splitlines() if mt.exists() else []) if not l.startswith("#")]
+    merg = [r for r in rows if r["kind"] == "MERGER"]
+    ok = check(f"{label}: gw_events.dat MERGER rows", len(merg), 1, lower=True)
+    ok &= check(f"{label}: gw_events.dat MERGER rows (no duplicates)", len(merg), 1)
+    if not merg or not tree:
+        print(out[-1500:])
+        return False
+    r, t = merg[0], tree[0]
+    m1, m2 = sorted((r["m1"], r["m2"]))
+    c1, c2 = sorted((float(cfg.get("TRIPLE_M1", cfg.get("BINARY_M1"))), float(cfg.get("TRIPLE_M2", cfg.get("BINARY_M2")))))
+    ok &= check(f"{label}: |m1, m2 - configured| / m", max(abs(m1 - c1) / c1, abs(m2 - c2) / c2), 1e-12)
+    ok &= check(f"{label}: |kw1 + kw2 - 28| (two BHs)", abs(r["kw1"] + r["kw2"] - 28), 0)
+    print(f"   decision: a = {r['a_au']:.6e} AU, e = {r['e']:.6e}, f_gw = {r['f_gw_hz']:.4g} Hz, "
+          f"e_10Hz = {r['e_10Hz']:.6e}, e_10mHz = {r['e_10mHz']:.6e}, path {r['path']}, channel {r['channel']}")
+    for col, f in (("e_10Hz", 10.0), ("e_10mHz", 1e-2)):
+        ref = peters_e_at_f(r["a_au"], r["e"], r["m1"] + r["m2"], f)
+        if ref < 0.0 or r[col] < 0.0:   # never at f on the track (formed above it): both must say so
+            ok &= check(f"{label}: {col} = -1 in code and integration (0 = yes)", int(ref != r[col]), 0)
+        else:
+            ok &= check(f"{label}: |{col} / Peters integration - 1|", abs(r[col] / ref - 1.0), GW_E_REL)
+    # merger_tree.dat: id time time_myr type pid1 pid2 pid_rem m1 m2 m_rem a e v_kick E_rad chi_x chi_y chi_z
+    ok &= check(f"{label}: |m_rem / merger tree - 1|", abs(r["m_rem"] / float(t[9]) - 1.0), 1e-9)
+    ok &= check(f"{label}: |v_kick - merger tree| [km/s]", abs(r["v_kick_kms"] - float(t[12])), 1e-5)
+    ok &= check(f"{label}: |chi_rem - merger tree|",
+                max(abs(r[f"chi_rem_{c}"] - float(t[14 + k])) for k, c in enumerate("xyz")), 1e-6)
+    return ok & check(f"{label}: remnant |chi_rem| (BH merger)",
+                      math.sqrt(sum(r[f"chi_rem_{c}"] ** 2 for c in "xyz")), 0.5, lower=True)
+
+
+def gw_restart(exe, label, cfg, n):
+    """Restart safety of gw_events.dat: a run of 2n steps against a run that writes the restart file at step n and
+    goes on to step 1.5n, then resumed from that file in the same directory (its rows after step n are in the file
+    and must not stay or be duplicated): the two tables must be identical, line for line."""
+    dt = float(cfg["DT_MAX_MYR"])
+    full = dict(cfg, PRINT_INTERVAL="1", SNAPSHOT_INTERVAL="1", TOTAL_TIME_MYR=f"{(2 * n - 0.5) * dt:.17g}")
+    first = dict(full, TOTAL_TIME_MYR=f"{(1.5 * n - 0.5) * dt:.17g}", RESTART_INTERVAL=str(n))
+    with tempfile.TemporaryDirectory() as da, tempfile.TemporaryDirectory() as db:
+        run_in(exe, full, da)
+        run_in(exe, first, db)
+        mid = Path(db, "gw_events.dat").read_text()
+        run_in(exe, full, db, args=("--restart", f"restart_{n:08d}.h5"))
+        ta, tb = Path(da, "gw_events.dat").read_text(), Path(db, "gw_events.dat").read_text()
+    ra, rm = gw_rows(ta), gw_rows(mid)
+    print(f"   rows: uninterrupted {len(ra)} ({sum(r['kind'] == 'MERGER' for r in ra)} MERGER), first run {len(rm)}")
+    ok = check(f"{label}: rows in the uninterrupted table", len(ra), 3, lower=True)
+    ok &= check(f"{label}: MERGER rows", sum(r["kind"] == "MERGER" for r in ra), 1)
+    ok &= check(f"{label}: rows the first run wrote after step {n} (dropped on resume)",
+                sum(r["t_myr"] > (n + 0.01) * dt for r in rm), 1, lower=True)
+    la, lb = ta.splitlines(), tb.splitlines()
+    ndiff = sum(x != y for x, y in zip(la, lb)) + abs(len(la) - len(lb))
+    return ok & check(f"{label}: lines differing, uninterrupted vs restarted", ndiff, 0)
+
+
+def gw_off_identical(exe, label, cfg):
+    """The GW table only reads the state: with it (and its census at every snapshot) on and off (NBODY_GW_OUTPUT=0)
+    the final particle dumps are identical, bit for bit; the table has rows."""
+    run_cfg = dict(cfg, PRINT_INTERVAL="1", SNAPSHOT_INTERVAL="1")
+    _, d_on, text = run_output(exe, run_cfg, dump=True, read="gw_events.dat")
+    _, d_off = run_output(exe, run_cfg, env={"NBODY_GW_OUTPUT": "0"}, dump=True)
+    ok = check(f"{label}: gw_events.dat rows (on)", len(gw_rows(text)), 1, lower=True)
+    n = sum(a != b for a, b in zip(d_on, d_off)) + abs(len(d_on) - len(d_off))
+    return ok & check(f"{label}: particles differing, GW output on vs off", n, 0)
+
+
 def stall_capture(exe, label, cfg, n):
     """STALL_DE_FACTOR / STALL_RESTART (core/stall.h): with a factor below 1 most steps count as energy jumps (the
     trigger on the step's energy change is deterministic, the wall-time one of STALL_FACTOR is not); each one prints
@@ -2099,6 +2253,9 @@ CASES = {
     "coll_tde_parabolic": lambda exe: subsys_collision(exe, "TDE, parabolic", COLL_TDE, "TDE", 1.5e-12),
     # 1.32e-14 measured (C11: the GW angular momentum of the secular triple booked, the energy fix through a_out and
     # the inclination at round-off of the members' energy; 2.5e-16 before, with the radiated L put into the outer orbit)
+    "gw_merger": lambda exe: (gw_merger(exe, "BH binary to ISCO, PN", COLL_ISCO)
+                              & gw_merger(exe, "eccentric BH binary to ISCO, PN", GW_ECC)
+                              & gw_merger(exe, "BH binary with t_GW < dt, secular", GW_PETERS)),
     "coll_bh_isco": lambda exe: subsys_collision(exe, "BH binary to ISCO, PN", COLL_ISCO, "ISCO", 1.7e-14),
     # Kepler drift (kepler_drift, subsystem audit #2): universal variables below e = 0.1 and near the parabola, the
     # perifocal construction from the anomaly otherwise. Bounds 1.3x measured (raven host, 2026-10-11); 043190d's
@@ -2238,6 +2395,14 @@ CASES = {
                                                             dict(CM_TIDE, FLYBY_CM_EPS="1e-5"), 5),
     "restart_cm_velocity": lambda exe: restart_identical(exe, "c.o.m. fly-by velocity, tidal sampling",
                                                          dict(CM_TIDE, FLYBY_CM_VELOCITY="true", FLYBY_CM_EPS="1e-5"), 5),
+    # Gravitational-wave table gw_events.dat (CASES.md E2): one MERGER row for the PN BH binary that reaches 10 R_S, e at
+    # 10 Hz / 10 mHz against an independent Peters integration, remnant as the merger code made it; restart-safe (no
+    # duplicates or gaps after a resume); read-only on the state (particles bit-identical with it off)
+    "gw_restart": lambda exe: gw_restart(exe, "BH binary to ISCO in ~16 steps, census every step", GW_INSPIRAL, 10),
+    "gw_off_identical": lambda exe: (gw_off_identical(exe, "BH binary to ISCO", GW_INSPIRAL)
+                                     & gw_off_identical(exe, "cluster + spinning IMBH binary (t_gw 1.4e5 Myr)",
+                                                        dict(SPIN_IMBH, TOTAL_TIME_MYR="5e-4",
+                                                             GW_CENSUS_TGW_MYR="1e7"))),
     "restart_spin_imbh": lambda exe: restart_identical(exe, "cluster + spinning IMBH binary, all PN", SPIN_IMBH, 5),
     # FSI: the global step is the fastest occupied level, not DT_MAX: the first run stops after step 1
     "restart_fsi": lambda exe: restart_identical(exe, "FSI integrator", dict(FSI_BINARY, DT_MAX_MYR="1e-6"), 5,

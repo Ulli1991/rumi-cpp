@@ -3603,9 +3603,7 @@ static int hhs_fsi_recursive_impl(
             if (g_collisional.c_code > 0.0) {
                 auto mergers = detect_mergers(g_subsystem_mgr, p, G,
                                                g_collisional.c_code, pivot_dt);
-                for (const auto& ev : mergers) {
-                    auto* sub = find_subsystem_for_merger(g_subsystem_mgr, ev);
-                    if (sub) g_merger_tree.record(ev, *sub, g_sim_time);
+                for (const auto& ev : mergers) {   // execute_merger records the event in the merger tree
                     static const bool merge_check = std::getenv("NBODY_MERGE_CHECK") != nullptr;   // debug
                     double e_chk0 = 0.0;
                     if (merge_check)

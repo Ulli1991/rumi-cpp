@@ -5,6 +5,7 @@
 #include "constants.h"
 #include "collisional_config.h"
 #include "gw_recoil.h"
+#include "gw_output.h"
 #include "tidal_field.h"
 #include <cstdint>
 #include <cstring>
@@ -331,6 +332,50 @@ void execute_merger(const MergerEvent& event, Particles& p,
         books.sink_PL(m_rem, rc, u, -1.0);
     }
 
+    // Merger tree, with the remnant made here (before 2026-10-21 the caller recorded the event before this call:
+    // remnant mass m1 + m2, no kick, no spin)
+    const Subsystem* sub = nullptr;
+    for (const auto& s : mgr.active)
+        if (std::find(s.particle_ids.begin(), s.particle_ids.end(), event.pid2) != s.particle_ids.end()) sub = &s;
+    {
+        MergerEvent ev = event;
+        ev.m_remnant = m_rem;
+        for (int k = 0; k < 3; k++) { ev.v_kick[k] = v_kick[k]; ev.spin_remnant[k] = chi_rem[k]; }
+        if (const Subsystem* s2 = find_subsystem_for_merger(mgr, event)) {
+            g_merger_tree.record(ev, *s2, g_sim_time);
+        } else {   // the tree's a, e from the pair itself
+            Subsystem tmp{};
+            const double rr[3] = {h_x(idx2) - h_x(idx1), h_y(idx2) - h_y(idx1), h_z(idx2) - h_z(idx1)};
+            const double vv[3] = {h_vx(idx2) - h_vx(idx1), h_vy(idx2) - h_vy(idx1), h_vz(idx2) - h_vz(idx1)};
+            tmp.orb = cartesian_to_elements(rr, vv, G * M);
+            g_merger_tree.record(ev, tmp, g_sim_time);
+        }
+    }
+
+    // Gravitational-wave table (gw_output.h): a merger of two compact objects, from the state at the decision
+    if (g_gw_log.on && gw_compact_pair(h_stype(idx1), h_stype(idx2))) {
+        GwRow row;
+        row.kind = 0; row.t = g_sim_time; row.type = (int)event.type;
+        row.path = event.type == MergerType::GW_COALESCENCE ? (sub && sub->is_secular ? GW_PATH_SECULAR : GW_PATH_PETERS)
+                                                            : GW_PATH_CONTACT;
+        row.pid1 = event.pid1; row.pid2 = event.pid2; row.kw1 = h_stype(idx1); row.kw2 = h_stype(idx2);
+        row.m1 = m1; row.m2 = m2;
+        for (int k = 0; k < 3; k++) { row.chi1[k] = h_spin(idx1, k); row.chi2[k] = h_spin(idx2, k); }
+        const double rr[3] = {h_x(idx2) - h_x(idx1), h_y(idx2) - h_y(idx1), h_z(idx2) - h_z(idx1)};
+        const double vv[3] = {h_vx(idx2) - h_vx(idx1), h_vy(idx2) - h_vy(idx1), h_vz(idx2) - h_vz(idx1)};
+        gw_fill_pair(row, rr, vv, G, c_code);
+        row.m_rem = m_rem;
+        for (int k = 0; k < 3; k++) row.chi_rem[k] = chi_rem[k];
+        row.v_kick = std::sqrt(v_kick[0] * v_kick[0] + v_kick[1] * v_kick[1] + v_kick[2] * v_kick[2]);
+        row.n_members = sub ? sub->n_bodies : 2;
+        const double xc[3] = {(m1 * h_x(idx1) + m2 * h_x(idx2)) / M, (m1 * h_y(idx1) + m2 * h_y(idx2)) / M,
+                              (m1 * h_z(idx1) + m2 * h_z(idx2)) / M};
+        const double vc[3] = {cvx, cvy, cvz};
+        gw_environment(row, p.N, h_x.data(), h_y.data(), h_z.data(), h_vx.data(), h_vy.data(), h_vz.data(), h_m.data(),
+                       idx1, idx2, xc, vc, r, G);
+        g_gw_log.pending.push_back(row);
+    }
+
     // Place remnant at idx1, mark idx2 for removal
     h_x(idx1) = cx; h_y(idx1) = cy; h_z(idx1) = cz;
     h_vx(idx1) = cvx + v_kick[0];
@@ -486,6 +531,25 @@ void finalize_subsystem_collision(const SubsystemCollision& c, Particles& p, Sub
     books.E_merge += E_before - E_after;
     books.sink_PL(M, xr, vr);
     books.sink_PL(m_rem, xr, u, -1.0);
+
+    // Gravitational-wave table (gw_output.h): the pair at the collision, the remnant as made here
+    if (g_gw_log.on && gw_compact_pair(c.kw_keep, c.kw_gone)) {
+        GwRow row;
+        row.kind = 0; row.t = g_sim_time; row.type = (int)c.type; row.path = GW_PATH_SUBSYS;
+        row.pid1 = c.pid_keep; row.pid2 = c.pid_gone; row.kw1 = c.kw_keep; row.kw2 = c.kw_gone;
+        row.m1 = c.m_keep; row.m2 = c.m_gone;
+        for (int k = 0; k < 3; k++) { row.chi1[k] = h_spin(ik, k); row.chi2[k] = h_spin(ig, k); }
+        double rr[3], vv[3];
+        for (int k = 0; k < 3; k++) { rr[k] = c.d_gone[k] - c.d_keep[k]; vv[k] = c.u_gone[k] - c.u_keep[k]; }
+        gw_fill_pair(row, rr, vv, G, c_code);
+        row.m_rem = m_rem;
+        for (int k = 0; k < 3; k++) row.chi_rem[k] = chi_rem[k];
+        row.v_kick = std::sqrt(kick[0] * kick[0] + kick[1] * kick[1] + kick[2] * kick[2]);
+        row.n_members = c.n_members;
+        gw_environment(row, p.N, h_x.data(), h_y.data(), h_z.data(), h_vx.data(), h_vy.data(), h_vz.data(), h_m.data(),
+                       ik, ig, xr, vr, std::sqrt(rr[0] * rr[0] + rr[1] * rr[1] + rr[2] * rr[2]), G);
+        g_gw_log.pending.push_back(row);
+    }
 
     h_m(ik) = m_rem;
     h_vx(ik) = u[0]; h_vy(ik) = u[1]; h_vz(ik) = u[2];

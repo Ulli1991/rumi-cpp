@@ -96,6 +96,9 @@ const std::vector<ParamSpec> kParams = {
      "Fraction of a tidally disrupted star the BH accretes (FROST-CLUSTERS I, DRAGON-II)"},
     {"BH_MERGE_RADIUS", S, "total", "Collisions and mergers", USER, "total|max_single",
      "BH-BH merger at r < 10 R_S = 20 G (m1 + m2) / c^2 (total) or max(6 G m_i / c^2) (max_single, FROST-CLUSTERS I)"},
+    {"GW_CENSUS_TGW_MYR", D, "13800", "Collisions and mergers", USER, "",
+     "gw_events.dat: at every snapshot also the bound NS/BH pairs of the subsystems with Peters merger time below "
+     "this (Myr; LISA band, ejected binaries); 0: merger rows only"},
 
     // ---- Escapers and tidal field ----
     {"R_ESCAPE_RH", D, "100.0", "Escapers and tidal field", EXPERT, "", "Escape radius in half-mass radii"},
@@ -295,6 +298,7 @@ const std::vector<DebugEnvSpec> kDebugEnv = {
     {"NBODY_FORCE_ERR_LEVELS", "=L: nested grids of the cell model (default 6; edges r_rms 2^-l)"},
     {"NBODY_FORCE_ERR_LFIX", "=1: also remove the net torque of the error over each kicked range (angular momentum exact; implies PFIX)"},
     {"NBODY_FORCE_ERR_PFIX", "=1: remove the mass-weighted mean error over each kicked range (momentum exact; default 1 for cell, 0 otherwise)"},
+    {"NBODY_GW_OUTPUT", "=0: no gravitational-wave table gw_events.dat (A/B: the dynamics must be bit-identical)"},
     {"NBODY_MERGE_CHECK", "=1: total energy and books before and after each per-level merger (merger energy booking check)"},
     {"NBODY_SSE_CHECK", "=1: runtime SSE potential change booked against two full triangle sums (SSE energy booking check)"},
     {"NBODY_LEAN_SYNC", "=0: keep every device fence of the original code (default on: lean copies, bit-identical)"},

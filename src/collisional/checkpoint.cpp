@@ -97,6 +97,7 @@ void Checkpoint::save(const Particles& p, const SubsystemManager& mgr,
     removed_pids = mgr.removed_pids;
     energy_books = books;
     merger_tree = g_merger_tree;
+    gw_pending = g_gw_log.pending;
 
     valid = true;
 }
@@ -212,6 +213,7 @@ void Checkpoint::restore(Particles& p, SubsystemManager& mgr,
     if (p.collisional) mgr.rebuild_pid_to_idx(p);
     books = energy_books;
     g_merger_tree = merger_tree;
+    g_gw_log.pending = gw_pending;
 }
 
 // ============================================================================

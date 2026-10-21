@@ -4,6 +4,7 @@
 #include "subsystem.h"
 #include "diagnostics.h"
 #include "merger_tree.h"
+#include "gw_output.h"
 #include <unordered_set>
 #include <vector>
 
@@ -33,6 +34,7 @@ struct Checkpoint {
 
     // Merger history (a rolled-back step must not leave its mergers recorded)
     MergerTree merger_tree;
+    std::vector<GwRow> gw_pending;   // rows of the gravitational-wave table not yet in the file
 
     // Energy bookkeeping
     EnergyBookkeeping energy_books;

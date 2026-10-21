@@ -26,6 +26,7 @@
 #include "checkpoint.h"
 #include "mergers.h"
 #include "merger_tree.h"
+#include "gw_output.h"
 #include "runtime_sse.h"
 #include "post_newtonian.h"
 #include "stellar_cache.h"
@@ -645,6 +646,9 @@ int main(int argc, char** argv) {
             g_collisional.tde_accretion = cfg.get_double("TDE_ACCRETION_FRACTION");
             g_collisional.coll_mass_loss_c = cfg.get_double("COLL_MASS_LOSS_C");
             g_collisional.bh_merge_max_single = cfg.get_str("BH_MERGE_RADIUS") == "max_single";
+            // Gravitational-wave table gw_events.dat (gw_output.h); NBODY_GW_OUTPUT=0: off (tests: identical dynamics)
+            g_gw_log.census_tgw = cfg.get_double("GW_CENSUS_TGW_MYR") / TIME_UNIT_MYR;
+            if (const char* e = std::getenv("NBODY_GW_OUTPUT")) g_gw_log.on = std::atoi(e) != 0;
             g_collisional.grad_fresh = cfg.get_bool("GRAD_FRESH");
             g_collisional.gbs_deuflhard = cfg.get_str("GBS_SEQUENCE") == "deuflhard";
             g_collisional.gbs_kmax = cfg.get_int("GBS_KMAX");
@@ -1179,6 +1183,10 @@ int main(int argc, char** argv) {
                                 compute_cluster_diag(work_p, G, t_now * TIME_UNIT_MYR, cluster_diag_rpair));
         };
         if (!resuming) cluster_diag_now(t, step);
+#ifdef ENABLE_COLLISIONAL
+        g_gw_log.on = g_gw_log.on && g_collisional.enabled;
+        g_gw_log.open(resuming);   // resumed: the rows written up to the restart point are kept, later ones dropped
+#endif
 #ifdef USE_HDF5
         if (resuming) { t = rs.t; step = rs.step; }
         int last_restart_step = resuming ? step : -1, last_snapshot_step = -1;
@@ -1196,6 +1204,9 @@ int main(int argc, char** argv) {
             sm.diag = compute_diagnostics(work_p, G, soft2);
             sm.diag0 = diag0;
             sm.config_json = config_json(cfg.params);
+#ifdef ENABLE_COLLISIONAL
+            gw_census(work_p, g_subsystem_mgr, G, g_collisional.c_code, t_now);   // compact binaries, t_gw < GW_CENSUS
+#endif
             if (my_rank == 0) {
                 if (snapshot_cluster_diag) {
                     sm.has_cluster = true;
@@ -1212,6 +1223,9 @@ int main(int argc, char** argv) {
             if (last_restart_step == step_now && last_restart_snap == rs.snapshot_index) return;
             StepProfiler::Region r_(g_profiler, StepProfiler::RESTART_IO);
             save_run_state(t_now, step_now);
+#ifdef ENABLE_COLLISIONAL
+            g_gw_log.flush();   // the restart stores the row count of gw_events.dat
+#endif
             // Replicated MPI state: every rank must hold the same state, rank 0 writes it
             bool agree = !use_distributed || dp.replicas_agree(step_now);
             agree = ranks_agree_on_run_state(rs) && agree;
@@ -1254,6 +1268,9 @@ int main(int argc, char** argv) {
             if (!stall_restart) return;
             StepProfiler::Region r_(g_profiler, StepProfiler::RESTART_IO);
             save_run_state(t_now, step_now);
+#ifdef ENABLE_COLLISIONAL
+            g_gw_log.flush();
+#endif
             if (my_rank == 0) {
                 std::filesystem::create_directories(roll_opt.dir);
                 write_restart(roll_opt, work_p, rs, cfg.text, cfg.params);
@@ -1758,6 +1775,7 @@ int main(int argc, char** argv) {
                         g_merger_tree.write_ascii("merger_tree.dat");
                         g_escaper_log.write_ascii("escaper_log.dat");
                     }
+                    g_gw_log.flush();
 #endif
                     g_profiler.stop(StepProfiler::DIAG);
                     g_profiler.report_step = step; g_profiler.report_t_myr = t * TIME_UNIT_MYR;
@@ -1821,6 +1839,9 @@ int main(int argc, char** argv) {
         g_subset_hist.reset();
 
         auto diag_final = compute_diagnostics(work_p, G, soft2);
+#ifdef ENABLE_COLLISIONAL
+        g_gw_log.flush();
+#endif
         if (my_rank == 0) {
             print_final(diag_final, diag0, work_p, levels, is_cluster, wall_sec, step, names);
 #ifdef ENABLE_COLLISIONAL

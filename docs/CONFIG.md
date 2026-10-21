@@ -1,10 +1,10 @@
 # Config reference
 
-All 152 keys of the config file (`config.txt`, or `--config <file>`), generated from the parameter table in `src/core/params.cpp` by `scripts/gen_config_md.py`. Every key has one default, in that table; an unknown key in a config file is an error. Each run writes the effective value of every key, and whether it came from the file or the default, to `run_params.txt`.
+All 153 keys of the config file (`config.txt`, or `--config <file>`), generated from the parameter table in `src/core/params.cpp` by `scripts/gen_config_md.py`. Every key has one default, in that table; an unknown key in a config file is an error. Each run writes the effective value of every key, and whether it came from the file or the default, to `run_params.txt`.
 
 Levels:
 
-- **user**: the choices of a run; these 50 keys are in `config.txt`.
+- **user**: the choices of a run; these 51 keys are in `config.txt`.
 - **expert**: accuracy and output knobs; the default is the production value.
 - **test**: parameters of the few-body test problems.
 - **internal**: performance tuning thresholds; results do not depend on them (or only through the reduction order).
@@ -87,6 +87,7 @@ Levels:
 | `COLL_MASS_LOSS_C` | double | `0.0` | user |  | Stellar-collision mass loss: m_rem = (m1 + m2)(1 - C q / (1 + q)^2) (Glebbeek 2013; FROST-CLUSTERS III: 0.3) |
 | `TDE_ACCRETION_FRACTION` | double | `0.5` | user |  | Fraction of a tidally disrupted star the BH accretes (FROST-CLUSTERS I, DRAGON-II) |
 | `BH_MERGE_RADIUS` | string | `total` | user | total\|max_single | BH-BH merger at r < 10 R_S = 20 G (m1 + m2) / c^2 (total) or max(6 G m_i / c^2) (max_single, FROST-CLUSTERS I) |
+| `GW_CENSUS_TGW_MYR` | double | `13800` | user |  | gw_events.dat: at every snapshot also the bound NS/BH pairs of the subsystems with Peters merger time below this (Myr; LISA band, ejected binaries); 0: merger rows only |
 
 ## Escapers and tidal field
 
@@ -249,6 +250,7 @@ Levels:
 | `NBODY_FORCE_ERR_LEVELS` | =L: nested grids of the cell model (default 6; edges r_rms 2^-l) |
 | `NBODY_FORCE_ERR_LFIX` | =1: also remove the net torque of the error over each kicked range (angular momentum exact; implies PFIX) |
 | `NBODY_FORCE_ERR_PFIX` | =1: remove the mass-weighted mean error over each kicked range (momentum exact; default 1 for cell, 0 otherwise) |
+| `NBODY_GW_OUTPUT` | =0: no gravitational-wave table gw_events.dat (A/B: the dynamics must be bit-identical) |
 | `NBODY_MERGE_CHECK` | =1: total energy and books before and after each per-level merger (merger energy booking check) |
 | `NBODY_SSE_CHECK` | =1: runtime SSE potential change booked against two full triangle sums (SSE energy booking check) |
 | `NBODY_LEAN_SYNC` | =0: keep every device fence of the original code (default on: lean copies, bit-identical) |
@@ -292,3 +294,8 @@ Levels:
 - Adding a key: a row in `kParams` (src/core/params.cpp), `cfg.get_*("KEY")` at the use site (no default there), a line
   in `config.txt` if it is level user, then `python3 scripts/gen_config_md.py`. The ctest case `config_table` checks
   all of this.
+- Output files of collisional runs: `merger_tree.dat`, `escaper_log.dat` (rewritten at every print) and
+  `gw_events.dat` (appended; docs/CASES.md E2): one row per NS/BH merger (masses, spins, a, e, Wen peak frequency, e
+  at 10 Hz and 10 mHz from Peters evolution, chi_eff, chi_p, remnant, path, environment, channel) and, at every
+  snapshot, one per bound NS/BH pair in a subsystem with Peters time below `GW_CENSUS_TGW_MYR`. The column header is
+  in the file; a resumed run truncates it to the rows of its restart file. `NBODY_GW_OUTPUT=0` turns it off.

@@ -6,6 +6,7 @@
 #include "collisional_config.h"
 #include "subsystem.h"
 #include "merger_tree.h"
+#include "gw_output.h"
 #include "stellar_cache.h"
 #endif
 #ifdef USE_MPI
@@ -406,6 +407,8 @@ void write_collisional(hid_t file) {
     write_books(g, g_energy_books);
     write_merger_tree(g, g_merger_tree);
     write_escapers(g, g_escaper_log);
+    // Rows of gw_events.dat at this state (flushed before the file is written): a resumed run truncates to them
+    h5::attr(g, "gw_rows", (long long)g_gw_log.n_written);
     h5::write<uint8_t>(g, "eattr", reinterpret_cast<const uint8_t*>(&g_eattr), sizeof(EnergyAttribution));
 }
 
@@ -416,6 +419,8 @@ void read_collisional(hid_t file) {
     read_books(g, g_energy_books);
     read_merger_tree(g, g_merger_tree);
     read_escapers(g, g_escaper_log);
+    g_gw_log.pending.clear();
+    g_gw_log.n_written = h5::has_attr(g, "gw_rows") ? h5::get_int(g, "gw_rows") : 0;   // older files: none
     std::vector<uint8_t> ea;
     h5::read(g, "eattr", ea);
     if (ea.size() == sizeof(EnergyAttribution)) {
