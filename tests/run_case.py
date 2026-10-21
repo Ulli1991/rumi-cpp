@@ -61,6 +61,8 @@ TIDAL_FLOOR_LOGH = 8200     # tidal_floor_bh_binary: 6308 LogH calls measured (1
 FLYBY_GROUP_STEPS = 39400  # flyby_group_floor: 30304 measured (host build)
 FLYBY_GROUP_DE = 5.8e-10   # flyby_group_floor: 4.42e-10 measured (host build)
 C19_PERI_DE = 1e-15       # c19_secular_peri: 7.65e-16 measured (host build; 1.22 of the pair, 6.7e-4 E_REF, before the fix)
+C21_SD_DE = 9.0e-10       # c21_sdar_outside_tide: 6.91e-10 measured (host build; 1.81e-5 before the fix, own |E0|)
+C21_SD_GBS = 19600        # c21_sdar_outside_tide: 15098 GBS steps measured (119579 before the fix)
 PN_BH_ONLY_DE = 7.7e-10   # pn_bh_only: 5.93e-10 measured (host build)
 BINARIES = dict(TEST_CASE="plummer", INTEGRATOR="hhs", TOTAL_TIME_MYR="2e-3", DT_MAX_MYR="1e-3", DT_MIN_MYR="1e-14",
                 ETA_FF="0.2", ETA_FB="0.2", ETA_GRAD="0.1", ETA_JERK="0.1", SOFTENING_PC="0", COLLISIONAL="true",
@@ -684,6 +686,26 @@ def c19_secular_peri(exe):
     rows = diagnostics(out)
     ok = check("c19: pair sent to LogH", moved, 1, lower=True)
     return ok & check("c19: max|dE/E|", max(r[0] for r in rows), C19_PERI_DE)
+
+
+def c21_sdar_outside_tide(exe):
+    """CASES.md C21: the 100 bodies around the deepest set of camp2-B seed 3, step 324 (stall_324.h5, cut-out
+    s3_s324_0), one 1e-3 Myr interval. SDAR slowed the 168 + 94 Msun binary (P 2.9 yr, e 0.87) of a 3-4 body LogH
+    group by kappa ~ 11 from its in-group perturber (a 0.25 Msun star) while the 141 + 113 Msun binary outside the
+    group dominates its tide: the FSI kicks then do work on a lagging phase, 8.1e-8 E_REF unbooked (the parent's
+    9.8e-8 jump), not reduced by halving the steps (RESTART: 1.3e-7). Now outside perturbers count in kappa
+    (Subsystem::ext_tidal) and a pair whose outside tidal energy swing per orbit exceeds FLYBY_CM_EPS E_REF keeps
+    kappa = 1: here nothing is slowed (= SDAR off)."""
+    cfg = dict(TEST_CASE="particle_file", IC_FILE=str(Path(__file__).parent / "data" / "c21_sdar_outside_tide.txt"),
+               TOTAL_TIME_MYR="1.0e-3", DT_MAX_MYR="1.0e-3", DT_MIN_MYR="1.0e-14", ETA="0", ETA_GRAD="0.2",
+               ETA_JERK="0", ETA_RESTART="1e-8", FLYBY_CM_EPS="1e-11", NGB_MASS_SCALING="true", SERIAL_N2_GPU="16384",
+               TREE_THRESHOLD="100000", TREE_THETA="0.7", SDAR="true", COLLISIONAL="true", PN_ORDER="31",
+               BH_MERGE_RADIUS="total", COLL_MASS_LOSS_C="0.3", TDE_ACCRETION_FRACTION="0.5", SSE_ENABLED="false",
+               PRINT_INTERVAL="1", PROFILING="false", E_REF="178136820.92837137", NGB_MREF="0.7363636363636357")
+    out = run_output(exe, cfg)
+    gbs = sum(int(a) for a in re.findall(r"LogH=\d+ \(gbs=(\d+)", out))
+    ok = check("c21: max|dE/E|", max(r[0] for r in diagnostics(out)), C21_SD_DE)
+    return ok & check("c21: LogH GBS steps", gbs, C21_SD_GBS)
 
 
 def cmv_recoil_remnant(exe):
@@ -1813,6 +1835,8 @@ CASES = {
     "cmv_recoil_remnant": lambda exe: cmv_recoil_remnant(exe),
     # C19: secular PN write-back at the pericentre of a near-radial BH binary (1e6 run, stall_15.h5)
     "c19_secular_peri": lambda exe: c19_secular_peri(exe),
+    # C21: SDAR slowed a binary whose tide comes from outside its LogH group (camp2-B s3, stall_324.h5)
+    "c21_sdar_outside_tide": lambda exe: c21_sdar_outside_tide(exe),
     "tidal_floor_bh_binary": lambda exe: tidal_floor_bh_binary(exe),
     "sec_inner_s432": lambda exe: sec_inner_cutout(exe, "s101_s432_1"),
     "sec_inner_s1025": lambda exe: sec_inner_cutout(exe, "s404_s1025_1"),

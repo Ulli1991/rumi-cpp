@@ -3580,7 +3580,7 @@ static int hhs_fsi_recursive_impl(
             if (g_profiler.fence) Kokkos::fence();   // profile: the time-step kernels above are asynchronous
             g_subsys_phase.add(SubsystemPhaseTimes::DT_WAIT, dt_clock.lap());
             slow0().record_pre(p, start, count);
-            g_subsystem_mgr.subsystem_timesteps(p, G, g_collisional.eta_pert);
+            g_subsystem_mgr.subsystem_timesteps(p, G, g_collisional.eta_pert, depth == 0);
             g_subsys_phase.add(SubsystemPhaseTimes::DT_SUBSYS, dt_clock.lap());
 
             // Level-0 store: capture dt AFTER subsystem adjustments

@@ -789,6 +789,7 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
             sub.T_scale = old->T_scale;
             sub.E_scale = old->E_scale;
             sub.scales_set = old->scales_set;
+            sub.ext_tidal = old->ext_tidal;
         } else {
             sub.id = next_id++;
         }
@@ -1625,10 +1626,31 @@ void SubsystemManager::apply_perturbation_timestep(Particles& p, double G, doubl
         md.scatter_dt(p);
 }
 
-void SubsystemManager::subsystem_timesteps(Particles& p, double G, double eta_pert) const {
+void SubsystemManager::subsystem_timesteps(Particles& p, double G, double eta_pert, bool full_set) const {
     if (active.empty()) return;
     MemberData md(active, pid_to_idx_, p);   // one gather and one scatter for both passes
     shared_timestep_md(active, pid_to_idx_, md);
+    if (g_collisional.sdar) {   // SDAR: external tidal strength of each 3+ body subsystem (Subsystem::ext_tidal)
+        auto x = md.col(MemberData::X), y = md.col(MemberData::Y), z = md.col(MemberData::Z);
+        auto ax = md.col(MemberData::AX), ay = md.col(MemberData::AY), az = md.col(MemberData::AZ);
+        auto slot = [&](int pid) { return (pid >= 0 && pid < (int)pid_to_idx_.size()) ? pid_to_idx_[pid] : -1; };
+        for (const auto& sub : active) {
+            if (sub.n_bodies < 3) continue;
+            double tid = 0.0;
+            for (int b = 0; b < sub.n_bodies; b++)
+                for (int c = b + 1; c < sub.n_bodies; c++) {
+                    const int i = slot(sub.particle_ids[b]), j = slot(sub.particle_ids[c]);
+                    if (i < 0 || j < 0 || i >= p.N || j >= p.N) continue;
+                    const double dx = x(j) - x(i), dy = y(j) - y(i), dz = z(j) - z(i);
+                    const double fx = ax(j) - ax(i), fy = ay(j) - ay(i), fz = az(j) - az(i);
+                    const double r = std::sqrt(dx * dx + dy * dy + dz * dz);
+                    if (r > 0.0) tid = std::max(tid, std::sqrt(fx * fx + fy * fy + fz * fz) / (G * r));
+                }
+            // a deeper set lacks the slower perturbers (their forces come by the parent's kicks): keep the largest
+            // value since the last full set (depth 0) of the step
+            sub.ext_tidal = full_set ? tid : std::max(sub.ext_tidal, tid);
+        }
+    }
     if (eta_pert > 0.0)
         perturbation_timestep_md(active, pid_to_idx_, md, G, eta_pert, &p,
                                  g_collisional.tidal_floor_adapt ? &tidal_floor_scale_ : nullptr);

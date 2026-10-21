@@ -56,6 +56,7 @@ struct SubsystemBatch {
     // Persistent normalization scales (computed once per subsystem, fixed thereafter)
     std::vector<double> stored_V_scale, stored_R_scale, stored_T_scale, stored_E_scale;
     std::vector<char> stored_scales_set;
+    std::vector<double> ext_tidal;   // Subsystem::ext_tidal per subsystem (SDAR, Msun / pc^3)
 
     // Per-body stellar radius (R_sun) and type (host, same layout as flat_mass): SDAR collision candidates
     std::vector<double> flat_radius;

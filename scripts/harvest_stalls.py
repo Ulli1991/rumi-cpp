@@ -8,10 +8,12 @@ culprits (the deepest set, each costly or inaccurate LogH integration, each subs
 ids) are cut out with scripts/cutout.py into
 DIR/<run>_s<step>_<k>/. Culprit sets met before (same particle ids) are skipped. With --exe every case is replayed
 in isolation on the host (one interval, OMP_NUM_THREADS=1 unless set) and the table lists wall time, LogH GBS steps
-and |dE/E|, |dL/L|: a case that still takes long reproduces the stall and becomes a test (tests/data/, run_case.py)
+and |dE| / E_REF (the parent cluster's |E0|, the units of the run's STALL jumps; the run itself prints |dE/E0| of
+the cut-out's own E0), |dL/L|: a case that still takes long reproduces the stall and becomes a test (tests/data/, run_case.py)
 with the fix that makes it fast at equal or better energy. Pure Python.
 """
 import argparse
+import math
 import os
 import re
 import subprocess
@@ -20,6 +22,19 @@ import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+G = 4.302194e-3   # pc (km/s)^2 / Msun (G_CODE)
+
+
+def eref_scale(case):
+    """|E0| of the cut-out (ic.txt) over the parent's E_REF (config.txt; 1 without E_REF)"""
+    eref = None
+    for line in open(case / "config.txt"):
+        if "=" in line and not line.lstrip().startswith("#") and line.split("=")[0].strip() == "E_REF":
+            eref = float(line.split("=", 1)[1])
+    b = [[float(v) for v in line.split()[:7]] for line in open(case / "ic.txt") if not line.startswith("#")]
+    T = sum(0.5 * q[0] * (q[4] ** 2 + q[5] ** 2 + q[6] ** 2) for q in b)
+    U = -sum(G * b[i][0] * b[j][0] / math.dist(b[i][1:4], b[j][1:4]) for i in range(len(b)) for j in range(i + 1, len(b)))
+    return abs(T + U) / eref if eref else 1.0
 
 
 def stall_blocks(log):
@@ -69,7 +84,7 @@ def replay(exe, case, timeout, env):
     gbs = sum(int(v) for v in re.findall(r"LogH=\d+ \(gbs=(\d+)", out))
     de = re.findall(r"^\|dE/E0\| = (\S+)", out, re.M)
     dl = re.findall(r"^\|dL/L0\| = (\S+)", out, re.M)
-    return f"{wall:.2f}", str(gbs), f"{float(de[-1]):.2e}" if de else "-", f"{float(dl[-1]):.2e}" if dl else "-"
+    return f"{wall:.2f}", str(gbs), f"{float(de[-1]) * eref_scale(case):.2e}" if de else "-", f"{float(dl[-1]):.2e}" if dl else "-"
 
 
 def main():
@@ -106,7 +121,7 @@ def main():
                 n = sum(1 for line in open(case / "ic.txt") if not line.startswith("#"))
                 res = replay(a.exe, case, a.timeout, env) if a.exe else ("-", "-", "-", "-")
                 rows.append((case.name, f"{wall}/{med}", kind, info, n) + res)
-    print(f"{'case':<28} {'step value/median':>22} {'kind':<5} {'n':>5} {'wall':>8} {'gbs':>9} {'dE/E':>10} {'dL/L':>10}  culprit")
+    print(f"{'case':<28} {'step value/median':>22} {'kind':<5} {'n':>5} {'wall':>8} {'gbs':>9} {'dE/E_REF':>10} {'dL/L':>10}  culprit")
     for name, sw, kind, info, n, w, g, de, dl in rows:
         print(f"{name:<28} {sw:>22} {kind:<5} {n:>5} {w:>8} {g:>9} {de:>10} {dl:>10}  {info}")
 

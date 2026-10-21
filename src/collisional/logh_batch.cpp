@@ -224,7 +224,9 @@ void SubsystemBatch::pack(const SubsystemManager& mgr, const Particles& p,
     stored_T_scale.resize(n_sub);
     stored_E_scale.resize(n_sub);
     stored_scales_set.resize(n_sub);
+    ext_tidal.resize(n_sub);
     for (int s = 0; s < n_sub; s++) {
+        ext_tidal[s] = mgr.active[s].ext_tidal;
         has_stored_aux_vel[s] = mgr.active[s].has_aux_vel;
         if (mgr.active[s].has_aux_vel) {
             int av_off = stored_aux_vel_offsets[s] * 3;
@@ -909,6 +911,13 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
             sd_par.c = g_collisional.sdar_c;
             sd_par.steps_per_orbit = gbs_steps_per_orbit();   // the limit follows kappa during the call
             sd_par.coll_pair = coll;
+            // perturbers outside the subsystem (C21): their tide reaches the members through the FSI kicks, which
+            // need the true phase; normalised sum m_k / d_k^3
+            if (s < (int)batch.ext_tidal.size())
+                sd_par.ext_tidal = batch.ext_tidal[s] * R_scale * R_scale * R_scale / M_total;
+            static const bool sdar_ext = [] { const char* e = std::getenv("NBODY_SDAR_EXT"); return !e || std::atoi(e) != 0; }();
+            if (!sdar_ext) sd_par.ext_tidal = 0.0;   // A/B: outside perturbers ignored (before C21)
+            else sd_par.ext_share = g_collisional.flyby_cm_eps * g_collisional.e_ref / E_scale;
             logh_sd_update(state, G_norm, sd_par);   // initial kappa: B = -H_sd
         }
 

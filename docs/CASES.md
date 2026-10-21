@@ -607,6 +607,48 @@ Status: **closed** (fixed, test, ensemble checked), **option** (fix kept as an o
   gives NaN at the first LogH call (dt = nan) in main as well. Not followed up: the 200k runs never reached it, and
   the IC is artificial (`/raven/ptmp/uli/cpp-nbody-runs/secinner-ab-2026-10-19/nan_ic.txt`).
 
+## C21 SDAR slowed a binary whose tide comes from outside its LogH group: 8e-8 E_REF per interval (fixed; GPU A/B pending)
+
+- **Found by:** the stall harvest of 2026-10-19, cut-out s3_s324_0 (camp2-B seed 3, 110k, stall_324.h5, t = 0.323
+  Myr; the 100 bodies within 0.05 pc of the deepest set). Host replay, one interval: |dE/E0| 1.81e-5 of the cut-out's
+  own E0 = 8.1e-8 E_REF (|E0| of the cut-out is 4.5e-3 E_REF). The parent's jump at that step was 9.8e-8 E_REF, so
+  the cut-out is faithful (parent E_REF / NGB_MREF, no external field in the parent either). 119579 GBS steps, 5 s.
+- **Localised (NBODY_ELEDGER):** subsystem advances balance their books (residue -7e-15; LogH residues <= 3e-14,
+  secular binaries -8e-15). The error is the own error of the FSI calls at depth 11-12 (sum 1.24e-7 at d12), many
+  calls of ~5e-10 with the same sign: a drift, not a single bad step. The automatic RESTART with halved etas makes it
+  worse (1.3e-7 E_REF): not a step-size error. With SDAR = false: 6.9e-10 (3.1e-12 E_REF), 15098 GBS steps, faster.
+- **Cause:** SDAR slows the 168 + 94 Msun binary (a ~ 13 AU, P 2.9 yr, e 0.87) of a 3-4 body LogH group by kappa ~ 11.
+  kappa came only from the in-group perturber, a 0.25 Msun star. The 141 + 113 Msun binary 0.019 pc away is outside
+  the group and dominates the tide. W20 (sec. 2.2, Eq. H2) slows the binary inside an external potential U. The
+  members feel dv/dt = -(1/kappa) grad U_b - grad U while their positions move at v/kappa. That is what the FSI kicks
+  plus a slowed LogH drift do. It conserves H_sd, but the physical energy then differs by (1 - 1/kappa) times the
+  binary's energy change from the outside tide. Nothing books that change (E_sd covers only changes made inside the
+  call). It stays bounded only while U is nearly constant over kappa P (W20 Eq. UieqUz), and that is the condition the
+  kappa criteria enforce. The code applied them to the in-group perturbers only, so they could not see the outside
+  binary. With it, kappa_org ~ 0.94: the pair should not have been slowed. PeTar likewise sums all perturbers of a
+  group, members and outside neighbours, into kappa. The 2-body subsystems already keep kappa = 1 for this reason
+  (logh_batch.cpp).
+- **Fix (local criteria, logh.cpp logh_sd_update, subsystem.cpp subsystem_timesteps):**
+  1. Subsystem::ext_tidal (3+ body subsystems, SDAR on) is the outside tidal strength, sum m_k / d_k^3. It is
+     estimated as max over member pairs of |a_ext,j - a_ext,i| / (G r_ij) from the members' external accelerations
+     in the time-step pass. The value is the largest since the step's depth-0 pass, because deeper sets lack the
+     slower perturbers. It is carried over by the detection and stored in restarts (dataset ext_tidal; older files
+     read 0). The term m_ab ext_tidal is added to every pair's perturbation in kappa_org (W20 Eq. 22).
+  2. Tidal energy cap: a pair keeps kappa = 1 when the outside tide's energy swing per orbit, 2 pi mu G ext_tidal
+     a^2, exceeds FLYBY_CM_EPS E_REF. That is the per-step budget the tidal-sampling steps of fly-bys already use.
+     Without the cap (1 alone) the error falls only 7x (2.5e-6 own E0): other pairs remain slowed with kappa ~ 11 in
+     the same tide.
+  - A/B switch NBODY_SDAR_EXT=0 restores the old behaviour.
+- **Cut-out (host, one interval, own E0):** main -> C21: |dE/E| 1.81e-5 -> 6.91e-10, GBS steps 119579 -> 15098,
+  |dL/L| 4.6e-14 -> 4.7e-15, wall 1.36 -> 1.23 s (no RESTART). Nothing is slowed here, the same result as SDAR off.
+- **Test:** c21_sdar_outside_tide (tests/data/c21_sdar_outside_tide.txt = the cut-out): |dE/E| <= 9e-10 and GBS
+  steps <= 19600 (1.3x measured). Fails on main (1.8e-5, 119579). The SDAR tests (sdar_kozai_triple, sdar_f3_flyby,
+  sdar_pn_kappa1, quad22_sdar) and sec_inner_* are unchanged. Host ctest: all pass (6 login-node 120 s timeouts
+  rerun individually: pass, results identical with NBODY_SDAR_EXT=0).
+- **200k A/B (pending, not run):** off (NBODY_SDAR_EXT=0) vs new, from the C20 A/B restarts (s101 stall_1340, s202
+  stall_1117, s404 stall_1025), gpudev, set up in `/raven/ptmp/uli/cpp-nbody-runs/sdarext-ab-2026-10-21/` (job.sh per
+  directory, binary nbody-c21). Submission is awaiting the user.
+
 ## Verified building blocks (checked against an independent derivation, no bug found)
 
 | Building block | Check | Result | Test |

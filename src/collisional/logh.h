@@ -54,6 +54,9 @@ struct SdarParams {
                                                 // replaces the per-body sum when set: TDE radii are not additive)
     bool pn[LOGH_MAX_BODIES] = {};          // PN bodies (CollisionalConfig::pn_body): their pairs keep kappa = 1
     double steps_per_orbit = 0.0;           // GBS step limit per slowed orbit (0: only the caller's max_iter)
+    double ext_tidal = 0.0;                 // sum m_k / d_k^3 of the perturbers outside the subsystem (normalised;
+                                            // Subsystem::ext_tidal), added to every pair's perturbation (C21)
+    double ext_share = 0.0;                 // FLYBY_CM_EPS |E0| (normalised; 0: none): outside tide kappa cap (C21)
 };
 
 // SDAR: slowed kinetic energy T_sd (FC-I Eq. A4; W20 Eq. 50) and potential U_sd; plain T, U when n_sd = 0

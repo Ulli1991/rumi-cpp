@@ -56,6 +56,13 @@ struct Subsystem {
     // Hierarchy info (for triples)
     int inner_binary_id;                 // -1 if not hierarchical
     int outer_companion_pid;             // -1 if not hierarchical
+
+    // SDAR (3+ bodies): tidal strength of the perturbers outside the subsystem, sum_k m_k / d_k^3 (Msun / pc^3),
+    // estimated as max over member pairs of |a_ext,j - a_ext,i| / (G r_ij) from the members' external accelerations
+    // of the time-step passes (subsystem_timesteps; largest since the step's depth-0 pass, carried over by the
+    // detection); 0: not known yet. Enters the slow-down factor's
+    // perturbation (W20 Eq. 22) next to the members' own perturbations (C21)
+    mutable double ext_tidal = 0.0;
 };
 
 struct SubsystemManager {
@@ -175,7 +182,7 @@ struct SubsystemManager {
     void apply_perturbation_timestep(Particles& p, double G, double eta_pert) const;
 
     // enforce_shared_timestep then apply_perturbation_timestep with one member gather and scatter
-    void subsystem_timesteps(Particles& p, double G, double eta_pert) const;
+    void subsystem_timesteps(Particles& p, double G, double eta_pert, bool full_set = false) const;
 
     // Per-level diagnostics: set by detect_from_pairs/accumulate_diagnostics
     int last_level_pairs = 0;       // neighbor pairs found at most recent detect_from_pairs

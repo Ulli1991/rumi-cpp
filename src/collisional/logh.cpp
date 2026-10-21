@@ -281,6 +281,12 @@ double logh_sd_dyn_time(const LogHState& state, double G, double M_total) {
 //   kappa_max = c |<r_j - r_cm>_m| / (P |<v_j - v_cm>_m|)                             (W20 Eq. 28, FC-I Eq. A9)
 // with mass-weighted means over the perturbers, kappa = min(kappa_org, kappa_max); pairs with kappa <= 1 are
 // not slowed, nor collision candidates, pericentre < coll_factor (R_a + R_b) (FC-I App. B3).
+// The sum over perturbers includes those outside the subsystem, m_ab par.ext_tidal (C21; PeTar sums all perturbers
+// of a group, members and outside neighbours). Their tide acts through the FSI kicks on the slowed members, as the
+// external potential U of W20 Eq. H2: H_sd is conserved, but the physical energy drifts by (1 - 1/kappa) of the
+// binary's energy change by that tide, which no book holds (s3_s324_0: 8e-8 E_REF per interval). A pair whose
+// outside tidal energy swing per orbit exceeds par.ext_share (FLYBY_CM_EPS E_REF) therefore keeps kappa = 1, as
+// 2-body subsystems do (see logh_batch.cpp).
 // The energy jump delta H_sd = H_sd(kappa') - H_sd(kappa) at fixed (x, v) (W20 Eq. 24) is booked into B, so
 // that T_sd + U_sd + B stays the accumulated integration error (W20 Eq. 25; B is the LogH momentum of time).
 double logh_sd_update(LogHState& state, double G, const SdarParams& par, bool clear) {
@@ -340,12 +346,20 @@ double logh_sd_update(LogHState& state, double G, const SdarParams& par, bool cl
                 m_p += state.mass[k];
                 pert_out += mb * state.mass[k] / (d2 * std::sqrt(d2));
             }
+            pert_out += mb * par.ext_tidal;
             if (pert_out <= 0.0) continue;
             const double kappa_org = par.k_ref * (mi * mj / (r_apo * r_apo * r_apo)) / pert_out;
             const double Rn = std::sqrt(R[0]*R[0] + R[1]*R[1] + R[2]*R[2]) / m_p;
             const double Vn = std::sqrt(V[0]*V[0] + V[1]*V[1] + V[2]*V[2]) / m_p;
             const double kappa_max = Vn > 0.0 ? par.c * Rn / (P * Vn) : kappa_org;
-            const double kappa = std::min(kappa_org, kappa_max);
+            double kappa = std::min(kappa_org, kappa_max);
+            // Outside tide budget (C21): the binary's tidal energy swing over an orbit, est = mu |T| v P =
+            // 2 pi mu G ext_tidal a^2 (T = G ext_tidal a, v P = 2 pi a), against the share FLYBY_CM_EPS |E0| of the
+            // tidal-sampling steps; above it kappa = 1
+            if (par.ext_share > 0.0 && par.ext_tidal > 0.0 && kappa > 1.0) {
+                const double est = 2.0 * M_PI * mi * mj / mb * G * par.ext_tidal * a * a;
+                if (est > par.ext_share) kappa = 1.0;
+            }
             if (!(kappa > 1.0)) continue;
             state.sd_a[state.n_sd] = i;
             state.sd_b[state.n_sd] = j;

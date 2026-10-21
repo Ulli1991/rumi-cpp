@@ -32,7 +32,7 @@ const char* code_version() { return NBODY_GIT_VERSION; }
 // Sizes for x86-64 with libstdc++ (host and nvcc builds).
 #ifdef ENABLE_COLLISIONAL
 static_assert(sizeof(OrbitalElements) == 10 * sizeof(double), "OrbitalElements changed: update io/restart.cpp");
-static_assert(sizeof(Subsystem) == 392, "Subsystem changed: update io/restart.cpp (write_subsystems/read_subsystems)");
+static_assert(sizeof(Subsystem) == 400, "Subsystem changed: update io/restart.cpp (write_subsystems/read_subsystems)");
 static_assert(sizeof(EnergyBookkeeping) == 13 * sizeof(double), "EnergyBookkeeping changed: update io/restart.cpp");
 static_assert(sizeof(MergerTreeNode) == 112, "MergerTreeNode changed: update io/restart.cpp");
 static_assert(sizeof(EscaperEvent) == 96, "EscaperEvent changed: update io/restart.cpp");
@@ -243,12 +243,12 @@ void write_subsystems(hid_t parent, const SubsystemManager& m) {
     const size_t n = m.active.size();
     std::vector<int> id(n), nb(n), type(n), sec(n), norb(n), has_aux(n), sc_set(n), inner(n), outer(n), off(n + 1, 0);
     std::vector<int> member;
-    std::vector<double> dt(n), orb(n * 10), aux(n * LOGH_MAX_BODIES * 3), scales(n * 4);
+    std::vector<double> dt(n), orb(n * 10), aux(n * LOGH_MAX_BODIES * 3), scales(n * 4), ext(n);
     for (size_t s = 0; s < n; s++) {
         const Subsystem& q = m.active[s];
         id[s] = q.id; nb[s] = q.n_bodies; type[s] = (int)q.type; sec[s] = q.is_secular; norb[s] = q.n_orb_per_dt;
         has_aux[s] = q.has_aux_vel; sc_set[s] = q.scales_set; inner[s] = q.inner_binary_id;
-        outer[s] = q.outer_companion_pid; dt[s] = q.dt_sub;
+        outer[s] = q.outer_companion_pid; dt[s] = q.dt_sub; ext[s] = q.ext_tidal;
         const OrbitalElements& o = q.orb;
         const double ov[10] = {o.a, o.e, o.inc, o.Omega, o.omega, o.true_anom, o.mean_anom, o.E_orb, o.L_mag, o.period};
         std::copy(ov, ov + 10, &orb[s * 10]);
@@ -262,7 +262,7 @@ void write_subsystems(hid_t parent, const SubsystemManager& m) {
     h5::write(g, "orb", orb, 10); h5::write(g, "type", type); h5::write(g, "is_secular", sec);
     h5::write(g, "n_orb_per_dt", norb); h5::write(g, "aux_vel_phys", aux, LOGH_MAX_BODIES * 3);
     h5::write(g, "has_aux_vel", has_aux); h5::write(g, "scales", scales, 4); h5::write(g, "scales_set", sc_set);
-    h5::write(g, "inner_binary_id", inner); h5::write(g, "outer_companion_pid", outer);
+    h5::write(g, "inner_binary_id", inner); h5::write(g, "outer_companion_pid", outer); h5::write(g, "ext_tidal", ext);
     h5::write(g, "member_offset", off); h5::write(g, "member_pid", member);
     std::vector<int> removed(m.removed_pids.begin(), m.removed_pids.end()), ghosts(m.ghost_pids.begin(), m.ghost_pids.end());
     std::sort(removed.begin(), removed.end());
@@ -274,13 +274,15 @@ void write_subsystems(hid_t parent, const SubsystemManager& m) {
 void read_subsystems(hid_t parent, SubsystemManager& m) {
     auto g = h5::open_group(parent, "subsystems");
     std::vector<int> id, nb, type, sec, norb, has_aux, sc_set, inner, outer, off, member;
-    std::vector<double> dt, orb, aux, scales;
+    std::vector<double> dt, orb, aux, scales, ext;
     h5::read(g, "id", id); h5::read(g, "n_bodies", nb); h5::read(g, "dt_sub", dt); h5::read(g, "orb", orb);
     h5::read(g, "type", type); h5::read(g, "is_secular", sec); h5::read(g, "n_orb_per_dt", norb);
     h5::read(g, "aux_vel_phys", aux); h5::read(g, "has_aux_vel", has_aux); h5::read(g, "scales", scales);
     h5::read(g, "scales_set", sc_set); h5::read(g, "inner_binary_id", inner); h5::read(g, "outer_companion_pid", outer);
     h5::read(g, "member_offset", off); h5::read(g, "member_pid", member);
+    if (h5::exists(g, "ext_tidal")) h5::read(g, "ext_tidal", ext);   // C21; older files: 0 (not known yet)
     const size_t n = id.size();
+    ext.resize(n, 0.0);
     if (off.size() != n + 1 || orb.size() != n * 10 || aux.size() != n * LOGH_MAX_BODIES * 3 || scales.size() != n * 4)
         h5::fail("restart subsystem table is inconsistent");
     m.active.clear();
@@ -289,7 +291,7 @@ void read_subsystems(hid_t parent, SubsystemManager& m) {
         Subsystem& q = m.active[s];
         q.id = id[s]; q.n_bodies = nb[s]; q.type = (SubsystemType)type[s]; q.is_secular = sec[s] != 0;
         q.n_orb_per_dt = norb[s]; q.has_aux_vel = has_aux[s] != 0; q.scales_set = sc_set[s] != 0;
-        q.inner_binary_id = inner[s]; q.outer_companion_pid = outer[s]; q.dt_sub = dt[s];
+        q.inner_binary_id = inner[s]; q.outer_companion_pid = outer[s]; q.dt_sub = dt[s]; q.ext_tidal = ext[s];
         const double* o = &orb[s * 10];
         q.orb = OrbitalElements{o[0], o[1], o[2], o[3], o[4], o[5], o[6], o[7], o[8], o[9]};
         std::copy(&aux[s * LOGH_MAX_BODIES * 3], &aux[(s + 1) * LOGH_MAX_BODIES * 3], q.aux_vel_phys);
