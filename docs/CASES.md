@@ -775,3 +775,7 @@ Status: **closed** (fixed, test, ensemble checked), **option** (fix kept as an o
 
 - **Tried on:** the C2 step. |dL/L| 1.3e-14 -> 1.4e-9, 15 % faster. Deleted in 1483094 (the isolated tests had stayed
   at round-off: a path inconsistency in the cluster, not debugged).
+- **s303 determinism check:** a base-only rerun (job 31374530) reproduces base_s303 bit for bit (final 2.63e-11), so the
+  s303 gap (3.66e-11 with IRK) is caused by the 370 IRK calls changing the trajectory, not run-to-run noise. Each IRK
+  call has ~100x less error than a GBS call, so the global difference is most likely chaotic divergence; the energy
+  rule still fails on s303 and NBODY_GAUSS_IRK stays default off. Production value needs PN subsystems covered.
