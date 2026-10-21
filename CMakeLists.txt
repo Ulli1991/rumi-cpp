@@ -43,6 +43,7 @@ if(ENABLE_COLLISIONAL)
         ${SRC_DIR}/collisional/subsystem.cpp
         ${SRC_DIR}/collisional/logh.cpp
         ${SRC_DIR}/collisional/gbs.cpp
+        ${SRC_DIR}/collisional/gauss_irk.cpp
         ${SRC_DIR}/collisional/logh_step.cpp
         ${SRC_DIR}/collisional/logh_batch.cpp
         ${SRC_DIR}/collisional/secular.cpp
@@ -155,6 +156,12 @@ if(ENABLE_COLLISIONAL)
                    ${SRC_DIR}/collisional/kepler.cpp ${SRC_DIR}/collisional/post_newtonian_core.cpp)
     target_include_directories(symplectic-test PRIVATE ${SRC_DIR}/collisional)
     target_compile_features(symplectic-test PRIVATE cxx_std_17)
+    # Gauss-IRK subsystem integrator: e = 0.9 binary, 2+2 quadruple, simplified Newton, hard-pericentre failure
+    # (tests/gauss_irk_test.cpp; ctest gauss_irk; CASES.md C22)
+    add_executable(gauss-irk-test ${CMAKE_CURRENT_SOURCE_DIR}/tests/gauss_irk_test.cpp ${SRC_DIR}/collisional/gauss_irk.cpp
+                   ${SRC_DIR}/collisional/logh.cpp ${SRC_DIR}/collisional/post_newtonian_core.cpp)
+    target_include_directories(gauss-irk-test PRIVATE ${SRC_DIR}/collisional)
+    target_compile_features(gauss-irk-test PRIVATE cxx_std_17)
     target_include_directories(kepler-test PRIVATE ${SRC_DIR}/collisional)
     target_compile_features(kepler-test PRIVATE cxx_std_17)
     # GBS error estimate against its round-off floor: an unreachable ETA_GBS must not collapse the step size
@@ -259,7 +266,7 @@ foreach(case kepler_e09 kepler_e0 frost4_e09 frost4_e099 planets_hhs planets_fsi
              mergers_sse binaries50_detected triples_detected
              cc_pn1_wide cc_binaries50 cc_min_binaries50 cc_vs_plain_binaries50 cc_consistent_binaries50 force_err_injection cm_cpu_vs_device cc_cm_consistent
              cm_eps_tidal_sampling cm_eps_cpu_vs_device pn_bh_only flyby_group_floor weak_split_bh_binary c19_secular_peri c21_sdar_outside_tide cmv_recoil_remnant tidal_floor_bh_binary sec_inner_s432 sec_inner_s1025 sec_inner_s3047 sec_inner_merge dense_core_split triple_id_order secular_triples_off sec_triple_energy adv_kozai_triple secular_omega0_steps spin_precession spin_j spin_j_pn1 ic_binaries_no_mergers eta_jerk0_fsi va_without_grad restart_halves_va secular_stellar_no_pn secular_bh_tight_steps logh_hierarchy_complete
-             sdar_kozai_triple sdar_f3_flyby sdar_pn_kappa1
+             sdar_kozai_triple sdar_f3_flyby sdar_pn_kappa1 gauss_irk_quad22 gauss_irk_s1744
              cm_eps_tidal_components flyby_member_com ngb_mass_scaling
              coll_headon_triple coll_contact_flyby coll_contact_flyby_logh coll_tde_parabolic coll_tde_accretion fryer_rapid_gap pn_boost_logh pn_boost_secular wide_binaries_ngb gbs_deuflhard_pn cluster_diag tidal_ref_orbit tidal_energy_books tidal_jacobi_escapers ss_companion_flyby int_pos_flyby quad22_sdar particle_file_roundtrip grad_only_planets bh_merge_radius_fc bh_merge_radius_total coll_mass_loss coll_bh_isco natal_kicks_ns natal_kicks_fallback sse_books
              tree_dt_binaries tree_dt_binaries_host tree_dt_binaries_cm tree_dt_binaries50 tree_dt_triples tree_dt_mergers tree_dt_softened tree_default_on
@@ -289,6 +296,7 @@ if(ENABLE_COLLISIONAL)
     add_test(NAME gbs_eta_floor COMMAND gbs-eta-floor-test)
     add_test(NAME kepler_near_parabolic COMMAND kepler-near-parabolic-test)
     add_test(NAME logh_symplectic COMMAND symplectic-test)
+    add_test(NAME gauss_irk COMMAND gauss-irk-test)
 endif()
 add_test(NAME grad_force_consistency COMMAND grad-force-test)
 if(USE_MPI)

@@ -85,6 +85,9 @@ struct SubsystemBatch {
     int stat_sd_calls = 0;         // SDAR: integrations with a slowed binary at some step
     double stat_sd_kappa_max = 0;  // SDAR: largest slow-down factor
     int stat_sec_inner = 0;        // secular inner binaries collapsed inside PN subsystems (CASES.md C20)
+    int stat_irk = 0;              // integrations done by Gauss-IRK (NBODY_GAUSS_IRK, CASES.md C21)
+    int stat_irk_fb = 0;           // ... chosen for Gauss-IRK but finished by LogH+GBS (no convergence, collision watch)
+    std::vector<char> irk_used;    // per subsystem: integrated by Gauss-IRK
     std::vector<double> t_reached; // physical time each subsystem's GBS integration reached (code units)
     int stat_collisions = 0;       // collisions decided inside the integrations
     int stat_peri_landings = 0;    // candidate pericentres a step was forced onto

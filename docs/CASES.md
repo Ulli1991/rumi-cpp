@@ -649,6 +649,40 @@ Status: **closed** (fixed, test, ensemble checked), **option** (fix kept as an o
   stall_1117, s404 stall_1025), gpudev, set up in `/raven/ptmp/uli/cpp-nbody-runs/sdarext-ab-2026-10-21/` (job.sh per
   directory, binary nbody-c21). Submission is awaiting the user.
 
+## C22 Gauss-Legendre IRK (symplectic, 8 stages) for compact Newtonian subsystems (merged, default off; 200k A/B below)
+
+- **Motivation:** after C20/4c the remaining subsystem cost is in compact non-hierarchical 2-4 body systems (eccentric
+  binaries, 2+2 quadruples). The prototype (tests/proto_symrk, branch worktree-agent-a0cc578ab96edb7bf) was 30-1000x
+  more accurate than LogH+GBS at equal cost on these, with no linear energy drift (e = 0.9: 1.7e-8 -> 2.1e-11 over
+  1e5 orbits). PN1 in Hamiltonian form was retested (R2) and does not help the energy books, so PN subsystems stay on
+  LogH+GBS.
+- **Implementation (src/collisional/gauss_irk.{h,cpp}, logh_batch.cpp):** 8-stage Gauss method on the Poincare-
+  transformed Hamiltonian, fixed ds (30 steps per innermost orbit, floor 8/sqrt(1-e)), fixed-point iteration
+  (HMR08/AMM17) plus simplified Newton, landing on t_end exact to 1e-14 (GBS lands to 1e-4). Classification by local
+  criteria only: 2-4 bodies, no PN member, no collision candidate, no e >= 0.99 pair or hard encounter within the
+  call, no stable MA hierarchy, no SDAR slow-down; the exit stats print the count per reason. If the iteration does
+  not finish, the call starts again from the same state with LogH+GBS (unit test: state unchanged on failure). The
+  energy books are exact (SUBSYS_ERR kind unbooked-irk). Switch NBODY_GAUSS_IRK=1, default off.
+- **Isolated:** e = 0.9 binary, 2000 orbits: |dE/E| 4e-14 in one call or in 2000 calls; P exact, L 1e-13. 2+2
+  quadruple 1.6e-13. Full program, 2+2 quadruple (500 orbits per interval): |dE/E| 4.0e-10 -> 2.0e-12, 21 of 22
+  calls by IRK, wall 3.0 -> 4.5 s. Harvest cut-out s1744 (MA-unstable stellar triple): error per call 1e-13 to
+  9e-13 vs GBS 1e-11 to 5e-11; the run's |dE/E| (2.4e-7 -> 1.4e-6) is set by the FSI error of the stars outside the
+  subsystem (ledger), chaotic. Simplified Newton agrees with the fixed point to 7e-15 but never rescued a step the
+  fixed point lost at a hard pericentre; the GBS fallback is the safety net.
+- **Tests:** gauss_irk (unit), gauss_irk_quad22, gauss_irk_s1744; host ctest all pass (login-node 120 s timeouts
+  pass alone).
+- **200k A/B (gpudev, prod200k bf0.1 config from the C20 A/B restarts, ~80 steps, 2026-10-21,
+  /raven/ptmp/uli/cpp-nbody-runs/girkab-2026-10-21/):** base vs NBODY_GAUSS_IRK=1, 112 IRK calls per run, 0
+  fallbacks, 0 Newton steps, s/step median 5.5 / 10.4 / 5.4 unchanged.
+  - final |dE/E|: s101 4.97e-11 -> 2.21e-11, s202 6.43e-11 -> 1.59e-11, s303 2.63e-11 -> 3.66e-11;
+  - max |dE/E|: s101 5.07e-11 -> 2.43e-11, s202 6.71e-11 -> 2.61e-11, s303 8.26e-11 -> 8.79e-11.
+  Better on two seeds, equal within noise on s303 (max) with a worse final value. Not yet decided as default: under
+  the energy rule (equal or better on every seed) s303 needs a longer run or more seeds. The runs finished after the
+  Raven login-node crash of 2026-10-21 and were evaluated from Viper; the exit stats of the three IRK runs are in
+  their run.log.
+- **Open:** default decision (longer A/B, add s404); why IRK is "not chosen" per reason at 200k (counters added
+  69ac4c7, not yet run); PN subsystems (would need the 2-3.5PN terms in the Poincare form).
+
 ## Verified building blocks (checked against an independent derivation, no bug found)
 
 | Building block | Check | Result | Test |

@@ -1165,6 +1165,38 @@ def quad22_sdar(exe, label, cfg, bound):
     return ok & check(f"{label} stellar binary |e - e_Newtonian|", abs(e - e_n), 1e-5)
 
 
+GIRK_QUAD = dict(TEST_CASE="quad22_test", INTEGRATOR="hhs", PN_ORDER="0", SDAR="true", R_NGB="0.01", R_NGB_MAX="0.1",
+                 QUAD_M1="1.0", QUAD_M2="1.0", QUAD_A1_PC="1e-5", QUAD_E1="0.5", QUAD_M3="0.8", QUAD_M4="0.6",
+                 QUAD_A2_PC="7e-6", QUAD_E2="0.7", QUAD_A_OUT_PC="1.5e-4", QUAD_E_OUT="0.3", TOTAL_TIME_MYR="1e-2",
+                 DT_MAX_MYR="1e-3", DT_MIN_MYR="1e-16", SOFTENING_PC="0", COLLISIONAL="true", N_ORB_SECULAR="3",
+                 SSE_ENABLED="false", ETA_RESTART="1e-8", ETA_GBS="1e-10", PRINT_INTERVAL="1", PROFILING="false")
+# gauss_irk_quad22 (host build): with NBODY_GAUSS_IRK=1 max|dE/E| 1.965e-12, |dP|/M 7.52e-13, |dL/L| 1.61e-13, 21 of 22
+# subsystem calls by Gauss-IRK (one fell back to GBS: no convergence), 4.5 s; LogH+GBS: 3.996e-10, 2.52e-12, 4.08e-12, 3.0 s
+GIRK_QUAD_BOUNDS = (1.3 * 1.965e-12, 1.3 * 7.52e-13, 1.3 * 1.61e-13)
+# gauss_irk_s1744 (host build): unbooked T + U change of the Gauss-IRK calls, max 1.028e-19 E_REF (5 calls); the GBS
+# calls of the same subsystem (NBODY_GAUSS_IRK=0): max 2.65e-18, sum 1.3e-17 over 12
+GIRK_S1744_DE = 1.3 * 1.028e-19
+
+
+def gauss_irk_case(exe, label, cfg, n_irk, bounds=None, irk_de=None):
+    """CASES.md C22: compact Newtonian subsystems by Gauss-IRK (NBODY_GAUSS_IRK=1). At least n_irk subsystem calls must
+    go to Gauss-IRK; bounds: max |dE/E|, |dP|/M, |dL/L| of the run; irk_de: the largest unbooked energy change of a
+    Gauss-IRK call (SUBSYS_ERR unbooked-irk, units of E_REF). Without the switch no call is integrated by Gauss-IRK."""
+    out = run_output(exe, dict(cfg, SUBSYS_ERR_TOL="1e-30") if irk_de else cfg, env={"NBODY_GAUSS_IRK": "1"})
+    irk = sum(int(a) for a in re.findall(r"irk=(\d+) irk_fb", out))
+    ok = check(f"{label}: subsystem calls by Gauss-IRK", irk, n_irk, lower=True)
+    rows = diagnostics(out)
+    if bounds:
+        ok &= check(f"{label}: max|dE/E|", max(r[0] for r in rows), bounds[0])
+        ok &= check(f"{label}: max|dP|/M [km/s]", max(r[1] for r in rows), bounds[1])
+        ok &= check(f"{label}: max|dL/L|", max(r[2] for r in rows), bounds[2])
+    if irk_de:
+        de = [abs(float(x)) for x in re.findall(r"^SUBSYS_ERR step \d+ unbooked-irk dE/E0 (\S+)", out, re.M)]
+        ok &= check(f"{label}: Gauss-IRK calls logged", len(de), n_irk, lower=True)
+        ok &= check(f"{label}: largest unbooked dE of a Gauss-IRK call / E_REF", max(de) if de else 1.0, irk_de)
+    return ok
+
+
 def tidal_escapers(exe, label, cfg, bound):
     """TIDAL_FIELD + R_ESCAPE_RJ = 2 (NBODY6, Baumgardt & Makino 2003): stars beyond 2 r_J leave, r_J from the total
     mass at the first removal matches (G M R^2 / 2 V_c^2)^(1/3) (singular logarithmic halo), the energy with the
@@ -2023,6 +2055,13 @@ CASES = {
     # login node; with NBODY_SDAR_PN=1: 0.44 s, kappa_max 8.9e4, max|dE/E| 2.1e-16 (bound: round-off floor)
     # TEST_CASE = particle_file reproduces binary_test (Kepler e = 0.9, 10 intervals) bit for bit from its initial dump
     "particle_file_roundtrip": lambda exe: particle_file_roundtrip(exe, dict(KEPLER, TOTAL_TIME_MYR="1e-4")),
+    # C21: 2+2 quadruple (a 2 AU, e 0.5 + 1.4 AU, e 0.7, outer 31 AU, e 0.3; ~500 inner orbits per interval), Newtonian,
+    # SDAR on (no slow-down: tidal ratio > k_ref): Gauss-IRK, 200x smaller energy error than LogH+GBS
+    "gauss_irk_quad22": lambda exe: gauss_irk_case(exe, "2+2 quadruple, Gauss-IRK", GIRK_QUAD, 15, GIRK_QUAD_BOUNDS),
+    # C21: harvested cut-out (camp2 s101 step 1744: 0.72 + 0.083 Msun stars at 2 AU, e 0.78, with a 0.46 Msun star at
+    # ~80 AU, MA-unstable, 57-114 inner orbits per call), production settings
+    "gauss_irk_s1744": lambda exe: gauss_irk_case(exe, "s1744 cut-out, Gauss-IRK", dict(
+        sec_inner_cfg("306584304.2034864", "0.4037126187872738", "gauss_irk_s101_s1744_1.txt")), 5, irk_de=GIRK_S1744_DE),
     "quad22_sdar": lambda exe: quad22_sdar(exe, "2+2 quadruple, PN + SDAR", dict(
         HIER_LOGH, TEST_CASE="quad22_test", PN_ORDER="31", M_PN="5.0", SDAR="true", R_NGB="0.01",
         TOTAL_TIME_MYR="1e-3", DT_MAX_MYR="1e-3", TEST_STELLAR_RADIUS_RSUN="0.4", ETA_RESTART="1e-8"), 1e-14),
