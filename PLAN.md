@@ -354,3 +354,27 @@ Order (gate in brackets; "exact" = bit-identical, host ctest + dump compare):
 - Next, in order: (1) C21 200k A/B on Viper apudev, (2) C22 default decision (longer A/B or 4th seed, "not chosen"
   counters), (3) MSTAR for the 16-18 body dense-core groups (the remaining stall class), (4) items 2-7 above.
 - Rejected today, do not redo: R2 (1/(-U) kick) retest and R3 (Kahan) — energy rule; PN1 Hamiltonian for IRK.
+
+## Energy report watertight (2026-10-21 late) — work items W1-W8
+Measured: 200k bf0.1 s101, 26 steps, all 487972 PN LogH calls re-integrated at ETA_GBS x 1e-4 (job 31378360):
+plain T+U difference 3.6e-7 E_REF was orbital phase of the 1PN E_N oscillation; phase-independent
+Q = T+U+E_PN(conserved function) differs by sum|.| 5.0e-10 (signed 9.4e-11) vs reported 9.5e-11 -> real hidden error
+~5x reported, 40 % from one poorly resolved call (12.2+45 Msun, a 0.37 AU, e 0.64, ~11 GBS steps/orbit). Cut-outs
+s1408/s706: Q 1e-16..1e-17. s432 (sec-inner off): Q 6.5e-10/interval at ETA_GBS 1e-10 (real GBS error).
+Work items (in order):
+W1 Local tolerance rule for PN calls (ETA_GBS scan 1e-10..1e-13 on s432 / the 12+45 Msun call; cost vs Q error).
+W2 Exact GBS end-time landing (today NBODY_GBS_TTOL 1e-4 of call length -> members off the step time): cost on
+   Newtonian + PN calls, default if affordable (A/B, energy rule).
+W3 3PN EOM consistent for unequal masses (general-frame 3PN, Blanchet LRR acc3PN): today a bounded c^-6 swing
+   proportional to the mass difference; failing-first test (remainder ~c^-8).
+W4 Honest PN books: conservative 1-3PN via pn_conserved_energy from states, 2.5/3.5PN via integrated RR work;
+   residual visible; separate lines for PN truncation residual, N>2 mixed-order residual; spins (SO/SS) or off.
+W5 Secular / C20 sec-inner paths: converge the s1340 (2.2e-7) / s1025 (2e-8) tolerance dependence; secular-GW book
+   with convergence ctest.
+W6 Error-injection ctest for every booking path (E, P, L).
+W7 3-seed 200k A/B of the default changes, then BIFROST long-term set with honest books: Fig 9/10/11 (5 Myr),
+   Fig 8 (35 Myr), core collapse (4 Myr); quote |dE/E| only after W1-W6.
+W8 (research, parallel) ADM-Hamiltonian PN (to 3PN) + Gauss-IRK for PN binaries, RR as in-collocation force (A) vs
+   symmetric RR-kick split (B), vs LogH+GBS; prototype only, verdict decides a production path.
+Also confirmed: Gauss-IRK (C22) gains nothing in production because 99.8 % of LogH calls are PN and 98.9-99.9 % of the
+visible error is FSI -> accuracy leverage is in FSI (step criteria, eta), next after W1-W7; MSTAR waits for W4.
