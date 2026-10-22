@@ -748,6 +748,67 @@ Status: **closed** (fixed, test, ensemble checked), **option** (fix kept as an o
 - **Host ctest** (CPU node, 2026-10-22): 156 of 156 pass (luna_reader skipped).
 - **Not changed:** the 2-body secular path (secular_evolve_pn already resolves the GW time and tests coalescence),
   LogH, PN, the energy booking.
+## C25 NBODY_CM_TIDE: c.o.m. kicks and the orbit-averaged tide for binaries the kicks do not resolve (option, default off; 200k A/B pending)
+
+- **Case:** R5 (energy episodes = step-size resonance). A hard BH-BH binary whose inner period equals an HHS block
+  step gets the tide of its bound light star as FSI kicks at the same orbital phase; the kick errors add up
+  coherently. Cut-out `episodes-2026-10-22/res_s202_-1e-5`: summed per-step |dE| 5.51e-9 E_REF (largest step
+  1.1e-9). The user chose R5 fix 1.
+- **Path taken (checked):** the triple alternates between the secular-triple path (TRI_S at depth 0, no error) and
+  binary (2-body subsystem, secular binary / Kepler2 advance) + field star. In the second case the error is made by the
+  cross kicks star <-> binary at depths 10-12 in the 3-body set (the binary in the fast set, the star slow; kick
+  spacing pivot/2 = 2-8 P). So the change sits in kick_velocities only.
+- **Literature:** NBODY6 moves unperturbed KS binaries (gamma < 1e-6) by their c.o.m. only (Aarseth 2003, sec. 9.6;
+  Mikkola & Aarseth 1996), and gives perturbed KS binaries ~30 steps per orbit. SDAR (Wang, Nitadori & Makino 2020,
+  sec. 2) shows that the slow-down reproduces the orbit-averaged secular evolution and conserves L. PeTar (Wang et al.
+  2020b) applies the tidal tensor to binaries treated as c.o.m. particles. Single-averaged quadrupole and the
+  Milankovitch equations: Tremaine (2023, MNRAS, ZLK Hamiltonian, Eqs. 7, 9-10; the same <H_quad> is derived here
+  from <r r^T> = (a^2/2)[(1 - e^2) I - j j^T + 5 e e^T]). Heggie & Rasio (1996) for the averaged perturbation.
+- **Method (src/collisional/cm_tide.cpp, NBODY_CM_TIDE=1).** Per kick (targets T, sources S, step s, weight h), for
+  each bound 2-body subsystem in T. Local criteria only:
+  - kick spacing s/2 > P/16, N = 16 set by NBODY_CM_TIDE_NRES. A kick that resolves the orbit is a normal kick.
+  - gamma = 2 (a(1+e))^3 sum_S m_k/d_k^3 / M < 1e-3 (NBODY_CM_TIDE_GAMMA). The mode leaves above 4x (hysteresis).
+  - every source moves slowly: d_k/|v_k - V| > 2 P.
+
+  In c.o.m. mode:
+  1. Both members get the mass-weighted mean acceleration, so P is exact.
+  2. Each pair (binary, k) gets the correction F_avg,k - F_inst,k on the c.o.m. and minus that on k (P exact).
+     F_avg is the monopole plus -grad of the averaged quadrupole (mu/2) Phi_ab Q_ab, so the outer orbit moves in a
+     conservative averaged field.
+  3. The internal L changes by h (tau - sum_k d_k x F_corr,k), where tau = mu r x (a_j - a_i) is the torque the c.o.m.
+     kick removed. Total L is then exact by construction. It is the averaged quadrupole torque plus the torque of
+     what is not a point-mass pair force (gradient term of the middle kick).
+  4. e changes by the Milankovitch rate of the averaged quadrupole and is projected onto e.j = 0, e^2 + j^2 = 1 at
+     fixed a, so the internal Kepler energy is unchanged. The orbit is rebuilt at the same mean longitude. The change
+     is written back as mass-fraction splits of dr, dv with compensated velocity adds: rebuilding absolute velocities
+     made P drift by 3.6e-10 km/s through phase-coherent rounding.
+
+  Nothing is booked. The averaged flow conserves T + U up to the dropped short-period tide, which stays bounded and
+  visible. The method runs on the host (host subtrees, host builds), for sets <= 64 with an HHS source context: self
+  kicks of fsi_step and the three cross kicks of hhs_fsi_recursive_impl. HHS_CC and the MPI / tree kicks keep normal
+  kicks.
+- **Why P/16 and not P/4:** Kozai triple test at gamma ~ 1e-3. With P/4 the fine levels' normal kicks at P/12-P/25
+  lost 4.4 % of the energy (a_in -5 %), and the mode toggled 1557 times while a resolved kick reset it. Now the mode
+  follows the tide only. With P/16 (and P/64) every kick of that binary is in c.o.m. mode, a stays fixed and e follows
+  LogH.
+- **Results (host, one thread; summed per-step |dE| in E_REF with books, as |dE/E|).** The unbooked SDAR-line metric
+  also contains the E_sd swing of the LogH-SDAR steps of the same triple (1.1e-10, bounded).
+
+  | case | main | CM_TIDE | max\|dP\|/M, \|dL/L\| | wall |
+  |---|---|---|---|---|
+  | res_s202_-1e-5 (resonant) | 5.51e-9 | 1.94e-12 | 1.3e-11 / 8e-13 (main 7e-12 / 1.1e-12 final) | 2.5 -> 1.1 s |
+  | res_s202_0 (exact) | 2.64e-9 (unbooked) | 1.45e-12 | 1.7e-11 / 2.2e-13 | |
+  | res_s202_3e-2 (detuned) | 4.91e-11 | 2.30e-12 | 1.3e-11 / 1.2e-12 | 1.4 -> 1.6 s |
+  | Kozai 10+10+10, 65 deg, 3 ZLK cycles, vs LogH | max\|de\| 0.71, max\|di\| 21 deg, \|dE/E\| 6.5e-2 | 0.016, 0.77 deg, 3.7e-4 (bounded) | 3e-13 / 1e-13 | |
+
+  The Kozai test runs at the old test defaults (FLYBY_CM_EPS 0). With production settings the binary is resolved
+  (no c.o.m. mode), follows LogH equally well, and loses 2.1e-3 to the normal kicks: main's C5 class at gamma 1e-3.
+- **Tests:** cmtide_res_s202 and cmtide_detuned (tests/data/cmtide_res_s202.txt, the R5 cut-out with the parent's
+  E_REF / NGB_MREF, NBODY_EATTR per-step dE) and cmtide_kozai (inner e and i vs the resolved 3-body LogH run, energy,
+  P, L). Bounds are 1.3x measured; all fail on main (no CM_TIDE line, 5.5e-9).
+- **Open:** gpudev 200k A/B (`/raven/ptmp/uli/cpp-nbody-runs/cmtide-2026-10-22/{off,on}_{s202r5000,s101r5000,s404}`,
+  NBODY_EATTR on). Binaries in sets > 64 (device-resident) and inside 3+ body subsystems are not covered. Octupole and
+  higher averaged terms are dropped, both inner and outer (quadrupole only).
 
 ## E2 Gravitational-wave observables of compact binaries and mergers: gw_events.dat (added, on by default)
 
