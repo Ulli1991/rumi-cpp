@@ -273,6 +273,7 @@ Levels:
 | `NBODY_SDAR_PN` | =0: no SDAR slow-down of inner binaries without a PN member inside PN subsystems (default on since C20; PLAN item 4c) |
 | `NBODY_SDAR_EXT` | =0: SDAR slow-down factors ignore the perturbers outside the LogH subsystem (no outside tide in kappa, no tidal energy cap; before C21) |
 | `NBODY_CM_TIDE` | =1: field kicks of a bound 2-body subsystem whose kick spacing exceeds P/NBODY_CM_TIDE_NRES (gamma < NBODY_CM_TIDE_GAMMA, slowly moving sources; sets <= 64 on the host) go to its c.o.m., the tide acts on the internal orbit as the orbit-averaged quadrupole (Milankovitch), with E, P, L exact by construction (CASES.md C24; default off, A/B). At exit: `CM_TIDE:` line |
+| `NBODY_CM_TIDE_CHECK` | =1: report every NBODY_CM_TIDE kick that changes the internal semi-major axis (must never print) |
 | `NBODY_CM_TIDE_GAMMA` | =g: tidal strength 2 (a(1+e))^3 sum m_k/d_k^3 / M below which NBODY_CM_TIDE takes a binary (default 1e-3; leaves it above 4 g) |
 | `NBODY_CM_TIDE_NRES` | =n: kicks per orbit that resolve a binary for NBODY_CM_TIDE (default 16: c.o.m. mode above spacing P/16, stays down to P/32) |
 | `NBODY_GAUSS_IRK` | =1: compact Newtonian subsystems (2-4 bodies, no PN member, no collision candidate, no e >= 0.99 pair or hard encounter, no stable MA hierarchy, no SDAR slow-down) by the symplectic 8-stage Gauss-Legendre IRK instead of LogH+GBS, LogH+GBS if it does not converge (CASES.md C22; default off, A/B). At exit: `Gauss-IRK stats` line; step summary `irk=` / `irk_fb=`; SUBSYS_ERR kind `unbooked-irk` |
