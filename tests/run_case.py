@@ -626,6 +626,137 @@ def sec_inner_cfg(e_ref, ngb_mref, ic):
                 PRINT_INTERVAL="1", PROFILING="false", E_REF=e_ref, NGB_MREF=ngb_mref)
 
 
+# NBODY_CM_TIDE (CASES.md C24): the s202 resonance cut-out of R5 (29.4 + 26.6 Msun BH binary, P = 6.10e-8 Myr, with a
+# bound 0.087 Msun star) at DT_MAX = P 2^14 (1 + x): x = -1e-5 (on resonance, R5's failing case) and 3e-2 (detuned);
+# the production configuration of the run, parent E_REF / NGB_MREF; summed per-step |dE| in E_REF units
+CMT_RES = dict(TEST_CASE="particle_file", IC_FILE=str(Path(__file__).parent / "data" / "cmtide_res_s202.txt"),
+               BH_MERGE_RADIUS="total", COLLISIONAL="true", COLL_MASS_LOSS_C="0", E_REF="332540756.5659795",
+               NGB_MREF="0.3979476182578909", PRINT_INTERVAL="1", PROFILING="false", SSE_ENABLED="false",
+               STALL_RESTART="false", SUBSYS_ERR_TOL="1e-12", TDE_ACCRETION_FRACTION="0.5", TIDAL_FIELD="none",
+               PN_ORDER="0", DT_MIN_MYR="1.0e-14", ETA="0", ETA_GRAD="0.2", ETA_JERK="0", ETA_RESTART="1e-8",
+               FLYBY_CM_EPS="1e-11", NGB_MASS_SCALING="true", SERIAL_N2_GPU="16384", TREE_THRESHOLD="100000",
+               TREE_THETA="0.7", SDAR="true")
+CMT_ON = dict(CMT_RES, DT_MAX_MYR="0.0009072784277356841", TOTAL_TIME_MYR="0.018145568554713682")
+CMT_OFF = dict(CMT_RES, DT_MAX_MYR="0.0009345061256290109", TOTAL_TIME_MYR="0.018690122512580218")
+CMT_G = 4.302194e-3
+
+
+def cmt_step_errors(out, ic, e_ref):
+    """Per-step energy changes (E_REF units, books included as in |dE/E|: E_sd of the SDAR LogH calls) from the signed
+    NBODY_EATTR lines and the cut-out's own E0."""
+    rows = [list(map(float, l.split())) for l in open(ic) if l.strip() and not l.startswith("#")]
+    e0 = sum(0.5 * r[0] * sum(v * v for v in r[4:7]) for r in rows)
+    for a in range(len(rows)):
+        for b in range(a + 1, len(rows)):
+            e0 -= CMT_G * rows[a][0] * rows[b][0] / math.dist(rows[a][1:4], rows[b][1:4])
+    vals = {int(s): float(v) for s, v in re.findall(r"^EATTR step (\d+) signed_dE (\S+)", out, re.M)}
+    prev, steps = 0.0, []
+    for k in sorted(vals):
+        steps.append((vals[k] - prev) * abs(e0) / float(e_ref))
+        prev = vals[k]
+    return steps
+
+
+def cmtide_res(exe, label, cfg, bounds):
+    """R5 resonance class with NBODY_CM_TIDE=1: summed per-step |dE| (E_REF), max |dP|/M, max |dL/L|; c.o.m. kicks
+    must happen."""
+    out = run_output(exe, cfg, env={"NBODY_CM_TIDE": "1", "NBODY_EATTR": "1"})
+    steps = cmt_step_errors(out, cfg["IC_FILE"], cfg["E_REF"])
+    rows = diagnostics(out)
+    m = re.search(r"CM_TIDE: (\d+) binary kicks", out)
+    ok = check(f"{label}: c.o.m. kicks", int(m.group(1)) if m else 0, 1, lower=True)
+    ok &= check(f"{label}: sum of per-step |dE| [E_REF]", sum(abs(x) for x in steps), bounds[0])
+    ok &= check(f"{label}: max|dP|/M [km/s]", max(r[1] for r in rows), bounds[1])
+    return ok & check(f"{label}: max|dL/L|", max(r[2] for r in rows), bounds[2])
+
+
+# Kozai triple through the FSI (R_NGB below a_out: the binary is a 2-body subsystem, the third body a field star):
+# 10 + 10 Msun at a_in = 1e-5 pc (e 0.1), 10 Msun at a_out = 1.6e-4 pc (e 0), 65 deg; t_ZLK ~ 1.2e-3 Myr. The
+# reference is the resolved three-body LogH integration (R_NGB 1e-3, SDAR and secular triples off)
+CMT_KOZAI = dict(TEST_CASE="triple_test", INTEGRATOR="hhs", TRIPLE_A_IN_PC="1e-5", TRIPLE_E_IN="0.1", TRIPLE_M1="10.0",
+                 TRIPLE_M2="10.0", TRIPLE_A_OUT_PC="1.6e-4", TRIPLE_E_OUT="0.0", TRIPLE_M3="10.0",
+                 TRIPLE_INCL_DEG="65", TOTAL_TIME_MYR="1e-2", DT_MAX_MYR="1e-4", DT_MIN_MYR="1e-14", SOFTENING_PC="0",
+                 COLLISIONAL="true", R_NGB="5e-5", R_NGB_MAX="5e-5", N_ORB_SECULAR="3", PN_ORDER="0",
+                 SSE_ENABLED="false", SECULAR_TRIPLES="false", SDAR="false", ETA_RESTART="0", PRINT_INTERVAL="1",
+                 PROFILING="false")
+
+
+def inner_elements(rows):
+    """Inner e and the inclination (deg) of the inner orbit to the total angular momentum, from dump rows."""
+    best = None
+    for a in range(3):
+        for b in range(a + 1, 3):
+            d = math.dist(rows[a][2:5], rows[b][2:5])
+            if best is None or d < best[0]:
+                best = (d, a, b)
+    _, a, b = best
+    ma, mb = rows[a][1], rows[b][1]
+    r = [rows[b][2 + k] - rows[a][2 + k] for k in range(3)]
+    v = [rows[b][5 + k] - rows[a][5 + k] for k in range(3)]
+    gm = CMT_G * (ma + mb)
+    h = [r[1] * v[2] - r[2] * v[1], r[2] * v[0] - r[0] * v[2], r[0] * v[1] - r[1] * v[0]]
+    rr = math.sqrt(sum(x * x for x in r))
+    ev = [(v[1] * h[2] - v[2] * h[1]) / gm - r[0] / rr, (v[2] * h[0] - v[0] * h[2]) / gm - r[1] / rr,
+          (v[0] * h[1] - v[1] * h[0]) / gm - r[2] / rr]
+    lt = [0.0, 0.0, 0.0]
+    for q in rows:
+        m = q[1]
+        x, u = q[2:5], q[5:8]
+        lt = [lt[0] + m * (x[1] * u[2] - x[2] * u[1]), lt[1] + m * (x[2] * u[0] - x[0] * u[2]),
+              lt[2] + m * (x[0] * u[1] - x[1] * u[0])]
+    c = sum(h[k] * lt[k] for k in range(3)) / (math.sqrt(sum(x * x for x in h)) * math.sqrt(sum(x * x for x in lt)))
+    return math.sqrt(sum(x * x for x in ev)), math.degrees(math.acos(max(-1.0, min(1.0, c))))
+
+
+def run_dumps(exe, cfg, env):
+    """(stdout, [rows of every NBODY_DUMP snapshot]) of one run."""
+    with tempfile.TemporaryDirectory() as d:
+        Path(d, "config.txt").write_text("".join(f"{k} = {v}\n" for k, v in {**OLD_DEFAULTS, **cfg}.items()))
+        out = subprocess.run([exe], cwd=d, capture_output=True, text=True, timeout=TIMEOUT_S,
+                             env={**os.environ, "NBODY_DUMP": "1", **env})
+        if out.returncode != 0:
+            raise SystemExit(f"FAIL: exit {out.returncode}\n{out.stdout[-2000:]}{out.stderr[-2000:]}")
+        snaps = []
+        for fn in sorted(Path(d).glob("dump_*.bin")):
+            raw = fn.read_bytes()
+            n = struct.unpack_from("i", raw)[0]
+            snaps.append(sorted(struct.unpack_from("9d", raw, 4 + 72 * i)[:8] for i in range(n)))
+        return out.stdout, snaps
+
+
+def cmtide_kozai(exe, bounds):
+    """The averaged tide must keep the real secular evolution: inner e and inclination over ~3 ZLK cycles against the
+    resolved LogH reference (max deviation over the outputs), with the binary in c.o.m. mode; P and L at round-off."""
+    ref_out, ref = run_dumps(exe, dict(CMT_KOZAI, R_NGB="1e-3", R_NGB_MAX="1e-3"), {})
+    out, cmt = run_dumps(exe, CMT_KOZAI, {"NBODY_CM_TIDE": "1"})
+    _, off = run_dumps(exe, CMT_KOZAI, {})
+    er = [inner_elements(s) for s in ref]
+    ec = [inner_elements(s) for s in cmt]
+    eo = [inner_elements(s) for s in off]
+    n = min(len(er), len(ec), len(eo))
+    de = max(abs(er[k][0] - ec[k][0]) for k in range(n))
+    di = max(abs(er[k][1] - ec[k][1]) for k in range(n))
+    if os.environ.get("CMT_PRINT"):
+        for k in range(n):
+            print(f"   {k:4d} ref {er[k][0]:.4f} {er[k][1]:7.3f}  cm {ec[k][0]:.4f} {ec[k][1]:7.3f}  "
+                  f"off {eo[k][0]:.4f} {eo[k][1]:7.3f}")
+    print(f"   e range ref {min(x[0] for x in er):.3f}-{max(x[0] for x in er):.3f}, cm {min(x[0] for x in ec):.3f}-"
+          f"{max(x[0] for x in ec):.3f}; without CM_TIDE max|de| {max(abs(er[k][0] - eo[k][0]) for k in range(n)):.3e}"
+          f" max|di| {max(abs(er[k][1] - eo[k][1]) for k in range(n)):.3e} deg")
+    m = re.search(r"CM_TIDE: (\d+) binary kicks", out)
+    rows = diagnostics(out)
+    ok = check("kozai: c.o.m. kicks", int(m.group(1)) if m else 0, 1, lower=True)
+    ok &= check("kozai: e range of the reference (ZLK cycles)", max(x[0] for x in er) - min(x[0] for x in er), 0.3,
+                lower=True)
+    ok &= check("kozai: max|e - e_ref|", de, bounds[0])
+    ok &= check("kozai: max|i - i_ref| [deg]", di, bounds[1])
+    # the averaged flow conserves T + U up to the dropped short-period tide (bounded, ~gamma E_in at gamma ~ 1e-3);
+    # normal kicks at the old defaults lose 6.5e-2 here, the resolved LogH reference 4.5e-10
+    ok &= check("kozai: max|dE/E|", max(r[0] for r in rows), bounds[4])
+    ok &= check("kozai: max|dP|/M [km/s]", max(r[1] for r in rows), bounds[2])
+    return ok & check("kozai: max|dL/L|", max(r[2] for r in rows), bounds[3])
+
+
 def sec_inner_merge(exe):
     """C20: the s1025 cut-out with its BH binary shrunk 60x (t_GW < one step): the merger must still happen exactly
     once (a binary about to merge is never collapsed: the secular dry run refuses it, so the binary GW rule / LogH
@@ -2028,6 +2159,11 @@ CASES = {
     "sec_inner_s1025": lambda exe: sec_inner_cutout(exe, "s404_s1025_1"),
     "sec_inner_s3047": lambda exe: sec_inner_cutout(exe, "s404_s3047_0"),
     "sec_inner_merge": sec_inner_merge,
+    # C24 NBODY_CM_TIDE: R5 resonance cut-out on / off resonance (bounds 1.3 x measured max; without the switch the
+    # summed |dE| is 5.51e-9 / 4.91e-11, max|dP|/M and |dL/L| at the same round-off), Kozai triple vs LogH
+    "cmtide_res_s202": lambda exe: cmtide_res(exe, "on resonance", CMT_ON, (2.53e-12, 1.63e-11, 1.04e-12)),
+    "cmtide_detuned": lambda exe: cmtide_res(exe, "detuned", CMT_OFF, (3.0e-12, 1.70e-11, 1.52e-12)),
+    "cmtide_kozai": lambda exe: cmtide_kozai(exe, (0.021, 1.0, 4.0e-13, 1.3e-13, 4.8e-4)),
     # PN_BH_ONLY false: the PN binaries of massive stars give the LogH calls the two paths are compared on
     "cm_eps_cpu_vs_device": lambda exe: paths_same_steps(exe, "fly-by step with tidal sampling",
                                                          dict(BINARIES, FLYBY_CM_EPS="1e-11", PN_ORDER="31",

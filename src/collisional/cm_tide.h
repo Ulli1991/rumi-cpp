@@ -8,10 +8,13 @@
 //
 // Per kick (target range T, source range S, step s, kick weight h), for every bound 2-body subsystem with both
 // members in T, the binary is in c.o.m. mode when (local criteria, hysteresis in brackets):
-//   kick spacing s/2 > P/4 (stays on while s/2 > P/8),
+//   kick spacing s/2 > P/N (N = NBODY_CM_TIDE_NRES, default 16; c.o.m. mode down to P/(2N)): FSI kicks resolve a
+//   perturbed orbit only with ~N per orbit (KS binaries in NBODY6 take ~30 steps per orbit; a Kozai triple at
+//   gamma 1e-3 with normal kicks at P/12-P/25 lost 4 % of its energy, CASES.md C24),
 //   gamma = 2 (a(1+e))^3 / M sum_k m_k / d_k^3 < NBODY_CM_TIDE_GAMMA (default 1e-3; stays on below 4x),
 //   every source k changes the tide slowly: d_k / |v_k - V| > 2 P,
-// with d_k the distance of source k from the binary's c.o.m. In c.o.m. mode:
+// with d_k the distance of source k from the binary's c.o.m. The mode follows the tide only; a kick that resolves
+// the orbit is a normal kick. In c.o.m. mode:
 //   1. both members get the mass-weighted mean of their accelerations (momentum exact),
 //   2. every pair (binary, k) gets the correction F_avg,k - F_inst,k on the c.o.m. and its opposite on k
 //      (momentum exact): the outer orbit then moves in the monopole plus the averaged quadrupole of the binary,

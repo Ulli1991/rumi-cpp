@@ -26,21 +26,29 @@ struct Bin {
     double Phi[6];            // tidal tensor of the sources at the c.o.m. (xx yy zz xy xz yz)
     double Fsum[3];           // sum of the pair corrections on the c.o.m.
     double tc[3];             // their torque, sum_k d_k x F_k
+    double a_pre;             // semi-major axis before the kick (NBODY_CM_TIDE_CHECK)
     std::vector<Corr> corr;
 };
 std::vector<Bin> g_bins;
 std::unordered_map<long long, char> g_mode;   // hysteresis: binary (pid pair) in c.o.m. mode at its last kick
 
 struct Stats {
-    long long kicks = 0, on = 0, off = 0, refused_gamma = 0, refused_slow = 0, j_clamp = 0;
+    long long kicks = 0, on = 0, off = 0, refused_gamma = 0, refused_slow = 0, j_clamp = 0, resolved = 0;
+    double res_min = 1e30, res_max = 0.0;   // kick spacing / P of the resolved (normal) kicks
     ~Stats() {
         if (kicks || refused_gamma || refused_slow)
             std::printf("CM_TIDE: %lld binary kicks in c.o.m. mode, %lld switches on, %lld off, refused: %lld by the "
-                        "tide, %lld by the perturber speed, %lld |j| clamps\n",
-                        kicks, on, off, refused_gamma, refused_slow, j_clamp);
+                        "tide, %lld by the perturber speed, %lld |j| clamps; %lld normal kicks at spacing/P %.3g-%.3g\n",
+                        kicks, on, off, refused_gamma, refused_slow, j_clamp, resolved, resolved ? res_min : 0.0,
+                        res_max);
         std::fflush(stdout);
     }
 } g_stats;
+
+double n_res() {   // kicks per orbit that count as resolving it (NBODY_CM_TIDE_NRES, default 16: spacing P/16)
+    static const double n = [] { const char* e = std::getenv("NBODY_CM_TIDE_NRES"); return e ? std::atof(e) : 16.0; }();
+    return n;
+}
 
 double gamma_on() {
     static const double g = [] { const char* e = std::getenv("NBODY_CM_TIDE_GAMMA"); return e ? std::atof(e) : 1e-3; }();
@@ -129,7 +137,12 @@ bool pre(Particles& p, int start, int count, double h) {
         if (eps >= 0.0) { set_mode(false); continue; }
         const double a = -GM / (2.0 * eps);
         const double P = 2.0 * M_PI * std::sqrt(a * a * a / GM);
-        if (spacing <= (was_on ? 0.125 : 0.25) * P) { set_mode(false); continue; }
+        if (spacing <= (was_on ? 0.5 : 1.0) * P / n_res()) {
+            g_stats.resolved++;
+            g_stats.res_min = std::min(g_stats.res_min, spacing / P);
+            g_stats.res_max = std::max(g_stats.res_max, spacing / P);
+            continue;
+        }   // resolved by this kick: normal kick, the mode stays (it follows the tide)
         double hv[3], ev[3];
         cross(r, v, hv);
         cross(v, hv, ev);
@@ -155,7 +168,7 @@ bool pre(Particles& p, int start, int count, double h) {
         set_mode(true);
 
         Bin b{};
-        b.i = i; b.j = j; b.mi = mi; b.mj = mj;
+        b.i = i; b.j = j; b.mi = mi; b.mj = mj; b.a_pre = a;
         b.ai[0] = ax[i]; b.ai[1] = ay[i]; b.ai[2] = az[i];
         b.aj[0] = ax[j]; b.aj[1] = ay[j]; b.aj[2] = az[j];
         const double mu = mi * mj / M;
@@ -262,6 +275,9 @@ void post(Particles& p, double h) {
         const double eps = 0.5 * dot(v, v) - GM / rr;
         if (eps >= 0.0) continue;   // cannot happen (c.o.m. kicks leave the relative motion alone)
         double a = -GM / (2.0 * eps);
+        static const bool chk = std::getenv("NBODY_CM_TIDE_CHECK") != nullptr;
+        if (chk && std::fabs(a / b.a_pre - 1.0) > 1e-12)
+            std::printf("CM_TIDE_CHECK kick changed a by %.3e (e %.4f)\n", a / b.a_pre - 1.0, 0.0);
         double hv[3], ev[3];
         cross(r, v, hv);
         cross(v, hv, ev);
