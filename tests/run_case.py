@@ -609,9 +609,9 @@ def tidal_floor_bh_binary(exe):
 # (CASES.md C20). (E_REF, NGB_MREF, bounds 1.3 x measured on the host build: |dE/E|, |dP|/M [km/s], |dL/L| (with the
 # booked P / L sinks); GBS steps bound). Before C20: s432 |dP|/M 3.5e-13, |dL/L| 1.9e-13; s1025 2.0e-12, 3.2e-13
 SEC_INNER_CASES = {
-    "s101_s432_1": ("306584304.2034864", "0.4037126187872738", (SEC_DE_432, 1.64e-12, 2.5e-13), 1000),
+    "s101_s432_1": ("306584304.2034864", "0.4037126187872738", (SEC_DE_432, 2.95e-12, 2.5e-13), 1000),
     "s404_s1025_1": ("367882904.67611593", "0.40210304758978715", (SEC_DE_1025, 5.6e-12, 1.45e-13), 5000),
-    "s404_s3047_0": ("367882904.67611593", "0.40210304758978715", (SEC_DE_3047, 2.3e-12, 4.9e-13), 2000),
+    "s404_s3047_0": ("367882904.67611593", "0.40210304758978715", (SEC_DE_3047, 3.6e-12, 6.6e-13), 2000),
 }
 SEC_INNER_WALL = 20.0   # s per run (0.03-0.11 s measured on the login node; 470 s, 748 s, > 900 s before)
 

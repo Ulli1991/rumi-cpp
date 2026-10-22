@@ -131,9 +131,11 @@ double secular_pn_et2(double eps, double j, double nu, int pn_order) {
 // Secular evolution of (eps, j) — auxiliary variable leapfrog (Hellstrom & Mikkola 2010)
 // ============================================================================
 //
-// The rates depend on the state, so the ODE is not separable; copies (eps_aux, j_aux) are kicked with the rates of
-// the physical state and vice versa (KDK), and the drift advances the pericentre angle (k n) and the mean anomaly (n)
-// at the half-stepped state.
+// The rates depend on the state, so the ODE is not separable; extended phase space (Pihajoki 2015, CeMDA 121, 211):
+// the state is kicked with the rates of a copy (eps_aux, j_aux) and the copy with the rates of the state, in sequence
+// (state h/2, copy h, state h/2: a symmetric composition, second order), and the drift advances the pericentre angle
+// (k n) and the mean anomaly (n) at the half-stepped state. Before (CASES.md C23, ctest sec_gw_conv_fast) both half
+// kicks were simultaneous: the copy stayed equal to the state and the scheme was forward Euler (first order).
 int secular_evolve_pn(SecularPnState& s, double dt, double nu, double Gm, double c, int pn_order) {
     // Secular timestep criterion: eta_sec * min(eps / |eps'|, e_t^2 / |(e_t^2)'|) from the current state, re-evaluated
     // every sub-step (t_GW ~ a^4 shrinks within one interval of an inspiral). BIFROST Eq. 30 also has omega/omega-dot,
@@ -159,25 +161,26 @@ int secular_evolve_pn(SecularPnState& s, double dt, double nu, double Gm, double
         dw = secular_pn_k(eps, j, nu, pn_order) * dM;
     };
 
-    double eps_aux = s.eps, j_aux = s.j;
+    double eps_aux = s.eps, j_aux = s.j, de_a = 0.0, dj_a = 0.0;
+    bool have_aux_rate = false;
     s.dw = 0.0; s.dM = 0.0; s.merged = false;
     int n_steps = 0;
     for (double t_done = 0.0; t_done < dt && n_steps < max_steps; n_steps++) {
         double h = step_size(s.eps, s.j);
         if (h >= (dt - t_done) * (1.0 - 1e-12)) h = dt - t_done;   // last sub-step lands on dt
         t_done = (h == dt - t_done) ? dt : t_done + h;
-        for (int half = 0; half < 2; half++) {
-            double de_a, dj_a, de_p, dj_p;
-            secular_pn_rates(eps_aux, j_aux, nu, Gm, c, pn_order, de_a, dj_a);
+        if (!have_aux_rate) secular_pn_rates(eps_aux, j_aux, nu, Gm, c, pn_order, de_a, dj_a);
+        s.eps += 0.5 * h * de_a; s.j += 0.5 * h * dj_a;
+        {
+            double dw, dM, de_p, dj_p;
+            drift_rate(s.eps, s.j, dw, dM);
+            s.dw += h * dw; s.dM += h * dM;
             secular_pn_rates(s.eps, s.j, nu, Gm, c, pn_order, de_p, dj_p);
-            s.eps += 0.5 * h * de_a; s.j += 0.5 * h * dj_a;
-            eps_aux += 0.5 * h * de_p; j_aux += 0.5 * h * dj_p;
-            if (half == 0) {
-                double dw, dM;
-                drift_rate(s.eps, s.j, dw, dM);
-                s.dw += h * dw; s.dM += h * dM;
-            }
+            eps_aux += h * de_p; j_aux += h * dj_p;
         }
+        secular_pn_rates(eps_aux, j_aux, nu, Gm, c, pn_order, de_a, dj_a);   // also the first kick of the next step
+        have_aux_rate = true;
+        s.eps += 0.5 * h * de_a; s.j += 0.5 * h * dj_a;
         // Coalescence: pericentre a (1 - e) < 20 G m / c^2 (10 Schwarzschild radii, collision_distance), a = G m / (eps c^2)
         const double e = std::sqrt(std::max(secular_pn_et2(s.eps, s.j, nu, pn_order), 0.0));
         if (!(s.eps > 0.0) || !(s.j > 0.0) || (1.0 - e) < 20.0 * s.eps) { s.merged = true; break; }

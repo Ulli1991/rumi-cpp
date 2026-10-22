@@ -1213,3 +1213,16 @@ Status: **closed** (fixed, test, ensemble checked), **option** (fix kept as an o
   s303 gap (3.66e-11 with IRK) is caused by the 370 IRK calls changing the trajectory, not run-to-run noise. Each IRK
   call has ~100x less error than a GBS call, so the global difference is most likely chaotic divergence; the energy
   rule still fails on s303 and NBODY_GAUSS_IRK stays default off. Production value needs PN subsystems covered.
+
+## C26 Secular PN integrator was first order (simultaneous half kicks; fixed)
+
+- **Bug (since c72bfcb):** `secular_evolve_pn` (src/collisional/secular.cpp) meant to be a symmetric extended-phase-space
+  leapfrog, but the two half kicks were evaluated simultaneously, so the copy stayed equal to the state and the step was
+  forward Euler (first order). Found by a convergence ctest (`sec_gw_conv_fast`, branch secgw-conv-c23): a 10+10 Msun BH
+  binary radiating 1/3 of its binding energy in one step; convergence ratio 3.8 (first order), E_gw off by 9e-3 at the
+  default step factor.
+- **Fix:** sequential kicks (Pihajoki 2015), second order; convergence ratio 16.0 in a scratch driver.
+- **On main (cherry-picked, 2026-10-22):** secular / sec_inner / c19 / c24 / merger / GW tests pass; sec_inner_s432 and
+  sec_inner_s3047 max|dP|/M (2.27e-12, 2.75e-12 km/s) and s3047 |dL/L| (5.0e-13) moved at round-off with the corrected
+  trajectory; bounds set to 1.3x the new values. The convergence ctest itself needs NBODY_ETA_SEC (C23 branch) and comes
+  with the C23 merge.
