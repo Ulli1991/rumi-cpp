@@ -24,6 +24,7 @@
 #include "stellar_cache.h"
 #include "device_staging.h"
 #include "stall.h"
+#include "cm_tide.h"
 #endif
 #include <Kokkos_Core.hpp>
 #include <vector>
@@ -1607,6 +1608,9 @@ void fsi_step(Particles& p, int start, int count,
     g_subset_hist.record(SubsetHistogram::FSI_STEP, count);
     bool tree_mode = !force_direct_n2 && (use_tree && count >= tree_threshold);
     bool tree_built = false;
+#ifdef ENABLE_COLLISIONAL
+    cm_tide::KickSrcScope cmt_src(start, count, dt, G);   // self kicks: the set is its own source
+#endif
 
     // U kick (dt/6)
     if (forces_valid) {
@@ -2008,6 +2012,10 @@ void kick_velocities(Particles& p, int start, int count, double dt) {
     RawView pvx{p.vx.data()}, pvy{p.vy.data()}, pvz{p.vz.data()};
     RawView pax{p.ax.data()}, pay{p.ay.data()}, paz{p.az.data()};
     RawView cvx{p.cvx.data()}, cvy{p.cvy.data()}, cvz{p.cvz.data()};
+#ifdef ENABLE_COLLISIONAL
+    // NBODY_CM_TIDE (cm_tide.h, CASES.md C24): unresolved binaries get c.o.m. kicks and the orbit-averaged tide
+    const bool cmt = !use_integer_positions && cm_tide::enabled() && cm_tide::pre(p, start, count, dt);
+#endif
 
     // Compensated: a plain v += a dt rounds at ~eps|v| per kick and sets the energy floor
     small_for("kick", count, KOKKOS_LAMBDA(int ii) {
@@ -2016,6 +2024,9 @@ void kick_velocities(Particles& p, int start, int count, double dt) {
         kahan_add(pvy(i), cvy(i), pay(i) * dt);
         kahan_add(pvz(i), cvz(i), paz(i) * dt);
     });
+#ifdef ENABLE_COLLISIONAL
+    if (cmt) cm_tide::post(p, dt);
+#endif
 }
 
 // =============================================================================
@@ -3779,8 +3790,18 @@ static int hhs_fsi_recursive_impl(
     g_profiler.stop(StepProfiler::CROSS_FORCE, cross_pairs);
     g_profiler.start();
     force_err_inject(p, slow_start, slow_count + fast_count, slow_count + fast_count);
-    kick_velocities(p, slow_start, slow_count, pivot_dt * FSI_KICK);
-    kick_velocities(p, fast_start, fast_count, pivot_dt * FSI_KICK);
+    {
+#ifdef ENABLE_COLLISIONAL
+        cm_tide::KickSrcScope cmt_src(fast_start, fast_count, pivot_dt, G);   // cross kicks: sources = the other set
+#endif
+        kick_velocities(p, slow_start, slow_count, pivot_dt * FSI_KICK);
+    }
+    {
+#ifdef ENABLE_COLLISIONAL
+        cm_tide::KickSrcScope cmt_src(slow_start, slow_count, pivot_dt, G);
+#endif
+        kick_velocities(p, fast_start, fast_count, pivot_dt * FSI_KICK);
+    }
     g_profiler.stop(StepProfiler::DRIFT_KICK);
 
     // Step 2: FSI half-step on slow
@@ -3842,8 +3863,18 @@ static int hhs_fsi_recursive_impl(
     g_profiler.stop(StepProfiler::CROSS_GRAD, cross_pairs * 2);
     g_profiler.start();
     force_err_inject(p, slow_start, slow_count + fast_count, slow_count + fast_count);
-    kick_velocities(p, slow_start, slow_count, pivot_dt * FSI_MOD_KICK);
-    kick_velocities(p, fast_start, fast_count, pivot_dt * FSI_MOD_KICK);
+    {
+#ifdef ENABLE_COLLISIONAL
+        cm_tide::KickSrcScope cmt_src(fast_start, fast_count, pivot_dt, G);   // cross kicks: sources = the other set
+#endif
+        kick_velocities(p, slow_start, slow_count, pivot_dt * FSI_MOD_KICK);
+    }
+    {
+#ifdef ENABLE_COLLISIONAL
+        cm_tide::KickSrcScope cmt_src(slow_start, slow_count, pivot_dt, G);
+#endif
+        kick_velocities(p, fast_start, fast_count, pivot_dt * FSI_MOD_KICK);
+    }
     g_profiler.stop(StepProfiler::DRIFT_KICK);
 
     // Step 5: Recurse on fast (second half)
@@ -3904,8 +3935,18 @@ static int hhs_fsi_recursive_impl(
     g_profiler.stop(StepProfiler::CROSS_FORCE, cross_pairs);
     g_profiler.start();
     force_err_inject(p, slow_start, slow_count + fast_count, slow_count + fast_count);
-    kick_velocities(p, slow_start, slow_count, pivot_dt * FSI_KICK);
-    kick_velocities(p, fast_start, fast_count, pivot_dt * FSI_KICK);
+    {
+#ifdef ENABLE_COLLISIONAL
+        cm_tide::KickSrcScope cmt_src(fast_start, fast_count, pivot_dt, G);   // cross kicks: sources = the other set
+#endif
+        kick_velocities(p, slow_start, slow_count, pivot_dt * FSI_KICK);
+    }
+    {
+#ifdef ENABLE_COLLISIONAL
+        cm_tide::KickSrcScope cmt_src(slow_start, slow_count, pivot_dt, G);
+#endif
+        kick_velocities(p, fast_start, fast_count, pivot_dt * FSI_KICK);
+    }
     g_profiler.stop(StepProfiler::DRIFT_KICK);
     return n_removed;
 }

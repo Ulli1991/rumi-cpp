@@ -41,6 +41,7 @@ if(ENABLE_COLLISIONAL)
     target_sources(nbody-kokkos PRIVATE
         ${SRC_DIR}/collisional/kepler.cpp
         ${SRC_DIR}/collisional/subsystem.cpp
+        ${SRC_DIR}/collisional/cm_tide.cpp
         ${SRC_DIR}/collisional/logh.cpp
         ${SRC_DIR}/collisional/gbs.cpp
         ${SRC_DIR}/collisional/gauss_irk.cpp
