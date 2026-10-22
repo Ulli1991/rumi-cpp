@@ -34,3 +34,10 @@ App. B l. 942-975) are not the Fig. 8 ICs. `config_fig8_soft.txt` is that soften
 **Chain logic.** Each segment runs `--restart auto` and stops cleanly at WALLTIME_LIMIT = 23.6 h. The segment
 resubmits itself only if all of these hold: the newest `restart_*.h5` is new in this segment, its step (taken with
 `head -1`, because ".h5" also matches the regex) is below 35000, and fewer than 12 segments have run.
+
+**Status 2026-10-22.** The binary is built: main 6784753, CUDA, at
+`/raven/ptmp/uli/cpp-nbody-runs/fig8-2026-10-22/nbody-main-6784753`. `make_runs.sh` has written the job
+directories there (`gpudev_s101`, `s101`, `s202`, `s303`). Nothing has been submitted yet. Next step: run
+`gpudev_s101/job.sh` to get the s/interval and the first per-interval |dE/E|. Then the node-hour estimate is
+35000 x s/interval / 3600 per seed. The reference is about 1.3 s/interval at 1e5 (BIFROST Fig. 7) and 2-5
+s/interval at 2e5 (Fig. 9). That implies about 15-50 node-h per seed, or 1-3 segments of 24 h.
