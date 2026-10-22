@@ -1,0 +1,40 @@
+# BIFROST Fig. 8 (Rantala et al. 2023, arXiv:2210.02472, Sec. 5.2): unsoftened N = 162000 equal-mass Plummer
+# cluster, 35 Myr. Source lines of every value: README.md next to this file. Production chain: job.sh in
+# /raven/ptmp/uli/cpp-nbody-runs/fig8-2026-10-22/s<seed>/ (PLUMMER_SEED, RESTART_*, WALLTIME_LIMIT set there).
+TEST_CASE = plummer
+INTEGRATOR = hhs
+TOTAL_TIME_MYR = 35.0                   # T = 35 Myr
+DT_MAX_MYR = 1.0e-3                     # integration interval (maximum time-step) 1e-3 Myr
+PLUMMER_N = 162000                      # caption of Fig. 8 (text: 161000, see README)
+PLUMMER_M_TOTAL = 8.1e4                 # 162000 x 0.5 Msun
+PLUMMER_R_HALF = 3.1                    # pc
+PLUMMER_MASS_DIST = equal
+PLUMMER_SEED = 101
+REMOVE_BH = false
+BINARY_FRAC = 0.0
+ADD_IMBH = false
+# Accuracy parameters (Sec. 5.2)
+ETA_FF = 0.2
+ETA_FB = 0.2
+ETA_GRAD = 0.1
+ETA_JERK = 0.1
+ETA_GBS = 1e-10                         # LogH end-time tolerance 1e-4 = NBODY_GBS_TTOL default
+R_NGB = 1e-3                            # pc, = eps_soft of the FROST-like run
+R_NGB_MAX = 0.1
+SOFTENING_PC = 0
+COLLISIONAL = true
+PN_ORDER = 0                            # no PN (no BHs; equal-mass 0.5 Msun stars)
+SSE_ENABLED = false
+R_ESCAPE_RH = 100.0
+TIDAL_FIELD = none
+# Output
+PRINT_INTERVAL = 1                      # per-interval |dE/E| (scripts/step_err.py, scripts/run_summary.py)
+PROFILING = on
+RESTART_INTERVAL = 100
+RESTART_KEEP = 2
+RESTART_DIR = .
+RESTART_FILE = auto
+WALLTIME_LIMIT = 0
+STALL_RESTART = true
+SNAPSHOT_INTERVAL = 0
+CLUSTER_DIAG_INTERVAL = 1000            # Lagrangian radii every 1 Myr (no core collapse expected in 35 Myr)
