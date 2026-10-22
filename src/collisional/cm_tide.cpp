@@ -277,7 +277,7 @@ void post(Particles& p, double h) {
         double a = -GM / (2.0 * eps);
         static const bool chk = std::getenv("NBODY_CM_TIDE_CHECK") != nullptr;
         if (chk && std::fabs(a / b.a_pre - 1.0) > 1e-12)
-            std::printf("CM_TIDE_CHECK kick changed a by %.3e (e %.4f)\n", a / b.a_pre - 1.0, 0.0);
+            std::printf("CM_TIDE_CHECK kick changed a by %.3e\n", a / b.a_pre - 1.0);
         double hv[3], ev[3];
         cross(r, v, hv);
         cross(v, hv, ev);
