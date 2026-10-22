@@ -272,6 +272,8 @@ Levels:
 | `NBODY_SEC_INNER` | =0: no secular inner binaries in PN subsystems (CASES.md C20; A/B) |
 | `NBODY_SDAR_PN` | =0: no SDAR slow-down of inner binaries without a PN member inside PN subsystems (default on since C20; PLAN item 4c) |
 | `NBODY_SDAR_EXT` | =0: SDAR slow-down factors ignore the perturbers outside the LogH subsystem (no outside tide in kappa, no tidal energy cap; before C21) |
+| `NBODY_DT_ATTR` | =1 (one rank): print which time-step criterion set each particle's step, per level and class (diagnostic, CASES.md R6) |
+| `NBODY_DT_SCALE` | <class>:<f>: scale the steps of bh \| sub \| single \| all \| deepN particles by f (diagnostic scan, CASES.md R6) |
 | `NBODY_CM_TIDE` | =1: field kicks of a bound 2-body subsystem whose kick spacing exceeds P/NBODY_CM_TIDE_NRES (gamma < NBODY_CM_TIDE_GAMMA, slowly moving sources; sets <= 64 on the host) go to its c.o.m., the tide acts on the internal orbit as the orbit-averaged quadrupole (Milankovitch), with E, P, L exact by construction (CASES.md C25; default off, A/B). At exit: `CM_TIDE:` line |
 | `NBODY_CM_TIDE_CHECK` | =1: report every NBODY_CM_TIDE kick that changes the internal semi-major axis (must never print) |
 | `NBODY_CM_TIDE_GAMMA` | =g: tidal strength 2 (a(1+e))^3 sum m_k/d_k^3 / M below which NBODY_CM_TIDE takes a binary (default 1e-3; leaves it above 4 g) |
