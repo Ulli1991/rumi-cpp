@@ -1,10 +1,13 @@
 // RUMI++ library interface (rumi_lib.h): the standalone program's set-up and HHS step (main.cpp, INTEGRATOR = hhs,
 // ETA_RESTART = 0) behind host-array calls, so a host code can integrate its bodies with RUMI++.
 #include "rumi_lib.h"
+#include "git_version.h"
 
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
+#include <filesystem>
 #include <vector>
 #include <Kokkos_Core.hpp>
 
@@ -19,19 +22,27 @@
 #include "profiling.h"
 #include "fence_stats.h"
 #include "tidal_field.h"
+#include "mpi_comm.h"
 #include "collisional_config.h"
 #include "subsystem.h"
 #include "logh_batch.h"
 #include "gw_output.h"
 #include "stellar_cache.h"
 #include "merger_tree.h"
+#include "runtime_sse.h"
+#ifdef USE_HDF5
+#include "restart.h"
+#endif
 
 #ifndef ENABLE_COLLISIONAL
 #error "the RUMI++ library needs ENABLE_COLLISIONAL"
 #endif
-#ifdef USE_MPI
-#error "the RUMI++ library runs on one host process: build it with USE_MPI=OFF"
-#endif
+
+#define RUMI_LIB_STR2(x) #x
+#define RUMI_LIB_STR(x) RUMI_LIB_STR2(x)
+// found by `strings librumi.a` (host Makefiles) and returned by build_id()
+extern "C" __attribute__((used)) const char rumi_lib_build_id[] =
+    "RUMI_LIB_ID api=" RUMI_LIB_STR(RUMI_LIB_API_VERSION) " commit=" NBODY_GIT_VERSION;
 
 namespace rumi_lib {
 namespace {
@@ -40,7 +51,9 @@ double secs(clk::time_point a) { return std::chrono::duration<double>(clk::now()
 
 bool own_kokkos = false;     // this library initialised Kokkos (and finalises it)
 bool configured = false;
-Particles P;                 // the bodies, Kokkos default memory space
+bool distributed = false;    // attach_comm with more than one rank
+Particles P;                 // the bodies (one process), Kokkos default memory space
+DistributedParticles DP;     // the bodies (distributed: DP.local, replicated on every rank)
 bool have_p = false;
 int nslots = 0;
 std::vector<long long> slot_id;
@@ -49,16 +62,52 @@ std::vector<int> slot_kw;
 std::vector<double> slot_r;
 double eta = 0.2, dt_min = 0.0, soft2 = 0.0, t_lib = 0.0;
 RunSettings rs;
+Config cfg_lib;
 Timers T;
+Ledger L;
 int merged = 0;
+size_t merger_seen = 0;      // g_merger_tree events handed to the host
+
+Particles& W() { return distributed ? DP.local : P; }
+
+// Rank-0 host data to every rank of the communicator (no-op on one process)
+template <class V> void bcast(V* data, size_t n) {
+#ifdef USE_MPI
+    if (distributed && n > 0) MPI_Bcast(data, (int)(n * sizeof(V)), MPI_BYTE, 0, MPIComm::comm());
+#else
+    (void)data; (void)n;
+#endif
+}
+template <class V> std::vector<V> from_root(const V* p, size_t n) {
+    std::vector<V> v(n);
+    if (MPIComm::rank() == 0 && p) std::memcpy(v.data(), p, n * sizeof(V));
+    bcast(v.data(), n);
+    return v;
+}
+int bcast_flag(bool present) {   // whether the root passed an array
+    int f = present ? 1 : 0;
+    bcast(&f, 1);
+    return f;
+}
 
 // slot of each present body (index i -> particle_id)
 std::vector<int> present_slots(int& n) {
-    n = P.N;
-    auto h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Kokkos::subview(P.particle_id, Kokkos::make_pair(0, n)));
+    n = W().N;
+    auto h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Kokkos::subview(W().particle_id, Kokkos::make_pair(0, n)));
     std::vector<int> s(n);
     for (int i = 0; i < n; i++) s[i] = h(i);
     return s;
+}
+
+// |internal energy| in the centre-of-mass frame (collective under MPI)
+double internal_energy(double G) {
+    Particles& p = W();
+    const DiagnosticState d = compute_diagnostics(p, G, soft2);
+    double M = 0;
+    auto pm = p.mass;
+    Kokkos::parallel_reduce("lib_mtot", p.N, KOKKOS_LAMBDA(int i, double& s) { s += pm(i); }, M);
+    const double P2 = d.Px * d.Px + d.Py * d.Py + d.Pz * d.Pz;
+    return d.E_total - (M > 0 ? 0.5 * P2 / M : 0.0);
 }
 }  // namespace
 
@@ -74,7 +123,7 @@ int kokkos_initialize(int num_threads, int device_id) {
 }
 
 void kokkos_finalize() {
-    if (have_p) { P.deallocate(); have_p = false; }
+    if (have_p) { if (distributed) DP.local.deallocate(); else P.deallocate(); have_p = false; }
     g_logh_batch = SubsystemBatch();          // global Views go before Kokkos::finalize (as main.cpp)
     g_subsystem_mgr = SubsystemManager();
     release_integrator_globals();
@@ -84,9 +133,23 @@ void kokkos_finalize() {
 
 const char* backend_name() { return Kokkos::DefaultExecutionSpace::name(); }
 
+int attach_comm(int fortran_comm) {
+#ifdef USE_MPI
+    MPIComm::attach(MPI_Comm_f2c(fortran_comm));
+    distributed = MPIComm::size() > 1;
+    return 0;
+#else
+    (void)fortran_comm;
+    std::fprintf(stderr, "RUMI++ library: attach_comm needs a build with USE_MPI\n");
+    return 1;
+#endif
+}
+
+int comm_rank() { return MPIComm::rank(); }
+
 int configure(const char* config_file, int verbose) {
-    Config cfg;
-    cfg.load(config_file, verbose != 0);
+    Config& cfg = cfg_lib;
+    cfg.load(config_file, verbose != 0 && MPIComm::rank() == 0);
     g_profiler.enabled = false;
     g_profiler.detailed = false;
     g_profiler.fence = false;
@@ -108,41 +171,51 @@ int configure(const char* config_file, int verbose) {
     g_tidal.type = TidalField::NONE;
     configured = true;
     T = Timers();
-    if (verbose)
-        std::printf("RUMI++ library: %s, %s, ETA_FF %.3g ETA_GBS %.3g FLYBY_CM_EPS %.3g\n", config_file, backend_name(),
-                    g_collisional.eta_ff, g_collisional.eta_gbs, g_collisional.flyby_cm_eps);
+    L = Ledger();
+    if (verbose && MPIComm::rank() == 0)
+        std::printf("RUMI++ library: %s, %s, %d rank(s), ETA_FF %.3g ETA_GBS %.3g FLYBY_CM_EPS %.3g\n", config_file,
+                    backend_name(), MPIComm::size(), g_collisional.eta_ff, g_collisional.eta_gbs, g_collisional.flyby_cm_eps);
     return 0;
 }
 
-int set_particles(int n, const long long* id, const double* m, const double* x, const double* v, const int* kw,
-                  const double* radius_rsun, double G, double dt) {
+int set_particles(int n_in, const long long* id_in, const double* m_in, const double* x_in, const double* v_in,
+                  const int* kw_in, const double* r_in, double G, double dt) {
     if (!configured) return 1;
     auto t0 = clk::now();
-    if (have_p) { P.deallocate(); have_p = false; }
+    int n = n_in; bcast(&n, 1);
+    const std::vector<long long> id = from_root(id_in, n);
+    const std::vector<double> m = from_root(m_in, n), x = from_root(x_in, 3 * (size_t)n), v = from_root(v_in, 3 * (size_t)n);
+    const int has_kw = bcast_flag(kw_in != nullptr), has_r = bcast_flag(r_in != nullptr);
+    const std::vector<int> kw = has_kw ? from_root(kw_in, n) : std::vector<int>(n, 1);
+    const std::vector<double> rr = has_r ? from_root(r_in, n) : std::vector<double>(n, 0.0);
+    double E_old = 0;
+    if (have_p && W().N > 0) E_old = compute_diagnostics(W(), G, soft2).E_total;
+    if (have_p) { if (distributed) DP.local.deallocate(); else P.deallocate(); have_p = false; }
     nslots = n; merged = 0;
-    slot_id.assign(id, id + n);
-    last_m.assign(m, m + n); last_x.assign(x, x + 3 * n); last_v.assign(v, v + 3 * n);
-    slot_kw.assign(n, 1); slot_r.assign(n, 0.0);
-    for (int i = 0; i < n; i++) { if (kw) slot_kw[i] = kw[i]; if (radius_rsun) slot_r[i] = radius_rsun[i]; }
-    if (n == 0) { T.rebuild += secs(t0); return 0; }
-    P = Particles();
-    P.allocate(n, true);
-    have_p = true;
+    slot_id = id; last_m = m; last_x = x; last_v = v; slot_kw = kw; slot_r = rr;
+    if (n == 0) { L.E_set += -E_old; T.rebuild += secs(t0); return 0; }
+    // every rank builds the same set (bit-identical inputs); distributed mode distributes rank 0's copy as main.cpp
+    Particles fresh;
+    fresh.allocate(n, true);
     {
-        auto hx = Kokkos::create_mirror_view(P.x), hy = Kokkos::create_mirror_view(P.y), hz = Kokkos::create_mirror_view(P.z);
-        auto hvx = Kokkos::create_mirror_view(P.vx), hvy = Kokkos::create_mirror_view(P.vy), hvz = Kokkos::create_mirror_view(P.vz);
-        auto hm = Kokkos::create_mirror_view(P.mass);
-        auto hst = Kokkos::create_mirror_view(P.stellar_type);
-        auto hr = Kokkos::create_mirror_view(P.stellar_radius);
+        auto hx = Kokkos::create_mirror_view(fresh.x), hy = Kokkos::create_mirror_view(fresh.y), hz = Kokkos::create_mirror_view(fresh.z);
+        auto hvx = Kokkos::create_mirror_view(fresh.vx), hvy = Kokkos::create_mirror_view(fresh.vy), hvz = Kokkos::create_mirror_view(fresh.vz);
+        auto hm = Kokkos::create_mirror_view(fresh.mass);
+        auto hst = Kokkos::create_mirror_view(fresh.stellar_type);
+        auto hr = Kokkos::create_mirror_view(fresh.stellar_radius);
         for (int i = 0; i < n; i++) {
             hm(i) = m[i]; hx(i) = x[3*i]; hy(i) = x[3*i+1]; hz(i) = x[3*i+2];
             hvx(i) = v[3*i]; hvy(i) = v[3*i+1]; hvz(i) = v[3*i+2];
-            hst(i) = kw ? kw[i] : 1; hr(i) = radius_rsun ? radius_rsun[i] : 0.0;
+            hst(i) = kw[i]; hr(i) = rr[i];
         }
-        Kokkos::deep_copy(P.x, hx); Kokkos::deep_copy(P.y, hy); Kokkos::deep_copy(P.z, hz);
-        Kokkos::deep_copy(P.vx, hvx); Kokkos::deep_copy(P.vy, hvy); Kokkos::deep_copy(P.vz, hvz);
-        Kokkos::deep_copy(P.mass, hm); Kokkos::deep_copy(P.stellar_type, hst); Kokkos::deep_copy(P.stellar_radius, hr);
+        Kokkos::deep_copy(fresh.x, hx); Kokkos::deep_copy(fresh.y, hy); Kokkos::deep_copy(fresh.z, hz);
+        Kokkos::deep_copy(fresh.vx, hvx); Kokkos::deep_copy(fresh.vy, hvy); Kokkos::deep_copy(fresh.vz, hvz);
+        Kokkos::deep_copy(fresh.mass, hm); Kokkos::deep_copy(fresh.stellar_type, hst); Kokkos::deep_copy(fresh.stellar_radius, hr);
     }
+    if (distributed) { DP = DistributedParticles(); DP.distribute_initial(fresh); fresh.deallocate(); }
+    else P = fresh;
+    have_p = true;
+    Particles& p = W();
     StellarPropsCache::get().invalidate();
     // fresh subsystem state for the new set (main.cpp: initial forces, subsystems and levels)
     g_logh_batch = SubsystemBatch();
@@ -150,25 +223,26 @@ int set_particles(int n, const long long* id, const double* m, const double* x, 
     g_collisional.G = G;
     g_subsystem_mgr.allocate_ngb_buffers(std::max(1000, n / 10));
     g_subsystem_mgr.reset_ngb_count();
-    // |E0| of the FLYBY_CM_EPS tolerance: the first set's energy (as main.cpp), raised when a later set is more bound
-    if (g_collisional.flyby_cm_eps > 0.0 || g_collisional.subsys_err_tol > 0.0) {
-        const double e = rs.e_ref_set > 0.0 ? rs.e_ref_set : std::fabs(compute_diagnostics(P, G, soft2).E_total);
-        if (e > g_collisional.e_ref) g_collisional.e_ref = e;
-    }
+    // |E_ref| of FLYBY_CM_EPS: E_REF, else the set's internal energy in its centre-of-mass frame (frame-independent;
+    // it follows the integrated set, so the budget stays the same fraction of the system's own binding energy)
+    if (g_collisional.flyby_cm_eps > 0.0 || g_collisional.subsys_err_tol > 0.0)
+        g_collisional.e_ref = rs.e_ref_set > 0.0 ? rs.e_ref_set : std::fabs(internal_energy(G));
     if (rs.ngb_mass_scaling && g_collisional.ngb_inv_mref == 0.0) {   // <m> of the first set, fixed afterwards
         double s = 0; for (int i = 0; i < n; i++) s += m[i];
         g_collisional.ngb_inv_mref = rs.ngb_mref > 0.0 ? 1.0 / rs.ngb_mref : n / s;
     }
-    compute_acceleration_and_timestep(P, G, soft2, eta);
+    if (distributed) compute_acceleration_and_timestep_distributed(DP, G, soft2, eta);
+    else compute_acceleration_and_timestep(p, G, soft2, eta);
     g_subsystem_mgr.reset_ngb_count();
-    neighbor_search_subset(P, 0, P.N, G, g_collisional.r_ngb, g_collisional.r_ngb_max, dt);
-    g_subsystem_mgr.detect_from_pairs(P, G, dt, g_collisional.r_ngb, g_collisional.r_ngb_max, g_collisional.n_orb_secular);
-    g_subsystem_mgr.update_particle_flags(P);
+    neighbor_search_subset(p, 0, p.N, G, g_collisional.r_ngb, g_collisional.r_ngb_max, dt);
+    g_subsystem_mgr.detect_from_pairs(p, G, dt, g_collisional.r_ngb, g_collisional.r_ngb_max, g_collisional.n_orb_secular);
+    g_subsystem_mgr.update_particle_flags(p);
     g_subsystem_mgr.reset_step_diagnostics();
     g_subsystem_mgr.accumulate_diagnostics();
     auto levels = build_levels(dt, dt_min);
-    assign_levels(P, levels);
-    P.partition_by_level();
+    assign_levels(p, levels);
+    p.partition_by_level();
+    L.E_set += compute_diagnostics(p, G, soft2).E_total - E_old;
     Kokkos::fence();
     T.rebuild += secs(t0); T.n_rebuild++;
     return 0;
@@ -180,18 +254,19 @@ int get_state(double* m, double* x, double* v) {
     auto t0 = clk::now();
     int n = 0;
     if (have_p) {
+        Particles& p = W();
         std::vector<int> s = present_slots(n);
-        auto hm = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), P.mass);
-        auto hx = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), P.x);
-        auto hy = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), P.y);
-        auto hz = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), P.z);
-        auto hvx = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), P.vx);
-        auto hvy = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), P.vy);
-        auto hvz = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), P.vz);
+        auto hm = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.mass);
+        auto hx = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.x);
+        auto hy = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.y);
+        auto hz = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.z);
+        auto hvx = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vx);
+        auto hvy = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vy);
+        auto hvz = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vz);
         std::vector<char> seen(nslots, 0);
         for (int i = 0; i < n; i++) {
             const int k = s[i];
-            if (k < 0 || k >= nslots) continue;
+            if (k < 0 || k >= nslots || hm(i) <= 0.0) continue;
             seen[k] = 1;
             last_m[k] = hm(i);
             last_x[3*k] = hx(i); last_x[3*k+1] = hy(i); last_x[3*k+2] = hz(i);
@@ -201,64 +276,124 @@ int get_state(double* m, double* x, double* v) {
         for (int k = 0; k < nslots; k++) if (!seen[k]) { last_m[k] = 0.0; nm++; }
         merged = nm;
     }
-    for (int k = 0; k < nslots; k++) {
-        m[k] = last_m[k];
-        for (int j = 0; j < 3; j++) { x[3*k+j] = last_x[3*k+j]; v[3*k+j] = last_v[3*k+j]; }
-    }
+    if (m && x && v)
+        for (int k = 0; k < nslots; k++) {
+            m[k] = last_m[k];
+            for (int j = 0; j < 3; j++) { x[3*k+j] = last_x[3*k+j]; v[3*k+j] = last_v[3*k+j]; }
+        }
     T.d2h += secs(t0);
     return n;
 }
 
 namespace {
-void add_by_slot(const double* d, Kokkos::View<double*> a, Kokkos::View<double*> b, Kokkos::View<double*> c) {
+// adds d (by slot) to (a, b, c); with mass m != null returns the kinetic-energy change 1/2 m (|u + d|^2 - |u|^2)
+double add_by_slot(const std::vector<double>& d, Kokkos::View<double*> a, Kokkos::View<double*> b, Kokkos::View<double*> c,
+                   bool work) {
+    bool any = false;
+    for (double e : d) if (e != 0.0) { any = true; break; }
+    if (!any) return 0.0;   // exact no-op: the state keeps its bits
     int n = 0;
     std::vector<int> s = present_slots(n);
     auto ha = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), a);
     auto hb = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), b);
     auto hc = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), c);
-    bool any = false;
+    auto hm = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), W().mass);
+    double dK = 0.0;
     for (int i = 0; i < n; i++) {
         const int k = s[i];
-        if (k < 0 || k >= nslots) continue;
-        if (d[3*k] != 0.0 || d[3*k+1] != 0.0 || d[3*k+2] != 0.0) any = true;
+        if (k < 0 || k >= nslots || hm(i) <= 0.0) continue;
+        const double u0 = ha(i), u1 = hb(i), u2 = hc(i);
         ha(i) += d[3*k]; hb(i) += d[3*k+1]; hc(i) += d[3*k+2];
+        if (work) dK += 0.5 * hm(i) * (ha(i)*ha(i) + hb(i)*hb(i) + hc(i)*hc(i) - u0*u0 - u1*u1 - u2*u2);
     }
-    if (!any) return;   // exact no-op: the state keeps its bits
     Kokkos::deep_copy(a, ha); Kokkos::deep_copy(b, hb); Kokkos::deep_copy(c, hc);
+    W().zero_kick_compensation();
+    return dK;
 }
 }  // namespace
 
 void kick(const double* dv) {
-    if (!have_p || !dv) return;
+    if (!have_p) return;
     auto t0 = clk::now();
-    add_by_slot(dv, P.vx, P.vy, P.vz);
+    if (!bcast_flag(dv != nullptr)) return;
+    const std::vector<double> d = from_root(dv, 3 * (size_t)nslots);
+    const double dK = add_by_slot(d, W().vx, W().vy, W().vz, true);
+    L.W_kick += dK; L.W_kick_abs += std::fabs(dK);
     T.h2d += secs(t0);
 }
 
 void shift(const double* dx) {
-    if (!have_p || !dx) return;
+    if (!have_p) return;
     auto t0 = clk::now();
-    add_by_slot(dx, P.x, P.y, P.z);
+    if (!bcast_flag(dx != nullptr)) return;
+    const std::vector<double> d = from_root(dx, 3 * (size_t)nslots);
+    add_by_slot(d, W().x, W().y, W().z, false);
+    T.h2d += secs(t0);
+}
+
+void set_mass(const double* m_in, const double* r_in, double G) {
+    if (!have_p) return;
+    auto t0 = clk::now();
+    const std::vector<double> mnew = from_root(m_in, nslots);
+    const int has_r = bcast_flag(r_in != nullptr);
+    const std::vector<double> rnew = has_r ? from_root(r_in, nslots) : std::vector<double>();
+    Particles& p = W();
+    int n = 0;
+    std::vector<int> s = present_slots(n);
+    auto hm = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.mass);
+    auto hr = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.stellar_radius);
+    auto hvx = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vx);
+    auto hvy = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vy);
+    auto hvz = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.vz);
+    auto hx = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.x);
+    auto hy = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.y);
+    auto hz = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.z);
+    std::vector<int> touched; std::vector<double> dmass, mbar;
+    double KE_change = 0.0;
+    bool radius_changed = false;
+    for (int i = 0; i < n; i++) {
+        const int k = s[i];
+        if (k < 0 || k >= nslots || hm(i) <= 0.0) continue;
+        if (has_r && rnew[k] != hr(i)) { hr(i) = rnew[k]; slot_r[k] = rnew[k]; radius_changed = true; }
+        if (mnew[k] <= 0.0 || mnew[k] == hm(i)) continue;
+        const double v2 = hvx(i)*hvx(i) + hvy(i)*hvy(i) + hvz(i)*hvz(i);
+        KE_change += 0.5 * (mnew[k] - hm(i)) * v2;
+        const double r[3] = {hx(i), hy(i), hz(i)}, vv[3] = {hvx(i), hvy(i), hvz(i)};
+        g_energy_books.sink_PL(hm(i), r, vv);
+        g_energy_books.sink_PL(mnew[k], r, vv, -1.0);
+        touched.push_back(i); dmass.push_back(mnew[k] - hm(i)); mbar.push_back(0.5 * (mnew[k] + hm(i)));
+    }
+    if (!touched.empty()) {
+        for (size_t q = 0; q < touched.size(); q++) hm(touched[q]) += dmass[q];
+        Kokkos::deep_copy(p.mass, hm);
+        const double dU = potential_change(p, touched, dmass, mbar, G);   // with the new masses on the device
+        g_energy_books.E_sse += -KE_change - dU;
+        T.n_set_mass++;
+    }
+    if (radius_changed) Kokkos::deep_copy(p.stellar_radius, hr);
+    if (!touched.empty() || radius_changed) StellarPropsCache::get().invalidate();
     T.h2d += secs(t0);
 }
 
 int advance(double dt, double G) {
     if (!configured) return 1;
-    if (!have_p || P.N == 0) { t_lib += dt; return 0; }
+    if (!have_p || W().N == 0) { t_lib += dt; return 0; }
     auto t0 = clk::now();
     g_collisional.G = G;
     g_sim_time = t_lib;
     g_step_in_progress++;
-    hhs_fsi_step_dynamic(P, 0, P.N, dt, G, soft2, dt_min, eta);
+    if (distributed) hhs_fsi_step_distributed(DP, dt, G, soft2, dt_min, eta, 2);
+    else hhs_fsi_step_dynamic(P, 0, P.N, dt, G, soft2, dt_min, eta);
     Kokkos::fence();
     t_lib += dt;
     T.advance += secs(t0); T.n_advance++;
     return 0;
 }
 
-void energy(double G, double* E_bodies, double* E_books) {
-    *E_bodies = have_p && P.N > 0 ? compute_diagnostics(P, G, soft2).E_total : 0.0;
-    *E_books = g_energy_books.total_sink();
+void energy(double G, double* E_bodies, double* E_books) {   // collective under MPI; null outputs allowed
+    const double E = have_p && W().N > 0 ? compute_diagnostics(W(), G, soft2).E_total : 0.0;
+    if (E_bodies) *E_bodies = E;
+    if (E_books) *E_books = g_energy_books.total_sink();
 }
 
 void books(double out[7]) {
@@ -266,11 +401,28 @@ void books(double out[7]) {
     out[0] = b.E_escape; out[1] = b.E_gw; out[2] = b.E_merge; out[3] = b.E_sse; out[4] = b.E_pn; out[5] = b.E_sd; out[6] = b.E_tidal;
 }
 
+const Ledger& ledger() { return L; }
+
+int merger_events(std::vector<int>& kept, std::vector<int>& gone, std::vector<double>& mprod) {
+    kept.clear(); gone.clear(); mprod.clear();
+    const auto& ev = g_merger_tree.events;
+    if (merger_seen > ev.size()) merger_seen = ev.size();
+    for (size_t k = merger_seen; k < ev.size(); k++) {
+        kept.push_back(ev[k].pid_remnant);
+        gone.push_back(ev[k].pid_remnant == ev[k].pid1 ? ev[k].pid2 : ev[k].pid1);
+        mprod.push_back(ev[k].m_remnant);
+    }
+    merger_seen = ev.size();
+    return (int)kept.size();
+}
+double e_ref() { return g_collisional.e_ref; }
+
 int dump_ic(const char* path) {
-    std::FILE* f = std::fopen(path, "w");
-    if (!f) return 1;
     std::vector<double> m(nslots), x(3 * nslots), v(3 * nslots);
     get_state(m.data(), x.data(), v.data());
+    if (MPIComm::rank() != 0) return 0;
+    std::FILE* f = std::fopen(path, "w");
+    if (!f) return 1;
     std::fprintf(f, "# RUMI++ library state: m x y z vx vy vz kw R (pc, Msun, km/s), slot order\n");
     for (int k = 0; k < nslots; k++)
         if (m[k] > 0.0)
@@ -280,6 +432,79 @@ int dump_ic(const char* path) {
     return 0;
 }
 
+#ifdef USE_HDF5
+namespace {
+template <class V> void put_vec(RunState& r, const std::string& key, const std::vector<V>& v) {
+    auto& b = r.blobs[key];
+    b.resize(v.size() * sizeof(V));
+    if (!v.empty()) std::memcpy(b.data(), v.data(), b.size());
+}
+template <class V> void get_vec(const RunState& r, const std::string& key, std::vector<V>& v) {
+    auto it = r.blobs.find(key);
+    v.clear();
+    if (it == r.blobs.end()) return;
+    v.resize(it->second.size() / sizeof(V));
+    if (!v.empty()) std::memcpy(v.data(), it->second.data(), v.size() * sizeof(V));
+}
+}  // namespace
+#endif
+
+int save_state(const char* dir, const std::vector<char>& host_blob) {
+#ifdef USE_HDF5
+    if (!have_p) return 1;
+    RunState r;
+    r.t = t_lib; r.step = (int)T.n_advance; r.integrator = "hhs"; r.test = "library";
+    put_vec(r, "lib_slot_id", slot_id); put_vec(r, "lib_last_m", last_m); put_vec(r, "lib_last_x", last_x);
+    put_vec(r, "lib_last_v", last_v); put_vec(r, "lib_slot_kw", slot_kw); put_vec(r, "lib_slot_r", slot_r);
+    put_vec(r, "lib_host", host_blob);
+    r.put("lib_ledger", L); r.put("lib_nslots", nslots); r.put("lib_merged", merged);
+    r.put("lib_step_in_progress", g_step_in_progress); r.put("lib_merger_seen", merger_seen);
+    if (MPIComm::rank() == 0) {
+        std::filesystem::create_directories(dir);
+        RestartOptions opt; opt.dir = dir; opt.keep = 1;
+        write_restart(opt, W(), r, cfg_lib.text, cfg_lib.params);
+    }
+    MPIComm::barrier();
+    return 0;
+#else
+    (void)dir; (void)host_blob;
+    std::fprintf(stderr, "RUMI++ library: save_state needs a build with HDF5\n");
+    return 1;
+#endif
+}
+
+int load_state(const char* dir, std::vector<char>& host_blob) {
+#ifdef USE_HDF5
+    const std::string path = latest_restart(dir);
+    if (path.empty()) return 1;
+    RunState r;
+    if (have_p) { if (distributed) DP.local.deallocate(); else P.deallocate(); have_p = false; }
+    g_logh_batch = SubsystemBatch();
+    g_subsystem_mgr = SubsystemManager();
+    Particles fresh;
+    read_restart(path, fresh, r, true);   // every rank reads (as main.cpp)
+    if (distributed) {
+        DP = DistributedParticles(); DP.distribute_initial(fresh); fresh.deallocate();
+        read_restart(path, DP.local, r, false);
+    } else P = fresh;
+    have_p = true;
+    g_subsystem_mgr.rebuild_pid_to_idx(W());
+    StellarPropsCache::get().invalidate();
+    t_lib = r.t; T.n_advance = r.step;
+    get_vec(r, "lib_slot_id", slot_id); get_vec(r, "lib_last_m", last_m); get_vec(r, "lib_last_x", last_x);
+    get_vec(r, "lib_last_v", last_v); get_vec(r, "lib_slot_kw", slot_kw); get_vec(r, "lib_slot_r", slot_r);
+    std::vector<char> hb; get_vec(r, "lib_host", hb); host_blob = hb;
+    r.get("lib_ledger", L); r.get("lib_nslots", nslots); r.get("lib_merged", merged);
+    r.get("lib_step_in_progress", g_step_in_progress); r.get("lib_merger_seen", merger_seen);
+    return 0;
+#else
+    (void)dir; (void)host_blob;
+    std::fprintf(stderr, "RUMI++ library: load_state needs a build with HDF5\n");
+    return 1;
+#endif
+}
+
+const char* build_id() { return rumi_lib_build_id; }
 const Timers& timers() { return T; }
 int n_mergers() { return merged; }
 

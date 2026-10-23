@@ -14,6 +14,16 @@ every call (`set_particles`, `advance`, `energy`); `G_CODE` is not used by the l
 - **Replays:** `dump_ic` writes the state as an `IC_FILE`; the standalone program with `G_OVERRIDE` and `DT_MAX_CODE`
   repeats the coupled run bit for bit.
 
+## Versioning
+
+- `RUMI_LIB_API_VERSION` in `rumi_lib.h` is bumped on every change of the interface: a call added, removed or
+  changed in signature, units or meaning. Internal changes that keep the calls and their meaning do not bump it.
+- The library embeds `RUMI_LIB_ID api=<version> commit=<git describe>` (`build_id()`). A host checks the version at
+  build time (GIZMO's Makefile reads it from `librumi.a` with `strings` and stops on a mismatch with the version its
+  `rumi_coupling.cc` expects) and records the commit for provenance (GIZMO: run log and snapshot header).
+- Versions: 1 = first prototype (set_particles, kick, shift, advance, get_state); 2 = attach_comm, set_mass,
+  ledger, e_ref, save_state/load_state, build_id.
+
 ## Build
 
 ```
