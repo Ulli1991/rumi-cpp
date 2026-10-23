@@ -537,6 +537,11 @@ int main(int argc, char** argv) {
         double bin_a_min_au = cfg.get_double("BINARY_A_MIN_AU");
         double bin_a_max_au = cfg.get_double("BINARY_A_MAX_AU");
         std::string binary_pop = cfg.get_str("BINARY_POP");
+        if (binary_pop == "bifrost") {  // deprecated alias
+            if (my_rank == 0)
+                std::fprintf(stderr, "WARNING: BINARY_POP = bifrost is deprecated, use flatq_massive\n");
+            binary_pop = "flatq_massive";
+        }
         bool binary_peri_check = cfg.get_bool("BINARY_PERI_CHECK");
         bool add_imbh       = cfg.get_bool("ADD_IMBH");
         double imbh_m1      = cfg.get_double("IMBH_M1");

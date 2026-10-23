@@ -530,8 +530,8 @@ void init_plummer(Particles& p, int N, double M_total_msun, double r_half_pc, in
             for (int i = 0; i < N; i++) idx[i] = i;
             std::sort(idx.begin(), idx.end(), [&](int a, int b) { return hmass[a] > hmass[b]; });
             for (int b = 0; b < N_bin; b++) pairs.emplace_back(idx[2 * b], idx[2 * b + 1]);
-        } else if (binary_pop == "bifrost") {
-            // BIFROST (Rantala et al. 2023, MNRAS 522, 5180) App. A "Binary stars", Table A1:
+        } else if (binary_pop == "flatq_massive") {
+            // Rantala et al. (2023, MNRAS 522, 5180), App. A "Binary stars", Table A1:
             //   N = N_s + 2 N_b, N_b = f_bin N / 2.
             //   Primaries above m_pair = 5 M_sun get a secondary from a flat mass-ratio distribution
             //   q = m_2/m_1 = const, 0.1 <= q < 1.0 (Kiminki 2012, Sana 2012, Kobulnicky 2014): "beginning from
@@ -578,13 +578,13 @@ void init_plummer(Particles& p, int N, double M_total_msun, double r_half_pc, in
                 pairs.emplace_back(i, j);
             }
         } else {
-            std::fprintf(stderr, "ERROR: BINARY_POP must be bifrost or mass_rank, got '%s'\n", binary_pop.c_str());
+            std::fprintf(stderr, "ERROR: BINARY_POP must be flatq_massive or mass_rank, got '%s'\n", binary_pop.c_str());
             std::exit(1);
         }
 
         std::printf("  BINARY_FRAC: pairing %d binaries (%.0f%% of %d particles), BINARY_POP=%s",
                     (int)pairs.size(), 100.0 * 2.0 * pairs.size() / N, N, binary_pop.c_str());
-        if (binary_pop == "bifrost") std::printf(" (%d primaries > 5 M_sun with flat q)", n_massive_primaries);
+        if (binary_pop == "flatq_massive") std::printf(" (%d primaries > 5 M_sun with flat q)", n_massive_primaries);
         std::printf("\n");
     }
 #endif

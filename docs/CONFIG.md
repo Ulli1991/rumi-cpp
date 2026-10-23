@@ -38,7 +38,7 @@ Levels:
 | key | type | default | level | values | description |
 |---|---|---|---|---|---|
 | `BINARY_FRAC` | double | `0.0` | user |  | Primordial binary fraction (0-1) |
-| `BINARY_POP` | string | `bifrost` | user | bifrost\|mass_rank | Pairing: bifrost (BIFROST App. A: flat q in [0.1, 1) above 5 Msun, random pairs below); mass_rank: heaviest with next heaviest |
+| `BINARY_POP` | string | `flatq_massive` | user | flatq_massive\|mass_rank\|bifrost | Pairing: flatq_massive (Rantala et al. 2023, App. A: flat q in [0.1, 1) above 5 Msun, random pairs below); mass_rank: heaviest with next heaviest; bifrost: deprecated alias of flatq_massive |
 | `BINARY_A_MIN_AU` | double | `0.01` | user |  | Smallest semi-major axis (AU), log-uniform in a |
 | `BINARY_A_MAX_AU` | double | `100.0` | user |  | Largest semi-major axis (AU) |
 | `R_BREAK_AU` | double | `0.0` | user |  | Remove artificial binaries with a < r_break (AU) from the ICs (BIFROST App. A); 0: IC_R_BREAK |

@@ -21,7 +21,7 @@ FIG9 = dict(TEST_CASE="plummer", INTEGRATOR="hhs", DT_MAX_MYR="1e-3", DT_MIN_MYR
             SSE_PPISN_MODEL="STRONG", SSE_ECSN_MODEL="ON", SSE_MXNS="2.5", PLUMMER_N="200000", PLUMMER_R_HALF="3.1",
             PLUMMER_SEED="42", PLUMMER_MASS_DIST="kroupa_evolved", PLUMMER_AGE_GYR="1.0", PLUMMER_METALLICITY="0.0002",
             R_BREAK_AU="1000.0", BINARY_FRAC="0.1", BINARY_A_MIN_AU="0.01", BINARY_A_MAX_AU="100.0",
-            BINARY_POP="bifrost", PROFILING="false", REPLICA_CHECK_INTERVAL="1")
+            BINARY_POP="flatq_massive", PROFILING="false", REPLICA_CHECK_INTERVAL="1")
 
 
 def main(exe, out_dir):

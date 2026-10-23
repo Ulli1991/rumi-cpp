@@ -17,12 +17,12 @@ void init_plummer(Particles& p, int N, double M_total_msun, double r_half_pc, in
                   double imbh_a_pc = 1e-4, double imbh_e = 0.5, double imbh_spin = 0.0,
                   double r_break_au = 0.0,
                   const SSEConfig* sse_cfg = nullptr,
-                  // Primordial binary population: "bifrost" (BIFROST App. A: flat q above 5 M_sun, random
+                  // Primordial binary population: "flatq_massive" (Rantala et al. 2023, App. A: flat q above 5 M_sun, random
                   // pairing below) or "mass_rank" (heaviest with next heaviest); pericentre condition
                   // r_p = a(1-e) > contact distance (FROST-CLUSTERS II Sec. 2.3)
                   // Binary centre of mass: the primary's own Plummer f(E) draw (SCIC/mcluster: a binary is one
                   // point particle until its members are placed)
-                  const std::string& binary_pop = "bifrost", bool binary_peri_check = true);
+                  const std::string& binary_pop = "flatq_massive", bool binary_peri_check = true);
 
 // Half-mass radius [pc] of a star cluster of mass M [M_sun] from the SCIC mass-size relations
 // (BIFROST, Rantala et al. 2023, App. A, eqs. A2-A3)

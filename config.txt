@@ -19,7 +19,7 @@ REMOVE_BH = false                       # Strip the black holes from the initial
 
 # ---- Primordial binaries ----
 BINARY_FRAC = 0.0                       # Binary fraction (0-1)
-BINARY_POP = bifrost                    # bifrost (BIFROST App. A pairing) / mass_rank
+BINARY_POP = flatq_massive              # flatq_massive (Rantala et al. 2023, App. A) / mass_rank
 BINARY_A_MIN_AU = 0.01                  # Semi-major axes log-uniform between these (AU)
 BINARY_A_MAX_AU = 100.0
 R_BREAK_AU = 1000.0                     # Remove artificial binaries with a < r_break from the ICs (AU; 0: off)

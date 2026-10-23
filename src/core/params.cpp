@@ -42,9 +42,9 @@ const std::vector<ParamSpec> kParams = {
 
     // ---- Primordial binaries ----
     {"BINARY_FRAC", D, "0.0", "Primordial binaries", USER, "", "Primordial binary fraction (0-1)"},
-    {"BINARY_POP", S, "bifrost", "Primordial binaries", USER, "bifrost|mass_rank",
-     "Pairing: bifrost (BIFROST App. A: flat q in [0.1, 1) above 5 Msun, random pairs below); mass_rank: "
-     "heaviest with next heaviest"},
+    {"BINARY_POP", S, "flatq_massive", "Primordial binaries", USER, "flatq_massive|mass_rank|bifrost",
+     "Pairing: flatq_massive (Rantala et al. 2023, App. A: flat q in [0.1, 1) above 5 Msun, random pairs below); "
+     "mass_rank: heaviest with next heaviest; bifrost: deprecated alias of flatq_massive"},
     {"BINARY_A_MIN_AU", D, "0.01", "Primordial binaries", USER, "", "Smallest semi-major axis (AU), log-uniform in a"},
     {"BINARY_A_MAX_AU", D, "100.0", "Primordial binaries", USER, "", "Largest semi-major axis (AU)"},
     {"R_BREAK_AU", D, "0.0", "Primordial binaries", USER, "",
