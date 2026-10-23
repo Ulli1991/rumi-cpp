@@ -1,31 +1,25 @@
 # RUMI++
 
-Performance-portable gravitational N-body code for stellar cluster simulations. Built on the **Kokkos 5.0** performance portability library, supporting CPUs as well as NVIDIA, AMD, and Intel GPUs. MPI-parallelized with GPU-aware MPI support where available.
+RUMI++ is a **novel, performance-portable direct N-body code** for gravitational dynamics of stellar clusters. It is built on the **Kokkos 5.0** performance portability library and runs on configured CPU and GPU backends; optional MPI supports multi-GPU and multi-node runs. Direct pairwise gravity is the high-accuracy method, while an optional Barnes–Hut approximation is available for softened, non-collisional runs.
 
-## Physics
+## Methods and features
 
-The integrator implements a 4th-order Hermite scheme (Forward Symplectic Integrator, FSI) inside a **Hierarchical Hamiltonian Splitting** (HHS) framework following Algorithm 3 of the [FROST paper](https://doi.org/10.1093/mnras/stab057) (Rantala, Naab & Springel 2021). Particles are recursively split into slow and fast groups by individual adaptive timesteps, giving O(N log N) time integration cost even with a wide dynamic range.
+- **Adaptive, fourth-order integration.** The Forward Symplectic Integrator (FSI) is composed with **Hierarchical Hamiltonian Splitting (HHS)**, recursively advancing slow and fast particle groups on adaptive individual timesteps. This follows the FROST method [1]. Pairwise timestep criteria resolve the wide range of orbital timescales in a cluster.
+- **Direct gravity, with an optional tree.** Direct summation evaluates particle-particle forces. For softened collisionless problems, an optional Kokkos Barnes–Hut tree uses monopole approximations and group-based traversal [5]. Tree-based neighbor and timestep searches are also available.
+- **Close-encounter dynamics** (compile with `-DENABLE_COLLISIONAL=ON`, enable `COLLISIONAL` in the run configuration). This mode uses unsoftened direct gravity and detects close pairs and connected few-body subsystems. Subsystems are evolved with LogH algorithmic regularization and Gragg–Bulirsch–Stoer (GBS) extrapolation; slow-down of weakly perturbed binaries is available through SDAR [3]. Secular binary and hierarchical-triple evolution are available when their orbits are sufficiently separated in timescale.
+- **Compact-object and stellar physics.** Optional post-Newtonian corrections through 3.5PN, including gravitational-wave radiation reaction and spin couplings, act on compact-object encounters [2, 6]. The collisional mode also supports collisions, mergers and merger trees, single-star evolution with configurable wind and remnant prescriptions, and external galactic tidal fields.
+- **Initial conditions and output.** Generate Plummer clusters with equal-mass or Kroupa mass distributions, primordial binaries and an optional central IMBH binary, or use built-in few-body and outer-Solar-System test cases. HDF5 snapshots use a LUNA-readable layout; HDF5 restarts preserve the state needed for bit-identical continuation.
 
-### Non-collisional mode (default)
+Collisional features are excluded from builds made without `ENABLE_COLLISIONAL`.
 
-Softened gravity suitable for large-N collisionless problems (galaxy models, cosmological halos). Includes an optional **Barnes-Hut tree** for O(N log N) force evaluation with monopole approximation and GPU-accelerated Morton-key sorting and group-based traversal.
+### Method references
 
-### Collisional mode (`-DENABLE_COLLISIONAL=ON`)
-
-Unsoftened direct N-body with close encounter handling for star cluster simulations, following the methods of [Rantala et al. 2023](https://doi.org/10.1093/mnras/stad1360):
-
-- **Subsystem detection**: neighbor-based detection of close encounters (flybys, binaries, hierarchical triples)
-- **LogH regularization**: logarithmic Hamiltonian integrator with Gragg-Bulirsch-Stoer (GBS) extrapolation for subsystems, handling arbitrarily close encounters
-- **Secular binary evolution**: Gauss perturbation equations for wide, weakly-perturbed binaries
-- **Post-Newtonian corrections**: PN1 through PN3.5 for compact object dynamics
-- **Single stellar evolution** (SSE): C++ port of the Hurley et al. (2000) fitting formulae with modern prescriptions (Vink 2001 winds, Fryer 2012 remnant models, PPISN/PISN, ECSN)
-- **Merger detection and stellar merger trees**
-
-Zero overhead when compiled without `ENABLE_COLLISIONAL`.
-
-### Initial conditions
-
-Built-in IC generator supporting Plummer spheres with configurable mass functions (equal mass, Kroupa IMF, Kroupa + SSE-evolved), primordial binary populations, and IMBH injection. Also includes isolated binary, triple, and outer solar system test cases.
+1. Rantala, Naab & Springel (2021), FROST: [MNRAS paper](https://doi.org/10.1093/mnras/stab057) — HHS-FSI.
+2. Rantala et al. (2023): [MNRAS paper](https://doi.org/10.1093/mnras/stad1360) — collisional cluster methods, regularization and relativistic corrections.
+3. Wang, Nitadori & Makino (2020), SDAR: [arXiv:2002.07938](https://arxiv.org/abs/2002.07938).
+4. Hurley, Pols & Tout (2000), single-star evolution: [MNRAS paper](https://doi.org/10.1046/j.1365-8711.2000.03426.x).
+5. Barnes & Hut (1986), hierarchical force calculation: [Nature paper](https://doi.org/10.1038/324446a0).
+6. Blanchet (2014), post-Newtonian theory: [Living Reviews in Relativity](https://doi.org/10.12942/lrr-2014-2).
 
 ## Building
 
