@@ -1,6 +1,6 @@
 # Config reference
 
-All 154 keys of the config file (`config.txt`, or `--config <file>`), generated from the parameter table in `src/core/params.cpp` by `scripts/gen_config_md.py`. Every key has one default, in that table; an unknown key in a config file is an error. Each run writes the effective value of every key, and whether it came from the file or the default, to `run_params.txt`.
+All 156 keys of the config file (`config.txt`, or `--config <file>`), generated from the parameter table in `src/core/params.cpp` by `scripts/gen_config_md.py`. Every key has one default, in that table; an unknown key in a config file is an error. Each run writes the effective value of every key, and whether it came from the file or the default, to `run_params.txt`.
 
 Levels:
 
@@ -18,6 +18,8 @@ Levels:
 | `TOTAL_TIME_MYR` | double | `0.23` | user |  | End time (Myr) |
 | `DT_MAX_MYR` | double | `1.6e-3` | user |  | Integration interval (Myr): the level-0 step; diagnostics, restarts and snapshots count these steps |
 | `PRESET` | string | `production` | user | production\|cluster | Accuracy defaults: production (the table defaults) or cluster (FLYBY_CM_EPS = 1e-7, ETA_RESTART = 0 where the file does not set them; N <~ 1e4 star clusters, docs/CONFIG.md notes) |
+| `G_OVERRIDE` | double | `0` | expert |  | Gravitational constant in pc^3 Msun^-1 (km/s)^2 (0: G_CODE); replays of runs coupled to a host code that sets G |
+| `DT_MAX_CODE` | double | `0` | expert |  | Integration interval in code time units, overriding DT_MAX_MYR when > 0 (bit-exact replays of coupled runs) |
 | `DT_MIN_MYR` | double | `1.0e-14` | expert |  | Smallest time step (Myr): the deepest HHS level |
 | `INTEGRATOR` | string | `hhs` | internal | hhs\|fsi | hhs: adaptive HHS-FSI (FROST Algorithm 3); fsi: every particle on the fastest occupied level (tests) |
 

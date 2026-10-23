@@ -1129,7 +1129,7 @@ void SubsystemManager::fill_cm_velocity(const Particles& p, int lo, int hi, Kokk
     auto buf = raw(cm_buf_);
     auto pm = raw(p.mass);
     auto px_ = raw(p.x), py_ = raw(p.y), pz_ = raw(p.z);
-    const double G = G_CODE;
+    const double G = g_collisional.G;
     // TIDAL_FLOOR_ADAPT: per subsystem the factor on the floor (1 unless subsystem_timesteps found the binary's local
     // tidal estimate above its share)
     const bool adapt = g_collisional.tidal_floor_adapt && tol > 0.0;

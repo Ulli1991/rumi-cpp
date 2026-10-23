@@ -604,7 +604,7 @@ void print_final(const DiagnosticState& cur, const DiagnosticState& ini,
 #ifdef ENABLE_COLLISIONAL
     if (g_collisional.enabled && !g_subsystem_mgr.active.empty()) {
         std::printf("\n");
-        print_subsystem_diagnostics(p, G_CODE);
+        print_subsystem_diagnostics(p, g_collisional.G);
     }
 #endif
 

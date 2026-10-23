@@ -626,9 +626,12 @@ int main(int argc, char** argv) {
 #endif
         const bool resuming = !restart_arg.empty();
 
-        double G = G_CODE;
+        double G = cfg.get_double("G_OVERRIDE") > 0.0 ? cfg.get_double("G_OVERRIDE") : G_CODE;
+#ifdef ENABLE_COLLISIONAL
+        g_collisional.G = G;
+#endif
         double soft2 = soft_pc * soft_pc;
-        double dt_max = dt_max_myr / TIME_UNIT_MYR;   // Myr → code TU
+        double dt_max = cfg.get_double("DT_MAX_CODE") > 0.0 ? cfg.get_double("DT_MAX_CODE") : dt_max_myr / TIME_UNIT_MYR;   // Myr → code TU
 #ifdef ENABLE_COLLISIONAL
         g_eattr.dt_cap = dt_max;
 #endif

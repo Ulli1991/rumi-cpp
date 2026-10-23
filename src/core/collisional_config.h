@@ -5,12 +5,14 @@
 #include <cstdlib>
 #include <algorithm>
 #include <initializer_list>
+#include "constants.h"
 
 // Collisional N-body configuration
 // All parameters under "Unsoftened direct N-body options" in config file
 
 struct CollisionalConfig {
     bool enabled = false;               // master toggle (COLLISIONAL)
+    double G = G_CODE;                  // gravitational constant of the run (main: G_OVERRIDE or G_CODE; library: the host's)
 
     // Neighbor search
     double r_ngb = 1e-3;               // neighbor search radius (pc)
