@@ -969,6 +969,8 @@ int main(int argc, char** argv) {
             if (g_collisional.enabled) {
                 std::printf("Collisional mode: r_ngb=%.2e, r_ngb_max=%.2e, eta_gbs=%.2e\n",
                             g_collisional.r_ngb, g_collisional.r_ngb_max, g_collisional.eta_gbs);
+                std::printf("  PRESET=%s: FLYBY_CM_EPS=%.1e, ETA_RESTART=%.1e\n", cfg.get_str("PRESET").c_str(),
+                            g_collisional.flyby_cm_eps, g_collisional.eta_restart);
                 std::printf("  PN order=%d, M_PN=%.1f M_sun, MSTAR threshold=%d\n",
                             g_collisional.pn_order, g_collisional.m_pn, g_collisional.mstar_threshold);
                 if (g_collisional.sdar)

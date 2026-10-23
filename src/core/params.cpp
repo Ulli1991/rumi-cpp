@@ -24,6 +24,8 @@ const std::vector<ParamSpec> kParams = {
     {"TOTAL_TIME_MYR", D, "0.23", "Run", USER, "", "End time (Myr)"},
     {"DT_MAX_MYR", D, "1.6e-3", "Run", USER, "",
      "Integration interval (Myr): the level-0 step; diagnostics, restarts and snapshots count these steps"},
+    {"PRESET", S, "production", "Run", USER, "production|cluster",
+     "Accuracy defaults: production (the table defaults) or cluster (FLYBY_CM_EPS = 1e-7, ETA_RESTART = 0 where the file does not set them; N <~ 1e4 star clusters, docs/CONFIG.md notes)"},
     {"DT_MIN_MYR", D, "1.0e-14", "Run", EXPERT, "", "Smallest time step (Myr): the deepest HHS level"},
     {"INTEGRATOR", S, "hhs", "Run", INTERNAL, "hhs|fsi",
      "hhs: adaptive HHS-FSI (FROST Algorithm 3); fsi: every particle on the fastest occupied level (tests)"},
@@ -335,6 +337,9 @@ const std::vector<DebugEnvSpec> kDebugEnv = {
     {"NBODY_N2_R", "N^2 kernels: force teams of TS / R threads, R = 1, 2 (default per kernel, results identical)"},
 };
 
+// PRESET = cluster: these keys take the preset value where the config file does not set them
+const std::map<std::string, std::string> kClusterPreset = {{"FLYBY_CM_EPS", "1e-7"}, {"ETA_RESTART", "0"}};
+
 const char* type_name(ParamType t) {
     switch (t) {
         case ParamType::Bool: return "bool";
@@ -515,9 +520,24 @@ const std::string& Config::raw(const std::string& key, ParamType type) const {
     if (o != overrides.end()) return o->second;
     auto it = params.find(key);
     if (it != params.end()) return it->second;
+    if (const char* v = preset_value(key)) {
+        static thread_local std::string pre;
+        pre = v;
+        return pre;
+    }
     static thread_local std::string def;
     def = p->def;
     return def;
+}
+
+const char* Config::preset_value(const std::string& key) const {
+    if (key == "PRESET") return nullptr;
+    auto o = overrides.find("PRESET");
+    auto f = params.find("PRESET");
+    const std::string preset = o != overrides.end() ? o->second : f != params.end() ? f->second : find_param("PRESET")->def;
+    if (preset != "cluster") return nullptr;
+    auto c = kClusterPreset.find(key);
+    return c == kClusterPreset.end() ? nullptr : c->second.c_str();
 }
 
 std::string Config::get_str(const std::string& key) const { return raw(key, ParamType::String); }
@@ -560,6 +580,7 @@ void Config::write_effective(const std::string& path) const {
         std::string v = p.def;
         if (overrides.count(p.key)) { from = "command line"; v = overrides.at(p.key); }
         else if (params.count(p.key)) { from = "file"; v = params.at(p.key); }
+        else if (const char* pv = preset_value(p.key)) { from = "preset"; v = pv; }
         std::fprintf(f, "%-26s = %-20s # %s\n", p.key, v.c_str(), from);
     }
     std::fclose(f);
