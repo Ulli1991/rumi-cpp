@@ -97,7 +97,7 @@ KOKKOS_INLINE_FUNCTION double pair_dt(double r2s, double ir, double dx, double d
                                       double eta_ff, double eta_fb) {
     double tff, tfb;
     symmetrized_timestep(r2s, ir, dx, dy, dz, dvx, dvy, dvz, G, msum, eta_ff, eta_fb, tff, tfb);
-    return Kokkos::fmin(eta_ff * tff, eta_fb * tfb);
+    return n2_fmin(eta_ff * tff, eta_fb * tfb);
 }
 
 // Single-precision pre-rejects of the pair time step (AUDIT G row 2a) and of the tidal-sampling step (device code with
@@ -155,12 +155,12 @@ KOKKOS_INLINE_FUNCTION bool pair_dt_reject_f32(float cur3, float r2, float ir, d
                                                float eff, float efb) {
 #ifdef N2_DT_F32
     if (!(r2 >= 1e-30f && r2 <= 1e30f)) return false;
-    gm = fmaxf(gm, 1e-20f);
+    gm = n2_fmax(gm, 1e-20f);
     const float v2 = (float)v2s + 1e-30f;
     const float r = r2 * ir;
     const float tff = r2 * rsqrt_f32_normal(r * gm);
     const float iv = rsqrt_f32_normal(v2), tfb = r * iv;
-    const float rdvn = fmaxf(0.0f, 1e-6f * r * v2 * iv - (float)rdvs);   // >= max(0, -r.dv)
+    const float rdvn = n2_fmax(0.0f, 1e-6f * r * v2 * iv - (float)rdvs);   // >= max(0, -r.dv)
     const float c = rdvn * ir * ir;                                       // >= max(0, -c_ff / 1.5), max(0, -c_fb / ...)
     const float kff = 1.5f * (1.0f + 4e-5f) * eff, kfb = (1.0f + 4e-5f) * efb;   // launch constants
     const float rff = cur3 * (1.0f + (c * tff) * kff), rfb = cur3 * (1.0f + (c * (1.0f + gm * ir * iv * iv) * tfb) * kfb);
@@ -191,7 +191,7 @@ KOKKOS_INLINE_FUNCTION double pair_dt_below(double cur, double r2s, double ir, d
     const double d_ff = 1.5 * rdv_ir2 * t_ff * eta_ff;
     const double d_fb = rdv_ir2 * (1.0 + Gm * ir * inv_v * inv_v) * t_fb * eta_fb;
     const double mc = N2_DT_REJECT_MARGIN * cur;
-    if (eta_ff * t_ff >= mc * (1.0 + Kokkos::fmax(0.0, -d_ff)) && eta_fb * t_fb >= mc * (1.0 + Kokkos::fmax(0.0, -d_fb)))
+    if (eta_ff * t_ff >= mc * (1.0 + n2_fmax(0.0, -d_ff)) && eta_fb * t_fb >= mc * (1.0 + n2_fmax(0.0, -d_fb)))
         return 1e30;
     return pair_dt(r2s, ir, dx, dy, dz, dvx, dvy, dvz, G, msum, eta_ff, eta_fb);
 }
@@ -202,7 +202,7 @@ KOKKOS_INLINE_FUNCTION double pair_dt_below(double cur, double r2s, double ir, d
 // 23+23 Msun BH binary passed a 46 AU stellar binary 1.6 mpc away (outside r_ngb = 1 mpc) at tidal ratio 0.11; the
 // FSI kicks then carried that strong interaction (200k, 10 % binaries, seed 42, step 19: |dE/E| +4.7e-10)
 KOKKOS_INLINE_FUNCTION double ngb_radius(double r_ngb, double mi, double mj, double inv_mref) {
-    return r_ngb * Kokkos::fmax(1.0, Kokkos::cbrt(Kokkos::fmax(mi, mj) * inv_mref));
+    return r_ngb * n2_fmax(1.0, Kokkos::cbrt(n2_fmax(mi, mj) * inv_mref));
 }
 
 // The neighbour criteria of NgbK (Rantala et al. 2023, sec. 3.5) for a pair with r2 < r_ngb_max^2 (dx = x_j - x_i, dv = v_j - v_i,
@@ -219,7 +219,7 @@ KOKKOS_INLINE_FUNCTION bool ngb_pair_test(double dx, double dy, double dz, doubl
     double Lx = dy * dvz - dz * dvy, Ly = dz * dvx - dx * dvz, Lz = dx * dvy - dy * dvx;
     double L2 = Lx * Lx + Ly * Ly + Lz * Lz;
     double e_arg = 1.0 + 2.0 * E_orb * L2 / (mu * mu + EPS);
-    e_val = Kokkos::sqrt(Kokkos::fmax(is_bound ? 0.0 : 1.0, e_arg));
+    e_val = Kokkos::sqrt(n2_fmax(is_bound ? 0.0 : 1.0, e_arg));
     bool is_neighbor = false;
     if (is_bound) {
         // r_wide (NGB_WIDE_FAC): bound pairs up to a < r_wide too, so wide binaries just above r_ngb become
@@ -277,7 +277,7 @@ struct NgbK {
 // (e = 0.97) RES = 1 gives |dE/E| 3.7e-10 in 4 s, no floor 5.7e-10 in 544 s, RES >= 5 degrades (5.5e-9)
 KOKKOS_INLINE_FUNCTION double tidal_sampling_dt(double ki, double kj, double mi, double mj, double r2s, double fi,
                                                 double fj) {
-    return Kokkos::fmax(Kokkos::fmin(ki / mj, kj / mi) * r2s * Kokkos::sqrt(r2s), Kokkos::fmax(fi, fj));
+    return n2_fmax(n2_fmin(ki / mj, kj / mi) * r2s * Kokkos::sqrt(r2s), n2_fmax(fi, fj));
 }
 
 // fp32 pre-reject of tidal_sampling_dt (device code with DT_FP32_PREREJECT): the step is >= min(k_i / m_j, k_j / m_i)
@@ -289,7 +289,7 @@ KOKKOS_INLINE_FUNCTION double tidal_sampling_dt(double ki, double kj, double mi,
 KOKKOS_INLINE_FUNCTION bool tidal_dt_reject_f32(float curt, float r2, float r, float ki, float rmj, float kj, float rmi) {
 #ifdef N2_DT_F32
     if (!(r2 >= 1e-30f)) return false;
-    return fminf(ki * rmj, kj * rmi) * r2 * r * (1.0f - 4e-5f) >= curt;
+    return n2_fmin(ki * rmj, kj * rmi) * r2 * r * (1.0f - 4e-5f) >= curt;
 #else
     (void)curt; (void)r2; (void)r; (void)ki; (void)rmj; (void)kj; (void)rmi;
     return false;
@@ -321,7 +321,7 @@ KOKKOS_INLINE_FUNCTION void dt_min(const DtSink& a, double* mn, double t) {
     }
 #else
     (void)a;
-    mn[0] = Kokkos::fmin(mn[0], t);
+    mn[0] = n2_fmin(mn[0], t);
 #endif
 }
 
@@ -345,7 +345,7 @@ KOKKOS_INLINE_FUNCTION void dt_pair_min(const DtSink& a, double* mn, bool w, dou
     (void)m32j; (void)k32j; (void)rm32j;
 #endif
     double t = rp ? 1e30 : pair_dt_below(mn[0], r2s, ir, dx, dy, dz, cdx, cdy, cdz, G, a.m + mj, eta_ff, eta_fb);
-    if (COLL) t = Kokkos::fmin(t, rt ? 1e30 : tidal_sampling_dt(a.k, kj, a.m, mj, r2s, a.kf, kfj));
+    if (COLL) t = n2_fmin(t, rt ? 1e30 : tidal_sampling_dt(a.k, kj, a.m, mj, r2s, a.kf, kfj));
     dt_min(a, mn, w ? t : 1e30);
 }
 
@@ -434,7 +434,7 @@ struct DtK {
                 double a_mag = Kokkos::sqrt(sum[0] * sum[0] + sum[1] * sum[1] + sum[2] * sum[2]);
                 double j_mag = Kokkos::sqrt(sum[JERK ? 3 : 0] * sum[JERK ? 3 : 0] + sum[JERK ? 4 : 0] * sum[JERK ? 4 : 0] +
                                             sum[JERK ? 5 : 0] * sum[JERK ? 5 : 0]);
-                if (j_mag > EPS && a_mag > EPS) d = Kokkos::fmin(d, eta_jerk * a_mag / j_mag);
+                if (j_mag > EPS && a_mag > EPS) d = n2_fmin(d, eta_jerk * a_mag / j_mag);
             }
             ax(i) = sum[0]; ay(i) = sum[1]; az(i) = sum[2];
         }
@@ -511,11 +511,11 @@ struct DtMixK {
             // divisions when it cannot go below the running minimum
             const float lff = eta_ff * tff, lfb = eta_fb * tfb, cur = mn[0] * 1.0001f;
             float t = 1e30f;
-            if (lff < cur * (1.0f + fmaxf(0.0f, -cff * lff)) || lfb < cur * (1.0f + fmaxf(0.0f, -cfb * lfb)))
-                t = fminf(sym(tff, cff, eta_ff), sym(tfb, cfb, eta_fb));
+            if (lff < cur * (1.0f + n2_fmax(0.0f, -cff * lff)) || lfb < cur * (1.0f + n2_fmax(0.0f, -cfb * lfb)))
+                t = n2_fmin(sym(tff, cff, eta_ff), sym(tfb, cfb, eta_fb));
             const float kj = n2_lo_f(s[7]), kfj = n2_hi_f(s[7]), rmj = n2_lo_f(s[8]);
-            t = fminf(t, fmaxf(fminf(a.k * rmj, kj * a.rm) * r2 * r, fmaxf(a.kf, kfj)));
-            mn[0] = w ? fminf(mn[0], t) : mn[0];
+            t = n2_fmin(t, n2_fmax(n2_fmin(a.k * rmj, kj * a.rm) * r2 * r, n2_fmax(a.kf, kfj)));
+            mn[0] = w ? n2_fmin(mn[0], t) : mn[0];
         }
         const float f = (w ? gmj : 0.0f) * ir2 * ir;
         sum[0] += f * dx; sum[1] += f * dy; sum[2] += f * dz;
@@ -594,10 +594,10 @@ struct AccDtK {
             if (JERK) {
                 double j_mag = Kokkos::sqrt(sum[JERK ? 3 : 0] * sum[JERK ? 3 : 0] + sum[JERK ? 4 : 0] * sum[JERK ? 4 : 0] +
                                             sum[JERK ? 5 : 0] * sum[JERK ? 5 : 0]);
-                if (eta_jerk > 0.0 && j_mag > EPS && a_mag > EPS) d = Kokkos::fmin(d, eta_jerk * a_mag / j_mag);
+                if (eta_jerk > 0.0 && j_mag > EPS && a_mag > EPS) d = n2_fmin(d, eta_jerk * a_mag / j_mag);
             }
             double v_mag = Kokkos::sqrt(a.vx * a.vx + a.vy * a.vy + a.vz * a.vz);
-            if (eta_va > 0.0 && a_mag > EPS && v_mag > EPS) d = Kokkos::fmin(d, eta_va * v_mag / a_mag);
+            if (eta_va > 0.0 && a_mag > EPS && v_mag > EPS) d = n2_fmin(d, eta_va * v_mag / a_mag);
         }
         dt(i) = d;
     }
@@ -736,7 +736,7 @@ struct EdgeK {
             double r2s = dx * dx + dy * dy + dz * dz + soft2;
             double ir = fast_rsqrt(r2s);
             double t = pair_dt(r2s, ir, dx, dy, dz, s[4] - a.vx, s[5] - a.vy, s[6] - a.vz, G, a.m + s[3], eta_ff, eta_fb);
-            if (COLL) t = Kokkos::fmin(t, tidal_sampling_dt(a.k, s[COLL ? 8 : 0], a.m, s[3], r2s, a.kf, s[COLL ? 9 : 0]));
+            if (COLL) t = n2_fmin(t, tidal_sampling_dt(a.k, s[COLL ? 8 : 0], a.m, s[3], r2s, a.kf, s[COLL ? 9 : 0]));
             edge = (t < pivot) | (t <= a.dmin) | (t <= s[DM]);
         }
         if (edge) {
@@ -774,7 +774,7 @@ struct PairMinK {
         double dx = s[0] - a.x, dy = s[1] - a.y, dz = s[2] - a.z;
         double r2s = dx * dx + dy * dy + dz * dz + soft2;
         double ir = fast_rsqrt(r2s);
-        mn[0] = Kokkos::fmin(mn[0], Kokkos::fmin(pair_dt(r2s, ir, dx, dy, dz, s[4] - a.vx, s[5] - a.vy, s[6] - a.vz, G, a.m + s[3], eta_ff, eta_fb),
+        mn[0] = n2_fmin(mn[0], n2_fmin(pair_dt(r2s, ir, dx, dy, dz, s[4] - a.vx, s[5] - a.vy, s[6] - a.vz, G, a.m + s[3], eta_ff, eta_fb),
                                                  tidal_sampling_dt(a.k, s[8], a.m, s[3], r2s, a.kf, s[9])));
     }
     KOKKOS_INLINE_FUNCTION void finish(int i, const Sink&, const double*, const double* mn) const { dmin(i - off) = mn[0]; }

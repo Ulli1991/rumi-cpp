@@ -78,6 +78,11 @@ inline long long n2_host_max() {
     return v;
 }
 
+// fmin / fmax with the C semantics (a NaN operand yields the other) as inline compares: on the host the libm calls are not
+// inlined without -ffinite-math-only and cost ~6 % of a step in the time-step kernel
+template <class T> KOKKOS_INLINE_FUNCTION T n2_fmin(T a, T b) { return (b < a || a != a) ? b : a; }
+template <class T> KOKKOS_INLINE_FUNCTION T n2_fmax(T a, T b) { return (b > a || a != a) ? b : a; }
+
 // Kernels with SUM_F32 = true take float sums and minima in pair(): the driver adds the sums up over 32 sources at a
 // time and folds each partial sum into the fp64 block sum (Sapporo, Gaburov et al. 2009), independent of where a source
 // range starts; minima run in fp32 over one call
@@ -98,7 +103,7 @@ KOKKOS_INLINE_FUNCTION void n2_pairs(const K& k, const typename K::Sink& s, int 
             for (int jt = c; jt < e; jt++) k.pair(s, i, src + (size_t)jt * K::NSRC, jbase + jt, fb, mf);
             for (int a = 0; a < K::NS; a++) blk[a] += (double)fb[a];
         }
-        for (int a = 0; a < K::NM; a++) mn[a] = Kokkos::fmin(mn[a], (double)mf[a]);
+        for (int a = 0; a < K::NM; a++) mn[a] = n2_fmin(mn[a], (double)mf[a]);
     } else {
         for (int jt = 0; jt < n; jt++) k.pair(s, i, src + (size_t)jt * K::NSRC, jbase + jt, blk, mn);
     }
@@ -283,6 +288,45 @@ void run_tiled_p(const char* name, int i0, int ni, int j0, int nj, const K& k) {
 }
 }  // namespace n2_detail
 
+namespace n2_detail {
+inline Kokkos::View<double*>& source_buffer() {
+    static Kokkos::View<double*> buf("n2_sources", 0);
+    static bool hook = (Kokkos::push_finalize_hook([] { buf = Kokkos::View<double*>(); }), true);
+    (void)hook;
+    return buf;
+}
+
+// Host backends: the sources are packed once per call, then one thread per sink takes them in order, one pair per
+// n2_pairs call and Kahan blocks of N2_KAHAN_BLOCK, as run_tiled<1, 1, 1> (bit-identical) without its per-pair repacking
+// of the source and two team barriers per source
+template <class K>
+void run_host_packed(const char* name, int i0, int ni, int j0, int nj, const K& k) {
+    constexpr int NSRC = K::NSRC > 0 ? K::NSRC : 1, NSa = K::NS > 0 ? K::NS : 1, NMa = K::NM > 0 ? K::NM : 1;
+    auto& buf = source_buffer();
+    if (buf.extent(0) < (size_t)nj * NSRC) Kokkos::realloc(buf, (size_t)nj * NSRC);
+    double* src = buf.data();
+    Kokkos::parallel_for("n2_pack_sources", nj, KOKKOS_LAMBDA(int jj) { k.source(j0 + jj, src + (size_t)jj * NSRC); });
+    Kokkos::parallel_for(name, ni, KOKKOS_LAMBDA(int ii) {
+        const int i = i0 + ii;
+        typename K::Sink s = k.sink(i);
+        double sum[NSa], comp[NSa], blk[NSa], mn[NMa];
+        for (int a = 0; a < NSa; a++) sum[a] = comp[a] = blk[a] = 0.0;
+        for (int a = 0; a < NMa; a++) mn[a] = 1e30;
+        int in_block = 0;
+        for (int jj = 0; jj < nj; jj++) {
+            n2_pairs(k, s, i, src + (size_t)jj * NSRC, j0 + jj, 1, blk, mn);
+            if (++in_block >= N2_KAHAN_BLOCK || jj == nj - 1) {
+                for (int a = 0; a < K::NS; a++) { kahan_add(sum[a], comp[a], blk[a]); blk[a] = 0.0; }
+                in_block = 0;
+            }
+        }
+        double out[NSa];
+        for (int a = 0; a < K::NS; a++) out[a] = sum[a] - comp[a];
+        k.finish(i, s, out, mn);
+    });
+}
+}  // namespace n2_detail
+
 template <class K>
 void run_n2(const char* name, int i0, int ni, int j0, int nj, const K& k) {
     if (ni <= 0) return;
@@ -324,6 +368,6 @@ void run_n2(const char* name, int i0, int ni, int j0, int nj, const K& k) {
     if (n2_detail::set_size(ni) >= big_tile_min) { n2_detail::run_tiled_p<256>(name, i0, ni, j0, nj, k); return; }
     n2_detail::run_tiled_p<TILE_SIZE>(name, i0, ni, j0, nj, k);
 #else
-    n2_detail::run_tiled<TILE_SIZE, 1, 1>(name, i0, ni, j0, nj, k);
+    n2_detail::run_host_packed(name, i0, ni, j0, nj, k);
 #endif
 }
