@@ -907,6 +907,7 @@ void advance_subsystems_in_range_impl(Particles& p, int start, int count,
         const int s = eligible[k];
         adv_check.own(s);
         const auto& sub = g_subsystem_mgr.active[s];
+        subsys_advance_count(sub.particle_ids, dt, sub.orb.a, sub.orb.e, (int)sub.type);
         if (to_logh[s]) {
             logh_idx.push_back(s);
         } else if (sub.is_secular && sub.n_bodies == 2) {
@@ -1021,7 +1022,8 @@ void advance_subsystems_in_range_impl(Particles& p, int start, int count,
         }
         if (g_collisional.subsys_err_tol > 0.0 && g_collisional.e_ref > 0.0 && MPIComm::rank() == 0)
             for (int k = 0; k < n_sec; k++)
-                if (evolved[k] && std::fabs(sec_res[k]) > g_collisional.subsys_err_tol * g_collisional.e_ref) {
+                if (evolved[k] && std::fabs(sec_res[k]) > g_collisional.subsys_err_tol * g_collisional.e_ref &&
+                    subsys_err_first(g_subsystem_mgr.active[secular_idx[k]].particle_ids)) {
                     const auto& sub = g_subsystem_mgr.active[secular_idx[k]];
                     const double* q = &sec_pre[14 * k];
                     auto& sc = StellarPropsCache::get();
@@ -1151,7 +1153,7 @@ void advance_subsystems_in_range_impl(Particles& p, int start, int count,
             {
                 const double res = tri_energy() - (E_tri0 - st.booked_gw);   // what is left after the fix (round-off)
                 if (g_collisional.subsys_err_tol > 0.0 && g_collisional.e_ref > 0.0 && MPIComm::rank() == 0 &&
-                    std::fabs(res) > g_collisional.subsys_err_tol * g_collisional.e_ref) {
+                    std::fabs(res) > g_collisional.subsys_err_tol * g_collisional.e_ref && subsys_err_first(sub.particle_ids)) {
                     std::printf("SUBSYS_ERR step %d secular_triple dE/E0 %.3e type %d n 3 dt %.3e a %.4e e %.5f m %.4g %.4g %.4g "
                                 "pids %d %d %d state", g_step_in_progress, res / g_collisional.e_ref, (int)sub.type,
                                 dt * TIME_UNIT_MYR, st.a_in, st.e_in, m1, m2, m3, sub.inner_binary_id, inner_j,
@@ -1447,7 +1449,7 @@ void advance_subsystems_in_range_impl(Particles& p, int start, int count,
         const double subsys_log = g_collisional.subsys_err_tol;
         auto log_subsys = [&](const Subsystem& sub, int nb, const char* kind, double d, int si) {
             if (subsys_log <= 0.0 || g_collisional.e_ref <= 0.0 || MPIComm::rank() != 0 ||
-                std::fabs(d) <= subsys_log * g_collisional.e_ref) return;
+                std::fabs(d) <= subsys_log * g_collisional.e_ref || !subsys_err_first(sub.particle_ids)) return;
             std::string msg;
             char buf[96];
             std::snprintf(buf, sizeof(buf), "SUBSYS_ERR step %d %s dE/E0 %.3e type %d n %d dt %.3e a %.4e e %.5f m",

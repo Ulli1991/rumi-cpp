@@ -1,3 +1,5 @@
+#include <string>
+#include <map>
 #include <cstdlib>
 #include "diagnostics.h"
 #include "constants.h"
@@ -23,6 +25,35 @@
 EnergyBookkeeping g_energy_books;
 EnergyAttribution g_eattr;
 int g_step_in_progress = 0;
+
+namespace {
+int g_err_step = -1, g_adv_step = -1;
+std::map<std::vector<int>, long long> g_err_n, g_adv_n;
+std::vector<int> sorted_pids(const std::vector<int>& p) { std::vector<int> q(p); std::sort(q.begin(), q.end()); return q; }
+}
+bool subsys_err_first(const std::vector<int>& pids) {
+    if (g_err_step != g_step_in_progress) {
+        long long sup = 0; for (const auto& kv : g_err_n) sup += kv.second - 1;
+        if (sup > 0) std::printf("SUBSYS_ERR step %d: %lld more lines of the same subsystems suppressed\n", g_err_step, sup);
+        g_err_n.clear(); g_err_step = g_step_in_progress;
+    }
+    return ++g_err_n[sorted_pids(pids)] == 1;
+}
+void subsys_advance_count(const std::vector<int>& pids, double dt, double a, double e, int type) {
+    if (g_collisional.subsys_advance_limit <= 0) return;
+    if (g_adv_step != g_step_in_progress) { g_adv_n.clear(); g_adv_step = g_step_in_progress; }
+    const long long n = ++g_adv_n[sorted_pids(pids)];
+    if (n <= g_collisional.subsys_advance_limit) return;
+    std::string ps; for (int q : pids) ps += " " + std::to_string(q);
+    std::fprintf(stderr, "SUBSYS_ADVANCE_LIMIT: step %d, subsystem type %d pids%s advanced %lld times in one top-level step "
+                 "(limit %lld), last dt %.3e Myr, a %.4e pc, e %.6f: stopping\n", g_step_in_progress, type, ps.c_str(), n,
+                 (long long)g_collisional.subsys_advance_limit, dt * TIME_UNIT_MYR, a, e);
+    std::printf("SUBSYS_ADVANCE_LIMIT: step %d, subsystem type %d pids%s advanced %lld times in one top-level step (limit %lld), "
+                "last dt %.3e Myr, a %.4e pc, e %.6f: stopping\n", g_step_in_progress, type, ps.c_str(), n,
+                (long long)g_collisional.subsys_advance_limit, dt * TIME_UNIT_MYR, a, e);
+    std::fflush(stdout); std::fflush(stderr);
+    std::abort();
+}
 
 // ==========================================================================
 // Tiled GPU potential energy computation (shared-memory, TILE_SIZE tiles)

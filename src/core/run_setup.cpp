@@ -85,6 +85,7 @@ int apply_run_settings(const Config& cfg, RunSettings& rs) {
         g_collisional.ngb_mass_gamma  = cfg.get_double("NGB_MASS_GAMMA");
         g_collisional.weak_split_gamma = cfg.get_double("WEAK_SPLIT_GAMMA");
         g_collisional.subsys_err_tol = cfg.get_double("SUBSYS_ERR_TOL");
+        g_collisional.subsys_advance_limit = cfg.get_int("SUBSYS_ADVANCE_LIMIT");
         g_collisional.tidal_step_res  = cfg.get_double("TIDAL_STEP_RES");
         g_collisional.tidal_floor_adapt = cfg.get_bool("TIDAL_FLOOR_ADAPT");
         g_collisional.secular_triples = cfg.get_bool("SECULAR_TRIPLES");

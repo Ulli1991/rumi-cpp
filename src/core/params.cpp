@@ -192,6 +192,8 @@ const std::vector<ParamSpec> kParams = {
      "A step slower than this x the median of the previous steps prints STALL lines: the costliest LogH integrations and the deepest set (0: off)"},
     {"STALL_DE_FACTOR", D, "10", "Output", EXPERT, "",
      "A step whose energy change (ETA_RESTART check) exceeds this x the median of the previous steps prints STALL lines (0: off)"},
+    {"SUBSYS_ADVANCE_LIMIT", I, "0", "Subsystems", EXPERT, "",
+     "A subsystem advanced more often than this in one top-level step stops the run with its state (0: off; hosts that must not stall)"},
     {"SUBSYS_ERR_TOL", D, "1e-11", "Output", EXPERT, "",
      "A subsystem advance (LogH, secular binary or triple) with unbooked |dE| above this x |E0| prints a SUBSYS_ERR line with its members' state (scripts/subsys_cases.py; 0: off)"},
     {"STALL_RESTART", B, "false", "Output", EXPERT, "",
