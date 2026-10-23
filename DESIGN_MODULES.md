@@ -65,9 +65,9 @@ The same happened to the particle struct: one record carrying every field of eve
    each module passes alone.
 
 8. **No hidden global state.** Modules hold their own state and buffers, released explicitly before
-   `Kokkos::finalize` (cpp-nbody had to retrofit finalize hooks for static Views).
+   `Kokkos::finalize` (RUMI++ had to retrofit finalize hooks for static Views).
 
-## What cpp-nbody already follows and what to clean up first
+## What RUMI++ already follows and what to clean up first
 
 Follows: the direct-sum driver and the FMM take positions and masses through narrow interfaces and know nothing
 about particle types; collisional physics is compiled separately (`ENABLE_COLLISIONAL`).

@@ -458,7 +458,7 @@ int main(int argc, char** argv) {
     if (argc < 2) { std::fprintf(stderr, "usage: see header\n"); return 1; }
     std::string mode = argv[1];
     const char* harvest = std::getenv("SYMRK_HARVEST");
-    if (!harvest) harvest = "/raven/ptmp/uli/cpp-nbody-runs/harvest-2026-10-19/s404_s1025_1/ic.txt";
+    if (!harvest) harvest = "harvest-2026-10-19/s404_s1025_1/ic.txt";
     if (mode == "verify") { verify(); return 0; }
     if (argc < 4) return 1;
     Case c = make_case(argv[2], harvest);

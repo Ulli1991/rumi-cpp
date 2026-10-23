@@ -36,7 +36,7 @@ const char* channel_str(int c) {
 
 void write_header(FILE* f) {
     std::fprintf(f,
-        "# cpp-nbody gravitational-wave table (src/collisional/gw_output.h, docs/CASES.md E2). One row per compact\n"
+        "# RUMI++ gravitational-wave table (src/collisional/gw_output.h, docs/CASES.md E2). One row per compact\n"
         "# (NS kw 13 / BH kw 14) merger at the moment the code decides it (kind MERGER) and per bound compact pair in a\n"
         "# subsystem with t_gw < GW_CENSUS_TGW_MYR at every snapshot (kind BINARY). a, e: Newtonian osculating elements\n"
         "# of the relative orbit; f_gw: peak GW frequency (Wen 2003); e_10Hz, e_10mHz: e on the orbit-averaged Peters\n"

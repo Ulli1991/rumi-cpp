@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""cpp-nbody initial conditions -> PeTar input (the same particles for a head-to-head run, PLAN item 4b).
+"""RUMI++ initial conditions -> PeTar input (the same particles for a head-to-head run, PLAN item 4b).
 
-Input: the step-0 particle dump of a cpp-nbody run with NBODY_DUMP=1 (dump_0000.bin: int N, then N rows of
+Input: the step-0 particle dump of a RUMI++ run with NBODY_DUMP=1 (dump_0000.bin: int N, then N rows of
 pid m x y z vx vy vz subsystem_id as doubles; pc, Msun, km/s).
 Output: the 7-column file petar.init reads (m x y z vx vy vz), Msun / pc / pc/Myr (petar -u 1), binaries first as
 adjacent pairs (petar -b n_bin). Binaries are mutual most-bound pairs with E < 0 within r_max (the binary census of
@@ -14,7 +14,7 @@ import argparse
 import numpy as np
 from scipy.spatial import cKDTree
 
-G = 4.302194e-3            # pc (km/s)^2 / Msun (cpp-nbody constants.h)
+G = 4.302194e-3            # pc (km/s)^2 / Msun (RUMI++ constants.h)
 KMS_TO_PC_MYR = 1.0227122  # 1 km/s in pc/Myr
 
 

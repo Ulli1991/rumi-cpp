@@ -30,7 +30,7 @@
 using namespace admpn;
 using symrk::GaussCoeffs; using symrk::CState; using symrk::IrkStats; using symrk::DIM_MAX; using symrk::S_MAX;
 
-static const char* HARVEST = "/raven/ptmp/uli/cpp-nbody-runs/harvest-2026-10-19";
+static const char* HARVEST = "harvest-2026-10-19"  // stall cut-outs of the 2026-10-19 harvest (local directory);
 static const double G_PC = 4.30091e-3, C_KMS = 299792.458;
 
 // ---------------------------------------------------------------------------------------------------- cases

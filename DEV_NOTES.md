@@ -1,4 +1,4 @@
-# Status and next steps (for the viper session)
+# Development notes, October 2026: fixes, measurements, open items
 
 ## Done (tested on CPU, Kokkos 5.0.2 Serial, ctest: 8/8 pass in ~80 s)
 
@@ -16,7 +16,7 @@
   planets_fsi, floor_binary_e0, floor_planets. Bounds 1.3x measured, orders measured -0.1/+0.3,
   each case fails on the pre-fix code (teeth).
 
-## Done on viper (2026-10-09, host build: Kokkos OpenMP/Serial at ~/kokkos-host, build-host/)
+## Fixes of 2026-10-09 (host build with Kokkos OpenMP/Serial; GPU checks on MI300A)
 
 - Mergers inside the HHS recursion (bug 3, part of 9): compaction shifted the arrays under the callers'
   ranges and left a stale copy in the old last slot (the duplicated pid / one-body LogH NaN / endless
@@ -98,7 +98,7 @@ Open, found on the way:
 - With USE_TREE the global tree indices go stale after a merger compaction (tree is off in collisional runs).
 - dL/L is not conserved through mergers (orbital L of the pair is dropped; stellar spin is not tracked).
 
-## On viper
+## Next steps (as of 2026-10-09)
 
 1. Build against the GPU Kokkos and run `ctest --test-dir <build>`: first check of the fixes on the
    GPU path (TILE_SIZE 128). Bounds are from the laptop; a floor-test failure means re-measure first.
@@ -140,54 +140,38 @@ Open, found on the way:
    momentum to 1e-17 at every order; error ~theta^p. N = 2e4 Plummer: rms 3.0e-10 at theta 0.2,
    p 10 (8.4e-12 at p 12); 1.6e-7 at theta 0.3, p 10. Plain Cartesian M2L is O(p^6), 27 us at p 10:
    far too slow. Next: O(p^3) rotation-based spherical-harmonic M2L (Dehnen 2014), which needs an
-   exactly Newtonian far field: compact (spline/Wendland) softening or none, decided by the user.
+   exactly Newtonian far field: compact (spline/Wendland) softening or none (to be decided).
 
-Full audit and review: `jax-hydro/research_notes/Rantala integrators/` (rantala_spec.md,
-cpp_nbody_code_review.md; local, not in a repo). The README's FROST DOI is wrong:
-FROST is 10.1093/mnras/stab057 (the Rantala et al. 2023 link is fixed to 10.1093/mnras/stad1360); the HHS-FSI is FROST Algorithm 3.
+FROST is Rantala, Naab & Springel 2021, MNRAS 502, 5546 (doi 10.1093/mnras/stab057); the HHS-FSI is its Algorithm 3.
 
-After cpp-nbody: the standalone Python/JAX/Pallas port (`~/jax-nbody/DESIGN.md`), measured against
-this code.
+## Isolated-set stop and stable triples (2026-10-10)
 
-## Hand-over 2026-10-10: viper GPU partition down, work continues on raven
-
-State when the viper session died (2026-10-10 02:44, hardware failure; apu/apudev all down or drained since):
-
-- 200k, 10 % binaries, 1 viper node, 30 steps (job 12148154, outputs in `/viper/ptmp2/uli/cpp-nbody-ab/run/{old,new,new_cap10}`):
-  old code f8676d6 14.65 s/step, max late |dE/E| 5.4e-10; new code 6.86 s/step but 2.8e-9 (2.1x faster, 5x worse late
-  energy); new with the old GBS cap (DYNCAP 10) 2.9e-9, so the GBS cap is not the cause.
+- 200k, 10 % binaries, 1 MI300A node, 30 steps: old code f8676d6 14.65 s/step, max late |dE/E| 5.4e-10; new code
+  6.86 s/step but 2.8e-9 (2.1x faster, 5x worse late energy); new with the old GBS cap (DYNCAP 10) 2.9e-9, so the GBS cap
+  is not the cause.
 - Diagnosis: old and new agree until step 27. From step 29 the new code sends stable triples to the orbit-averaged
   secular-triple solver (16/8/16 calls in steps 29-31); the old code never does. The isolated-set stop advances a set that
   is one subsystem over the whole pivot step, and the LogH/secular choice depends on the step length
   (`n_orb_per_dt = dt / P_in`), so the longer step pushes triples into the secular path, which does not conserve their
-  instantaneous energy. Fix (committed after this note): 3-member sets are excluded from the stop and recurse as before.
-  Host ctest 24/24 with the fix. **Unverified on the GPU**: the verification jobs never ran:
-  - 12148543: fixed binary (`fix.run`), seeds 42, 7, 13 (`jobC.sh`);
-  - 12148506 / 12148507: old vs new on seeds 7 and 13, and new with `NBODY_SMALL_FOR=0 NBODY_SMALL_N2=0` and
-    `NBODY_TILE256_MIN=100000000` (`jobA.sh`, `jobB.sh`); `base_config.txt` is the common config.
-  Pass criterion (energy rule): the fixed code must match the old code's late-time |dE/E| on every seed.
-  If not, bisect: small-set host paths, 256 tiles (summation order at the top levels), a build without the isolated-set stop.
-- GPU ctest (job 12144484): 28/29. `floor_planets` misses the |dL/L| bound 3.3e-15 by round-off only (3.3e-15 with the
-  host small-set paths, 3.9e-15 on the device path; energy identical, 8.8e-14 against 1.25e-13). Loosen the bound after
-  the seed runs, not before.
-- Pending user decisions: dense-core floor (keep digging with single-binary reference tests, or park: findings in the
-  dense-core section above); the two agreed speed items: wire the spline `Softening` into the kernels, CPU path,
-  diagnostics and FMM, and build the FMM interaction lists on the GPU.
-- Later: full 5 Myr Rantala et al. 2023 Fig. 9 run with binaries; spin evolution (§3.9) exists but is never called; MSTAR for groups
-  of more than 8 bodies; far field item 7 above.
+  instantaneous energy. Fix: 3-member sets are excluded from the stop and recurse as before. Host ctest 24/24 with the fix.
+  Pass criterion for the GPU check (energy rule): the fixed code must match the old code's late-time |dE/E| on seeds 42,
+  7 and 13. If not, bisect: small-set host paths, 256 tiles (summation order at the top levels), a build without the
+  isolated-set stop.
+- GPU ctest: 28/29. `floor_planets` misses the |dL/L| bound 3.3e-15 by round-off only (3.3e-15 with the host small-set
+  paths, 3.9e-15 on the device path; energy identical, 8.8e-14 against 1.25e-13). Loosen the bound after the seed runs,
+  not before.
+- Open decisions: dense-core floor (more single-binary reference tests, or park it: findings in the dense-core item
+  above); wire the spline `Softening` into the kernels, CPU path, diagnostics and FMM; build the FMM interaction lists
+  on the GPU.
+- Later: full 5 Myr Rantala et al. 2023 Fig. 9 run with binaries; spin evolution (§3.9) exists but is never called;
+  MSTAR for groups of more than 8 bodies; far field item 7 above.
 
-On raven:
+## CUDA build (A100)
 
-- Clone at `/raven/u/uli/cpp-nbody` (was at b6a681a with uncommitted work from 2026-03-10; that work is kept on the
-  branch `raven-wip-2026-03-10` and is not merged: BINARY_FRAC pairing, PN2.5 energy-check skip, GBS/LogH diagnostics were
-  redone on viper. Nine old stashes remain there too). `main` fast-forwarded to origin/main.
-- Kokkos 5.0.99 CUDA (AMPERE80) at `/raven/u/uli/kokkos-cuda-mpi`, modules `gcc/13 cuda/12.6 openmpi_gpu/5.0`:
-  `cmake -DCMAKE_CXX_COMPILER=/u/uli/kokkos-cuda-mpi/bin/nvcc_wrapper -DKokkos_ROOT=/u/uli/kokkos-cuda-mpi -DUSE_MPI=ON
-  -DUSE_GPU_AWARE_MPI=ON -DENABLE_COLLISIONAL=ON` in `build-mpi/`; submit script `submit_kokkos_mpi_raven.sh`
-  (partition gpu, 4 x A100, `--kokkos-map-device-id-by=mpi_rank`), 15 min default.
-- Everything since 37aa7bf was built and run with HIP on the MI300A only. First CUDA build: expect compile issues in
-  `n2_driver.h` / `n2_kernels.h` (templated tile sizes, nvcc_wrapper), and check that the unified-memory paths
+- Kokkos with CUDA (AMPERE80), modules `gcc/13 cuda/12.6 openmpi_gpu/5.0` on an MPCDF-type system:
+  `cmake -DCMAKE_CXX_COMPILER=<kokkos>/bin/nvcc_wrapper -DKokkos_ROOT=<kokkos> -DUSE_MPI=ON -DUSE_GPU_AWARE_MPI=ON
+  -DENABLE_COLLISIONAL=ON`; run with `--kokkos-map-device-id-by=mpi_rank`, 4 x A100 per node.
+- Until 37aa7bf everything was built and run with HIP on the MI300A only. On the first CUDA build check
+  `n2_driver.h` / `n2_kernels.h` (templated tile sizes, nvcc_wrapper), and that the unified-memory paths
   (`kHostAccessibleDevice`, `NBODY_SMALL_FOR`, `NBODY_SMALL_N2`) are off on the A100. `RSQRT_NEWTON` is on by default
-  (GPU accuracy = CPU). A host Kokkos (OpenMP+Serial) is needed for the CPU ctest as on viper (`viper-host-build` memory).
-- Order: build, host + GPU ctest, then the seed A/B above (old f8676d6 vs new vs fix, 200k, 10 % binaries, 30 steps),
-  then the pending decisions.
+  (GPU accuracy = CPU). The CPU ctest needs a host Kokkos (OpenMP+Serial).

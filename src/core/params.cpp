@@ -26,7 +26,7 @@ const std::vector<ParamSpec> kParams = {
      "Integration interval (Myr): the level-0 step; diagnostics, restarts and snapshots count these steps"},
     {"DT_MIN_MYR", D, "1.0e-14", "Run", EXPERT, "", "Smallest time step (Myr): the deepest HHS level"},
     {"INTEGRATOR", S, "hhs", "Run", INTERNAL, "hhs|fsi",
-     "hhs: adaptive HHS-FSI (FROST Algorithm 4); fsi: every particle on the fastest occupied level (tests)"},
+     "hhs: adaptive HHS-FSI (FROST Algorithm 3); fsi: every particle on the fastest occupied level (tests)"},
 
     // ---- Star cluster ----
     {"PLUMMER_N", I, "1000", "Star cluster", USER, "", "Number of stars"},

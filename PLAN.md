@@ -1,18 +1,17 @@
-# cpp-nbody: development plan (accuracy and speed targets from the literature)
+# RUMI++: development plan (accuracy and speed targets from the literature)
 
 ## Context
 
-Goal (user, 2026-10-10): make cpp-nbody (Kokkos; HIP on MI300A, CUDA on A100) at least as accurate and as
-fast as the published Rantala codes. The viper session that held the working plan crashed; everything since
-37aa7bf was built only with HIP; commit 7a966b2 (secular-triple regression fix) was never checked on a GPU;
-work moves to raven (4x A100 per node — the hardware of the Rantala et al. 2023 timings). A newer copy of the repo with a
-literature plan exists on GitHub but cannot be fetched from raven (no credentials; user pulls it).
+Goal (2026-10-10): make RUMI++ (Kokkos; HIP on MI300A, CUDA on A100) at least as accurate and as fast as the
+published Rantala codes. Everything since 37aa7bf had been built only with HIP, and commit 7a966b2 (secular-triple
+regression fix) had not yet been checked on a GPU; development moved to A100 nodes (Raven, 4x A100 per node — the
+hardware of the Rantala et al. 2023 timings).
 
-Papers re-read from arXiv LaTeX, stored in `/raven/u/uli/papers/rantala/` (PDF + `src/<id>/manuscript.tex`):
+Papers re-read from the arXiv LaTeX sources:
 MSTAR 2001.03180, FROST 2011.14984, Rantala et al. 2023 2210.02472, FROST-CLUSTERS I 2403.10602, II 2506.04330,
 III 2601.07917, letter 2503.21879.
 
-User decisions: (1) add SDAR inside the LogH/GBS batch and A/B it against LogH + secular, switching the
+Decisions: (1) add SDAR inside the LogH/GBS batch and A/B it against LogH + secular, switching the
 default only when equal or better; (2) accuracy gates first, then speed — every speed change keeps |dE/E|
 equal or better (standing rule); (3) scope includes collision upgrades, stellar-evolution upgrade, spin +
 MSTAR, and far field: **tree for time-step/neighbour assignment, FMM to take the far-field force work at
@@ -31,7 +30,7 @@ Accuracy (eta_ff = eta_fb = 0.2, eta_grad = eta_jerk = 0.1, eta_GBS 1e-10, inter
 
 Speed (one raven node, 4x A100, per 1e-3 Myr interval): Rantala et al. 2023 Fig 7: N = 1e4 / 1e5 / 1e6 ->
 0.12 s / 1.3 s / 58 s; f_bin 10 % -> 100 % costs +25 % (1e4, 1e5), +3 % (1e6). Strong scaling to
-~40 N/1e6 GPUs. (Note: memory file `rantala-papers.md` says 5.8 s for 1e6 — wrong by 10x; fix it.)
+~40 N/1e6 GPUs.
 
 Method changes after Rantala et al. 2023 that the current Rantala code uses:
 - FC-I A1: Omelyan gradient, ã(r) ≈ a(r + ε²/24 a) — same kernel as Newtonian forces.
@@ -82,7 +81,7 @@ SSE once per top-level step without ε_se coupling, deterministic natal kicks, B
 5.5-41.6; no MPI shared windows; FMM exists (`gravity/fmm.cpp`, spherical harmonics p = 12, host
 interaction lists) but not wired; `Softening` spline struct unused.
 
-Build/test state on raven: `/u/uli/kokkos-cuda-mpi` (Kokkos 5.0.99, CUDA AMPERE80) exists; `build-mpi/`
+Build/test state on Raven (2026-10-10): a Kokkos 5.0.99 install (CUDA AMPERE80) exists; `build-mpi/`
 is configured against it but its binary is from March. No HIP-only constructs found; unified-memory
 paths compile out on A100, so `SERIAL_N2_CPU` is the only small-set lever there. CTest: 30+ cases in
 `CMakeLists.txt:128-147`, checks in `tests/run_case.py` (bounds measured on laptop/MI300A).
@@ -90,13 +89,12 @@ paths compile out on A100, so `SERIAL_N2_CPU` is the only small-set lever there.
 ## Milestones
 
 Each step: failing test first, bounds 1.3x measured, A/B by env var where behaviour changes, multi-seed
-when noisy, notes in `VIPER_NOTES.md` (rename to `NOTES.md` later), commit per step.
+when noisy, notes in `DEV_NOTES.md`, commit per step.
 
 ### M0 — Raven bring-up and reconcile
-1. User pulls the GitHub version (`! git -C /raven/u/uli/cpp-nbody pull origin main` with a token, or
-   add `~/.ssh/id_ed25519.pub` to GitHub). Read its development plan and merge its items into this one.
-2. CUDA build in `build-mpi/` (recipe in `VIPER_NOTES.md` hand-over section); host build against
-   `/u/uli/kokkos` (Serial+OpenMP) in `build-host/`. Fix nvcc compile issues (watch `n2_driver.h`,
+1. Merge the items of the GitHub version's development plan into this one.
+2. CUDA build in `build-mpi/` (recipe in `DEV_NOTES.md`, "CUDA build"); host build against a Serial+OpenMP
+   Kokkos in `build-host/`. Fix nvcc compile issues (watch `n2_driver.h`,
    `n2_kernels.h`, `double4` in `constants.h:44`).
 3. Host ctest, then GPU ctest in a gpu job (`NBODY_TEST_TIMEOUT` raised). Re-measure bounds per
    platform (A100 vs MI300A vs x86) and record them in `tests/run_case.py`.
@@ -170,7 +168,7 @@ Tests: head-on star collision, TDE on parabolic orbit, BH binary to ISCO with re
 2. `FLYBY_CM_VELOCITY` on all paths (CPU, HHS_CC) and A/B as default (FC-II). (done; rejected as default by the production A/B and deleted 2026-10-12; restored 2026-10-13 as an option, off by default, on top of the N^2 kernel speedups)
 3. Omelyan gradient as option (`GRADIENT=omelyan`), A/B accuracy on M2; makes the FMM gradient a
    second force evaluation.
-4. Tree for time-step and neighbour assignment (user requirement): octree on device, exact pruning so
+4. Tree for time-step and neighbour assignment (requirement): octree on device, exact pruning so
    that the min-reduction and neighbour lists are bit-identical to O(N²) (cell bound on ff/fb/jerk
    and on r < r_ngb_max), used above a set-size threshold at the top levels.
 5. Subsystem cost: true device batching of LogH/SDAR for many small subsystems, or keep host threads
@@ -207,7 +205,7 @@ HARD_PROBLEMS.md (frontier problems, cost, gaps, flagships), SCALING_DESIGN.md (
 PARALLEL_ASYNC_REVIEW.md (parallel-in-time, async, runtimes, shared memory, MPI/NCCL), AUDIT_2026-10.md (F1-F7, G).
 Only the items below are adopted; everything else in those documents is reference, and the "rejected" list says why.
 
-## Goals (user-confirmed)
+## Goals
 - A: BH-rich 1e6 cluster, observed multiplicity, through BH-driven core collapse, full PN BH dynamics (stepping stone 2e5).
 - B: dense young cluster, full massive-star multiplicity, runaway collisions / IMBH.
 - C: 1e7 through core collapse (needs FMM + multi-node).
@@ -223,7 +221,7 @@ Only the items below are adopted; everything else in those documents is referenc
 - M0 done (raven builds, new stack built). M1 gate passes on 3 seeds after the seed-7/13/42 fixes.
 - M2 partial: Fig 7 like-for-like done (fig7-2026-10-11); Figs 8/9/11 long runs and core collapse open.
 - M3: SDAR implemented (default off; no gain at 200k now); collisions in LogH done (M5 part).
-  Kepler fix + KEPLER_2BODY on branch worktree-agent-a1a708bf08cc7e185: -12..27 % but 200k energy worse on 6/9
+  Kepler fix + KEPLER_2BODY on a development branch: -12..27 % but 200k energy worse on 6/9
   seeds from the universal-variable secular change -> find cause, then merge.
 - M5: collisions decided at pericentre inside LogH/GBS merged; open: TDE accretion 0.5, FC-I BH-BH radius.
 - M7: trees, F2 overhead, LogH/GBS bit-identical speedups, GPU audit items (fences, energy check, transport,
@@ -242,8 +240,8 @@ Only the items below are adopted; everything else in those documents is referenc
    shape (REVIEW #7, 3 seeds), parallel GBS columns for stragglers (REVIEW #10).
 4. Validation ladder (HARD_PROBLEMS §6.2): equal-mass collapse 16-32k; mass-spectrum collapse; Rantala et al. 2023 §5.6;
    Rizzuto-type; DRAGON-II-like; Fig 9 to BH collapse; 1e6 flagship A.
-   4b. Head-to-head with PeTar (user, 2026-10-12; github.com/lwang-astro/PeTar, Wang et al. 2020: P3T tree + SDAR +
-   slow-down, galpy tidal field, the closest public code in scope). Same ICs written for both (cpp-nbody snapshot ->
+   4b. Head-to-head with PeTar (2026-10-12; github.com/lwang-astro/PeTar, Wang et al. 2020: P3T tree + SDAR +
+   slow-down, galpy tidal field, the closest public code in scope). Same ICs written for both (RUMI++ snapshot ->
    PeTar input), N = 1e4 / 1e5 / 2e5, without and with 10-50 % binaries, isolated and in a tidal field; compare
    |dE/E| per interval and over the run, wall time per Myr on one raven node (PeTar MPI+OpenMP(+CUDA tree)),
    and the physics (Lagrangian radii, core collapse time, escaper rate, binary census) on seed ensembles.
@@ -286,7 +284,7 @@ Only the items below are adopted; everything else in those documents is referenc
 | K-2/K-3 | pericentre collisions; ZL15 recoil with spins | K-2 done (M5); K-3 open (needed for goal A) |
 | gradmag fix 3 | fresh grad_mag per kernel (branch ab-gradmag) | better energy, 28 % slower at 200k: re-test with B-1 |
 
-Survey corrections already applied: SSE memory note fixed; F3 understood as a dragged-in fly-by (now handled by SDAR,
+Survey corrections already applied: SSE note fixed; F3 understood as a dragged-in fly-by (now handled by SDAR,
 collisions, FLYBY_NGB_CM); r_strong is only a BSE switch; FMM needs eps <~ 1e-8 at today's accuracy.
 
 ## Deleted options (decided A/B comparisons: winner hard-wired, losing path and key deleted)
@@ -298,7 +296,7 @@ The code before the deletions is tagged archive/pre-step2-deletions.
 | SUBSYS_COLLISIONS | true: collisions decided inside LogH/GBS at the pericentre, FC-I App. B3 (7de902c, 043190d) | deleted 2026-10-12, winner hard-wired |
 | WEAK_PERTURBER_GAMMA | off: no weak-perturber split (C-1, 7c5b3ca: 3.6x worse energy); test weak_flyby_split deleted | deleted 2026-10-12, winner hard-wired |
 | FLYBY_CM_KICK, FLYBY_CM_KICK_EPS | off: no c.o.m. kicks of weakly perturbed binaries (d83324d; 200k seed-3 stall step: \|dL/L\| 1.4e-9, 15 % faster); tests cm_kick_* deleted | deleted 2026-10-16, winner hard-wired |
-| (weak-perturber split back) | WEAK_SPLIT_GAMMA, default off, 1809570 (option by user decision) | 2026-10-16 |
+| (weak-perturber split back) | WEAK_SPLIT_GAMMA, default off, 1809570 (kept as an option) | 2026-10-16 |
 | TIDAL_GAMMA, TIDAL_RES (+ NBODY_TIDAL_DEBUG) | off: no orbit-resolving step for strongly perturbed binaries (fe207ed, 6278068: no benefit) | deleted 2026-10-12, winner hard-wired |
 | MPI_TRANSPORT = device | host staging (f24a76b: 3488 vs 1028 us; no UCC/hcoll on raven); key stays for host vs nccl on USE_NCCL builds (auto) | value deleted 2026-10-12; MPI_NON_BLOCKING gathers are now always blocking (the Iallgatherv path was device-only) |
 | NBODY_SECULAR_PREC_STEP | off: no 1/omega-dot limit on the secular step (4ebc740: 100000-step cap per evolution) | deleted 2026-10-12, winner hard-wired |
@@ -308,11 +306,11 @@ The code before the deletions is tagged archive/pre-step2-deletions.
 | BINARY_COM_V | sampled: one f(E) draw per binary c.o.m. (a8728fb; average gave Q_obj 0.336, cold binaries) | deleted 2026-10-12, winner hard-wired |
 | DISTRIBUTE_SUBSYSTEMS, DISTRIBUTE_MIN_SUBSYSTEMS | off: every rank advances every subsystem (5eb53e1: the exchange was slower; SCALING_DESIGN: retire); tests mergers_mpi2_dist, mpi_1v2_dist, restart_mpi2_dist deleted (duplicates of the non-distributed cases) | deleted 2026-10-12, winner hard-wired |
 
-## Pending evaluations (agents stopped mid-work)
+## Pending evaluations
 - Task runtimes (HPX/Charm++/Legion): literature says tasks must be >= ~100 us; evaluate only at subtree granularity.
-- GPU idle prototypes (uncommitted in worktree agent-a80a0259e1d880784): overlap of host LogH with device forces.
+- GPU idle prototypes (not committed): overlap of host LogH with device forces.
 - Ask MPCDF for an Open MPI build with UCC (GPU-aware collectives); NCCL for CUDA 13.2.
-- Check viper Kokkos is built with GFX942_APU.
+- Check that the MI300A Kokkos build has GFX942_APU.
 
 ## Rejected (with reason; do not redo)
 - Parareal/PFASST/MGRIT on the whole cluster (chaos: O(1) convergence window). Optimistic PDES / Time Warp.
@@ -324,7 +322,7 @@ The code before the deletions is tagged archive/pre-step2-deletions.
 
 ## Speed plan for the flagship runs A, B, C (2026-10-15)
 
-Baselines, one raven node (4x A100), current main, fixed ICs (ptmp abc-2026-10-14; nsys profiles in prof/):
+Baselines, one raven node (4x A100), current main, fixed ICs (run label abc-2026-10-14, with nsys profiles):
 - A (1e6, 50 % binaries, evolved 1 Gyr): 210 s/step. GPU-bound, 70 % busy: ForceK 40 %, GradK 24 %, DtK 20 % (5x the
   force cost per pair), energy-check potential 4.4 %; ~90k syncs + 255k launches/step (2-3 s).
 - B (1.1e5 young dense, r_h 0.6 pc, 10 % binaries): 630 s/step. Launch-bound, GPU 13 % busy: the FLYBY_CM_EPS step
@@ -346,17 +344,17 @@ Order (gate in brackets; "exact" = bit-identical, host ctest + dump compare):
 9. FMM far field after the force-error study (statistical equivalence + energy). A, C several x.
 10. Mixed precision (double-single) against the 1e-8 force-error limit (energy rule). A, C kernels 3-5x.
 
-## Status 2026-10-21 (Raven login crash; GPU work moves to Viper) — see docs/HANDOFF_2026-10-21.md
+## Status 2026-10-21
 - Merged today: C15 (diagnostics read-only), C21 (SDAR kappa with outside perturbers; 200k A/B owed), C22 (Gauss-IRK
   for compact Newtonian subsystems, default off; 200k A/B done, s303 undecided). CASES.md has the numbers.
 - 4c/C20 (secular inner binaries of PN subsystems): the stall class behind 6 of 8 harvested stalls is gone (worst
-  step 187 s -> 20 s at 200k); the main-branch s101 comparison is still queued on Raven (job 31366161).
-- Next, in order: (1) C21 200k A/B on Viper apudev, (2) C22 default decision (longer A/B or 4th seed, "not chosen"
+  step 187 s -> 20 s at 200k); the main-branch s101 comparison was still queued.
+- Next, in order: (1) C21 200k A/B on the MI300A nodes, (2) C22 default decision (longer A/B or 4th seed, "not chosen"
   counters), (3) MSTAR for the 16-18 body dense-core groups (the remaining stall class), (4) items 2-7 above.
 - Rejected today, do not redo: R2 (1/(-U) kick) retest and R3 (Kahan) — energy rule; PN1 Hamiltonian for IRK.
 
 ## Energy report watertight (2026-10-21 late) — work items W1-W8
-Measured: 200k bf0.1 s101, 26 steps, all 487972 PN LogH calls re-integrated at ETA_GBS x 1e-4 (job 31378360):
+Measured: 200k bf0.1 s101, 26 steps, all 487972 PN LogH calls re-integrated at ETA_GBS x 1e-4:
 plain T+U difference 3.6e-7 E_REF was orbital phase of the 1PN E_N oscillation; phase-independent
 Q = T+U+E_PN(conserved function) differs by sum|.| 5.0e-10 (signed 9.4e-11) vs reported 9.5e-11 -> real hidden error
 ~5x reported, 40 % from one poorly resolved call (12.2+45 Msun, a 0.37 AU, e 0.64, ~11 GBS steps/orbit). Cut-outs
@@ -380,4 +378,4 @@ Also confirmed: Gauss-IRK (C22) gains nothing in production because 99.8 % of Lo
 visible error is FSI -> accuracy leverage is in FSI (step criteria, eta), next after W1-W7; MSTAR waits for W4.
 - W9 (low priority) 1.5PN tail (and 2PN) GW flux in the secular binary path via eccentric enhancement functions (Arun+2008, Loutrel & Yunes 2017): local, ~1 % on inspiral times at x~0.01. Hereditary tails in the direct EOM -> separate GR library. (R4: production 3.5PN verified by Enzyme flux balance; 1.1 % harmonic vs ADM inspiral gap = O(x^2) truncation.)
 - W10 C22 gauss_irk: guard NaN states and diverging fixed-point iterations accepted by the stopping rule (R4 side finding). W11 (low) GBS step control at eta 1e-8 costs 4-20x more evaluations than at 1e-10 in 3 of 6 R4 cases: investigate.
-- B1/M4 MSTAR (2026-10-22): deferred. The s7 dense stalls were 3-body C20-class groups (0.01 AU BH-BH + 0.1 Msun star), fixed by C20 on main (657 s -> 1.4 s, 8.7M -> 440 GBS steps); LogH takes <= 8 bodies, no current run makes larger groups. Build MSTAR only when a run produces >8-body groups (IMBH + cusp, goal B). Diag: /raven/ptmp/uli/cpp-nbody-runs/mstar-2026-10-22/diag/.
+- B1/M4 MSTAR (2026-10-22): deferred. The s7 dense stalls were 3-body C20-class groups (0.01 AU BH-BH + 0.1 Msun star), fixed by C20 on main (657 s -> 1.4 s, 8.7M -> 440 GBS steps); LogH takes <= 8 bodies, no current run makes larger groups. Build MSTAR only when a run produces >8-body groups (IMBH + cusp, goal B). Diagnostics: run label mstar-2026-10-22.

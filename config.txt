@@ -1,4 +1,4 @@
-# cpp-nbody run configuration: the choices of a run. Every other parameter (accuracy, tuning, test problems,
+# RUMI++ run configuration: the choices of a run. Every other parameter (accuracy, tuning, test problems,
 # experiments) has its production default in src/core/params.cpp and is listed in docs/CONFIG.md; it can be set
 # here too. An unknown key is an error. Each run writes the effective value of every key to run_params.txt.
 

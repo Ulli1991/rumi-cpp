@@ -1,4 +1,4 @@
-"""Run one cpp-nbody test case from a small config and check the printed diagnostics against bounds."""
+"""Run one RUMI++ test case from a small config and check the printed diagnostics against bounds."""
 import math
 import os
 import re
@@ -1843,11 +1843,11 @@ def snapshot_cluster_header(exe, label, cfg):
 
 
 def luna_reader(exe, label, cfg):
-    """A cpp-nbody snapshot read through LUNA's own read_snapshot (src/luna/file_io/read_snapshot.py) and its
+    """A RUMI++ snapshot read through LUNA's own read_snapshot (src/luna/file_io/read_snapshot.py) and its
     Gadget-style particle access. Needs LUNA_PYTHON (a Python with h5py where `import luna` works) or skips."""
     py = os.environ.get("LUNA_PYTHON", "")
     if not py or not Path(py).exists():
-        print(f"skip {label}: set LUNA_PYTHON to a Python in which LUNA imports (e.g. /u/uli/jax-env/bin/python)")
+        print(f"skip {label}: set LUNA_PYTHON to a Python in which LUNA imports")
         return "skip"
     with tempfile.TemporaryDirectory() as d:
         run_in(exe, {"SNAPSHOT_INTERVAL": "1000000", **cfg}, d)

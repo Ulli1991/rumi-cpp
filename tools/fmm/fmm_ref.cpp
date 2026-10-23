@@ -1,4 +1,4 @@
-// Reference Cartesian fast multipole method (phase 1 of the far-field plan, VIPER_NOTES item 7).
+// Reference Cartesian fast multipole method (phase 1 of the far-field plan, DEV_NOTES.md item 7).
 //
 // Purpose: force error and cost against expansion order p and opening angle theta for a Plummer sphere,
 // before anything is built into the integrator. Serial and written for clarity, not speed.
@@ -11,7 +11,7 @@
 //     pairs interact directly and mutually. Every interaction is antisymmetric, so total momentum is
 //     conserved to round-off (Newton's third law by construction)
 //   - downward pass: local expansions shifted to the children, evaluated at the particles
-// Kernel: phi = -G m / sqrt(r^2 + eps^2) (Plummer softening, as in cpp-nbody). Its derivatives follow from
+// Kernel: phi = -G m / sqrt(r^2 + eps^2) (Plummer softening, as in RUMI++). Its derivatives follow from
 //   (r^2 + eps^2) d_i f = -R_i f differentiated with Leibniz' rule:
 //   s D_n = -R_i D_{n-e_i} - q_i D_{n-2e_i} - sum_j [2 q_j R_j D_{n-e_j} + q_j (q_j - 1) D_{n-2e_j}],
 //   s = r^2 + eps^2, q = n - e_i for any i with n_i > 0.

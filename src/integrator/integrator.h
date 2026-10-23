@@ -38,7 +38,7 @@ void fsi_step(Particles& p, int start, int count,
               double G, double soft2, double dt, bool forces_valid = false,
               bool force_direct_n2 = false);
 
-// HHS-FSI recursive step with dynamic pivot-based partitioning (per paper's Algorithm 4)
+// HHS-FSI recursive step with dynamic pivot-based partitioning (FROST Algorithm 3)
 // Partitions particles [start, start+count) into slow (dt >= pivot) and fast (dt < pivot)
 // Recomputes adaptive timesteps for the current subset at each level
 void hhs_fsi_step_dynamic(Particles& p, int start, int count, double pivot_dt,

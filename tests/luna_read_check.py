@@ -1,4 +1,4 @@
-"""Read cpp-nbody snapshots with the LUNA hydro code's own I/O (CTest luna_reader; LUNA is not modified).
+"""Read RUMI++ snapshots with the LUNA hydro code's own I/O (CTest luna_reader; LUNA is not modified).
 
     <python with LUNA importable> tests/luna_read_check.py <run directory>
 

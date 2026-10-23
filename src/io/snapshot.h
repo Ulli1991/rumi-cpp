@@ -1,6 +1,6 @@
 #pragma once
-// Science snapshots (HDF5) in the layout of the LUNA hydro code (/raven/u/uli/LUNA, src/luna/file_io), so that
-// LUNA's read_snapshot() and its Gadget-style particle tools read cpp-nbody output directly (HARD_PROBLEMS.md G2).
+// Science snapshots (HDF5) in the layout of the LUNA hydro code (src/luna/file_io), so that
+// LUNA's read_snapshot() and its Gadget-style particle tools read RUMI++ output directly (HARD_PROBLEMS.md G2).
 //
 //   <SNAPSHOT_DIR>/snapdir_NNN/<SNAPSHOT_BASE>_NNN.0.hdf5      NNN = snapshot number (3+ digits), one file
 //

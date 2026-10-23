@@ -69,7 +69,7 @@ void write_cells(hid_t f, const SnapshotMeta& m, double box, double M, const dou
                           "local_Nx", "local_Ny", "local_Nz"}) h5::attr(c, k, 1);
     for (const char* k : {"x_start", "y_start", "z_start"}) h5::attr(c, k, 0);
     h5::attr(c, "placeholder", 1);
-    h5::attr(c, "placeholder_note", "cpp-nbody is a particle code: one cell spanning the box, density = total mass / "
+    h5::attr(c, "placeholder_note", "RUMI++ is a particle code: one cell spanning the box, density = total mass / "
                                     "BoxSize^3, velocity = centre-of-mass velocity, no gas (pressure = 0)");
     const double rho = box > 0 ? M / (box * box * box) : 0.0;
     // [1,1,1] arrays as LUNA writes them for a 3-d grid

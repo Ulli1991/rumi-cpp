@@ -17,7 +17,7 @@
 // Results 2026-10-17: (a) 1e-13 - 1.2e-10, ratios 64.0 and 32.0; (b) 32.0, 64.0; (c) <= 5.6e-16; all q.
 // Masses q = m2/m1 = 1, 0.1, 1e-3; random eccentric states (r = 1, |v| up to 1.3 sqrt(GM/r)), |chi| <= 1.
 //   /mpcdf/soft/SLE_15/packages/x86_64/clang/18.1.8/bin/clang++ -std=c++20 -O2 \
-//     -fplugin=/u/uli/sw-build/enzyme/build/Enzyme/ClangEnzyme-18.so -Isrc/collisional tests/enzyme/spin_consistency.cpp
+//     -fplugin=<enzyme-build>/Enzyme/ClangEnzyme-18.so -Isrc/collisional tests/enzyme/spin_consistency.cpp
 #include "../../src/collisional/post_newtonian_core.cpp"
 #include <cstdio>
 #include <random>

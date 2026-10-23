@@ -317,7 +317,7 @@ if(USE_HDF5 AND HDF5_FOUND)
     target_link_libraries(h5-roundtrip ${HDF5_C_LIBRARIES})
     target_compile_features(h5-roundtrip PRIVATE cxx_std_17)
     add_dependencies(nbody-kokkos h5-roundtrip)
-    # LUNA_PYTHON: a Python in which LUNA (/raven/u/uli/LUNA) imports, for the luna_reader case (skipped if empty)
+    # LUNA_PYTHON: a Python in which LUNA imports, for the luna_reader case (skipped if empty)
     set(LUNA_PYTHON "" CACHE FILEPATH "Python with LUNA importable (luna_reader test)")
     foreach(case restart_binaries restart_walltime restart_triples stall_capture restart_mergers restart_ngb_mergers restart_tidal restart_mergers_sse restart_natal_kicks restart_pn_logh
                  restart_spin restart_secular restart_secular_triple restart_sdar restart_tidal_sampling restart_cm_velocity restart_spin_imbh

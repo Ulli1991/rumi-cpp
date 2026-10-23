@@ -1,10 +1,10 @@
-# cpp-nbody
+# RUMI++
 
 Performance-portable gravitational N-body code for stellar cluster simulations. Built on the **Kokkos 5.0** performance portability library, supporting CPUs as well as NVIDIA, AMD, and Intel GPUs. MPI-parallelized with GPU-aware MPI support where available.
 
 ## Physics
 
-The integrator implements a 4th-order Hermite scheme (Forward Symplectic Integrator, FSI) inside a **Hierarchical Hamiltonian Splitting** (HHS) framework following Algorithm 4 of the [FROST paper](https://doi.org/10.1093/mnras/stac2192). Particles are recursively split into slow and fast groups by individual adaptive timesteps, giving O(N log N) time integration cost even with a wide dynamic range.
+The integrator implements a 4th-order Hermite scheme (Forward Symplectic Integrator, FSI) inside a **Hierarchical Hamiltonian Splitting** (HHS) framework following Algorithm 3 of the [FROST paper](https://doi.org/10.1093/mnras/stab057) (Rantala, Naab & Springel 2021). Particles are recursively split into slow and fast groups by individual adaptive timesteps, giving O(N log N) time integration cost even with a wide dynamic range.
 
 ### Non-collisional mode (default)
 
@@ -32,6 +32,7 @@ Built-in IC generator supporting Plummer spheres with configurable mass function
 Requires a Kokkos 5.0 installation configured for the target backend (CUDA, HIP, SYCL, or OpenMP for CPU).
 
 ```bash
+git clone https://github.com/Ulli1991/rumi-cpp.git && cd rumi-cpp
 cmake -S . -B build \
   -DKokkos_ROOT=/path/to/kokkos
 cmake --build build -j$(nproc)
@@ -46,7 +47,7 @@ cmake --build build -j$(nproc)
 | `MPI_TOPOLOGY_RING` | OFF | Alternative j-partitioned MPI topology using allreduce |
 | `ENABLE_COLLISIONAL` | OFF | Unsoftened collisional mode with close encounter handling |
 | `USE_HDF5` | ON (if found) | HDF5 restart files and snapshots (raven: `module load hdf5-serial/1.14.1` after `gcc/13`) |
-| `LUNA_PYTHON` | empty | Python with LUNA importable, for the `luna_reader` test (e.g. `/u/uli/jax-env/bin/python`) |
+| `LUNA_PYTHON` | empty | Python with LUNA importable, for the `luna_reader` test |
 
 ### Example: multi-GPU build with collisional support
 

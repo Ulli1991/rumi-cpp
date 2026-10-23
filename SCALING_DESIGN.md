@@ -1,4 +1,4 @@
-# cpp-nbody scaling architecture: deep-level batching and task parallelism across ranks
+# RUMI++ scaling architecture: deep-level batching and task parallelism across ranks
 
 Design document. Nothing in the repository was changed. Code references are to main at 4f71d62.
 
@@ -74,7 +74,7 @@ Status of the inputs:
 
 ## 1. Background in plain terms
 
-**HHS** (hierarchical Hamiltonian splitting) is AMR subcycling in time with refluxing built in. At level d, a set of particles is split into slow (S, step ≥ pivot) and fast (F). The sequence (FROST Alg. 4, `hhs_fsi_recursive`, `integrator.cpp:2324`) is:
+**HHS** (hierarchical Hamiltonian splitting) is AMR subcycling in time with refluxing built in. At level d, a set of particles is split into slow (S, step ≥ pivot) and fast (F). The sequence (FROST Alg. 3, `hhs_fsi_recursive`, `integrator.cpp:2324`) is:
 
 ```
 kick_SF(τ/6) ; fsi(S, τ/2) ; hhs(F, τ/2) ; kick_SF+grad(2τ/3) ; hhs(F, τ/2) ; fsi(S, τ/2) ; kick_SF(τ/6)
@@ -187,7 +187,7 @@ Integers only, so bit-identical. Check mode: `NBODY_CHECK_PIDMAP`, plus a new `N
 
 Bit-identity argument: `run_tiled` with TS = 128 and ni ≤ 512 uses one source chunk (`chunk_count` gives n = 1 because nj/(4·TS) < 1). Each sink accumulates over sources in tiles of 128, with Kahan flushes at tile boundaries. A single-team kernel looping over sink blocks with the same tile loop and flush rule reproduces each sink's sum exactly. Minima are order-free. Check mode `NBODY_CHECK_BATCH=1` runs the old path on a copy and memcmps dt, ax/ay/az, partition and flags, in the style of `NBODY_CHECK_TREE_DT`.
 
-**B4. Kokkos Graph segments.** The installed Kokkos is 5.0.99 at `/u/uli/kokkos-cuda-mpi`. Its headers provide:
+**B4. Kokkos Graph segments.** The installed Kokkos (CUDA build) is 5.0.99. Its headers provide:
 - `Kokkos::Experimental::create_graph` / `Graph`;
 - `then_parallel_for`, `then_parallel_reduce` (into a View), `then_host`;
 - `cuda_capture` / `hip_capture`, which record arbitrary existing Kokkos launches on an execution-space instance into the graph;
@@ -621,9 +621,9 @@ Sources (web):
 - [FROST-CLUSTERS III, arXiv:2601.07917](https://arxiv.org/abs/2601.07917)
 
 ### Critical Files for Implementation
-- /raven/u/uli/cpp-nbody/src/integrator/integrator.cpp: `hhs_fsi_recursive`, `hhs_cc_step`, `fsi_step`, `advance_subsystems_in_range`, `partition_by_pivot`, `exchange_subsystem_results`, `allgather_collisions`
-- /raven/u/uli/cpp-nbody/src/gravity/n2_driver.h: `chunk_count` and the tile switch (rank-count dependence); the template for fused small-set kernels
-- /raven/u/uli/cpp-nbody/src/gravity/forces.cpp: `cc_components`, `neighbor_search_subset`, the `cc_inter_*` kernels
-- /raven/u/uli/cpp-nbody/src/collisional/subsystem.cpp: `next_id`, `update_particle_flags`, `rebuild_pid_to_idx`, `restore_active` / `strip_removed`
-- /raven/u/uli/cpp-nbody/src/core/mpi_comm.cpp and /raven/u/uli/cpp-nbody/src/core/mpi_comm.h: slicing, allgathers, `replicas_agree`; where NCCL, rank subgroups and shared windows go
-- also: /raven/u/uli/cpp-nbody/src/collisional/logh_batch.cpp (the LogH pool and staging), /raven/u/uli/cpp-nbody/src/core/constants.h (`fast_rsqrt`, the reason for host/device divergence), /raven/u/uli/cpp-nbody/tests/run_case.py (the `rankcount_*` and fuzzing cases)
+- src/integrator/integrator.cpp: `hhs_fsi_recursive`, `hhs_cc_step`, `fsi_step`, `advance_subsystems_in_range`, `partition_by_pivot`, `exchange_subsystem_results`, `allgather_collisions`
+- src/gravity/n2_driver.h: `chunk_count` and the tile switch (rank-count dependence); the template for fused small-set kernels
+- src/gravity/forces.cpp: `cc_components`, `neighbor_search_subset`, the `cc_inter_*` kernels
+- src/collisional/subsystem.cpp: `next_id`, `update_particle_flags`, `rebuild_pid_to_idx`, `restore_active` / `strip_removed`
+- src/core/mpi_comm.cpp and src/core/mpi_comm.h: slicing, allgathers, `replicas_agree`; where NCCL, rank subgroups and shared windows go
+- also: src/collisional/logh_batch.cpp (the LogH pool and staging), src/core/constants.h (`fast_rsqrt`, the reason for host/device divergence), tests/run_case.py (the `rankcount_*` and fuzzing cases)

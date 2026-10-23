@@ -1,6 +1,6 @@
 #pragma once
 
-// Fast multipole method for the far field (VIPER_NOTES item 7; prototype and derivations in tools/fmm).
+// Fast multipole method for the far field (DEV_NOTES.md item 7; prototype and derivations in tools/fmm).
 // Solid-harmonic expansions to order p about cell centres of mass, mutual-orientation M2L by rotation to the
 // z axis (O(p^3), real form), exact Newtonian far field. Near field: direct sums with the selected softening
 // kernel, which must be exactly Newtonian beyond its support (none or spline), and subsystem exclusion.

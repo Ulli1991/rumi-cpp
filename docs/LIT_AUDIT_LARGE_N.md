@@ -275,11 +275,11 @@ At 1e7 with 10-50% binaries there are 1e6-5e6 binaries.
 **Rantala et al. 2023 evidence (2210.02472 §4, VERIFIED):**
 - the binary fraction has "negligible effect" on wall time at 1e6 and 5e6, even with 2.5e6 binaries;
 - the cost is dominated by the O(N²) loops, because most binaries are secular or Kepler;
-- the large-N risk is stragglers (deep hierarchies), not the count (PeTar §8; our hand-over 2026-10-12).
+- the large-N risk is stragglers (deep hierarchies), not the count (PeTar §8; our notes of 2026-10-12).
 
 | Method | Accuracy | Speed / batching | Fit | Verdict |
 |---|---|---|---|---|
-| SDAR (Wang+ 2020, 2002.07938, local) | Symplectic-like AR + slow-down; secular evolution of perturbed binaries kept | "A few thousand times" fewer steps for weakly perturbed binaries; CPU OpenMP in PeTar | Already in cpp-nbody (FC-III also switched to SDAR) | Keep; distribute (§6-#4) |
+| SDAR (Wang+ 2020, 2002.07938, local) | Symplectic-like AR + slow-down; secular evolution of perturbed binaries kept | "A few thousand times" fewer steps for weakly perturbed binaries; CPU OpenMP in PeTar | Already in RUMI++ (FC-III also switched to SDAR) | Keep; distribute (§6-#4) |
 | Slow-down KS (Mikkola & Aarseth 1996; NBODY6) | κ ≤ 10 cap in NBODY6 | Serial CPU | Superseded by SDAR | Reject |
 | AR-CHAIN (Mikkola & Merritt 2008, 0709.3367, local) | GBS + LogH + chain; PN | Per-system serial | Our LogH/GBS is the same family | Keep as is |
 | TSUNAMI (Trani & Spera 2022/23, 2206.10583, local) | Chain + LogH + BS; tides; PN to 2.5 | Fast few-body code (single systems) | Same family; worth comparing for tides | Reject for adoption; borrow tide terms if needed |
@@ -299,7 +299,7 @@ At 1e7 with 10-50% binaries there are 1e6-5e6 binaries.
 | DRAGON (1602.00759) | NBODY6++GPU | 1e6 × 4 runs, 16 K20m each | 12 Gyr in about 8600 h; 2000-4000 h per t_rh |
 | DRAGON-II (2307.04805-07) | NBODY6++GPU | 1e6 (2 runs), up to 33% binaries | 2.2 M core-h for 19 runs over about 2 yr; 1e6 runs reached about 200 Myr |
 | PeTar (2006.16560) | P3T + SDAR; MPI + OpenMP (+ GPU tree) | 1e7 on 960 XC50 cores | 1106 / 1344 s per N-body time unit; about 2 Myr/day for a 6e6 M_sun cluster (our conversion) |
-| FROST; Rantala et al. 2023 (2011.14984, 2210.02472) | HHS-FSI, direct O(N²) | 5e6 on 128 A100 (tested); 2.5e6 binaries | Scales to N_GPU ≈ 40 N/1e6; 1.5 Myr/day at 1e6 on 4 A100 (Rantala et al. 2023 Fig. 7; memory note) |
+| FROST; Rantala et al. 2023 (2011.14984, 2210.02472) | HHS-FSI, direct O(N²) | 5e6 on 128 A100 (tested); 2.5e6 binaries | Scales to N_GPU ≈ 40 N/1e6; 1.5 Myr/day at 1e6 on 4 A100 (Rantala et al. 2023 Fig. 7) |
 | HiGPUs (1207.2367) | 6th-order Hermite, block steps, direct, no regularisation | 8e6 on 256 GPUs (CINECA) | "Few crossing times" only |
 | phi-GPU (1312.1789; Berczik+) | 4/6/8th-order Hermite, block steps | A few 1e6; large GPU clusters | About 50% of K20 peak in production |
 | Bonsai (1412.0659) | GPU tree, collisionless | 2.4e11 on 18,600 GPUs | 24.77 Pflops |
@@ -333,7 +333,7 @@ combination ranked first below.
 
 ---
 
-## 6. Ranked short list for cpp-nbody, each with the experiment that decides it
+## 6. Ranked short list for RUMI++, each with the experiment that decides it
 
 ### #1 Pairwise (HOLD/P3T-type) split inside HHS-FSI, direct far field. Test.
 
@@ -380,7 +380,7 @@ LPT ordering. Revisit device batching (GENGA/Swarm-NG style, J-3) only if per-ca
 **Decisive experiment.** J-1 per-depth breakdown at 1e6 and 2e6 on 16 GPUs: subsystem share of the step and the
 largest single subsystem time per call. Build if the stragglers exceed 20% of wall time.
 
-### #5 External accuracy reference: CMC/MOCCA vs cpp-nbody at 1e6, later 1e7. Adopt (cheap).
+### #5 External accuracy reference: CMC/MOCCA vs RUMI++ at 1e6, later 1e7. Adopt (cheap).
 
 **Why.** No N-body code has a 1e7 core-collapse reference; CMC does (N up to 1e8). The comparison is valid for
 spherical, non-rotating ICs: core-collapse time, BH ejection rate, binding-energy distribution. Rodriguez+ 2016 is
@@ -388,7 +388,7 @@ the template. It is also the cheapest way to see whether a #3 approximation chan
 FMM/tree papers check with Lagrangian radii.
 
 **Decisive experiment.** Run the same 2e5 and 1e6 ICs (no primordial binaries, then 10%) in public CMC and
-cpp-nbody to core collapse. Pass: t_cc within the N-body seed scatter.
+RUMI++ to core collapse. Pass: t_cc within the N-body seed scatter.
 
 ### Not recommended
 
@@ -403,7 +403,7 @@ cpp-nbody to core collapse. Pass: t_cc within the N-body seed scatter.
 
 ---
 
-## 7. References (arXiv IDs; local copies under `/raven/u/uli/papers/`)
+## 7. References (arXiv IDs)
 
 ### Rantala and collaborators
 

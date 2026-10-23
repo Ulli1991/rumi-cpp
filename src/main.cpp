@@ -438,6 +438,7 @@ static void set_binary_spins(Particles& p, const Config& cfg) {
 }
 
 static void print_usage(const char* prog) {
+    std::printf("RUMI++ collisional N-body code (https://github.com/Ulli1991/rumi-cpp)\n");
     std::printf("Usage: %s [--config <file>] [--test <case>]\n", prog);
     std::printf("  --config <file>   Config file (default: config.txt)\n");
     std::printf("  --test <case>     Override TEST_CASE from config\n");
@@ -938,7 +939,7 @@ int main(int argc, char** argv) {
 
         const char* mode_str = (integrator == "hhs") ? "hhs" : "fsi";
         if (my_rank == 0) {
-            std::printf("=== Kokkos N-Body: %s, %s test, N=%d ===\n",
+            std::printf("=== RUMI++: %s, %s test, N=%d ===\n",
                         mode_str, test.c_str(), N_display);
             if (use_distributed) {
                 std::printf("    Distributed mode: %d ranks, %d local particles\n",
@@ -1509,7 +1510,7 @@ int main(int argc, char** argv) {
 #endif
             }
         } else {
-            // HHS-FSI (per paper's Algorithm 4)
+            // HHS-FSI (FROST Algorithm 3)
             // Note: the post-step force+timestep recomputation is only needed for
             // diagnostics. HHS recomputes adaptive timesteps at the start of each step from
             // the same state, so skipping it for non-diagnostic steps saves a

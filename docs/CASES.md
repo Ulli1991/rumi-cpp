@@ -398,7 +398,7 @@ Status: **closed** (fixed, test, ensemble checked), **option** (fix kept as an o
 - **A/B (200k, 61 steps, final |dE/E|; cmvcoal-2026-10-18):** cmv on, main -> fix: s3 2.7e-11 -> 2.0e-11, s7 4.0e-10
   -> 4.0e-10, s13 timeout at 59 both, s21 1.6e-9 -> 2.7e-11, s42 4.2e-11 -> 5.6e-11. cmv off, main -> fix (not
   bit-identical: remnants re-timed): s3 8.6e-12 -> 3.1e-14, s7 5.2e-12 -> 7.5e-12, s13 6.6e-11 -> 6.6e-11, s21
-  3.2e-11 -> 1.8e-10, s42 3.1e-11 -> 2.5e-11. Merged as a correctness fix (user decision 2026-10-18) despite s21.
+  3.2e-11 -> 1.8e-10, s42 3.1e-11 -> 2.5e-11. Merged as a correctness fix (decision 2026-10-18) despite s21.
 - **Open:** cmv stays off: s7 (C5-type jump at step 1, 77x base) and s3/s42 (1.8-2.3x) still fail the energy rule.
 
 ## C15 The diagnostics output changes the trajectory: results depend on PRINT_INTERVAL (closed)
@@ -485,7 +485,7 @@ Status: **closed** (fixed, test, ensemble checked), **option** (fix kept as an o
 - **Isolated replay** (`scripts/subsys_cases.py`, the logged state, one interval): 1.5e-16, does not reproduce
   (lesson 3: state-dependent).
 - **Ledger on the run's state:** rerun with STALL_RESTART = true reproduces it bit-identically and keeps
-  `/raven/ptmp/uli/cpp-nbody-runs/ferr-gate-2026-10-18/runs/cap_m42_c1e-5/stall_15.h5`; the one-step replay
+  Raven run ferr-gate-2026-10-18/runs/cap_m42_c1e-5/stall_15.h5; the one-step replay
   without any injected error (`ledger/cap_m42_c1e-5_s15`, NBODY_ELEDGER) gives root 7.256e-4 = own error of one depth-3
   call, class **booking:secular binaries**: `sub dE_int 7.256e-4 type 0 n 2 secular 1 pids 353706 888286` (PN path),
   every other secular binary < 7e-6 and cancelling in pairs. So the secular PN advance of this binary changes its
@@ -537,7 +537,7 @@ Status: **closed** (fixed, test, ensemble checked), **option** (fix kept as an o
 
 ## C20 Tight inner binaries of small PN subsystems: LogH followed every orbit (8-120 min intervals) (fixed, A/B below)
 
-- **Found by:** the stall harvest of 2026-10-19 (`/raven/ptmp/uli/cpp-nbody-runs/harvest-2026-10-19/`, host
+- **Found by:** the stall harvest of 2026-10-19 (Raven run harvest-2026-10-19, host
   replays, one interval, one thread). 6 of the 8 reproducing slow stalls of 200k bf 0.1 are 3-6 body LogH sets with
   2.5-4.5 M GBS steps: s101_s432_1 (470 s), s404_s1025_1 (748 s), s404_s1408_1 (894 s), s101_s1340_0 (7224 s),
   s404_s706_0 (4706 s) and s404_s3047_0 (4260 s). The last three were run to the end on the host (main 683263c).
@@ -595,14 +595,14 @@ Status: **closed** (fixed, test, ensemble checked), **option** (fix kept as an o
   timeout), at least 1 collapse, the GBS steps, and |dE/E|, |dP|/M, |dL/L| at 1.3x measured. sec_inner_merge is
   described above.
 - **200k A/B** (bf 0.1, 60 intervals from stall_1340 (camp2 s101), stall_1025 (camp3 s404), stall_1117 (camp2 s202),
-  4 A100 each; `/raven/ptmp/uli/cpp-nbody-runs/secinner-ab-2026-10-19/`): final |dE/E| (run_summary.py, w.r.t. the restart), |dP|/M [km/s], |dL/L|,
+  4 A100 each; Raven run secinner-ab-2026-10-19): final |dE/E| (run_summary.py, w.r.t. the restart), |dP|/M [km/s], |dL/L|,
   s/step median / mean / max, main -> C20:
   s404 (84 steps; main in 2 gpudev segments): 6.6e-11 -> 1.26e-10, 1.4e-13 -> 1.1e-13, 1.8e-12 -> 1.9e-12,
   4.15 / 7.30 / 187 -> 4.11 / 4.55 / 20.
   s202 (86 steps): 4.53e-9 -> 4.55e-9, 2.3e-13 -> 2.3e-13, 2.6e-12 -> 2.1e-12, 3.99 / 4.31 / 12 -> 3.95 / 4.22 / 8.
-  s101 (91 steps): C20 1.51e-9, 1.5e-13, 1.7e-11, 4.61 / 5.22 / 18. Main is still queued on gpu (job 31366161, main_s101):
+  s101 (91 steps): C20 1.51e-9, 1.5e-13, 1.7e-11, 4.61 / 5.22 / 18. Main was still queued (main_s101):
   its first step is the 1096 s stall and cannot fit in gpudev.
-  Energy: equal on s202, 1.9x on s404 (noise level, user decision 2026-10-21: acceptable for the speed-up).
+  Energy: equal on s202, 1.9x on s404 (noise level, decision 2026-10-21: acceptable for the speed-up).
 - **Open (closed by C24):** a 3-body IC with the star moved to 5e-4 pc from a 60x shrunk BH binary (a = 1.3e-9 pc,
   v ~ 5000 km/s) gave NaN at the first LogH call (dt = nan) in main as well.
 
@@ -645,7 +645,7 @@ Status: **closed** (fixed, test, ensemble checked), **option** (fix kept as an o
   sdar_pn_kappa1, quad22_sdar) and sec_inner_* are unchanged. Host ctest: all pass (6 login-node 120 s timeouts
   rerun individually: pass, results identical with NBODY_SDAR_EXT=0).
 - **200k A/B (Raven gpudev, 2026-10-21, 4 A100, ~85-91 intervals from the C20 A/B restarts, same binary nbody-c21,
-  off = NBODY_SDAR_EXT=0; `/raven/ptmp/uli/cpp-nbody-runs/sdarext-ab-2026-10-21/`):**
+  off = NBODY_SDAR_EXT=0; Raven run sdarext-ab-2026-10-21):**
 
   | seed | final \|dE/E\| off -> new | sum of \|per-step jumps\| | max jump | \|dL/L\| | s/step median/mean/max |
   |---|---|---|---|---|---|
@@ -660,7 +660,7 @@ Status: **closed** (fixed, test, ensemble checked), **option** (fix kept as an o
 ## C22 Gauss-Legendre IRK (symplectic, 8 stages) for compact Newtonian subsystems (merged, default off; 200k A/B below)
 
 - **Motivation:** after C20/4c the remaining subsystem cost is in compact non-hierarchical 2-4 body systems (eccentric
-  binaries, 2+2 quadruples). The prototype (tests/proto_symrk, branch worktree-agent-a0cc578ab96edb7bf) was 30-1000x
+  binaries, 2+2 quadruples). The prototype (tests/proto_symrk) was 30-1000x
   more accurate than LogH+GBS at equal cost on these, with no linear energy drift (e = 0.9: 1.7e-8 -> 2.1e-11 over
   1e5 orbits). PN1 in Hamiltonian form was retested (R2) and does not help the energy books, so PN subsystems stay on
   LogH+GBS.
@@ -680,7 +680,7 @@ Status: **closed** (fixed, test, ensemble checked), **option** (fix kept as an o
 - **Tests:** gauss_irk (unit), gauss_irk_quad22, gauss_irk_s1744; host ctest all pass (login-node 120 s timeouts
   pass alone).
 - **200k A/B (gpudev, prod200k bf0.1 config from the C20 A/B restarts, ~80 steps, 2026-10-21,
-  /raven/ptmp/uli/cpp-nbody-runs/girkab-2026-10-21/):** base vs NBODY_GAUSS_IRK=1, same CUDA binary (404a33f).
+  Raven run girkab-2026-10-21):** base vs NBODY_GAUSS_IRK=1, same CUDA binary (404a33f).
   Gauss-IRK calls / all LogH calls: s101 112 / 807k, s202 101 / 459k, s303 370 / 766k (16 GBS fallbacks, no
   convergence). 0 Newton steps. s/step median 5.5 / 10.4 / 5.4 unchanged.
   - final |dE/E|: s101 4.97e-11 -> 2.21e-11, s202 6.43e-11 -> 1.59e-11, s303 2.63e-11 -> 3.66e-11;
@@ -702,6 +702,12 @@ Status: **closed** (fixed, test, ensemble checked), **option** (fix kept as an o
   in the fixed point, the Newton iterate and the final L; an increment growing over 3 successive iterations above 1e-13
   counts as non-contracting. Either is failure (fail 2, state unchanged, GBS fallback). Test `gauss_irk` section 5
   (third body 4e-12 from a binary member): old code fail 4 after accepted steps, now fail 2; all earlier bounds unchanged.
+- **Open (host builds other than the one the bounds were set on, 2026-10-21):** `sec_inner_s432` max |dL/L| 3.0e-13
+  vs 2.5e-13 and `gauss_irk_s1744` largest unbooked IRK dE 1.42e-19 vs 1.34e-19 E_REF are at round-off (bounds 1.3x the
+  gcc 15 value; re-measure per compiler/CPU and widen). `gauss_irk_quad22` (max |dE/E| 3.95e-11 vs 2.55e-12, |dL/L|
+  3.0e-13 vs 2.1e-13, 19 IRK calls instead of 21) is not round-off. Suspect: C21 adds the outside tide to the SDAR kappa
+  and the IRK classification excludes subsystems with an SDAR slow-down, so two calls of the quadruple go to GBS (4e-10
+  class error). If confirmed, decide whether the IRK exclusion should use kappa from in-group perturbers only.
 
 
 ## C24 Secular triple: a BH inner binary that coalesces within the step came back NaN (closed)
@@ -753,7 +759,7 @@ Status: **closed** (fixed, test, ensemble checked), **option** (fix kept as an o
 - **Case:** R5 (energy episodes = step-size resonance). A hard BH-BH binary whose inner period equals an HHS block
   step gets the tide of its bound light star as FSI kicks at the same orbital phase; the kick errors add up
   coherently. Cut-out `episodes-2026-10-22/res_s202_-1e-5`: summed per-step |dE| 5.51e-9 E_REF (largest step
-  1.1e-9). The user chose R5 fix 1.
+  1.1e-9). R5 fix 1 was chosen.
 - **Path taken (checked):** the triple alternates between the secular-triple path (TRI_S at depth 0, no error) and
   binary (2-body subsystem, secular binary / Kepler2 advance) + field star. In the second case the error is made by the
   cross kicks star <-> binary at depths 10-12 in the 3-body set (the binary in the fast set, the star slow; kick
@@ -806,7 +812,7 @@ Status: **closed** (fixed, test, ensemble checked), **option** (fix kept as an o
 - **Tests:** cmtide_res_s202 and cmtide_detuned (tests/data/cmtide_res_s202.txt, the R5 cut-out with the parent's
   E_REF / NGB_MREF, NBODY_EATTR per-step dE) and cmtide_kozai (inner e and i vs the resolved 3-body LogH run, energy,
   P, L). Bounds are 1.3x measured; all fail on main (no CM_TIDE line, 5.5e-9).
-- **Open:** gpudev 200k A/B (`/raven/ptmp/uli/cpp-nbody-runs/cmtide-2026-10-22/{off,on}_{s202r5000,s101r5000,s404}`,
+- **Open:** gpudev 200k A/B (Raven run cmtide-2026-10-22/{off,on}_{s202r5000,s101r5000,s404},
   NBODY_EATTR on). Binaries in sets > 64 (device-resident) and inside 3+ body subsystems are not covered. Octupole and
   higher averaged terms are dropped, both inner and outer (quadrupole only).
 
@@ -862,8 +868,8 @@ Status: **closed** (fixed, test, ensemble checked), **option** (fix kept as an o
   inspiral and the IMBH cluster). Full host ctest (build-gw, gcc 15 + HDF5): all pass; 19 login-node 120 s timeouts passed when rerun alone
   (luna_reader skipped, as on main).
 - **200k smoke run (gpudev):** prod200k bf0.1 config from the C22 A/B restart (base_s101, step 80, 0.08 Myr),
-  20 steps to 0.1 Myr with SNAPSHOT_INTERVAL 5, CUDA build 10f07a7, job 31378117,
-  /raven/ptmp/uli/cpp-nbody-runs/gw-smoke-2026-10-21/{on,off}: 4 snapshots, 228 census rows (57 BH-BH binaries
+  20 steps to 0.1 Myr with SNAPSHOT_INTERVAL 5, CUDA build 10f07a7,
+  Raven run gw-smoke-2026-10-21/{on,off}: 4 snapshots, 228 census rows (57 BH-BH binaries
   with t_gw < 13.8 Gyr per snapshot, none ejected yet; the hardest at a = 0.003 AU, e = 0.20, t_gw = 1.9e-3 Myr), no
   merger in the interval. Output on vs off (NBODY_GW_OUTPUT=0): all 22 L0 rows identical; wall 130.9 vs 131.0 s,
   step wall of the last three profile reports 5.67 / 5.74 / 5.56 vs 5.67 / 5.73 / 5.54 s.
@@ -966,7 +972,7 @@ Status: **closed** (fixed, test, ensemble checked), **option** (fix kept as an o
   (<= 6.4e-11 sum = 1.3x the measured 4.9e-11) at equal or better wall time.
 - **Pending:** the gpudev replays of the step-5000 restarts with main (`gpu_bf0.1_s{101,202}_r5000`: restart
   compatibility and the cluster ledger) had not run when this was written. bf0.5_s202's 2965 s stall was not analysed.
-- **Files:** `/raven/ptmp/uli/cpp-nbody-runs/episodes-2026-10-22/` holds cut_* (the step-5000 cut-outs and their
+- **Files:** Raven run episodes-2026-10-22 holds cut_* (the step-5000 cut-outs and their
   variants), syn_* (synthetic outer pericentres), eps_* (FLYBY_CM_EPS scan), res_* (DT_MAX commensurability scan) and
   gpu_* (the cluster replays).
 
@@ -998,9 +1004,9 @@ Status: **closed** (fixed, test, ensemble checked), **option** (fix kept as an o
   (Rantala et al. 2023, Eq. 51 and Fig. 10: 3e-7 -> 5e-9 total). The background is therefore not eta-limited FSI truncation.
   Remaining eta-independent suspects: the tidal-sampling budget FLYBY_CM_EPS (1e-11 |E0| per pair and step, the
   same scale; the EATTR_TID / STALL tidal estimates are 2-6e-12 per binary) and its TIDAL_STEP_RES floor (C5).
-- **Prepared, not yet run (session limit):** 0.7x scans, ETA_JERK 0.1, ETA 0.2 (v/a); class interventions
+- **Prepared, not yet run:** 0.7x scans, ETA_JERK 0.1, ETA 0.2 (v/a); class interventions
   bh / sub / single / deep5 x 0.5; FLYBY_CM_EPS 1e-12; TIDAL_FLOOR_ADAPT; one-rank ledger + DT_ATTR
-  (`/raven/ptmp/uli/cpp-nbody-runs/fsibudget-2026-10-22/*/job.sh`).
+  (Raven run fsibudget-2026-10-22/*/job.sh).
 - **Decision so far:** no eta default change (no gain per cost). ETA_GRAD 0.1 costs nothing measurable (-10 %, within
   noise; the value of Rantala et al. 2023) and is a candidate after a 3-seed check. The 5 Myr error is set by episodes (one triple in
   s101); the next lever is per-episode (ledger replay of a stall restart), and FLYBY_CM_EPS / TIDAL_FLOOR_ADAPT for
@@ -1008,7 +1014,7 @@ Status: **closed** (fixed, test, ensemble checked), **option** (fix kept as an o
 
 ## R4 Gauss-IRK on the ADM PN Hamiltonian for PN binaries (research prototype, tests/proto_admpn; no production change)
 
-- **Question (user):** C22 showed that 8-stage Gauss-IRK beats LogH+GBS on Newtonian compact subsystems, but in
+- **Question:** C22 showed that 8-stage Gauss-IRK beats LogH+GBS on Newtonian compact subsystems, but in
   production every LogH subsystem contains a PN pair. Does an ADM Hamiltonian formulation (to 3PN, plus radiation
   reaction) let Gauss-IRK take over the PN binaries, and is it worth a production path?
 - **Literature.**
@@ -1077,7 +1083,7 @@ Status: **closed** (fixed, test, ensemble checked), **option** (fix kept as an o
   - At e = 0.9 the splits need many more steps: the RR force is peaked at the pericentre, and the end-point kicks
     under-sample it (h2h table below).
   - **Decision: RR inside the collocation (A).**
-- **The 1.1 % inspiral difference vs production (Enzyme, user request): not a bug.**
+- **The 1.1 % inspiral difference vs production (Enzyme): not a bug.**
   - At full PN, t_insp of LogH+GBS (harmonic) exceeds ADM by 1.07 % (x0 = 0.01) and 0.23 % (x0 = 0.005): ratio
     4.7, i.e. x^2.
   - With 2.5PN only: production agrees with Peters to 6e-4, and ADM to 9e-6.
@@ -1162,9 +1168,9 @@ Status: **closed** (fixed, test, ensemble checked), **option** (fix kept as an o
     ds = 0.01.
   - On the energy shell T + B = -U the two kicks agree, so only the off-shell part is extra; GBS extrapolation does
     not remove it.
-  - The kick of Rantala et al. 2023 is symplectic to 6e-13 (test in branch worktree-agent-ae641fc52220640f6, tests/symplectic_test.cpp).
+  - The kick of Rantala et al. 2023 is symplectic to 6e-13 (test in a development branch, tests/symplectic_test.cpp).
 - **A/B (NBODY_KICK_U):**
-  - Isolated (agent): e = 0.999 binary 1.8e-11 vs 4.4e-9; 200-system ensemble median 1.2-4x better, but the p90/max
+  - Isolated: e = 0.999 binary 1.8e-11 vs 4.4e-9; 200-system ensemble median 1.2-4x better, but the p90/max
     of e >= 0.9 binaries 2-4x worse.
   - Cluster, 0.06 Myr, |dE/E| at the end: 200k seeds 3/7/13/21/42 base 8.6e-12 / 5.2e-12 / 6.6e-11 / 3.2e-11 /
     3.1e-11, 1/(-U) 6.8e-11 / 1.7e-12 / 4.0e-11 / 8.2e-11 / 2.3e-11 (8x and 2.6x worse on two seeds). B (110k) seeds
@@ -1175,7 +1181,7 @@ Status: **closed** (fixed, test, ensemble checked), **option** (fix kept as an o
 - **Guard (2026-10-19):** ctest `logh_symplectic` (tests/symplectic_test.cpp, Enzyme versions in
   tests/enzyme/symplectic/) keeps the 1/Omega kick's symplectic defect at its measured O(ds) value (4.0e-2 / 4.9e-2
   at ds = 1e-2, bound 1.3x) and checks reversibility, P/L equivariance and the symplectic kepler_drift to round-off.
-- **Retest 2026-10-21 (user request; switch NBODY_KICK_U re-added on branch worktree-agent-a43c927618cc29a31, ctest
+- **Retest 2026-10-21 (switch NBODY_KICK_U re-added on a development branch, ctest
   logh_symplectic_kick_u: defect 2.6e-12).** tests/proto_symrk/bench.cpp, production gbs_step, eta 1e-10, k_max 10,
   max |dE/E| / force evaluations per orbit, 1/Omega vs 1/(-U):
   - e = 0.9 (1e5 orbits) 1.7e-8 / 2851 vs 6.3e-9 / 2457; e = 0.99 (1e4) 3.3e-9 / 4372 vs 1.3e-8 / 3425; Kozai triple
@@ -1209,7 +1215,7 @@ Status: **closed** (fixed, test, ensemble checked), **option** (fix kept as an o
 
 - **Tried on:** the C2 step. |dL/L| 1.3e-14 -> 1.4e-9, 15 % faster. Deleted in 1483094 (the isolated tests had stayed
   at round-off: a path inconsistency in the cluster, not debugged).
-- **s303 determinism check:** a base-only rerun (job 31374530) reproduces base_s303 bit for bit (final 2.63e-11), so the
+- **s303 determinism check:** a base-only rerun reproduces base_s303 bit for bit (final 2.63e-11), so the
   s303 gap (3.66e-11 with IRK) is caused by the 370 IRK calls changing the trajectory, not run-to-run noise. Each IRK
   call has ~100x less error than a GBS call, so the global difference is most likely chaotic divergence; the energy
   rule still fails on s303 and NBODY_GAUSS_IRK stays default off. Production value needs PN subsystems covered.

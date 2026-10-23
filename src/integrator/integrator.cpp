@@ -1732,7 +1732,7 @@ void fsi_step(Particles& p, int start, int count,
 }
 
 // ==========================================================================
-// Dynamic pivot-based partitioning for HHS (per paper's Algorithm 4)
+// Dynamic pivot-based partitioning for HHS (FROST Algorithm 3)
 // Partitions particles [start, start+count) into:
 //   - slow: dt_adapt >= pivot (at beginning)
 //   - fast: dt_adapt < pivot (at end)
@@ -2604,7 +2604,7 @@ static void cross_acceleration_and_gradient_global_tree(Particles& p,
 // HHS with connected components (HHS_CC, Janes et al. 2014): the fast set F splits into components (pair time
 // step below the pivot, or subsystem partners, connect). Interactions S<->F and between components are kicked at
 // this level (with the gradient term in the middle kick); each component recurses alone, so the deep levels become
-// independent pieces of work. Same kick-drift structure as Algorithm 4.
+// independent pieces of work. Same kick-drift structure as FROST Algorithm 3.
 // =============================================================================
 static int hhs_cc_step(Particles& p, DistributedParticles* dp, int slow_start, int slow_count, int fast_start,
                        std::vector<int> comps, double pivot_dt, double G, double soft2, double dt_min, double eta,
@@ -2973,7 +2973,7 @@ static int hhs_fsi_host_subtree(Particles& p, DistributedParticles* dp, int star
 }
 
 // =============================================================================
-// Unified HHS-FSI recursion (Algorithm 4 from FROST paper)
+// Unified HHS-FSI recursion (FROST Algorithm 3)
 //
 // Single function handles all GPU paths: MPI-distributed, local GPU, and tree.
 // dp == nullptr → single-rank mode (no MPI, no tree).
@@ -3007,7 +3007,7 @@ struct EnergyLedger {
     int depth_calls[MD] = {};
     double adv_unattr = 0.0;   // advances whose subsystem list changed (not attributed per class)
     // own errors per call type (0 other/early return, 1 min-dt FSI, 2 all slow, 3 all fast, 4 slow + fast
-    // (Algorithm 4), 5 one subsystem, 6 HHS_CC, 7 host subtree) and |own| per depth (signed sums cancel)
+    // (FROST Algorithm 3), 5 one subsystem, 6 HHS_CC, 7 host subtree) and |own| per depth (signed sums cancel)
     static constexpr int NT = 8;
     double type_own[NT] = {}, type_abs[NT] = {}, depth_abs[MD] = {};
     int type_calls[NT] = {};

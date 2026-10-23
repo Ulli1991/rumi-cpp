@@ -1,13 +1,13 @@
-# cpp-nbody methods survey and learning guide (October 2026)
+# RUMI++ methods survey and learning guide (October 2026)
 
 This document has two jobs:
 
-- explain, in physical terms, each numerical method that cpp-nbody uses or could use;
+- explain, in physical terms, each numerical method that RUMI++ uses or could use;
 - turn the literature into a ranked list of experiments we can run.
 
 It is written for a reader fluent in astrophysical hydrodynamics (GADGET/AREPO, individual time bins, tree/FMM gravity, operator splitting, Richardson extrapolation) and less fluent in collisional N-body methods.
 
-**Companion documents.** Plan: `/u/uli/.claude/plans/bubbly-fluttering-falcon.md` (milestones M0-M8). Measurements: `AUDIT_2026-10.md` (findings F1-F6). Papers: `/raven/u/uli/papers/<topic>/<arXiv id>.pdf`; the list is in the appendix.
+**Companion documents.** Plan: `PLAN.md` (milestones M0-M8). Measurements: `AUDIT_2026-10.md` (findings F1-F6). Papers: listed in the appendix.
 
 **Conventions.**
 
@@ -101,7 +101,7 @@ With the c.o.m. fly-by velocity on, about half of the step is subsystem integrat
 - Ahmad-Cohen splits each particle's force into a neighbour part (short step) and a regular part (long step, extrapolated). The speed-up is about N^{1/4} (PeTar 2006.16560 §3.2).
 - 6th/8th-order Hermite: Nitadori & Makino 2008, arXiv 0708.0738 (abstract only checked).
 
-### A.2 What cpp-nbody does now
+### A.2 What RUMI++ does now
 
 - **FSI step** (`src/integrator/integrator.cpp:1136-1262`, `fsi_step`). It uses kick coefficients `FSI_KICK = 1/6`, `FSI_DRIFT = 1/2`, `FSI_MOD_KICK = 2/3` (`src/core/constants.h:22-24`), and the subsystems are advanced inside each drift (R23 Alg. 1 ordering).
 - **Gradient term.** It is computed exactly: one force pass, then a second pass over acceleration snapshots (`GradK`, `src/gravity/n2_kernels.h:36-60`; `src/gravity/forces.cpp:102-149`). This is 4 O(N²) passes per FSI cycle, as R23 §2.1 counts. There is no Omelyan option.
@@ -192,7 +192,7 @@ Each particle's step is the minimum over several criteria, each multiplied by an
 - **Perturbation** (R23 Eq. 30): subsystem members get τ ≤ η_pert min(|a/ȧ|, 1/|ė|) from the Gauss equations of the external tide (energy and angular momentum rates for N > 2).
 - **Level-0 clamp** (R23 §3.5.1). On deeper levels the criteria see only the fast set. Pairwise criteria are fine with that by design, but global ones (|a|, |j|, |v|) can grow spuriously. The clamp is τ ≤ τ(level 0). GADGET-4 has the same "partial forces in deeper levels" problem.
 
-### B.2 What cpp-nbody does now
+### B.2 What RUMI++ does now
 
 - **ff/fb symmetrised with the harmonic form** of FROST Eq. 49: `symmetrized_timestep`, `src/core/constants.h:83-116`. It is folded into the force kernels `DtK`/`AccDtK` (`src/gravity/n2_kernels.h:107-200`).
 - **Jerk** in the same kernels (`n2_kernels.h:144-147, 195`), with η_jerk = 0.1.
@@ -285,7 +285,7 @@ The flagged group is then integrated with its internal forces only. Everything e
 - **Lalande & Trani 2022** (2206.12402): a CNN on 5e6 TSUNAMI triples, ROC-AUC above 95%.
 - **Hayashi, Trani & Suto 2022/23** (2207.12672, 2209.08487): MA01 is a chaos-boundary (Lyapunov) criterion, not a disruption (Lagrange) criterion. ZLK destabilises 60° < i < 150°; retrograde orbits are more stable. For "is it safe to orbit-average", a chaos boundary is the right kind of test.
 
-### C.2 What cpp-nbody does now
+### C.2 What RUMI++ does now
 
 **Neighbour test**, R23 §3.4 Eqs. 18-19 (`src/gravity/forces.cpp:189-230`):
 
@@ -419,7 +419,7 @@ Close encounters make 1/r forces singular. A fixed-step integrator either takes 
   - Hyperbolic binary-binary: 60x fewer steps, with κ capped near 1e3.
   - **Failure:** a 1:1 mean-motion resonance became 1:2, with a drift in a of about 1e-3 after 2 t_KL.
 
-### D.2 What cpp-nbody does now
+### D.2 What RUMI++ does now
 
 - **LogH leapfrog with exact cubic Ω kick** (`src/collisional/logh.cpp:123-210`), and a PN variant with auxiliary velocities and spins (`logh.cpp:211-463`).
 - **No chain or MST coordinates.** `src/collisional/mstar.cpp` contains MST scaffolding that is never called. Groups above 8 bodies fall back to the FSI.
@@ -499,7 +499,7 @@ After k columns the order is 2k, and the work is Σn_j substeps: 72 for Deuflhar
 
 **End-time control.** The regularised integrator steps in s, not t, so landing exactly on the target time needs iteration. MSTAR (§2.4, Eqs. 15-16) first takes Δs = U Δt, and if τ + Δs/U would overshoot, sets Δs = U(Δt − τ).
 
-### E.2 What cpp-nbody does now
+### E.2 What RUMI++ does now
 
 - **Bulirsch sequence** {2, 4, 6, 8, 12, 16, 24, 32, 48, 64}, up to 10 stages (`src/collisional/gbs.h:13-14`).
 - **Polynomial Neville extrapolation in h²** (`gbs.cpp:95-140`); converged when err < η_GBS = 1e-10.
@@ -563,7 +563,7 @@ If a binary completes many orbits during one outer step, replace its fast orbita
   - Brown's Hamiltonian, the second-order correction (Tremaine 2023, 2304.01257), is often larger than the octupole term.
   - In a cluster, passing stars change the elements on T_coll ≈ 2e5 yr (1e6 pc⁻³/n)(AU/a2)(30 Msun/M) (Antonini 2014; printed equation number UNVERIFIED).
 
-### F.2 What cpp-nbody does now
+### F.2 What RUMI++ does now
 
 **Secular binary** (`src/collisional/secular.cpp:116-227, 424`; dispatch `integrator.cpp:599-705`).
 
@@ -629,7 +629,7 @@ If a binary completes many orbits during one outer step, replace its fast orbita
 
 Velocity-dependent forces break the explicit leapfrog. The fix is to carry an auxiliary velocity w (Hellström & Mikkola 2010, CeMDA 106, 143): kick v using forces evaluated with w, kick w using v, half/full/half (R23 Eq. 34). The map stays explicit and time-symmetric, which GBS requires. Pihajoki 2015 (1412.1911) adds "mixing" maps that stop v and w drifting apart.
 
-### G.2 What cpp-nbody does now
+### G.2 What RUMI++ does now
 
 - **EIH 1PN** (`post_newtonian.cpp:17`) for up to 3 bodies. 2PN-3.5PN are binary-only (bitmask `PN_ORDER = 31`). The aux-velocity leapfrog is at `logh.cpp:376`.
 - **Spins.** Rotation updates inside the PN leapfrog (`logh.cpp:211-250`), spin norms restored after extrapolation (`gbs.cpp:239-243`), spin-orbit term (`post_newtonian.cpp:318-375`). Plan bug 4 (spin-orbit coefficient missing μ) is still open (status not re-checked).
@@ -678,7 +678,7 @@ Three of the four per-level O(N²) passes give exact sums (forces, gradient). Th
 
 Gradient and jerk criteria are sums, so they stay in the force kernel, which runs anyway.
 
-### H.2 What cpp-nbody does now
+### H.2 What RUMI++ does now
 
 - The time step is fused into the force kernels (`DtK`/`AccDtK`).
 - The neighbour search is a separate O(N_set²) tiled kernel at every level (`forces.cpp:189-243`).
@@ -722,7 +722,7 @@ The catch for a collisional code is the accuracy level:
 - force errors of relative size ε give an energy error of roughly ε√(η/N) per dynamical time (Dehnen 2014, 1405.2255 App. A);
 - the FMM potential is only piecewise continuous, so energy is not conserved even with exact time integration.
 
-### I.2 What cpp-nbody does now
+### I.2 What RUMI++ does now
 
 `src/gravity/fmm.cpp` is a GPU spherical-harmonics FMM (p up to 20, Morton tree, M2L by rotation) with a test (`tests/fmm_test.cpp`). It is not wired into the integrator.
 
@@ -786,7 +786,7 @@ There are two standard cures:
 
 Hydro analogue: subcycling a stiff chemistry network per cell on the GPU, where batched per-cell solvers win and per-cell launches lose.
 
-### J.2 What cpp-nbody does now
+### J.2 What RUMI++ does now
 
 - LogH runs on host threads after a device→host pack; results are pushed back afterwards (`logh_batch.cpp:387`; `integrator.cpp:460-465, 948-965`).
 - Audit F2: with F1 on, subsystems take 53% of the step (about 3 s), with 32-512 calls per step at depths 3-7. At depth 7 pack/unpack costs about 0.6 ms per call.
@@ -796,7 +796,7 @@ Hydro analogue: subcycling a stiff chemistry network per cell on the GPU, where 
 
 **R23** (§3.1, §3.5) integrate many small LogH systems in parallel rather than parallelising inside one.
 
-- **It does not say explicitly whether that happens on CPU MPI ranks or on the GPU** (UNVERIFIED; the memory note "small sets on CPU" refers to the force sets, FROST §5.2).
+- **It does not say explicitly whether that happens on CPU MPI ranks or on the GPU** (UNVERIFIED; the earlier note "small sets on CPU" refers to the force sets, FROST §5.2).
 - R23 §4: going from 10% to 100% binaries costs +25% (1e4), +24% (1e5), +3% (1e6). Most binaries are secular/Kepler there.
 
 **PeTar** (§4.5): SDAR and Hermite on CPU OpenMP threads, tree on GPU; load imbalance from long-lived hierarchies with "no universal solution".
@@ -906,7 +906,7 @@ Ranked by expected value per unit effort, with accuracy gates first. "Cost" is t
 
 ## Findings that contradict the current plan or project memory
 
-1. **Memory: "R23 do not document their SSE modifications" — wrong.** R23 §3.13 cites Banerjee et al. 2020 (1902.07718): Vink winds, Fryer 2012 remnants and PPISN. Our SSE already has these switches; experiment K-1.
+1. **Earlier note: "R23 do not document their SSE modifications" — wrong.** R23 §3.13 cites Banerjee et al. 2020 (1902.07718): Vink winds, Fryer 2012 remnants and PPISN. Our SSE already has these switches; experiment K-1.
 
 2. **Plan and config keep jerk and v/a time-step criteria at η = 0.1. FC-I/II/III use min(ff, fb, ∇) at η = 0.2** (FC-I App. B l.869 and Table l.322, verified). The plan's accuracy targets come from R23 (which used jerk). Its speed targets for the FC era assume the cheaper set. Experiment B-1.
 
@@ -921,7 +921,7 @@ Ranked by expected value per unit effort, with accuracy gates first. "Cost" is t
 
 6. **The FC-II octree is undocumented** (one sentence, no numbers). Plan M7.4's "bit-identical" requirement is achievable (min-reductions prune exactly) but its payoff at 200k is unproven (H-2 first).
 
-7. **R23 do not state that their subsystems run on CPUs.** "Small sets on CPU" in memory refers to the force sets of FROST §5.2. The F2 design should follow measurement (J-1), not that assumption.
+7. **R23 do not state that their subsystems run on CPUs.** "Small sets on CPU" in the earlier notes refers to the force sets of FROST §5.2. The F2 design should follow measurement (J-1), not that assumption.
 
 8. **MA01 as printed in R23 Eq. 54 has a misplaced bracket.** Our version also lacks the inclination factor (plan bug 6). Use Vynatheya 2022 Eq. 2.
 
@@ -929,7 +929,7 @@ Ranked by expected value per unit effort, with accuracy gates first. "Cost" is t
 
 ---
 
-## Appendix: papers on disk (`/raven/u/uli/papers/`)
+## Appendix: papers read, by topic
 
 | Directory | Contents |
 |---|---|

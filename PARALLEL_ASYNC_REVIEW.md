@@ -1,12 +1,12 @@
-# Parallel-in-time, asynchronous and task-based methods for cpp-nbody: a literature review
+# Parallel-in-time, asynchronous and task-based methods for RUMI++: a literature review
 
 Date: 2026-10-11. Sections 5.8 (CUDA-aware MPI on raven) and 5.9 (paradigms beyond MPI) were added on request.
 Code state: commit 9b8dc35 (line numbers below refer to it). Research only; nothing in the code was
-changed. Papers are in `/raven/u/uli/papers/async_parallel_time/` (~110 PDFs; file names are given as `[file]`).
+changed. About 110 papers were read; their local file names are given as `[file]`.
 Every number quoted from a paper carries its section/figure; items marked **UNVERIFIED** could not be checked against
 the source. Our own measurements come from `AUDIT_2026-10.md` §G (200k, 10 % binaries, 4x A100 on one raven node).
 
-Readers: the two design agents (deep-level batching + task parallelism; GPU idle time) and the user. Hydro analogies
+Readers: the designers of deep-level batching + task parallelism and of the GPU idle-time work. Hydro analogies
 are given where they fit: HHS levels are time bins, connected components are "islands" of active cells, the parent
 kick is the bin synchronisation point.
 
@@ -698,7 +698,7 @@ Need 3-seed A/B: #2, #7, #10.
 
 ---
 
-## 9. References (verified unless marked; file names in `/raven/u/uli/papers/async_parallel_time/`)
+## 9. References (verified unless marked)
 
 **Parallel-in-time.** Lions, Maday & Turinici 2001, CRAS 332, 661, DOI 10.1016/S0764-4442(00)01793-6 · Gander &
 Vandewalle 2007, SISC 29, 556, DOI 10.1137/05064607X · Gander & Hairer 2008, LNCSE 60, 45, DOI

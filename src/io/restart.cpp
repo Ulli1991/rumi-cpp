@@ -536,7 +536,7 @@ void read_restart(const std::string& path, Particles& p, RunState& rs, bool allo
                   std::map<std::string, std::string>* params_out) {
     auto f = h5::open_file(path);
     if (!h5::has_attr(f, "format") || h5::get_string(f, "format") != "cpp-nbody-restart")
-        h5::fail(path + " is not a cpp-nbody restart file");
+        h5::fail(path + " is not a RUMI++ restart file");
     const int version = (int)h5::get_int(f, "format_version");
     if (version != FORMAT_VERSION)
         h5::fail(path + ": restart format version " + std::to_string(version) + ", this build reads " +

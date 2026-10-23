@@ -18,7 +18,7 @@ Levels:
 | `TOTAL_TIME_MYR` | double | `0.23` | user |  | End time (Myr) |
 | `DT_MAX_MYR` | double | `1.6e-3` | user |  | Integration interval (Myr): the level-0 step; diagnostics, restarts and snapshots count these steps |
 | `DT_MIN_MYR` | double | `1.0e-14` | expert |  | Smallest time step (Myr): the deepest HHS level |
-| `INTEGRATOR` | string | `hhs` | internal | hhs\|fsi | hhs: adaptive HHS-FSI (FROST Algorithm 4); fsi: every particle on the fastest occupied level (tests) |
+| `INTEGRATOR` | string | `hhs` | internal | hhs\|fsi | hhs: adaptive HHS-FSI (FROST Algorithm 3); fsi: every particle on the fastest occupied level (tests) |
 
 ## Star cluster
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Per-step energy error and wall time of cpp-nbody runs (A/B scans).
+"""Per-step energy error and wall time of RUMI++ runs (A/B scans).
 
 Reads the signed cumulative unbooked |E0|-relative error from the "SDAR step N ... unbooked_dE/E0 X" lines and the
 "Step wall" lines of each run.log; prints per run: steps, mean / rms / max |dE/E0| per step, |final - first|, median

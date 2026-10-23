@@ -1,6 +1,6 @@
 # Rantala et al. (2023, arXiv:2210.02472), Sec. 5.2, Fig. 8: unsoftened N = 162000 equal-mass Plummer
 # cluster, 35 Myr. Source lines of every value: README.md next to this file. Production chain: job.sh in
-# /raven/ptmp/uli/cpp-nbody-runs/fig8-2026-10-22/s<seed>/ (PLUMMER_SEED, RESTART_*, WALLTIME_LIMIT set there).
+# Raven run fig8-2026-10-22/s<seed> (PLUMMER_SEED, RESTART_*, WALLTIME_LIMIT set there).
 TEST_CASE = plummer
 INTEGRATOR = hhs
 TOTAL_TIME_MYR = 35.0                   # T = 35 Myr

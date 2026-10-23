@@ -1,10 +1,10 @@
 # The hardest problems for a collisional N-body code: literature audit (October 2026)
 
-**What this document is.** It answers six questions about cpp-nbody:
+**What this document is.** It answers six questions about RUMI++:
 
 - Which problems are the frontier for direct ("collisional") N-body codes today?
 - What makes each of them hard?
-- What would the user's candidate cost on our code? The candidate is a core-collapsing cluster of 1e6 stars or more.
+- What would the candidate problem cost on our code? The candidate is a core-collapsing cluster of 1e6 stars or more.
 - What do the other codes manage, and what do they approximate to get there?
 - What does our code lack?
 - Which two or three flagship problems should define success?
@@ -14,12 +14,10 @@ This is research and writing only; no code was changed.
 **Companion documents.**
 - `METHODS_SURVEY.md`: the methods, explained.
 - `AUDIT_2026-10.md`: our measurements.
-- The plan: `/u/uli/.claude/plans/bubbly-fluttering-falcon.md`, milestones M0–M8.
+- The plan: `PLAN.md`, milestones M0–M8.
 
-**Papers.** They are under `/raven/u/uli/papers/`. This audit added four folders:
-- `frontier_runs/`: the big simulations;
-- `cluster_theory/`: relaxation, collapse, chaos, Monte Carlo codes, nuclei;
-- `multiplicity/`, `binary_evolution/`, `gpu_scaling/`.
+**Papers.** This audit read papers on: the big simulations (frontier runs); relaxation, collapse, chaos, Monte Carlo
+codes and nuclei (cluster theory); multiplicity; binary evolution; GPU scaling.
 
 **Conventions.**
 - Section numbers are those of the arXiv LaTeX sources.
@@ -31,7 +29,7 @@ This is research and writing only; no code was changed.
 
 ## Summary
 
-1. **The user's guess is the right kind of problem, but it needs to be sharpened.**
+1. **The initial guess is the right kind of problem, but it needs to be sharpened.**
 
    *Who has done what at 1e6:*
    - **DRAGON (2016)** is still the only star-by-star 1e6-star cluster integrated to 12 Gyr, with 5 % binaries. It took about a year on 16 GPUs.
@@ -144,7 +142,7 @@ How long it takes:
 
 ### 1.1 Million- to ten-million-body clusters through core collapse and beyond
 
-The user's candidate.
+The candidate problem.
 
 **Done so far:**
 
@@ -288,7 +286,7 @@ Cost:
   - Softened clusters showed "practically no evolution"; regularised ones expanded 10–100×.
 - R23 §7 calls full dwarf galaxies a goal once a tree or FMM exists.
 
-**For the user (hydro background) this is the most natural bridge problem:** a collisional N-body module inside a galaxy-scale hydro code. It is a different code architecture, though: hybrid softened/regularised, not O(N²).
+**For a hydro background this is the most natural bridge problem:** a collisional N-body module inside a galaxy-scale hydro code. It is a different code architecture, though: hybrid softened/regularised, not O(N²).
 
 ---
 
@@ -318,7 +316,7 @@ Binary–single and binary–binary encounters in the core:
 
 Each encounter is a chaotic few-body problem that must be integrated to the end.
 - NB6++ (1504.03687 §4.3): with 5 % binaries at 1e6, "the KS takes about half of the calculation time when N_node ≥ 8".
-- Our own profile (Fig. 7 reproduction, `/raven/ptmp/uli/cpp-nbody-runs/fig7-2026-10-11/summary.md`): subsystems take 57–78 % of the wall time at N = 1e4–1e5, but 21 % at 1e6, where O(N²) work dominates.
+- Our own profile (Fig. 7 reproduction, Raven run fig7-2026-10-11/summary.md): subsystems take 57–78 % of the wall time at N = 1e4–1e5, but 21 % at 1e6, where O(N²) work dominates.
 
 ### 2.3 The stochastic energy error in core collapse
 
@@ -386,7 +384,7 @@ That is why regularised few-body accuracy is valuable for few-body physics. It i
 
 **Our status:**
 - Our MPI design replicates all particles on every rank (`core/mpi_comm.h:53`), as in R23.
-- 2 nodes gave no speed-up at 200k, because the small-set path and the subsystems are replicated (`VIPER_NOTES.md:70`).
+- 2 nodes gave no speed-up at 200k, because the small-set path and the subsystems are replicated (`DEV_NOTES.md`).
 - We have no multi-node measurement at 1e6.
 - FC-III added node-local MPI shared-memory windows.
 
@@ -433,7 +431,7 @@ What a code has to get right:
 
 ---
 
-## 3. What the user's candidate costs on our code
+## 3. What the candidate problem costs on our code
 
 ### 3.1 Inputs
 
@@ -455,7 +453,7 @@ What a code has to get right:
 - 1e7: ×100 from N² at fixed hardware, i.e. 360 h per crossing time on 4 A100.
 
 **Correction factors:**
-- **Production speed.** The 1e6 number is a first interval from fresh ICs. R23 §4 calls such numbers "the upper limit"; encounters, multiples and mergers slow later intervals. Our 200k runs show 2–3× (memory note `production-speed-metric`). We apply **×2–3**.
+- **Production speed.** The 1e6 number is a first interval from fresh ICs. R23 §4 calls such numbers "the upper limit"; encounters, multiples and mergers slow later intervals. Our 200k runs show 2–3× (production-speed measurements). We apply **×2–3**.
 - **Growth through collapse.** Central density rises ×30 in R23 §5.6, and by 10³–10⁶ in deep collapse, adding levels and binary activity. This is not quantified anywhere for HHS-FSI, so it is not included below. (Our expectation is ≤ 2×, because the core holds few stars.)
 
 **Number of crossing times to collapse:** t_rh/t_cr = 0.138 N/ln(γN). With γ = 0.11:
@@ -467,7 +465,7 @@ With γ = 0.015 these are ~15 % larger.
 
 ### 3.2 Results
 
-Our estimate (scratch script, formulas above).
+Our estimate (formulas above).
 
 | Case | t_rh | t_cc (0.2 t_rh) | t_cc in crossing times | 1 node, first-interval speed | Remarks |
 |---|---|---|---|---|---|
@@ -633,13 +631,13 @@ It then accepts a far field at the level that keeps core-collapse statistics unb
 - statistical equivalence with the direct run on an ensemble, e.g. Lagrangian radii, t_cc, binary binding-energy distributions and escaper counts within seed scatter;
 - the subsystem ledger stays exact.
 
-This is a decision for the user. It loosens our standing energy rule ("no |dE/E| loss") for the far field only. Experiment I-1 (synthetic force errors) should measure it before any FMM coding.
+This decision is open. It loosens our standing energy rule ("no |dE/E| loss") for the far field only. Experiment I-1 (synthetic force errors) should measure it before any FMM coding.
 
 ---
 
 ## 5. Gap list for our code
 
-**Code state** (commit 5b923f7, main): we checked the `src/` tree, `config.txt`, `AUDIT_2026-10.md`, `METHODS_SURVEY.md` and `VIPER_NOTES.md`.
+**Code state** (commit 5b923f7, main): we checked the `src/` tree, `config.txt`, `AUDIT_2026-10.md`, `METHODS_SURVEY.md` and `DEV_NOTES.md` (then `VIPER_NOTES.md`).
 
 ### 5.1 Cross-cutting gaps (block every long run)
 
@@ -648,7 +646,7 @@ This is a decision for the user. It loosens our standing energy rule ("no |dE/E|
 | G1 | **No restart from disk.** `collisional/checkpoint.{h,cpp}` holds the in-memory rollback for adaptive restarts only. `NBODY_DUMP` writes a diagnostic dump (pid, m, x, v, subsystem id) without the subsystem or SSE state, and it cannot be read back. | `main.cpp:464-484` | everything longer than one 24 h job. Must be bit-identical on resume (test: run N steps, or N/2 + restart + N/2, compare). Must include subsystem/LogH/SDAR state, RNG state, SSE state, merger tree and energy books. |
 | G2 | **No science output.** No snapshots (FC-I §3.1 uses GADGET-like HDF5). No Lagrangian radii, density centre, core radius or central density. No binary census (a, e, E_b distribution); no escaper or collision tables beyond `merger_tree.dat` and `escaper_log.dat`. | `io/diagnostics.h` | any comparison with R23 Figs. 13–14 or DRAGON-II. Data volume: DRAGON-II wrote 35 TB for 19 runs. FC-I §4.7 notes that binary–single encounters last ~4e-5 Myr, below any snapshot cadence, so event logs are needed. |
 | G3 | **No external tidal field** (isolated clusters only; escapers are removed at 100 r_h). | grep of `src/` | GCs to a Hubble time (§1.6); comparison with DRAGON, DRAGON-II, Kamlah+2022 (all tidally limited). A point-mass or log-potential tidal acceleration plus the matching energy term is small work. |
-| G4 | **Multi-node scaling unproven.** Replicated particles with allgather; 2 nodes gave no gain at 200k; never measured at 1e6. FC-III added node-local shared-memory windows. | `core/mpi_comm.h:53`, `VIPER_NOTES.md:70` | 1e6 in months, not years (§3.2). Target: 40 N/1e6 GPUs (R23 §4). |
+| G4 | **Multi-node scaling unproven.** Replicated particles with allgather; 2 nodes gave no gain at 200k; never measured at 1e6. FC-III added node-local shared-memory windows. | `core/mpi_comm.h:53`, `DEV_NOTES.md` | 1e6 in months, not years (§3.2). Target: 40 N/1e6 GPUs (R23 §4). |
 | G5 | **O(N²) outside the force.** Collisional time-step sums (`AUDIT` F7: the tree prunes only the min-search), gradient (cross and self), and the energy check (13 % at 1e6). | `fig7` summary; `AUDIT` F7 | 1e7, together with M8. |
 | G6 | **Production speed at 1e4–1e5.** 3–20× slower than the published timings (R23 Fig. 7 reproduction). The cause is subsystem overhead; SDAR is now in but off by default. | `fig7-2026-10-11/summary.md` | the validation ladder (small N, many seeds). |
 
