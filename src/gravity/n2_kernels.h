@@ -244,6 +244,7 @@ struct NgbK {
     double *pa, *pe, *pE;
     int max_ngb;
     double G, r_ngb, r_ngb_max_sq, pivot_dt, inv_mref, r_wide = 0.0;
+    WideOut wide = {};
     struct Sink { double x, y, z, m, vx, vy, vz; };
     KOKKOS_INLINE_FUNCTION Sink sink(int i) const { return {x(i), y(i), z(i), m(i), vx(i), vy(i), vz(i)}; }
     KOKKOS_INLINE_FUNCTION void source(int j, double* s) const {
@@ -264,6 +265,8 @@ struct NgbK {
             if (k < max_ngb) {   // array indices; detect_from_pairs converts to particle ids
                 pi[k] = i; pj[k] = j; pa[k] = a_val; pe[k] = e_val; pE[k] = E_orb; pb[k] = is_bound ? 1 : 0;
             }
+        } else if (is_bound && wide.cnt) {
+            wide.add(i, j, a.m, s[3], a_val);
         }
     }
     KOKKOS_INLINE_FUNCTION void finish(int, const Sink&, const double*, const double*) const {}
@@ -275,8 +278,15 @@ struct NgbK {
 // does not apply below. Without the floor a perturber drove a 29+29 Msun, 54 yr binary and itself to steps of 4e-9
 // Myr and an interval cost 150-270 s instead of ~15 s (200k, 10 % binaries, old seed-7 ICs); on the CM_TIDE test
 // (e = 0.97) RES = 1 gives |dE/E| 3.7e-10 in 4 s, no floor 5.7e-10 in 544 s, RES >= 5 degrades (5.5e-9)
+// WIDE_PAIR_TIDAL_STEP_RES: wide pair members carry -floor (kf < 0); a pair with one takes min(max(k_i / m_j r^3,
+// |f_i|), max(k_j / m_i r^3, |f_j|)), each source not below its own floor (with max(f_i, f_j) a loose wide pair's
+// floor above the step waived a nearby binary's step: c2 replay, +1.3e-5 |E0| in one step)
 KOKKOS_INLINE_FUNCTION double tidal_sampling_dt(double ki, double kj, double mi, double mj, double r2s, double fi,
                                                 double fj) {
+    if (fi < 0.0 || fj < 0.0) {
+        const double r3 = r2s * Kokkos::sqrt(r2s);
+        return n2_fmin(n2_fmax(ki / mj * r3, Kokkos::fabs(fi)), n2_fmax(kj / mi * r3, Kokkos::fabs(fj)));
+    }
     return n2_fmax(n2_fmin(ki / mj, kj / mi) * r2s * Kokkos::sqrt(r2s), n2_fmax(fi, fj));
 }
 
@@ -514,7 +524,11 @@ struct DtMixK {
             if (lff < cur * (1.0f + n2_fmax(0.0f, -cff * lff)) || lfb < cur * (1.0f + n2_fmax(0.0f, -cfb * lfb)))
                 t = n2_fmin(sym(tff, cff, eta_ff), sym(tfb, cfb, eta_fb));
             const float kj = n2_lo_f(s[7]), kfj = n2_hi_f(s[7]), rmj = n2_lo_f(s[8]);
-            t = n2_fmin(t, n2_fmax(n2_fmin(a.k * rmj, kj * a.rm) * r2 * r, n2_fmax(a.kf, kfj)));
+            if (a.kf < 0.0f || kfj < 0.0f)   // tidal_sampling_dt
+                t = n2_fmin(t, n2_fmin(n2_fmax(a.k * rmj * (r2 * r), Kokkos::fabs(a.kf)),
+                                       n2_fmax(kj * a.rm * (r2 * r), Kokkos::fabs(kfj))));
+            else
+                t = n2_fmin(t, n2_fmax(n2_fmin(a.k * rmj, kj * a.rm) * r2 * r, n2_fmax(a.kf, kfj)));
             mn[0] = w ? n2_fmin(mn[0], t) : mn[0];
         }
         const float f = (w ? gmj : 0.0f) * ir2 * ir;

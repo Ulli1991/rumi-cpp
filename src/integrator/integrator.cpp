@@ -3144,9 +3144,15 @@ void dt_attr_report(Particles& p, int start, int count, double G, double soft2) 
             symmetrized_timestep(r2, ir, dx, dy, dz, dvx, dvy, dvz, G, m(i) + m(j), eff, efb, tff, tfb);
             bff = Kokkos::fmin(bff, eff * tff);
             bfb = Kokkos::fmin(bfb, efb * tfb);
-            if (has_k)
-                btd = Kokkos::fmin(btd, Kokkos::fmax(Kokkos::fmin(kk(i) / m(j), kk(j) / m(i)) * r2 * Kokkos::sqrt(r2),
-                                                     Kokkos::fmax(kf(i), kf(j))));
+            if (has_k) {   // n2_kernels.h tidal_sampling_dt
+                const double r3 = r2 * Kokkos::sqrt(r2);
+                if (kf(i) < 0.0 || kf(j) < 0.0)
+                    btd = Kokkos::fmin(btd, Kokkos::fmin(Kokkos::fmax(kk(i) / m(j) * r3, Kokkos::fabs(kf(i))),
+                                                         Kokkos::fmax(kk(j) / m(i) * r3, Kokkos::fabs(kf(j)))));
+                else
+                    btd = Kokkos::fmin(btd, Kokkos::fmax(Kokkos::fmin(kk(i) / m(j), kk(j) / m(i)) * r2 * Kokkos::sqrt(r2),
+                                                         Kokkos::fmax(kf(i), kf(j))));
+            }
         }
         mff(ii) = bff; mfb(ii) = bfb; mtd(ii) = btd;
     });
@@ -3555,6 +3561,7 @@ static int hhs_fsi_recursive_impl(
                                                g_collisional.n_orb_secular);
             g_subsys_phase.add(SubsystemPhaseTimes::DET_PAIRS, det_clock.lap());
             g_subsystem_mgr.update_particle_flags(p);
+            g_subsystem_mgr.select_wide_pairs(p);
             g_subsystem_mgr.accumulate_diagnostics();
             lean_fence("integrator.cpp:2429");
             g_subsys_phase.add(SubsystemPhaseTimes::DET_FLAGS, det_clock.lap());

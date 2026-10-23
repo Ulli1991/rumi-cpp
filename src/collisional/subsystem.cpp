@@ -232,6 +232,7 @@ void SubsystemManager::reset_ngb_count() {
     if (ngb_count.extent(0) > 0) {
         dcopy(ngb_count, 0);
     }
+    if (wide_count.extent(0) > 0 && !host_exec()) dcopy(wide_count, 0);
 }
 
 // ============================================================================
@@ -1080,6 +1081,31 @@ KOKKOS_INLINE_FUNCTION double pericentre_passage_time(double rx, double ry, doub
     return 2.0 * M_PI * rp * rp / Kokkos::sqrt(l2);
 }
 
+// Tidal-sampling extent and speed of a two-body pair (relative position r, velocity u): R = a (1 + e) and mu_red v_p
+// for a bound pair, else |r| and mu_red |u|; floor res x P (1 - e)^(3/2) (bound) or res x pericentre_passage_time.
+// Returns whether the pair is bound
+KOKKOS_INLINE_FUNCTION bool two_body_tidal(double rx, double ry, double rz, double ux, double uy, double uz, double mi,
+                                           double mj, double G, double res, double& ext, double& muv, double& kfl) {
+    const double M = mi + mj;
+    const double r = Kokkos::sqrt(rx * rx + ry * ry + rz * rz), mu = G * M;
+    const double u2 = ux * ux + uy * uy + uz * uz, en = 0.5 * u2 - mu / r;
+    ext = r; muv = mi * mj / M * Kokkos::sqrt(u2);
+    if (en < 0.0) {
+        const double sa = -mu / (2.0 * en);
+        const double lx = ry * uz - rz * uy, ly = rz * ux - rx * uz, lz = rx * uy - ry * ux;
+        const double e2 = 1.0 - (lx * lx + ly * ly + lz * lz) / (mu * sa);
+        const double ecc = Kokkos::fmin(Kokkos::sqrt(e2 > 0.0 ? e2 : 0.0), 1.0 - 1e-12);
+        ext = sa * (1.0 + ecc);
+        // resolve the pericentre passage: P (1 - e)^(3/2) = 2 pi (r_p^3 / mu)^(1/2)
+        const double rp = sa * (1.0 - ecc);
+        kfl = res * 2.0 * M_PI * Kokkos::sqrt(rp * rp * rp / mu);
+        muv = mi * mj / M * Kokkos::sqrt(mu * (1.0 + ecc) / (sa * (1.0 - ecc)));
+        return true;
+    }
+    kfl = res * pericentre_passage_time(rx, ry, rz, ux, uy, uz, mu);
+    return false;
+}
+
 // FROST-CLUSTERS II (Rantala et al. 2025, arXiv:2506.04330) sec. 2.1: "for the fly-by time-steps of binary stars
 // in subsystems, we now use binary centre-of-mass velocities in the BIFROST fly-by time-step criteria instead of
 // the velocities of the binary components". Non-members keep their velocity; members of one subsystem do not pair
@@ -1098,6 +1124,7 @@ void SubsystemManager::fill_cm_velocity(const Particles& p, int lo, int hi, Kokk
             if (cm) { cvx(i) = vx(i); cvy(i) = vy(i); cvz(i) = vz(i); }
             if (tol > 0.0) { ck(i) = 1e30; cf(i) = 0.0; }
         });
+    if (tol > 0.0 && g_collisional.wide_pair_tidal_res > 0.0 && !wide_pids.empty()) fill_wide_tidal(p, lo, hi, ck_, cf_, tol);
     if (active.empty()) return;
     rebuild_pid_to_idx(p);   // incremental: partitions since the last build moved slots
     const auto& p2i = pid_to_idx();
@@ -1174,25 +1201,9 @@ void SubsystemManager::fill_cm_velocity(const Particles& p, int lo, int hi, Kokk
             double ext = 0.0, muv = 0.0;
             if (e - a == 2) {
                 const int i = buf(a), j = buf(a + 1);
-                const double rx = px_(j) - px_(i), ry = py_(j) - py_(i), rz = pz_(j) - pz_(i);
-                const double ux = vx(j) - vx(i), uy = vy(j) - vy(i), uz = vz(j) - vz(i);
-                const double r = Kokkos::sqrt(rx * rx + ry * ry + rz * rz), mu = G * M;
-                const double u2 = ux * ux + uy * uy + uz * uz, en = 0.5 * u2 - mu / r;
-                ext = r; muv = pm(i) * pm(j) / M * Kokkos::sqrt(u2);
-                if (en < 0.0) {
-                    const double sa = -mu / (2.0 * en);
-                    const double lx = ry * uz - rz * uy, ly = rz * ux - rx * uz, lz = rx * uy - ry * ux;
-                    const double e2 = 1.0 - (lx * lx + ly * ly + lz * lz) / (mu * sa);
-                    const double ecc = Kokkos::fmin(Kokkos::sqrt(e2 > 0.0 ? e2 : 0.0), 1.0 - 1e-12);
-                    ext = sa * (1.0 + ecc);
-                    // resolve the pericentre passage: P (1 - e)^(3/2) = 2 pi (r_p^3 / mu)^(1/2)
-                    const double rp = sa * (1.0 - ecc);
-                    kfl = res * 2.0 * M_PI * Kokkos::sqrt(rp * rp * rp / mu);
-                    if (adapt) kfl *= fscale(k);   // C5: below 1 where the binary's tidal estimate exceeds its share
-                    muv = pm(i) * pm(j) / M * Kokkos::sqrt(mu * (1.0 + ecc) / (sa * (1.0 - ecc)));
-                } else {
-                    kfl = res * pericentre_passage_time(rx, ry, rz, ux, uy, uz, mu);
-                }
+                const bool bound = two_body_tidal(px_(j) - px_(i), py_(j) - py_(i), pz_(j) - pz_(i), vx(j) - vx(i),
+                                                  vy(j) - vy(i), vz(j) - vz(i), pm(i), pm(j), G, res, ext, muv, kfl);
+                if (bound && adapt) kfl *= fscale(k);   // C5: below 1 where the binary's tidal estimate exceeds its share
             } else {
                 // The energy the tide T of a slow particle puts into the subsystem per unit time is
                 // sum_i m_i dv_i . T dr_i (relative to the c.o.m.), which in the coordinates of a binary tree
@@ -1767,4 +1778,113 @@ void SubsystemManager::print_step_summary() const {
 
 void SubsystemManager::clear() {
     active.clear();
+}
+
+// ============================================================================
+// WIDE_PAIR_TIDAL_STEP_RES: wide bound pairs of single stars as tidal-sampling sources
+// ============================================================================
+
+WideOut SubsystemManager::wide_out(int n_min) {
+    if (!(g_collisional.wide_pair_tidal_res > 0.0) || host_exec()) return {};
+    if (max_wide < n_min) {
+        max_wide = n_min;
+        wide_i = Kokkos::View<int*>("wide_i", max_wide);
+        wide_j = Kokkos::View<int*>("wide_j", max_wide);
+        wide_b = Kokkos::View<double*>("wide_b", max_wide);
+        if (wide_count.extent(0) == 0) { wide_count = Kokkos::View<int*>("wide_count", 1); Kokkos::deep_copy(wide_count, 0); }
+    }
+    return {wide_i.data(), wide_j.data(), wide_count.data(), wide_b.data(), max_wide};
+}
+
+void SubsystemManager::select_wide_pairs(const Particles& p) {
+    wide_pids.clear();
+    if (!(g_collisional.wide_pair_tidal_res > 0.0) || host_exec() || wide_count.extent(0) == 0) return;
+    int n = 0;
+    dcopy(n, Kokkos::subview(wide_count, 0));
+    n = std::min(n, max_wide);
+    if (n <= 0) return;
+    // (pid_i, pid_j, both non-members, binding) per candidate, one transfer
+    Kokkos::View<double*> d("wide_pack", 4 * (size_t)n);
+    auto pid = raw(p.particle_id), sid = raw(p.subsystem_id);
+    auto wi = raw(wide_i), wj = raw(wide_j);
+    auto wb = raw(wide_b);
+    auto dd = raw(d);
+    small_for("wide_pack", n, KOKKOS_LAMBDA(int k) {
+        const int i = wi(k), j = wj(k);
+        dd(4 * k) = pid(i); dd(4 * k + 1) = pid(j); dd(4 * k + 2) = (sid(i) < 0 && sid(j) < 0) ? 1.0 : 0.0;
+        dd(4 * k + 3) = wb(k);
+    });
+    auto h = host_copy(d);
+    struct C { int a, b; double eb; };
+    std::vector<C> c;
+    for (int k = 0; k < n; k++)
+        if (h(4 * k + 2) > 0.0) c.push_back({(int)h(4 * k), (int)h(4 * k + 1), h(4 * k + 3)});
+    // each particle's most bound partner (ties: lower pid); a pair is kept if it is that of either member
+    std::sort(c.begin(), c.end(), [](const C& x, const C& y) { return x.a != y.a ? x.a < y.a : x.b < y.b; });
+    std::unordered_map<int, size_t> best;
+    for (size_t k = 0; k < c.size(); k++)
+        for (int q : {c[k].a, c[k].b}) {
+            auto it = best.find(q);
+            if (it == best.end() || c[k].eb > c[it->second].eb) best[q] = k;
+        }
+    std::vector<char> keep(c.size(), 0);
+    for (const auto& b : best) keep[b.second] = 1;
+    for (size_t k = 0; k < c.size(); k++)
+        if (keep[k]) wide_pids.push_back({c[k].a, c[k].b});
+}
+
+// Floor of a wide pair's tidal-sampling step: res x max(tau_p, min(tau, t_p)), tau = 2 pi r / v now, tau_p at
+// pericentre, t_p the time to the next pericentre. Resolves the pair's current rate of change, steps down onto the
+// pericentre passage and resolves it; a fixed res P (1 - e)^(3/2) held eccentric pairs at their pericentre step all orbit
+KOKKOS_INLINE_FUNCTION double wide_pair_floor(double rx, double ry, double rz, double ux, double uy, double uz, double mu,
+                                              double res) {
+    const double r = Kokkos::sqrt(rx * rx + ry * ry + rz * rz), u2 = ux * ux + uy * uy + uz * uz;
+    const double en = 0.5 * u2 - mu / r, tp = pericentre_passage_time(rx, ry, rz, ux, uy, uz, mu);
+    if (!(en < 0.0) || !(u2 > 0.0)) return res * tp;
+    const double a = -mu / (2.0 * en), n = Kokkos::sqrt(mu / (a * a * a));
+    const double ec = 1.0 - r / a, es = (rx * ux + ry * uy + rz * uz) / Kokkos::sqrt(mu * a);   // e cos E, e sin E
+    double M = Kokkos::atan2(es, ec) - es;                                                     // mean anomaly
+    if (M < 0.0) M += 2.0 * M_PI;
+    const double t_peri = (2.0 * M_PI - M) / n;
+    return res * Kokkos::fmax(tp, Kokkos::fmin(2.0 * M_PI * r / Kokkos::sqrt(u2), t_peri));
+}
+
+// k and the floor of both members of each selected wide pair inside [lo, hi), k as for a bound 2-body subsystem
+void SubsystemManager::fill_wide_tidal(const Particles& p, int lo, int hi, Kokkos::View<double*> ck_,
+                                       Kokkos::View<double*> cf_, double tol) {
+    rebuild_pid_to_idx(p);
+    const auto& p2i = pid_to_idx();
+    std::vector<int> h;
+    for (const auto& w : wide_pids) {
+        const int i = (w.first < (int)p2i.size()) ? p2i[w.first] : -1, j = (w.second < (int)p2i.size()) ? p2i[w.second] : -1;
+        if (i >= lo && i < hi && j >= lo && j < hi) { h.push_back(i); h.push_back(j); }
+    }
+    if (h.empty()) return;
+    const int n = (int)h.size() / 2;
+    Kokkos::View<int*> d("wide_slots", h.size());
+    Kokkos::deep_copy(d, Kokkos::View<const int*, Kokkos::HostSpace, Kokkos::MemoryTraits<Kokkos::Unmanaged>>(h.data(), h.size()));
+    auto dd = raw(d);
+    auto ck = raw(ck_), cf = raw(cf_);
+    auto vx = raw(p.vx), vy = raw(p.vy), vz = raw(p.vz), px = raw(p.x), py = raw(p.y), pz = raw(p.z), pm = raw(p.mass);
+    auto sid = raw(p.subsystem_id);
+    const double G = G_CODE, res = g_collisional.wide_pair_tidal_res;
+    // a particle in several pairs (a massive star with companions at different a) takes the smallest k and floor
+    small_for("wide_tidal_init", n, KOKKOS_LAMBDA(int k) {
+        const int i = dd(2 * k), j = dd(2 * k + 1);
+        if (sid(i) >= 0 || sid(j) >= 0) return;
+        cf(i) = -1e30; cf(j) = -1e30;
+    });
+    small_for("wide_tidal", n, KOKKOS_LAMBDA(int k) {
+        const int i = dd(2 * k), j = dd(2 * k + 1);
+        if (sid(i) >= 0 || sid(j) >= 0) return;
+        double ext = 0.0, muv = 0.0, kfl = 0.0;
+        const double rx = px(j) - px(i), ry = py(j) - py(i), rz = pz(j) - pz(i);
+        const double ux = vx(j) - vx(i), uy = vy(j) - vy(i), uz = vz(j) - vz(i);
+        two_body_tidal(rx, ry, rz, ux, uy, uz, pm(i), pm(j), G, res, ext, muv, kfl);
+        kfl = wide_pair_floor(rx, ry, rz, ux, uy, uz, G * (pm(i) + pm(j)), res);
+        const double kt = (ext > 0.0 && muv > 0.0) ? tol / (2.0 * G * ext * muv) : 1e30;
+        Kokkos::atomic_min(&ck(i), kt); Kokkos::atomic_min(&ck(j), kt);
+        // stored as -floor: own floor only (n2_kernels.h tidal_sampling_dt)
+        Kokkos::atomic_max(&cf(i), -Kokkos::fmax(kfl, 1e-300)); Kokkos::atomic_max(&cf(j), -Kokkos::fmax(kfl, 1e-300));
+    });
 }

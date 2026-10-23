@@ -38,6 +38,14 @@ PairVel pair_vel(Particles& p, bool coll, int lo, int hi) {
                             : PairVelocities{p.vx.data(), p.vy.data(), p.vz.data(), nullptr, nullptr};
     return {{v.x}, {v.y}, {v.z}, {v.k}, {v.kf}};
 }
+// Tidal-sampling floors of wide pair members may be present (kf < 0, WIDE_PAIR_TIDAL_STEP_RES)
+bool wide_pair_floors() {
+#ifdef ENABLE_COLLISIONAL
+    return g_collisional.wide_pair_tidal_res > 0.0;
+#else
+    return false;
+#endif
+}
 // Union of the sink and source ranges of a pairwise kernel
 int range_lo(int i0, int ni, int j0, int nj) { return std::min(ni > 0 ? i0 : j0, nj > 0 ? j0 : i0); }
 int range_hi(int i0, int ni, int j0, int nj) { return std::max(i0 + ni, j0 + nj); }
@@ -146,7 +154,7 @@ void tree_min_dt_on(Particles& p, int i0, int ni, int j0, int nj, const PairVel&
     const double *X = p.x.data(), *Y = p.y.data(), *Z = p.z.data(), *M = p.mass.data();
     T.pos.build(j0, nj, X, Y, Z, cv.x.ptr, cv.y.ptr, cv.z.ptr, M, false, true, cv.k.ptr, cv.kf.ptr);
     T.vel.build(j0, nj, X, Y, Z, cv.x.ptr, cv.y.ptr, cv.z.ptr, M, true, false, cv.k.ptr, cv.kf.ptr);
-    dtt::DtParams prm{G, soft2, eta_ff, eta_fb, tree_dt_vc_fac, cv.k.ptr, cv.kf.ptr};
+    dtt::DtParams prm{G, soft2, eta_ff, eta_fb, tree_dt_vc_fac, cv.k.ptr, cv.kf.ptr, wide_pair_floors()};
     long long np = 0;
     dtt::min_pair_dt(T.pos, T.vel, i0, ni, X, Y, Z, cv.x.ptr, cv.y.ptr, cv.z.ptr, M, sid, p.dt_adapt.data(), prm, &np);
     g_tree_stats.dt_pairs += np;
@@ -416,6 +424,7 @@ static void neighbor_search_kernel(Particles& p, int start, int count, double G,
                                    double pivot_dt, bool allow_tree = true) {
     auto& mgr = g_subsystem_mgr;
     const TreeMode mode = allow_tree ? tree_mode(count, tree_ngb_min_n) : TreeMode::None;
+    const WideOut wide = mgr.wide_out(std::max(1024, count));
     if (mode != TreeMode::None) {
         dtt::NgbOut o{mgr.ngb_pair_i.data(), mgr.ngb_pair_j.data(), mgr.ngb_pair_bound.data(), mgr.ngb_count.data(),
                       mgr.ngb_pair_a.data(), mgr.ngb_pair_e.data(), mgr.ngb_pair_E.data(), mgr.max_ngb_pairs};
@@ -426,12 +435,12 @@ static void neighbor_search_kernel(Particles& p, int start, int count, double G,
             auto& T = trees<HostExec>();
             T.pos.build(start, count, X, Y, Z, VX, VY, VZ, M, false);
             dtt::ngb_pairs(T.pos, start, count, X, Y, Z, VX, VY, VZ, M, G, r_ngb, r_ngb_max * r_ngb_max, pivot_dt, o,
-                           g_collisional.ngb_inv_mref, g_collisional.r_ngb_wide);
+                           g_collisional.ngb_inv_mref, g_collisional.r_ngb_wide, wide);
         } else {
             auto& T = trees<DevExec>();
             T.pos.build(start, count, X, Y, Z, VX, VY, VZ, M, false);
             dtt::ngb_pairs(T.pos, start, count, X, Y, Z, VX, VY, VZ, M, G, r_ngb, r_ngb_max * r_ngb_max, pivot_dt, o,
-                           g_collisional.ngb_inv_mref, g_collisional.r_ngb_wide);
+                           g_collisional.ngb_inv_mref, g_collisional.r_ngb_wide, wide);
         }
         Kokkos::fence("forces.cpp:362");
         return;
@@ -439,7 +448,7 @@ static void neighbor_search_kernel(Particles& p, int start, int count, double G,
     NgbK k{{p.x.data()}, {p.y.data()}, {p.z.data()}, {p.mass.data()}, {p.vx.data()}, {p.vy.data()}, {p.vz.data()},
            mgr.ngb_pair_i.data(), mgr.ngb_pair_j.data(), mgr.ngb_pair_bound.data(), mgr.ngb_count.data(),
            mgr.ngb_pair_a.data(), mgr.ngb_pair_e.data(), mgr.ngb_pair_E.data(), mgr.max_ngb_pairs,
-           G, r_ngb, r_ngb_max * r_ngb_max, pivot_dt, g_collisional.ngb_inv_mref, g_collisional.r_ngb_wide};
+           G, r_ngb, r_ngb_max * r_ngb_max, pivot_dt, g_collisional.ngb_inv_mref, g_collisional.r_ngb_wide, wide};
     run_n2("ngb_search", start, count, start, count, k);
     lean_fence("forces.cpp:370");
 }
@@ -499,10 +508,13 @@ void neighbor_search_subset(Particles& p, int start, int count,
     neighbor_search_kernel(p, start, count, G, r_ngb, r_ngb_max, pivot_dt);
     // The kernel counts every pair but stores only max_ngb_pairs: an overflow would silently drop pairs
     // (binaries left undetected are then integrated orbit by orbit by the FSI). Grow and search again.
-    int n_found = 0;
+    int n_found = 0, n_wide = 0;
     dcopy(n_found, Kokkos::subview(g_subsystem_mgr.ngb_count, 0));
-    if (n_found > g_subsystem_mgr.max_ngb_pairs) {
+    auto& mgr = g_subsystem_mgr;
+    if (mgr.wide_out(0).cnt) dcopy(n_wide, Kokkos::subview(mgr.wide_count, 0));
+    if (n_found > g_subsystem_mgr.max_ngb_pairs || n_wide > mgr.max_wide) {
         g_subsystem_mgr.allocate_ngb_buffers(2 * n_found);
+        if (n_wide > mgr.max_wide) mgr.wide_out(2 * n_wide);
         g_subsystem_mgr.reset_ngb_count();
         neighbor_search_kernel(p, start, count, G, r_ngb, r_ngb_max, pivot_dt);
         dcopy(n_found, Kokkos::subview(g_subsystem_mgr.ngb_count, 0));

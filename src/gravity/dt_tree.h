@@ -31,7 +31,9 @@
 //
 // Tidal-sampling pair step (FLYBY_CM_EPS, n2_kernels.h tidal_sampling_dt): t = max(min(k_i / m_j, k_j / m_i) r^3,
 // max(f_i, f_j)) enters the minimum next to pair_dt. Over a node (k_j >= k_min, m_j <= m_max, r >= r_min, f_j >= 0):
-// t >= max(min(k_i / m_max, k_min / m_i) r_min^3, f_i). fmin, fmax and the f floor are exact; the product and r^3
+// t >= max(min(k_i / m_max, k_min / m_i) r_min^3, f_i). With wide pair members (kf < 0, WIDE_PAIR_TIDAL_STEP_RES)
+// t = min(max(k_i / m_j r^3, |f_i|), max(k_j / m_i r^3, |f_j|)) >= min(max(k_i / m_max r_min^3, |f_i|), k_min / m_i
+// r_min^3), which is also below the first bound (wide = true). fmin, fmax and the f floor are exact; the product and r^3
 // carry a few ulp, covered by the factor (1 - 1e-6). The node bound is the smaller of the two bounds, so a pruned
 // node holds no pair whose min(pair_dt, t) is below the running minimum, and leaves evaluate DtK's expression: the
 // minimum stays bit-identical to the O(N^2) kernel with the tidal step too.
@@ -111,8 +113,12 @@ KOKKOS_INLINE_FUNCTION double dt_lower_bound(double r2lo, double r2hi, double so
 // Lower bound of the tidal-sampling step of sink (k_i, m_i, f_i) over sources with k >= kmin, m <= mmax at softened
 // distance >= sqrt(r2lo + soft2) (derivation at the top of this file)
 KOKKOS_INLINE_FUNCTION double tidal_lower_bound(double r2lo, double soft2, double ki, double mi, double fi, double kmin,
-                                                double mmax) {
+                                                double mmax, bool wide) {
     const double r2 = r2lo + soft2;
+    if (wide) {
+        const double r3 = (1.0 - 1e-6) * r2 * Kokkos::sqrt(r2);
+        return Kokkos::fmin(Kokkos::fmax(ki / mmax * r3, Kokkos::fabs(fi)), kmin / mi * r3);
+    }
     return Kokkos::fmax((1.0 - 1e-6) * Kokkos::fmin(ki / mmax, kmin / mi) * r2 * Kokkos::sqrt(r2), fi);
 }
 
@@ -263,6 +269,7 @@ struct DtParams {
     double vc_fac;   // V_c = min(sigma, vc_fac * 2 G m mn / R_c^2): split between the velocity and position searches
     const double* k = nullptr;    // tidal-sampling step of the sinks (PairVelocities::k, kf; the trees must carry it)
     const double* kf = nullptr;
+    bool wide = false;            // kf may hold wide pair members (< 0): the bound of tidal_lower_bound for both forms
 };
 
 // Minimum pair step of each sink i in [i0, i0 + ni) over the sources of the trees, written to dt(i). sid: subsystem
@@ -276,6 +283,7 @@ void min_pair_dt(const PointTree<Exec>& T, const PointTree<Exec>& V, int i0, int
     auto tk = T.k, tkf = T.kf, vk = V.k, vkf = V.kf;
     const double* K = prm.k;
     const double* KF = prm.kf;
+    const bool wide = prm.wide;
     if (K && !(T.has_k && V.has_k)) Kokkos::abort("dt_tree: tidal-sampling step without the trees' k arrays");
     auto vn = V.node; auto vpx = V.px, vpy = V.py, vpz = V.pz, vvx = V.vx, vvy = V.vy, vvz = V.vz, vm = V.m;
     auto vidx = V.idx;
@@ -349,7 +357,7 @@ void min_pair_dt(const PointTree<Exec>& T, const PointTree<Exec>& V, int i0, int
                 box_dist2(&vn(c2, 0), &vn(c2, 3), xi, yi, zi, r2lo, r2hi);
                 double lb = dt_lower_bound(r2lo, r2hi, soft2, mi + vn(c2, 13), mi + vn(c2, 12), vlo,
                                            Kokkos::fmin(Kokkos::sqrt(v2hi), VcB), G, eff, efb);
-                if (K) lb = Kokkos::fmin(lb, tidal_lower_bound(r2lo, soft2, ki, mi, fi, vn(c2, 14), vn(c2, 12)));
+                if (K) lb = Kokkos::fmin(lb, tidal_lower_bound(r2lo, soft2, ki, mi, fi, vn(c2, 14), vn(c2, 12), wide));
                 if (lb >= mn) continue;
                 if (c2 >= VP) {
                     const int l = c2 - VP;
@@ -376,7 +384,7 @@ void min_pair_dt(const PointTree<Exec>& T, const PointTree<Exec>& V, int i0, int
                 const double vlo = Kokkos::fmax(Kokkos::sqrt(v2lo), Vc), vhi = Kokkos::sqrt(v2hi);
                 if (vlo > vhi) continue;   // all members slower than V_c: found by the velocity tree
                 double lb = dt_lower_bound(r2lo, r2hi, soft2, mi + tn(c2, 13), mi + tn(c2, 12), vlo, vhi, G, eff, efb);
-                if (K) lb = Kokkos::fmin(lb, tidal_lower_bound(r2lo, soft2, ki, mi, fi, tn(c2, 14), tn(c2, 12)));
+                if (K) lb = Kokkos::fmin(lb, tidal_lower_bound(r2lo, soft2, ki, mi, fi, tn(c2, 14), tn(c2, 12), wide));
                 if (lb >= mn) continue;
                 if (c2 >= TP) {
                     const int l = c2 - TP;
@@ -410,7 +418,8 @@ struct NgbOut {
 template <class Exec>
 void ngb_pairs(const PointTree<Exec>& T, int i0, int ni, const double* X, const double* Y, const double* Z,
                const double* VX, const double* VY, const double* VZ, const double* M, double G, double r_ngb,
-               double r_ngb_max_sq, double pivot_dt, const NgbOut& o, double inv_mref = 0.0, double r_wide = 0.0) {
+               double r_ngb_max_sq, double pivot_dt, const NgbOut& o, double inv_mref = 0.0, double r_wide = 0.0,
+               const WideOut& wide = {}) {
     auto tn = T.node; auto tpx = T.px, tpy = T.py, tpz = T.pz, tvx = T.vx, tvy = T.vy, tvz = T.vz, tm = T.m;
     auto tidx = T.idx;
     const int TP = T.P, Tn = T.n;
@@ -451,6 +460,8 @@ void ngb_pairs(const PointTree<Exec>& T, int i0, int ni, const double* X, const 
                         o.pi[q] = i; o.pj[q] = j; o.pa[q] = a_val; o.pe[q] = e_val; o.pE[q] = E_orb;
                         o.pb[q] = is_bound ? 1 : 0;
                     }
+                } else if (is_bound && wide.cnt) {
+                    wide.add(i, j, mi, tm(k), a_val);
                 }
             }
         }

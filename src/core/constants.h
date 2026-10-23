@@ -66,6 +66,18 @@ constexpr int TILE_SIZE = 128;
 constexpr int TILE_SIZE = 1;
 #endif
 
+// WIDE_PAIR_TIDAL_STEP_RES: bound pairs within r_ngb_max that are not neighbours (slot indices i < j, binding energy
+// m_i m_j / a), appended through cnt by the neighbour searches; cnt null: off
+struct WideOut {
+    int *wi = nullptr, *wj = nullptr, *cnt = nullptr;
+    double* wb = nullptr;
+    int max_wide = 0;
+    KOKKOS_INLINE_FUNCTION void add(int i, int j, double mi, double mj, double a) const {
+        const int k = Kokkos::atomic_fetch_add(cnt, 1);
+        if (k < max_wide) { wi[k] = i; wj[k] = j; wb[k] = mi * mj / a; }
+    }
+};
+
 // Harmonic symmetrization factor for timestep (FROST paper Eq. 23)
 // f(d) = (d + sqrt(1 + d²) - 1) / d  for |d| > eps, else 1.0
 // Uses fast_rsqrt instead of sqrt: sqrt(x) = x * rsqrt(x)

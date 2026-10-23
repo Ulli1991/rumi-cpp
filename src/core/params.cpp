@@ -147,6 +147,10 @@ const std::vector<ParamSpec> kParams = {
      "Tidal-sampling pair step: energy a slow particle's kicks put into a subsystem per step <= this x |E0| (0: off)"},
     {"TIDAL_STEP_RES", D, "1.0", "Subsystems", INTERNAL, "",
      "Floor of the FLYBY_CM_EPS step: this x P (1 - e)^(3/2) of a bound binary, this x the shortest pair pericentre passage 2 pi r_p / v_p of an unbound pair or larger subsystem (0: none)"},
+    {"WIDE_PAIR_TIDAL_STEP_RES", D, "0", "Subsystems", INTERNAL, "",
+     "Bound pairs of single stars beyond the neighbour radius (most bound partner, within R_NGB_MAX) are FLYBY_CM_EPS "
+     "tidal-sampling sources like binary subsystems, with floor this x P (1 - e)^(3/2): perturbers resolve the pair's "
+     "orbit and the members its pericentre passage (0: off)"},
     {"TIDAL_FLOOR_ADAPT", B, "false", "Subsystems", INTERNAL, "",
      "Bound binaries whose local tidal estimate at the TIDAL_STEP_RES floor, mu |T| v_p floor (T: tidal acceleration "
      "of all perturbers), exceeds their share FLYBY_CM_EPS x |E0| take the floor x sqrt(share / estimate) (resolved "

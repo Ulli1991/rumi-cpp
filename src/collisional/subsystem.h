@@ -1,6 +1,7 @@
 #pragma once
 
 #include "particles.h"
+#include "constants.h"
 #include "kepler.h"
 #include "logh.h"
 #include <Kokkos_Core.hpp>
@@ -146,6 +147,18 @@ struct SubsystemManager {
     // Reset the GPU neighbor pair counter to zero (call before force kernels)
     void reset_ngb_count();
 
+    // WIDE_PAIR_TIDAL_STEP_RES: candidate wide pairs of the last neighbour search (WideOut) and the selected ones
+    Kokkos::View<int*> wide_i, wide_j, wide_count;
+    Kokkos::View<double*> wide_b;
+    int max_wide = 0;
+    std::vector<std::pair<int, int>> wide_pids;   // selected pairs (particle ids)
+    WideOut wide_out(int n_min);                  // sink of the neighbour searches (cnt null: off or host subtree)
+    // After detection and update_particle_flags: from the candidates, pairs of two non-members that are the most
+    // bound (m_i m_j / a) of either member
+    void select_wide_pairs(const Particles& p);
+    void fill_wide_tidal(const Particles& p, int lo, int hi, Kokkos::View<double*> ck, Kokkos::View<double*> cf,
+                         double tol);
+
     // Detect subsystems from neighbor pairs found during pairwise computation
     // Called after force/timestep kernels have written to ngb buffers
     void detect_from_pairs(Particles& p, double G, double dt_step,
@@ -164,6 +177,7 @@ struct SubsystemManager {
     // speed of a bound pair (else the separation and relative speed), mu its reduced mass; for larger subsystems R
     // is twice the largest member distance from the c.o.m. and mu v the sum of m |v - v_cm|.
     // cf <- floor of the tidal-sampling step: res x P (1 - e)^(3/2) for members of a bound 2-body subsystem, else 0.
+    // Members of the selected wide pairs (wide_pids) get the two-body values with WIDE_PAIR_TIDAL_STEP_RES as res.
     // cm = false (component velocities, FLYBY_CM_VELOCITY off): only ck, cf are written, cvx, cvy, cvz are not touched
     void fill_cm_velocity(const Particles& p, int lo, int hi, Kokkos::View<double*> cvx, Kokkos::View<double*> cvy,
                           Kokkos::View<double*> cvz, Kokkos::View<double*> ck, Kokkos::View<double*> cf, double tol,
