@@ -5,6 +5,7 @@ type: software
 authors:
   - family-names: Steinwandel
     given-names: Ulrich
+    orcid: "https://orcid.org/0000-0001-8867-5026"
 repository-code: "https://github.com/Ulli1991/rumi-cpp"
 license: BSD-3-Clause
 date-released: 2026-10-23
