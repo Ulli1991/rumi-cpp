@@ -175,3 +175,15 @@ FROST is Rantala, Naab & Springel 2021, MNRAS 502, 5546 (doi 10.1093/mnras/stab0
   `n2_driver.h` / `n2_kernels.h` (templated tile sizes, nvcc_wrapper), and that the unified-memory paths
   (`kHostAccessibleDevice`, `NBODY_SMALL_FOR`, `NBODY_SMALL_N2`) are off on the A100. `RSQRT_NEWTON` is on by default
   (GPU accuracy = CPU). The CPU ctest needs a host Kokkos (OpenMP+Serial).
+
+## G_CODE from the IAU 2015 nominal GM_sun (2026-10)
+
+- G_CODE 4.302194e-3 -> 4.300917e-3 pc (km/s)^2 / Msun (GM_sun = 1.3271244e26 cm^3 s^-2, MSUN_IN_G = GM_sun / G_CGS).
+- 16 round-off / phase-sensitive cases were re-measured on the Orion CPU build and their bounds reset to 1.3x the new
+  measurement (kepler_e09 order window -0.1/+0.3, cc_consistent_binaries50, cm_eps_tidal_*, cmtide_kozai,
+  sec_inner_s1025, ic_binaries_no_mergers, sdar_f3_flyby, ngb_mass_scaling, coll_contact_flyby(_logh),
+  coll_tde_parabolic, pn_boost_secular, secular_drift_e1e-8, kepler2_norb05, kepler2_hyperbolic).
+- c21_sdar_outside_tide is a repro of one saved state, not a round-off bound: its cut-out velocities are scaled by
+  sqrt(G_IAU / G_old) (interval and E_REF mapped), which gives back 6.91e-10 and 15098 GBS steps. On the unscaled state
+  (1.5e-4 off in v) the case gives 2.4e-7 and 42830 steps.
+- secular_drift_e1e-8 bounds are host-only (the A100 value of the old rule was not re-measured).
