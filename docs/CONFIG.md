@@ -1,10 +1,10 @@
 # Config reference
 
-All 153 keys of the config file (`config.txt`, or `--config <file>`), generated from the parameter table in `src/core/params.cpp` by `scripts/gen_config_md.py`. Every key has one default, in that table; an unknown key in a config file is an error. Each run writes the effective value of every key, and whether it came from the file or the default, to `run_params.txt`.
+All 154 keys of the config file (`config.txt`, or `--config <file>`), generated from the parameter table in `src/core/params.cpp` by `scripts/gen_config_md.py`. Every key has one default, in that table; an unknown key in a config file is an error. Each run writes the effective value of every key, and whether it came from the file or the default, to `run_params.txt`.
 
 Levels:
 
-- **user**: the choices of a run; these 51 keys are in `config.txt`.
+- **user**: the choices of a run; these 52 keys are in `config.txt`.
 - **expert**: accuracy and output knobs; the default is the production value.
 - **test**: parameters of the few-body test problems.
 - **internal**: performance tuning thresholds; results do not depend on them (or only through the reduction order).
@@ -17,6 +17,7 @@ Levels:
 | `TEST_CASE` | string | `outer_planets` | user | plummer\|outer_planets\|binary_test\|binary_test_peri\|triple_test\|quad22_test\|particle_file | Initial conditions: a star cluster (plummer) or a few-body test problem (--test overrides) |
 | `TOTAL_TIME_MYR` | double | `0.23` | user |  | End time (Myr) |
 | `DT_MAX_MYR` | double | `1.6e-3` | user |  | Integration interval (Myr): the level-0 step; diagnostics, restarts and snapshots count these steps |
+| `PRESET` | string | `production` | user | production\|cluster | Accuracy defaults: production (the table defaults) or cluster (FLYBY_CM_EPS = 1e-7, ETA_RESTART = 0 where the file does not set them; N <~ 1e4 star clusters, docs/CONFIG.md notes) |
 | `DT_MIN_MYR` | double | `1.0e-14` | expert |  | Smallest time step (Myr): the deepest HHS level |
 | `INTEGRATOR` | string | `hhs` | internal | hhs\|fsi | hhs: adaptive HHS-FSI (FROST Algorithm 3); fsi: every particle on the fastest occupied level (tests) |
 
@@ -294,6 +295,13 @@ Levels:
   PLUMMER_*, PN_ORDER, COLLISIONAL, SSE_*) it is not the production value, which `config.txt` sets.
 - Every other key's default is the production value (config.txt before 2026-10-12, which listed 108 keys). The ctest
   cases (`tests/run_case.py`) predate that and pin the old code defaults of 15 keys in `OLD_DEFAULTS`.
+- `PRESET = cluster` sets `FLYBY_CM_EPS = 1e-7` and `ETA_RESTART = 0` wherever the config file leaves them out
+  (run_params.txt marks them "preset"). The production values (1e-11, 1e-8) are tuned for clusters of 1e5-1e6 stars;
+  at N = 621 and 5000 (Plummer, 0.25 pc, 30 % binaries, 2 Myr, OpenMP) they cost 100-1000x more per step: the
+  tidal-sampling step drives the HHS 15-20 levels deep and the step-level restart fires at nearly every step
+  (per-step |dE/E| ~ 1e-7). With the preset: |dE/E| ~ 1e-4 (N = 621) and ~ 4e-6 (N = 5000) after 2 Myr; at N = 621
+  the median |da/a| of the hard primordial binaries (a < 100 AU) is 4e-5, as NBODY6 (FLYBY_CM_EPS = 0: 3e-4, the
+  eccentric ones then take kicks spaced longer than their orbit).
 - `R_BREAK_AU` and `IC_R_BREAK` set the same radius (absolute, or in units of `BINARY_A_MAX_AU`); `IC_R_BREAK` applies
   only when `R_BREAK_AU` = 0.
 - `MSTAR_THRESHOLD` is printed but not used: every subsystem is integrated with LogH.

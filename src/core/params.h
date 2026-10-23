@@ -5,8 +5,8 @@
 //
 // - A config file sets keys of the table only: an unknown key, a value of the wrong type or outside the allowed
 //   values is an error at load time (the message names the nearest valid key).
-// - cfg.get_*("KEY") returns the file's value or the table default; a key not in the table, or read with another
-//   type, is a programming error (abort).
+// - cfg.get_*("KEY") returns the file's value, the PRESET value or the table default; a key not in the table, or read
+//   with another type, is a programming error (abort).
 // - docs/CONFIG.md is generated from the table (scripts/gen_config_md.py); config.txt holds the level-user keys.
 
 #include <map>
@@ -62,4 +62,6 @@ struct Config {
 
 private:
     const std::string& raw(const std::string& key, ParamType type) const;
+    // PRESET value of a key the file and the command line leave unset (nullptr: the table default applies)
+    const char* preset_value(const std::string& key) const;
 };

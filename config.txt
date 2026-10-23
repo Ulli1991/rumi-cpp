@@ -6,6 +6,7 @@
 TEST_CASE = plummer                     # plummer, or a test: outer_planets / binary_test / binary_test_peri / triple_test
 TOTAL_TIME_MYR = 5.0                    # End time (Myr); Rantala et al. 2023, Fig. 9
 DT_MAX_MYR = 1.0e-3                     # Integration interval (Myr): the level-0 step
+PRESET = production                     # Accuracy defaults: production / cluster (N <~ 1e4: FLYBY_CM_EPS 1e-7, ETA_RESTART 0)
 
 # ---- Star cluster (TEST_CASE = plummer) ----
 PLUMMER_N = 200000                      # Number of stars
