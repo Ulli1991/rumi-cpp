@@ -124,6 +124,8 @@ int kokkos_initialize(int num_threads, int device_id) {
 
 void kokkos_finalize() {
     if (have_p) { if (distributed) DP.local.deallocate(); else P.deallocate(); have_p = false; }
+    DP = DistributedParticles();              // its staging Views too: globals are destroyed after Kokkos::finalize
+    P = Particles();
     g_logh_batch = SubsystemBatch();          // global Views go before Kokkos::finalize (as main.cpp)
     g_subsystem_mgr = SubsystemManager();
     release_integrator_globals();
