@@ -1,0 +1,10 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "RUMI++: a collisional N-body code"
+type: software
+authors:
+  - family-names: Steinwandel
+    given-names: Ulrich
+repository-code: "https://github.com/Ulli1991/rumi-cpp"
+license: BSD-3-Clause
+date-released: 2026-10-23
