@@ -261,6 +261,11 @@ void energy(double G, double* E_bodies, double* E_books) {
     *E_books = g_energy_books.total_sink();
 }
 
+void books(double out[7]) {
+    const EnergyBookkeeping& b = g_energy_books;
+    out[0] = b.E_escape; out[1] = b.E_gw; out[2] = b.E_merge; out[3] = b.E_sse; out[4] = b.E_pn; out[5] = b.E_sd; out[6] = b.E_tidal;
+}
+
 int dump_ic(const char* path) {
     std::FILE* f = std::fopen(path, "w");
     if (!f) return 1;

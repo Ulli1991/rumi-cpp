@@ -45,6 +45,8 @@ int advance(double dt, double G);
 
 // Kinetic + potential energy of the bodies and the energy booked as lost (mergers, GW); G as in advance
 void energy(double G, double* E_bodies, double* E_books);
+// The energy books one by one: escape, gw, merge, sse, pn, sd (SDAR), tidal (as E_books, cumulative)
+void books(double out[7]);
 // Write the current state as a RUMI++ IC_FILE (m x y z vx vy vz kw R per line, %.17g): bit-exact replays
 int dump_ic(const char* path);
 
