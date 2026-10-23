@@ -61,6 +61,8 @@ void natal_kick(int pid, int seed, int kw_new, double fbfac, bool ecsn, double d
     dv[2] = scale * r2 * std::cos(two_pi * u[3]);
 }
 
+}  // namespace
+
 // Potential-energy change of a mass update m -> m' that touches the stars T (d_i = m'_i - m_i, zero elsewhere):
 //   U' - U = -G sum_{i<j} (m'_i m'_j - m_i m_j) / r_ij,   m'_i m'_j - m_i m_j = d_i mbar_j + mbar_i d_j  (exact),
 // mbar = (m + m') / 2, hence
@@ -112,7 +114,6 @@ double potential_change(const Particles& p, const std::vector<int>& touched, con
     for (double t : term) dU += t;
     return dU;
 }
-}  // namespace
 
 void advance_stellar_evolution(Particles& p, SSEContext& sse, double dt_myr,
                                 EnergyBookkeeping& books, double G) {
