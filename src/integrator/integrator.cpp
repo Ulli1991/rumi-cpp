@@ -907,7 +907,25 @@ void advance_subsystems_in_range_impl(Particles& p, int start, int count,
         const int s = eligible[k];
         adv_check.own(s);
         const auto& sub = g_subsystem_mgr.active[s];
-        subsys_advance_count(sub.particle_ids, dt, sub.orb.a, sub.orb.e, (int)sub.type);
+        if (subsys_advance_count(sub.particle_ids, dt, sub.orb.a, sub.orb.e, (int)sub.type)) {
+            constexpr double R_sun_to_pc = 2.254e-8;   // as mergers.cpp
+            auto& sc = StellarPropsCache::get();   // the members as RUMI++ has them, and its contact distance
+            std::vector<int> kw; std::vector<double> m, R;
+            for (int pid : sub.particle_ids) {
+                const int ii = g_subsystem_mgr.safe_pid_to_idx(pid);
+                kw.push_back(sc.type_of(p, pid)); R.push_back(sc.radius_of(pid)); m.push_back(ii >= 0 ? h_m(ii - start) : -1.0);
+                std::printf("SUBSYS_ADVANCE_LIMIT member pid %d m %.6g Msun kw %d R %.6g Rsun\n", pid, m.back(), kw.back(), R.back());
+            }
+            if (sub.n_bodies == 2) {
+                MergerType mt;
+                const double rc = collision_distance(kw[0], m[0], R[0] * R_sun_to_pc, kw[1], m[1], R[1] * R_sun_to_pc, G,
+                                                     g_collisional.c_code, mt);
+                std::printf("SUBSYS_ADVANCE_LIMIT pericentre %.6e pc = %.4g Rsun, contact distance %.6e pc = %.4g Rsun\n",
+                            sub.orb.a * (1 - sub.orb.e), sub.orb.a * (1 - sub.orb.e) / R_sun_to_pc, rc, rc / R_sun_to_pc);
+            }
+            std::fflush(stdout);
+            std::abort();
+        }
         if (to_logh[s]) {
             logh_idx.push_back(s);
         } else if (sub.is_secular && sub.n_bodies == 2) {

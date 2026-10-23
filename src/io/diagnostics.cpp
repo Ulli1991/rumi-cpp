@@ -39,20 +39,16 @@ bool subsys_err_first(const std::vector<int>& pids) {
     }
     return ++g_err_n[sorted_pids(pids)] == 1;
 }
-void subsys_advance_count(const std::vector<int>& pids, double dt, double a, double e, int type) {
-    if (g_collisional.subsys_advance_limit <= 0) return;
+bool subsys_advance_count(const std::vector<int>& pids, double dt, double a, double e, int type) {
+    if (g_collisional.subsys_advance_limit <= 0) return false;
     if (g_adv_step != g_step_in_progress) { g_adv_n.clear(); g_adv_step = g_step_in_progress; }
     const long long n = ++g_adv_n[sorted_pids(pids)];
-    if (n <= g_collisional.subsys_advance_limit) return;
+    if (n <= g_collisional.subsys_advance_limit) return false;
     std::string ps; for (int q : pids) ps += " " + std::to_string(q);
-    std::fprintf(stderr, "SUBSYS_ADVANCE_LIMIT: step %d, subsystem type %d pids%s advanced %lld times in one top-level step "
-                 "(limit %lld), last dt %.3e Myr, a %.4e pc, e %.6f: stopping\n", g_step_in_progress, type, ps.c_str(), n,
-                 (long long)g_collisional.subsys_advance_limit, dt * TIME_UNIT_MYR, a, e);
     std::printf("SUBSYS_ADVANCE_LIMIT: step %d, subsystem type %d pids%s advanced %lld times in one top-level step (limit %lld), "
                 "last dt %.3e Myr, a %.4e pc, e %.6f: stopping\n", g_step_in_progress, type, ps.c_str(), n,
                 (long long)g_collisional.subsys_advance_limit, dt * TIME_UNIT_MYR, a, e);
-    std::fflush(stdout); std::fflush(stderr);
-    std::abort();
+    return true;
 }
 
 // ==========================================================================
