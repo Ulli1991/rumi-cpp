@@ -8,8 +8,8 @@
 //                Omega0, OmegaLambda (0), HubbleParam (1), NumPart_ThisFile[6], NumPart_Total[6],
 //                NumPart_Total_HighWord[6], NumFilesPerSnapshot (1), MassTable[6] (0: masses per particle),
 //                config_json; plus N-body attributes: Time_Myr, Step, SnapshotIndex, N, G, Softening_pc,
-//                E_kin, E_pot, E_total, E_total_initial, dE_rel (with the books), E_escape E_gw E_merge E_sse E_pn
-//                E_sd E_tidal, P_sink[3], L_sink[3], Code ("cpp-nbody"), CodeVersion, DoublePrecision (1).
+//                E_kin, E_pot, E_total, E_total_initial, dE_rel (with the books), dE_rel_max (diagnostics.h),
+//                E_escape E_gw E_merge E_sse E_pn E_sd E_tidal, P_sink[3], L_sink[3], Code ("cpp-nbody"), CodeVersion, DoublePrecision (1).
 //                SNAPSHOT_CLUSTER_DIAG (default on; io/cluster_diag.h): Cluster_MassTotal, Cluster_DensityCentre[3]
 //                (pc), Cluster_DensityCentreVelocity[3] (km/s), Cluster_CoreRadius_pc, Cluster_CoreDensity
 //                (Msun/pc^3), Cluster_Sigma1D_kms, Cluster_LagrangianFractions[7], Cluster_LagrangianRadii_pc[7],

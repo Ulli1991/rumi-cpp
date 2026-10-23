@@ -77,6 +77,11 @@ void compute_errors(const DiagnosticState& cur, const DiagnosticState& ini,
                     const Particles& p, bool is_cluster,
                     double& dE, double& dP, double& dL);
 
+// Largest |dE/E0| (with the books) of every evaluation of this process: prints, snapshots, step-level restart checks
+// (ETA_RESTART > 0) and the end; compute_errors notes its own
+void note_dE_rel(double abs_dE);
+double dE_rel_max();
+
 void print_timebin_table(const Particles& p, const std::vector<double>& levels,
                          double dE, double dP, double dL,
                          double t_myr, int step, bool is_cluster);
