@@ -7,7 +7,7 @@
 void init_outer_planets(Particles& p);
 
 // r_half_pc <= 0: r_h from scic_mass_size_r_half(M) of the generated masses. r_break_au > 0: SCIC artificial-binary
-// avoidance (BIFROST App. A) on singles and binary centres of mass.
+// avoidance (Rantala et al. 2023, App. A) on singles and binary centres of mass.
 void init_plummer(Particles& p, int N, double M_total_msun, double r_half_pc, int seed,
                   const std::string& mass_distribution = "equal",
                   double age_gyr = 1.0, double metallicity = 0.02,
@@ -25,7 +25,7 @@ void init_plummer(Particles& p, int N, double M_total_msun, double r_half_pc, in
                   const std::string& binary_pop = "flatq_massive", bool binary_peri_check = true);
 
 // Half-mass radius [pc] of a star cluster of mass M [M_sun] from the SCIC mass-size relations
-// (BIFROST, Rantala et al. 2023, App. A, eqs. A2-A3)
+// (Rantala et al. 2023, App. A, eqs. A2-A3)
 double scic_mass_size_r_half(double M_msun);
 
 // Isolated binary test case (2 particles): configurable orbital elements

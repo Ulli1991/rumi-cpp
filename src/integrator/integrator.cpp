@@ -953,7 +953,7 @@ void advance_subsystems_in_range_impl(Particles& p, int start, int count,
 
             evolved[k] = 1;
 
-            // PN terms only for BH binaries (CollisionalConfig::pn_body), as in LogH and BIFROST: stellar binaries
+            // PN terms only for BH binaries (CollisionalConfig::pn_body), as in LogH and Rantala et al. (2023): stellar binaries
             // are a Kepler drift. With PN on, a tight stellar binary took thousands of 1PN-precession sub-steps
             // per evolution (5-7 ms secular calls at depths 3-6 of the 200k cluster)
             double m1_sec = h_m(idx0 - start), m2_sec = h_m(idx1 - start);
@@ -1193,7 +1193,7 @@ void advance_subsystems_in_range_impl(Particles& p, int start, int count,
         g_led_sec3 += E - t.e0 + t.booked;
         g_led_n_sec3++;
     }
-    // --- LogH subsystems: batch integrate with per-subsystem restart (BIFROST §3.19) ---
+    // --- LogH subsystems: batch integrate with per-subsystem restart (Rantala et al. 2023, §3.19) ---
     if (!logh_idx.empty()) {
         // Most expensive first (longest-processing-time order), so a long integration does not start last
         // while the other host threads idle: cost ~ N^2 x orbits per step
@@ -1300,7 +1300,7 @@ void advance_subsystems_in_range_impl(Particles& p, int start, int count,
             g_subsystem_mgr.step_logh_best_dE = g_logh_batch.stat_best_dE;
         g_subsystem_mgr.step_logh_cap_hit += g_logh_batch.stat_cap_hit;
 
-        // Retry failed subsystems with subdivided timestep (BIFROST §3.19)
+        // Retry failed subsystems with subdivided timestep (Rantala et al. 2023, §3.19)
         if (!failed.empty()) {
             g_subsystem_mgr.step_logh_restarts += (int)failed.size();
             std::printf("  LogH restart: %d/%d subs exceeded eta_restart=%.1e\n",
@@ -1641,7 +1641,7 @@ void fsi_step(Particles& p, int start, int count,
         g_profiler.stop(StepProfiler::DRIFT_KICK);
     }
 
-    // H_S (dt/2) then T' drift (dt/2) — BIFROST Algorithm 1 ordering
+    // H_S (dt/2) then T' drift (dt/2) — Rantala et al. 2023, Algorithm 1 ordering
     g_profiler.start();
 #ifdef ENABLE_COLLISIONAL
     if (p.collisional && !g_subsystem_mgr.active.empty()) {
@@ -1693,7 +1693,7 @@ void fsi_step(Particles& p, int start, int count,
         g_profiler.stop(StepProfiler::DRIFT_KICK);
     }
 
-    // H_S (dt/2) then T' drift (dt/2) — BIFROST Algorithm 1 ordering
+    // H_S (dt/2) then T' drift (dt/2) — Rantala et al. 2023, Algorithm 1 ordering
     g_profiler.start();
 #ifdef ENABLE_COLLISIONAL
     if (p.collisional && !g_subsystem_mgr.active.empty()) {
@@ -1950,7 +1950,7 @@ void hhs_fsi_step_dynamic(Particles& p, int start, int count, double pivot_dt,
                           double eta) {
 #ifdef ENABLE_COLLISIONAL
     if (p.collisional) g_subsystem_mgr.reset_step_diagnostics();
-    // Global PN1.0 half-kicks around the FSI step (BIFROST Section 3.7), as in hhs_fsi_step_distributed
+    // Global PN1.0 half-kicks around the FSI step (Rantala et al. 2023, Section 3.7), as in hhs_fsi_step_distributed
     bool do_global_pn = p.collisional && (g_collisional.pn_order & 1) && g_collisional.c_code > 0.0;
     if (do_global_pn) {
         StepProfiler::Region r_(g_profiler, StepProfiler::GLOBAL_PN);
@@ -2188,7 +2188,7 @@ static void fsi_step_distributed(DistributedParticles& dp, int start, int count,
             g_profiler.stop(StepProfiler::DRIFT_KICK);
         }
 
-        // H_S (dt/2) then T' drift (dt/2) — BIFROST Algorithm 1 ordering
+        // H_S (dt/2) then T' drift (dt/2) — Rantala et al. 2023, Algorithm 1 ordering
         g_profiler.start();
 #ifdef ENABLE_COLLISIONAL
         if (dp.local.collisional && !g_subsystem_mgr.active.empty()) {
@@ -2224,7 +2224,7 @@ static void fsi_step_distributed(DistributedParticles& dp, int start, int count,
         kick_velocities(dp.local, start, count, dt * FSI_MOD_KICK);
         g_profiler.stop(StepProfiler::DRIFT_KICK);
 
-        // H_S (dt/2) then T' drift (dt/2) — BIFROST Algorithm 1 ordering
+        // H_S (dt/2) then T' drift (dt/2) — Rantala et al. 2023, Algorithm 1 ordering
         g_profiler.start();
 #ifdef ENABLE_COLLISIONAL
         if (dp.local.collisional && !g_subsystem_mgr.active.empty()) {
@@ -2301,7 +2301,7 @@ static void fsi_step_distributed(DistributedParticles& dp, int start, int count,
         g_profiler.stop(StepProfiler::DRIFT_KICK);
     }
 
-    // H_S (dt/2) then T' drift (dt/2) — BIFROST Algorithm 1 ordering
+    // H_S (dt/2) then T' drift (dt/2) — Rantala et al. 2023, Algorithm 1 ordering
     g_profiler.start();
 #ifdef ENABLE_COLLISIONAL
     if (dp.local.collisional && !g_subsystem_mgr.active.empty()) {
@@ -2367,7 +2367,7 @@ static void fsi_step_distributed(DistributedParticles& dp, int start, int count,
         g_profiler.stop(StepProfiler::DRIFT_KICK);
     }
 
-    // H_S (dt/2) then T' drift (dt/2) — BIFROST Algorithm 1 ordering
+    // H_S (dt/2) then T' drift (dt/2) — Rantala et al. 2023, Algorithm 1 ordering
     g_profiler.start();
 #ifdef ENABLE_COLLISIONAL
     if (dp.local.collisional && !g_subsystem_mgr.active.empty()) {
@@ -3529,10 +3529,10 @@ static int hhs_fsi_recursive_impl(
         return 0;
     }
 
-    // BIFROST Section 3.5: fresh neighbor search + detection, then timestep
+    // Rantala et al. 2023, Section 3.5: fresh neighbor search + detection, then timestep
     bool forces_valid = false;
     bool tree_built_for_subset = false;
-    // A merger detected below (per-level, BIFROST sec. 3.14) leaves the remnant with the time step of its progenitors
+    // A merger detected below (per-level, Rantala et al. 2023, sec. 3.14) leaves the remnant with the time step of its progenitors
     // although its mass and velocity changed (GW recoil kick, up to ~1e3 km/s): the set's neighbours, subsystems and
     // time steps are computed again with the remnant. With FLYBY_CM_VELOCITY the progenitors' step is the c.o.m.
     // fly-by step (slow set), and a kicked remnant crossed 0.1 pc in one step of the slow set (200k seed 21 step 38:
@@ -3593,10 +3593,10 @@ static int hhs_fsi_recursive_impl(
         }
         if (depth == 0) dt_attr_snap(p, start, count, g_dta_kern);   // NBODY_DT_ATTR (off: no-op)
 #ifdef ENABLE_COLLISIONAL
-        // Gradient + v/a timestep criteria (BIFROST Section 3.4.4, Eq. 24/26/27), each off at eta = 0
+        // Gradient + v/a timestep criteria (Rantala et al. 2023, Section 3.4.4, Eq. 24/26/27), each off at eta = 0
         if (p.collisional && (g_collisional.eta_grad > 0.0 || g_collisional.eta_va > 0.0)) {
             // GRAD_FRESH (fix 3, b7dfabe): |g'| of every particle from the current accelerations at level 0 (the set is
-            // every particle, BIFROST's sum over all j != i); deeper levels inherit the step through the level-0
+            // every particle, the sum over all j != i of Rantala et al. 2023); deeper levels inherit the step through the level-0
             // clamp (sec. 3.4.1). Off: grad_mag as the last gradient kick left it (partial: self or slow-fast)
             const bool fresh = g_collisional.grad_fresh && g_collisional.eta_grad > 0.0;
             if (fresh && depth == 0) {
@@ -3748,7 +3748,7 @@ static int hhs_fsi_recursive_impl(
                 std::fflush(stdout);
             }
         }
-        // Level-0 clamping (BIFROST Section 3.4.1)
+        // Level-0 clamping (Rantala et al. 2023, Section 3.4.1)
         if (p.collisional && depth > 0) {
             auto dt_f = raw(p.dt_adapt);
             auto dt_l0 = raw(p.dt_level0);
@@ -3789,7 +3789,7 @@ static int hhs_fsi_recursive_impl(
                 });
             }
 
-            // Merger detection at every HHS level (BIFROST §3.14)
+            // Merger detection at every HHS level (Rantala et al. 2023, §3.14)
             if (g_collisional.c_code > 0.0) {
                 auto mergers = detect_mergers(g_subsystem_mgr, p, G,
                                                g_collisional.c_code, pivot_dt);
@@ -4156,7 +4156,7 @@ void hhs_fsi_step_distributed(DistributedParticles& dp, double pivot_dt,
     bool is_distributed = false;
 #endif
 
-    // Global PN1.0 half-kick before FSI (BIFROST Section 3.7)
+    // Global PN1.0 half-kick before FSI (Rantala et al. 2023, Section 3.7)
 #ifdef ENABLE_COLLISIONAL
     bool do_global_pn = dp.local.collisional && (g_collisional.pn_order & 1) &&
                         g_collisional.c_code > 0.0;
@@ -4182,7 +4182,7 @@ void hhs_fsi_step_distributed(DistributedParticles& dp, double pivot_dt,
     }
 #endif
 
-    // Global PN1.0 half-kick after FSI (BIFROST Section 3.7)
+    // Global PN1.0 half-kick after FSI (Rantala et al. 2023, Section 3.7)
 #ifdef ENABLE_COLLISIONAL
     if (do_global_pn) {
         StepProfiler::Region r_(g_profiler, StepProfiler::GLOBAL_PN);

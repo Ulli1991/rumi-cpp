@@ -47,7 +47,7 @@ double gw_coalescence_time(double a, double e, double m1, double m2,
 
 double tidal_disruption_radius(double m_star, double R_star, double M_bh) {
     // r_t = 1.3 (M_bh / m_star)^{1/3} R_star: FROST-CLUSTERS I (Rantala et al. 2024) App. B3.3 and FROST-CLUSTERS
-    // III sec. 2.1.4, the cube-root scaling of Kochanek (1992). (Was 1.3 ((m + M) / m)^{1/3} R, BIFROST 2023.)
+    // III sec. 2.1.4, the cube-root scaling of Kochanek (1992). (Was 1.3 ((m + M) / m)^{1/3} R, Rantala et al. 2023.)
     // R_star in the same units as positions (pc)
     return 1.3 * std::cbrt(M_bh / m_star) * R_star;
 }
@@ -56,8 +56,8 @@ double collision_distance(int kw1, double m1, double R1, int kw2, double m2, dou
                           MergerType& type) {
     const bool bh1 = (kw1 == 14), bh2 = (kw2 == 14);
     const double r_isco = c > 0.0 ? 6.0 * G * (m1 + m2) / (c * c) : 0.0;
-    // BH pairs (default): 10 Schwarzschild radii of the total mass, 20 G (m1 + m2) / c^2, BIFROST sec. 3.14.1's
-    // conservative option (KETJU-GADGET4 12 R_S, Mannerkoski+2019, Rantala+2025 ~10 R_S): truncated PN fails inside,
+    // BH pairs (default): 10 Schwarzschild radii of the total mass, 20 G (m1 + m2) / c^2, the conservative
+    // option of Rantala et al. 2023, sec. 3.14.1 (KETJU-GADGET4 12 R_S, Mannerkoski+2019, Rantala+2025 ~10 R_S): truncated PN fails inside,
     // 3.5PN turns radiation reaction into an energy gain at pericentre x = G M / (r c^2) ~ 0.11-0.14 (CASES.md C8).
     // BH_MERGE_RADIUS = max_single: FROST-CLUSTERS I sec. 2.6.3, r_sep < max(r_ISCO,1, r_ISCO,2), r_ISCO = 6 G m / c^2
     if (bh1 && bh2) {
@@ -326,7 +326,7 @@ void execute_merger(const MergerEvent& event, Particles& p,
     }
 
     // Energy sink = E(before) - E(after) of everything the merger changes, so E_total + sinks
-    // stays constant (BIFROST §3.16): the pair's kinetic and mutual potential energy, the
+    // stays constant (Rantala et al. 2023, §3.16): the pair's kinetic and mutual potential energy, the
     // remnant's kinetic energy (with kick), and the potential with all other particles, where
     // m1 at x1 and m2 at x2 become m_rem at the CoM. Collisional runs are unsoftened.
     auto dist = [&](int k, double px, double py, double pz) {

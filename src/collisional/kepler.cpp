@@ -4,7 +4,7 @@
 #include <limits>
 
 // ============================================================================
-// Kepler equation solver: Mikkola (1987) cubic start with BIFROST empirical
+// Kepler equation solver: Mikkola (1987) cubic start with the empirical
 // correction (a_K = 6 - 0.768688675*M) + Newton-Raphson + bisection fallback
 // ============================================================================
 
@@ -21,7 +21,7 @@ double solve_kepler(double M, double e, double tol) {
         sign = -1.0;
     }
 
-    // Mikkola (1987) cubic starting value with BIFROST empirical correction
+    // Mikkola (1987) cubic starting value with the empirical correction of Rantala et al. (2023)
     // (Section 3.10): a_K = 6 - 0.768688675 * M makes the cubic exact at M=pi
     double a_K = 6.0 - 0.768688675 * M_reduced;
     // Guard against a_K becoming too small or negative for very large M_reduced

@@ -6,7 +6,7 @@
 #include <algorithm>
 #include <initializer_list>
 
-// Collisional N-body configuration (BIFROST-style)
+// Collisional N-body configuration
 // All parameters under "Unsoftened direct N-body options" in config file
 
 struct CollisionalConfig {
@@ -21,7 +21,7 @@ struct CollisionalConfig {
     double eta_fb = 0.2;               // fly-by timestep parameter
     double eta_grad = 0.1;             // gradient timestep parameter
     double eta_jerk = 0.1;             // jerk timestep parameter
-    double eta_va = 0.2;               // velocity-per-acceleration timestep parameter (ETA; BIFROST Eq. 24)
+    double eta_va = 0.2;               // velocity-per-acceleration timestep parameter (ETA; Rantala et al. 2023, Eq. 24)
     double eta_gbs = 1e-10;            // GBS accuracy for LogH
     double eta_pert = 0.02;            // perturbation timestep for subsystems
     bool secular_triples = true;        // SECULAR_TRIPLES: stable triples with >= N_ORB_SECULAR inner orbits per step use the
@@ -40,7 +40,7 @@ struct CollisionalConfig {
     double eta_restart = 1e-6;         // energy error restart threshold
 
     // SDAR slow-down of weakly perturbed inner binaries in LogH subsystems (Wang, Nitadori & Makino 2020;
-    // FROST-CLUSTERS I App. A2, which replaced plain LogH by it). Off: plain LogH (BIFROST 2023)
+    // FROST-CLUSTERS I App. A2, which replaced plain LogH by it). Off: plain LogH (Rantala et al. 2023)
     bool sdar = true;                  // SDAR (env NBODY_SDAR=0/1 overrides)
     double sdar_kref = 1e-6;           // SDAR_KREF: k_ref of the slow-down factor (W20 Eq. 22, FC-I Eq. A8)
     double sdar_c = 0.1;               // SDAR_C: kappa_max coefficient c (W20 Eq. 28, FC-I Eq. A9)
@@ -58,9 +58,9 @@ struct CollisionalConfig {
 
     // An isolated 2-body subsystem without PN takes the analytic Kepler drift (kepler_drift) at any orbit count, bound
     // or unbound, instead of LogH + GBS below N_ORB_SECULAR orbits per step (KEPLER_2BODY until 2026-10-12, 9efdca7:
-    // 12-27 % faster; the LogH alternative is deleted). Exact: with BIFROST's
+    // 12-27 % faster; the LogH alternative is deleted). Exact: with the
     // splitting of the Hamiltonian (Rantala et al. 2023, sec. 3.1) all external forces enter through the FSI kicks,
-    // so the internal motion of a 2-body subsystem between kicks is a Kepler orbit; BIFROST sec. 3.10: without PN
+    // so the internal motion of a 2-body subsystem between kicks is a Kepler orbit; Rantala et al. 2023, sec. 3.10: without PN
     // the secular integrator reduces to a Kepler solver; NBODY6 advances unperturbed binaries analytically (Aarseth
     // 2003). Stays on LogH: PN pairs (a member >= M_PN with PN on), collision candidates whose pericentre falls in
     // the interval (FROST-CLUSTERS I App. B3, decided there), pairs with a merged-away (massless) member, and

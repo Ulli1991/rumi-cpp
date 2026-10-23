@@ -65,7 +65,7 @@ void gradient_correction_range(Particles& p, int i0, int ni, int j0, int nj, con
 void gradient_magnitude_range(Particles& p, int i0, int ni, int j0, int nj, double G, double soft2);
 #endif
 
-// Standalone neighbor search (BIFROST Section 3.5)
+// Standalone neighbor search (Rantala et al. 2023, Section 3.5)
 // Lightweight N² tiled kernel: detects neighbor pairs without computing forces
 // or timesteps. No subsystem exclusion — all pairs are checked.
 // Writes detected pairs to g_subsystem_mgr neighbor buffers as array indices.

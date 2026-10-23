@@ -41,7 +41,7 @@ constexpr int GBS_MAX_STEPS = 1000;
 // into up to 256 pieces). Hard ceiling 4e6 steps; NBODY_GBS_STEPS_PER_ORBIT overrides 64 (0: fixed 1000).
 // The cost stays ~ orbits per interval: the remedy for weakly perturbed inner binaries is the slow-down of their
 // orbital motion (Mikkola & Aarseth 1996; SDAR, Wang, Nitadori & Makino 2020, MNRAS 493, 3398), which replaced
-// LogH in BIFROST (FROST-CLUSTERS I, Rantala et al. 2024, App. A2; kappa = 1 for PN subsystems there).
+// plain LogH in FROST-CLUSTERS I (Rantala et al. 2024, App. A2; kappa = 1 for PN subsystems there).
 // With SDAR the limit counts slowed orbits: a slowed pair's period is kappa P (kappa at the start of the call).
 static double gbs_steps_per_orbit() {
     static const double per_orbit = std::getenv("NBODY_GBS_STEPS_PER_ORBIT")
@@ -541,7 +541,7 @@ void SubsystemBatch::unpack(SubsystemManager& mgr, Particles& p, const HostSourc
 // For now: host-side per-subsystem GBS (GPU kernel version requires
 // GBS entirely in device code, which we'll implement after basic correctness)
 //
-// IMPORTANT: The TTL leapfrog equations (BIFROST convention:
+// IMPORTANT: The TTL leapfrog equations (Rantala et al. 2023 convention:
 // dv/ds = a/Ω, dx/ds = v/Ω, dt/ds = 1/Ω) are only dimensionally
 // consistent when the energy unit ≈ 1. In Hénon units (G=M=1) this
 // holds naturally. In code units (pc, M_sun, km/s), Ω ~ 10^7.
@@ -714,7 +714,7 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
             pn_order = 0;
         }
 
-        // Load spin vectors for 2-body BH binaries; spin couplings (PN_ORDER bit 32, BIFROST sec. 3.7) need the
+        // Load spin vectors for 2-body BH binaries; spin couplings (PN_ORDER bit 32, Rantala et al. 2023, sec. 3.7) need the
         // PN path (state.use_aux_vel), otherwise the spins are carried unchanged
         state.has_spins = false;
         state.c_code = c_norm;

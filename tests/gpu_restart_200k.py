@@ -1,4 +1,4 @@
-"""GPU check of the restart files on a BIFROST Fig. 9 cluster (200k Kroupa stars evolved to 1 Gyr, 10 % binaries,
+"""GPU check of the restart files on the cluster of Rantala et al. (2023), Fig. 9 (200k Kroupa stars evolved to 1 Gyr, 10 % binaries,
 all PN orders, FLYBY_CM_EPS): 2n steps against n steps + restart + n steps, L0 rows and particle dumps bit-identical,
 on NBODY_TEST_LAUNCHER (e.g. 4 ranks, one A100 each) and on one rank; then a short run with snapshots in OUT_DIR for
 LUNA's reader (tests/luna_read_check.py).

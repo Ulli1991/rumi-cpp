@@ -272,9 +272,9 @@ struct UnionFind {
 
 bool SubsystemManager::mardling_stability(double a_in, double a_out, double e_out,
                                            double m1, double m2, double m3, double i_mut) {
-    // Mardling & Aarseth (2001), as used by BIFROST (Rantala et al. 2023, Sec. 3.11): the triple is stable if
+    // Mardling & Aarseth (2001), as used by Rantala et al. (2023, Sec. 3.11): the triple is stable if
     //   R_p = a_out (1 - e_out) > R_p,crit = 2.8 [(1 + q_out) (1 + e_out) / sqrt(1 - e_out)]^(2/5) (1 - 0.3 i/pi) a_in
-    // with q_out = m3 / (m1 + m2) and i the mutual inclination in radians (0..pi). (The BIFROST LaTeX misplaces a
+    // with q_out = m3 / (m1 + m2) and i the mutual inclination in radians (0..pi). (Rantala et al. 2023 misplace a
     // parenthesis, "(1+q_out (1+e_out)/...)"; this is the MA01 form.) The criterion does not involve e_in.
     if (!(a_in > 0.0) || !(a_out > 0.0) || !(e_out < 1.0)) return false;
     const double q_out = m3 / (m1 + m2);
@@ -306,7 +306,7 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
                                           int n_orb_secular) {
     (void)r_ngb;
     (void)r_ngb_max;
-    // BIFROST Section 3.5: fresh detection at each HHS level.
+    // Rantala et al. 2023, Section 3.5: fresh detection at each HHS level.
     // Save existing subsystems for persistent state transfer, then start fresh.
     std::vector<Subsystem> old_active = std::move(active);
     active.clear();
@@ -401,7 +401,7 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
             return a.pid_lo == b.pid_lo && a.pid_hi == b.pid_hi;
         }), pairs.end());
 
-    // Distant fly-bys of a binary member (FLYBY_NGB_CM, default on). The pair test (BIFROST sec. 3.5, Eq. 4: r_peri <
+    // Distant fly-bys of a binary member (FLYBY_NGB_CM, default on). The pair test (Rantala et al. 2023, sec. 3.5, Eq. 4: r_peri <
     // r_ngb and 0.5 r / v < dt) takes the member's instantaneous orbital velocity, which reverses every binary period:
     // near a hard binary (hundreds of km/s) a passing star "reaches pericentre" with one member along a straight line
     // the star never follows. The star then joins a 3-body LogH subsystem whose inner binary makes thousands of orbits
@@ -562,7 +562,7 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
                 bool keep = true;
                 if (mass_scaled) {
                     // NGB_MASS_SCALING: the kernel took r_ngb (m_max / <m>)^(1/3). A pair that passes the unscaled
-                    // test (BIFROST Eq. 4, component velocities) is a neighbour as before; one that passes only with
+                    // test (Rantala et al. 2023, Eq. 4, component velocities) is a neighbour as before; one that passes only with
                     // the scaled radius joins only as a strong perturber of a binary: tidal ratio at its pericentre
                     // about the binary's c.o.m., 2 m_p R^3 / (M r_p^3) with R the binary's apocentre, above
                     // NGB_MASS_GAMMA. So hard binaries keep their distant stars out (orbit-by-orbit LogH, 900 s
@@ -762,7 +762,7 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
     for (auto& comp : components) {
         const int root = comp.key;
         const auto& members = comp.members;
-        // LogH has fixed storage for LOGH_MAX_BODIES; MSTAR, which BIFROST uses for larger groups, is
+        // LogH has fixed storage for LOGH_MAX_BODIES; MSTAR, which Rantala et al. (2023) use for larger groups, is
         // not wired in. Larger groups stay field particles, integrated by the FSI directly.
         if ((int)members.size() > LOGH_MAX_BODIES) {
             static bool warned = false;
@@ -1062,7 +1062,7 @@ void SubsystemManager::remap_indices(const Particles& p) {
 }
 
 // ============================================================================
-// Enforce shared timestep for subsystem members (BIFROST Section 3.4.2)
+// Enforce shared timestep for subsystem members (Rantala et al. 2023, Section 3.4.2)
 // ============================================================================
 
 
@@ -1288,7 +1288,7 @@ void SubsystemManager::enforce_shared_timestep(Particles& p) const {
 }
 
 // ============================================================================
-// Perturbation timestep for subsystems (BIFROST Section 3.4.3, Eq. 30)
+// Perturbation timestep for subsystems (Rantala et al. 2023, Section 3.4.3, Eq. 30)
 //
 // 2-body: Gauss planetary equations for da/dt, de/dt from tidal perturbation
 //   ε_pert = η_pert * min{ |a/ȧ|, |1/ė| }
@@ -1296,7 +1296,7 @@ void SubsystemManager::enforce_shared_timestep(Particles& p) const {
 //   ε_pert = η_pert * min{ |E/Ė|, |L/L̇| }
 // ============================================================================
 
-// Perturbation time step (BIFROST Eq. 30) on gathered member data; returns whether any member was clamped
+// Perturbation time step (Rantala et al. 2023, Eq. 30) on gathered member data; returns whether any member was clamped
 static bool perturbation_timestep_md(const std::vector<Subsystem>& active, const std::vector<int>& pid_to_idx,
                                      MemberData& md, double G, double eta_pert, const Particles* p_dbg,
                                      std::unordered_map<long long, double>* floor_scale) {
@@ -1425,7 +1425,7 @@ static bool perturbation_timestep_md(const std::vector<Subsystem>& active, const
                 // (1 + e cos nu) diverges on the asymptote, 1 + e cos nu = p / r -> 0), and a unit change of e means
                 // nothing at e >> 1. Vector form, valid for any orbit: |a / adot| = |E / Edot| with Edot = v . f,
                 // and the relative change of the eccentricity vector e = (v x L) / mu - r_hat,
-                // de/dt = (f x L + v x (r x f)) / mu (BIFROST sec. 3.4.3: rates "from the positions, velocities and
+                // de/dt = (f x L + v x (r x f)) / mu (Rantala et al. 2023, sec. 3.4.3: rates "from the positions, velocities and
                 // accelerations"). Seed 42, step 64: e = 346, cos E = 146, 1 / |edot| gave 5.7e-11 Myr
                 const double Edot = dvx * fx + dvy * fy + dvz * fz;
                 dt_a = std::fabs(Edot) > 1e-30 ? std::fabs(E_orb / Edot) : 1e30;

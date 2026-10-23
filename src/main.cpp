@@ -160,7 +160,7 @@ struct BinaryTracker {
     }
 };
 
-// Spin tracker for a spinning BH binary (BIFROST sec. 3.7): |chi_i| (an exact invariant of dS/dt = Omega × S),
+// Spin tracker for a spinning BH binary (Rantala et al. 2023, sec. 3.7): |chi_i| (an exact invariant of dS/dt = Omega × S),
 // the conserved J = L_N + L_PN1 + L_SO + S1 + S2 (Kidder 1995 eq. 2.9), and the precession angle of S1 about
 // the initial J against the orbit-averaged spin-orbit rate (2 + 3 m2 / (2 m1)) G |J| / (c^2 a^3 (1-e^2)^1.5),
 // exact for simple precession (S2 = 0).
@@ -525,7 +525,7 @@ int main(int argc, char** argv) {
         int replica_check_interval = cfg.get_int("REPLICA_CHECK_INTERVAL");  // steps; 0 = off
         int N_plummer       = cfg.get_int("PLUMMER_N");
         double M_total_msun = cfg.get_double("PLUMMER_M_TOTAL");
-        // PLUMMER_R_HALF absent or "mass_size": r_h from the SCIC mass-size relation (BIFROST App. A eq. A2-A3)
+        // PLUMMER_R_HALF absent or "mass_size": r_h from the SCIC mass-size relation (Rantala et al. 2023, App. A eq. A2-A3)
         std::string r_half_str = cfg.get_str("PLUMMER_R_HALF");
         double r_half_pc    = (r_half_str == "mass_size") ? -1.0 : Config::to_double("PLUMMER_R_HALF", r_half_str);
         int seed            = cfg.get_int("PLUMMER_SEED");
@@ -549,7 +549,7 @@ int main(int argc, char** argv) {
         double imbh_a_pc    = cfg.get_double("IMBH_A_PC");
         double imbh_e       = cfg.get_double("IMBH_E");
         double imbh_spin    = cfg.get_double("IMBH_SPIN");
-        // Artificial-binary avoidance (BIFROST App. A): IC_R_BREAK = r_break in units of BINARY_A_MAX_AU ("r_break ~ a
+        // Artificial-binary avoidance (Rantala et al. 2023, App. A): IC_R_BREAK = r_break in units of BINARY_A_MAX_AU ("r_break ~ a
         // few times a_max", Table A1); R_BREAK_AU (absolute, AU) takes precedence when > 0
         double r_break_au   = cfg.get_double("R_BREAK_AU");
         if (r_break_au <= 0.0) r_break_au = cfg.get_double("IC_R_BREAK") * bin_a_max_au;
@@ -1562,14 +1562,14 @@ int main(int argc, char** argv) {
                 }
 
                 // ============================================================
-                // Adaptive restart loop (BIFROST §3.19)
+                // Adaptive restart loop (Rantala et al. 2023, §3.19)
                 // If energy error is too large, restore checkpoint, reduce all
                 // eta parameters by 50%, increase r_ngb by 15%, and retry.
                 // Escape valves: max retries exhausted, or error not decreasing.
                 // ============================================================
                 if (g_collisional.enabled && g_collisional.eta_restart > 0.0) {
-                    // Per-step reference energy (BIFROST §3.19: "beginning of the interval")
-                    // BIFROST Eq.: |ΔE_s/E| = |E(t) - E(t-τ)| / |E(t₀)|
+                    // Per-step reference energy (Rantala et al. 2023, §3.19: "beginning of the interval")
+                    // Rantala et al. 2023: |ΔE_s/E| = |E(t) - E(t-τ)| / |E(t₀)|
                     //   numerator: per-step change (E_after - E_step_start)
                     //   denominator: initial energy E(t₀) = diag0.E_total
                     g_profiler.start();
@@ -1607,7 +1607,7 @@ int main(int argc, char** argv) {
                         }
                         }
 
-                        // Per-step error: |E(t) - E(t-τ)| / |E(t₀)|  (BIFROST §3.19)
+                        // Per-step error: |E(t) - E(t-τ)| / |E(t₀)|  (Rantala et al. 2023, §3.19)
                         g_profiler.start();
                         double PE_part = 0.0;
                         double E_part = compute_particle_energy(work_p, G, soft2, &PE_part);
@@ -1627,7 +1627,7 @@ int main(int argc, char** argv) {
 
                         bool give_up = restart == max_restarts || (restart > 0 && dE >= prev_dE);
                         if (give_up) {
-                            // Max retries exhausted, or the error grew again (BIFROST: accept the
+                            // Max retries exhausted, or the error grew again (Rantala et al. 2023: accept the
                             // attempt with the smallest error rather than the last one)
                             if (dE > best_dE) {
                                 StepProfiler::Region r_(g_profiler, StepProfiler::CHECKPOINT);
@@ -1660,7 +1660,7 @@ int main(int argc, char** argv) {
                             if (use_distributed) dp.sync_count();
                         }
 
-                        // Reduce ALL eta parameters by 50% (BIFROST §3.19)
+                        // Reduce ALL eta parameters by 50% (Rantala et al. 2023, §3.19)
                         g_collisional.eta_ff   *= 0.5;
                         g_collisional.eta_fb   *= 0.5;
                         g_collisional.eta_gbs  *= 0.5;
@@ -1680,7 +1680,7 @@ int main(int argc, char** argv) {
 
                     // the accepted step's energy change (STALL_DE_FACTOR)
                     step_de = (E_carry + g_energy_books.total_sink() - E_step_start) / (std::fabs(diag0.E_total) + 1e-30);
-                    // Restore original parameters after step (BIFROST: "original parameters are restored")
+                    // Restore original parameters after step (Rantala et al. 2023: "original parameters are restored")
                     g_collisional.eta_ff   = eta_ff_orig;
                     g_collisional.eta_fb   = eta_fb_orig;
                     g_collisional.eta_gbs  = eta_gbs_orig;

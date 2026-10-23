@@ -50,7 +50,7 @@ double tidal_disruption_radius(double m_star, double R_star, double M_bh);
 
 // Collision distance r_coll of a pair (FROST-CLUSTERS I App. B3; lengths in pc, kw = stellar type) and the event
 // it gives when the pair comes closer: two BHs (kw 14) type ISCO at 10 Schwarzschild radii, 20 G (m1 + m2) / c^2
-// (BIFROST's conservative option; FC-I's larger single-BH ISCO 6 G max(m) / c^2 with BH_MERGE_RADIUS); a BH and any other body the tidal
+// (the conservative option of Rantala et al. 2023, sec. 3.14.1; FC-I's larger single-BH ISCO 6 G max(m) / c^2 with BH_MERGE_RADIUS); a BH and any other body the tidal
 // radius above, at least R_star (a BH lighter than ~0.46 m_star is inside the star before r_t), or the ISCO when
 // that is larger (swallowed whole, type ISCO); two non-BHs R1 + R2. c <= 0: no ISCO.
 double collision_distance(int kw1, double m1, double R1, int kw2, double m2, double R2, double G, double c,

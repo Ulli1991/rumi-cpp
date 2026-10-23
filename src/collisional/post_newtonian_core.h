@@ -1,7 +1,7 @@
 #pragma once
 
 // PN_ORDER bitmask: 1 = PN1.0, 2 = PN2.0, 4 = PN2.5, 8 = PN3.0, 16 = PN3.5, 32 = spin couplings in 2-body LogH
-// subsystems (spin-orbit, spin-spin, spin-quadrupole accelerations and spin precession; BIFROST sec. 3.7)
+// subsystems (spin-orbit, spin-spin, spin-quadrupole accelerations and spin precession; Rantala et al. 2023, sec. 3.7)
 constexpr int PN_SPIN = 32;
 
 // Post-Newtonian accelerations up to PN3.5 for pairs inside regularized subsystems
@@ -12,7 +12,7 @@ constexpr int PN_SPIN = 32;
 // ============================================================================
 // Computes the PN correction to the acceleration of body A due to body B.
 // Uses individual particle positions/velocities/masses directly — no
-// relative-coordinate decomposition needed. (Poisson & Will 2014 / BIFROST)
+// relative-coordinate decomposition needed. (Poisson & Will 2014; Rantala et al. 2023)
 //
 // a_pn_A[3]: output PN acceleration on body A (added to Newtonian)
 // pn_order: bitmask (1=PN1, 2=PN2, 4=PN2.5)
@@ -119,7 +119,7 @@ void eih_pn_pairs_geom(const PnGeom& geom, const double* vel, int pn_order, doub
 double pn1_energy(const double* pos, const double* vel, const double* mass,
                   int n, double G, double c_code);
 
-// Spin-dependent PN binary dynamics (BIFROST sec. 3.7; Kidder 1995 eqs. 2.2c-d, 2.4, 2.9; Kerr quadrupole of
+// Spin-dependent PN binary dynamics (Rantala et al. 2023, sec. 3.7; Kidder 1995 eqs. 2.2c-d, 2.4, 2.9; Kerr quadrupole of
 // Racine 2008). Relative coordinates x = x1 - x2, v = v1 - v2; S1, S2 physical spins (chi G m^2 / c).
 // Precession vectors: dS_i/dt = Omega_i × S_i (spin-orbit + spin-spin + quadrupole)
 void spin_precession(const double x[3], const double v[3],

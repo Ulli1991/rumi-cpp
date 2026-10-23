@@ -2,7 +2,7 @@
 
 // Exact tree searches for the HHS time steps and the neighbour pairs (plan M7.4). Forces stay direct.
 //
-// FROST-CLUSTERS II (Rantala et al. 2025, arXiv:2506.04330, sec. 2.1) added an octree to BIFROST for the time-step and
+// FROST-CLUSTERS II (Rantala et al. 2025, arXiv:2506.04330, sec. 2.1) added an octree for the time-step and
 // neighbour searches. PeTar (Wang et al. 2020, arXiv:2006.16560, sec. 2.3) finds neighbour candidates with a
 // particle tree inside a radius and then applies the Kepler pericentre test pair by pair; GADGET-4 (Springel et al.
 // 2021, arXiv:2010.03567, sec. 5) keeps min/max coordinates and velocities per node for conservative search bounds.

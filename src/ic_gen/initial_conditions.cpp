@@ -121,7 +121,7 @@ static std::vector<double> sample_kroupa_imf(int N, std::mt19937_64& rng,
 }
 
 // =========================================================================
-// SCIC helpers (BIFROST, Rantala et al. 2023, MNRAS 522, 5180, App. A)
+// SCIC helpers (Rantala et al. 2023, MNRAS 522, 5180, App. A)
 // =========================================================================
 
 double scic_mass_size_r_half(double M) {
@@ -138,7 +138,7 @@ double scic_mass_size_r_half(double M) {
 
 namespace {
 
-// BIFROST App. A, "Avoiding artificial binaries and multiplets": "impose a minimum distance r_break ~ a few times
+// Rantala et al. 2023, App. A, "Avoiding artificial binaries and multiplets": "impose a minimum distance r_break ~ a few times
 // a_max between particles which are not members of the same binary system ... If an artificial binary is detected
 // (i.e. a < r_break) the positions and velocities of the particles in question are re-sampled ... A practical
 // algorithm in our SCIC code first performs the angular re-sampling method [keeping |r_i| and |v_i|] for the
@@ -421,10 +421,10 @@ void init_plummer(Particles& p, int N, double M_total_msun, double r_half_pc, in
     }
 
     // Half-mass radius: user-given, or the SCIC mass-size relation of the generated cluster mass (for an evolved
-    // population the present-day mass; BIFROST does not say which mass SCIC uses)
+    // population the present-day mass; the paper does not say which mass SCIC uses)
     if (r_half_pc <= 0.0) {
         r_half_pc = scic_mass_size_r_half(M_total_msun);
-        std::printf("  IC r_h = %.6g pc (SCIC mass-size relation, BIFROST App. A eq. A2/A3, M = %.6g M_sun)\n",
+        std::printf("  IC r_h = %.6g pc (SCIC mass-size relation, Rantala et al. 2023, App. A eq. A2/A3, M = %.6g M_sun)\n",
                     r_half_pc, M_total_msun);
     } else {
         std::printf("  IC r_h = %.6g pc (PLUMMER_R_HALF)\n", r_half_pc);
@@ -516,7 +516,7 @@ void init_plummer(Particles& p, int N, double M_total_msun, double r_half_pc, in
     // =====================================================================
     // ---- Pairing: list of (primary, secondary) indices ----------------------------------------------
     // Decided before the artificial-binary pass so that it acts on the N_s + N_b objects (singles and binary
-    // centres of mass, BIFROST App. A); a binary's centre of mass is its primary's Plummer phase-space point.
+    // centres of mass, Rantala et al. 2023, App. A); a binary's centre of mass is its primary's Plummer phase-space point.
     std::vector<std::pair<int,int>> pairs;
 #ifdef ENABLE_COLLISIONAL
     if (binary_frac > 0.0 && N >= 2) {
@@ -590,7 +590,7 @@ void init_plummer(Particles& p, int N, double M_total_msun, double r_half_pc, in
 #endif
 
     // =====================================================================
-    // Artificial binaries and multiplets (BIFROST App. A, "Avoiding artificial binaries and multiplets")
+    // Artificial binaries and multiplets (Rantala et al. 2023, App. A, "Avoiding artificial binaries and multiplets")
     // =====================================================================
     std::vector<int> partner(N, -1);  // other member of a binary (primary <-> secondary), -1 for singles
     for (auto [i, j] : pairs) { partner[i] = j; partner[j] = i; }
@@ -607,7 +607,7 @@ void init_plummer(Particles& p, int N, double M_total_msun, double r_half_pc, in
         // Contact distance below which the code merges the pair at once (collisional/mergers.cpp
         // detect_mergers): R1 + R2 for two stars, the tidal-disruption radius for a star and a BH, the ISCO
         // 6 G M / c^2 for two BHs. FROST-CLUSTERS II (Rantala et al. 2025) Sec. 2.3: "We ensure that for each
-        // sampled binary the pericenter distance initially fulfils r_p = a(1-e) > R_p + R_s"; BIFROST App. A
+        // sampled binary the pericenter distance initially fulfils r_p = a(1-e) > R_p + R_s"; Rantala et al. 2023, App. A
         // merges such systems in the IC generator instead (SCIC), together with compact binaries whose GW
         // inspiral takes less than 0.01 Myr. We keep the pair and redraw e (and, if even e = 0 cannot clear
         // the contact distance, a): the thermal f(e) = 2e restricted to e < e_max is e = e_max sqrt(U), which
@@ -637,9 +637,9 @@ void init_plummer(Particles& p, int N, double M_total_msun, double r_half_pc, in
                 : (h_srad[i] + h_srad[j]) * R_sun_pc;
             bool check_gw = binary_peri_check && compact_i && compact_j;
 
-            // Log-uniform semi-major axis (BIFROST Table A1: f(a) flat in log a)
+            // Log-uniform semi-major axis (Rantala et al. 2023, Table A1: f(a) flat in log a)
             double a_bin = std::exp(log_a_min + uni(rng) * (log_a_max - log_a_min));
-            // Thermal eccentricity f(e) = 2e (BIFROST App. A): e = sqrt(U)
+            // Thermal eccentricity f(e) = 2e (Rantala et al. 2023, App. A): e = sqrt(U)
             double e_bin = std::sqrt(uni(rng));
             bool ok = true;
             if (binary_peri_check && a_bin * (1.0 - e_bin) <= r_contact) {
@@ -682,7 +682,7 @@ void init_plummer(Particles& p, int N, double M_total_msun, double r_half_pc, in
             elements_to_cartesian(a_bin, e_bin, inc, Omega, omega, M_anom, mu, r_rel, v_rel);
 
             // Centre of mass = particle i's Plummer phase-space point: the binary is sampled from f(E) as one
-            // object (BIFROST App. A; mcluster, Kupper et al. 2011). The mean of both members' independent draws
+            // object (Rantala et al. 2023, App. A; mcluster, Kupper et al. 2011). The mean of both members' independent draws
             // (BINARY_COM_V = average, deleted 2026-10-12, a8728fb) shrank the c.o.m. velocity dispersion by
             // sqrt(m_i^2 + m_j^2) / M_bin (1/sqrt(2) for q = 1): binaries started kinematically cold.
             double cx = hx[i], cy = hy[i], cz = hz[i];
@@ -1133,7 +1133,7 @@ void init_triple_test(Particles& p,
 
 // 2+2 hierarchical quadruple (PLAN item 4c): binary A (m1, m2; a1, e1) and binary B (m3, m4; a2, e2) on an outer
 // orbit (a_out, e_out) about each other, every orbit started at apocentre; B's orbital plane is inclined by incl
-// about the x axis. Defaults (params.cpp) are the system that stalled the BIFROST Fig. 11 run: a 20.7 + 14.1 Msun BH
+// about the x axis. Defaults (params.cpp) are the system that stalled our run of the Rantala et al. (2023) Fig. 11 setup: a 20.7 + 14.1 Msun BH
 // binary at 58 AU and a 0.79 + 0.105 Msun binary at 0.019 AU bound to it at ~0.003 pc
 void init_quad22_test(Particles& p, double m1, double m2, double a1, double e1, double m3, double m4, double a2,
                       double e2, double a_out, double e_out, double incl_deg) {

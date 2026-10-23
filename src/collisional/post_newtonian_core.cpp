@@ -73,7 +73,7 @@
 // ============================================================================
 // EIH (Einstein-Infeld-Hoffmann) PN acceleration
 // Computes acceleration of body A due to body B directly.
-// (Poisson & Will 2014, Eq. 9.139 / BIFROST Eq. 5)
+// (Poisson & Will 2014, Eq. 9.139 / Rantala et al. 2023, Eq. 5)
 //
 // Convention: n_AB = (x_A - x_B) / r_AB  (points from B toward A)
 // ============================================================================
@@ -108,7 +108,7 @@ void eih_pn_acceleration(const double x_A[3], const double v_A[3], double m_A,
     double Gm_A = G * m_A;
     double Gm_B = G * m_B;
 
-    // PN1.0 (conservative) — Poisson & Will 2014 Eq. 9.139 / BIFROST Eq. 5
+    // PN1.0 (conservative) — Poisson & Will 2014 Eq. 9.139 / Rantala et al. 2023, Eq. 5
     if (pn_order & 1) {
         // Coefficient of n_AB:
         double coeff_n = -vA2 - 2.0*vB2 + 4.0*vA_dot_vB
@@ -734,7 +734,7 @@ double pn1_energy(const double* pos, const double* vel, const double* mass,
 }
 
 // ============================================================================
-// Spin-dependent PN dynamics of a binary (BIFROST sec. 3.7; Thorne & Hartle 1985; explicit forms of
+// Spin-dependent PN dynamics of a binary (Rantala et al. 2023, sec. 3.7; Thorne & Hartle 1985; explicit forms of
 // Kidder 1995, PRD 52, 821, eqs. 2.2c-d, 2.4, 2.9, covariant spin supplementary condition) plus the
 // spin-induced quadrupole of a Kerr black hole (Poisson 1998, PRD 57, 5287; Racine 2008, PRD 78, 044021).
 // Relative coordinates x = x1 - x2, v = v1 - v2, n = x / r; S_i are physical spins (|S| = chi G m^2 / c).

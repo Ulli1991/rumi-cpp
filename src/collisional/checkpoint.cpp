@@ -217,7 +217,7 @@ void Checkpoint::restore(Particles& p, SubsystemManager& mgr,
 }
 
 // ============================================================================
-// Compute total energy E = KE + PE + sinks (BIFROST §3.18 bookkeeping)
+// Compute total energy E = KE + PE + sinks (Rantala et al. 2023, §3.18 bookkeeping)
 // ============================================================================
 
 double compute_total_energy(const Particles& p, const EnergyBookkeeping& books,
@@ -252,7 +252,7 @@ double compute_particle_energy(const Particles& p, double G, double soft2, doubl
 }
 
 // ============================================================================
-// Compute energy error for adaptive restart check (BIFROST §3.19)
+// Compute energy error for adaptive restart check (Rantala et al. 2023, §3.19)
 // Returns |E_now - E_ref| / |E_norm|
 // ============================================================================
 

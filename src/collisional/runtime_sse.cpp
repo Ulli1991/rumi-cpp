@@ -18,7 +18,7 @@
 
 // ============================================================================
 // Natal kicks of new neutron stars and black holes: the "standard, fallback-controlled" kick of Banerjee et al. 2020
-// (A&A 639, A41, arXiv 1902.07718, sec. 3.1, eq. 1; the updated SSE/BSE that BIFROST sec. 3.13 cites):
+// (A&A 639, A41, arXiv 1902.07718, sec. 3.1, eq. 1; the updated SSE/BSE that Rantala et al. (2023, sec. 3.13) cite):
 //   v_kick = v_NS (1 - f_fb),  v_NS from a Maxwellian of 1D dispersion sigma_NS = 265 km/s (Hobbs et al. 2005),
 // isotropic. f_fb is the fallback fraction of the remnant prescription (SSEResult::fbfac): Fryer et al. 2012
 // rapid/delayed, Belczynski et al. 2002/2008 (f_fb = (M_CO - 5)/2.6 between M_CO = 5 and 7.6 Msun, 1 above; the

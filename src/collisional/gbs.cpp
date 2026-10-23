@@ -211,7 +211,7 @@ int GBSIntegrator::integrate_to_time(LogHState& state, double t_target, double G
 
     // Scale ds so each GBS step covers at most ~1/dyn_cap dynamical times (default 3; was 10, which cost 4x the
     // GBS steps at unchanged accuracy on the binary, PN, merger and dense-core tests; NBODY_GBS_DYNCAP overrides).
-    // BIFROST convention: dt = ds / Omega, so ds = dt * Omega.
+    // Convention of Rantala et al. (2023): dt = ds / Omega, so ds = dt * Omega.
     // This ensures stage 0 (2 substeps) produces a qualitatively correct
     // solution, which is required for GBS polynomial extrapolation.
     static const double dyn_cap = std::getenv("NBODY_GBS_DYNCAP") ? std::atof(std::getenv("NBODY_GBS_DYNCAP")) : 3.0;
@@ -316,12 +316,12 @@ int GBSIntegrator::integrate_to_time(LogHState& state, double t_target, double G
         double t_dyn_now = std::sqrt(r_min_now * r_min_now * r_min_now / (G * M_total));
         if (state.n_sd > 0) t_dyn_now = logh_sd_dyn_time(state, G, M_total);
 
-        // Estimate ds from dt_remain * Omega (BIFROST: ds = dt * Omega)
+        // Estimate ds from dt_remain * Omega (ds = dt * Omega)
         double Omega = logh_omega(state);
         if (Omega < 1e-30) Omega = 1e-30;
         double ds_est = dt_remain * Omega;
 
-        // Also cap ds by dynamical time (BIFROST: ds = dt * Omega)
+        // Also cap ds by dynamical time (ds = dt * Omega)
         double ds_dyn_now = t_dyn_now * Omega / dyn_cap;
 
         // Use the smallest of current ds, time-based estimate, and dynamical limit

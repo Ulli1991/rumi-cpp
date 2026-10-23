@@ -1,5 +1,5 @@
 """Writes <dir>/logh_ctrl.cpp: src/collisional/logh.cpp with the Newtonian kick of logh_leapfrog_steps replaced by
-BIFROST's dv/ds = a / Ubar, Ubar = -U(q) (Rantala et al. 2023 Eq. 3; Mikkola & Tanikawa 1999): the reference (control)
+The dv/ds = a / Ubar, Ubar = -U(q) (Rantala et al. 2023 Eq. 3; Mikkola & Tanikawa 1999): the reference (control)
 for tests/enzyme/symplectic (compile with -DCTRL -I<dir> -Isrc/collisional). Usage: python3.11 make_ctrl.py <dir>"""
 import os, sys
 root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..")

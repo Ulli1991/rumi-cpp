@@ -32,7 +32,7 @@ const std::vector<ParamSpec> kParams = {
     {"PLUMMER_N", I, "1000", "Star cluster", USER, "", "Number of stars"},
     {"PLUMMER_M_TOTAL", D, "3.79e2", "Star cluster", USER, "", "Total mass (Msun); not used by kroupa_evolved"},
     {"PLUMMER_R_HALF", S, "mass_size", "Star cluster", USER, "mass_size|<number>",
-     "Half-mass radius (pc), or mass_size: the SCIC mass-size relation (BIFROST App. A eq. A2-A3)"},
+     "Half-mass radius (pc), or mass_size: the SCIC mass-size relation (Rantala et al. 2023, App. A eq. A2-A3)"},
     {"PLUMMER_MASS_DIST", S, "equal", "Star cluster", USER, "equal|kroupa|kroupa_evolved",
      "Masses: equal, Kroupa IMF (ZAMS), or Kroupa IMF evolved with SSE to PLUMMER_AGE_GYR"},
     {"PLUMMER_AGE_GYR", D, "1.0", "Star cluster", USER, "", "Age of the population for kroupa_evolved (Gyr)"},
@@ -48,9 +48,9 @@ const std::vector<ParamSpec> kParams = {
     {"BINARY_A_MIN_AU", D, "0.01", "Primordial binaries", USER, "", "Smallest semi-major axis (AU), log-uniform in a"},
     {"BINARY_A_MAX_AU", D, "100.0", "Primordial binaries", USER, "", "Largest semi-major axis (AU)"},
     {"R_BREAK_AU", D, "0.0", "Primordial binaries", USER, "",
-     "Remove artificial binaries with a < r_break (AU) from the ICs (BIFROST App. A); 0: IC_R_BREAK"},
+     "Remove artificial binaries with a < r_break (AU) from the ICs (Rantala et al. 2023, App. A); 0: IC_R_BREAK"},
     {"IC_R_BREAK", D, "0.0", "Primordial binaries", EXPERT, "",
-     "r_break in units of BINARY_A_MAX_AU (BIFROST Table A1: a few); used only when R_BREAK_AU = 0"},
+     "r_break in units of BINARY_A_MAX_AU (Rantala et al. 2023, Table A1: a few); used only when R_BREAK_AU = 0"},
     {"BINARY_PERI_CHECK", B, "true", "Primordial binaries", EXPERT, "",
      "Redraw e (or a) until r_p = a (1 - e) > R1 + R2 (TDE radius / ISCO with BHs), FROST-CLUSTERS II sec. 2.3"},
 
@@ -64,7 +64,7 @@ const std::vector<ParamSpec> kParams = {
 
     // ---- Physics ----
     {"COLLISIONAL", B, "false", "Physics", USER, "",
-     "Unsoftened direct N-body with subsystems, PN and mergers (BIFROST); false: softened N-body"},
+     "Unsoftened direct N-body with subsystems, PN and mergers; false: softened N-body"},
     {"PN_ORDER", I, "7", "Physics", USER, "",
      "PN bitmask: 1 PN1, 2 PN2, 4 PN2.5, 8 PN3, 16 PN3.5, 32 BH spin couplings (63 all; 0 off)"},
     {"M_PN", D, "5.0", "Physics", EXPERT, "", "PN terms only for pairs with a member of at least this mass (Msun)"},
@@ -112,13 +112,13 @@ const std::vector<ParamSpec> kParams = {
     {"GALAXY_MASS_MSUN", D, "0.0", "Escapers and tidal field", USER, "", "pointmass galaxy mass (Msun)"},
 
     // ---- Time steps ----
-    {"ETA_FF", D, "0.2", "Time steps", EXPERT, "", "Free-fall time-step eta (BIFROST sec. 3.4)"},
+    {"ETA_FF", D, "0.2", "Time steps", EXPERT, "", "Free-fall time-step eta (Rantala et al. 2023, sec. 3.4)"},
     {"ETA_FB", D, "0.2", "Time steps", EXPERT, "", "Fly-by time-step eta"},
-    {"ETA_GRAD", D, "0.2", "Time steps", EXPERT, "", "Gradient time-step eta (FROST-CLUSTERS; BIFROST 0.1)"},
-    {"ETA_JERK", D, "0", "Time steps", EXPERT, "", "Jerk time-step eta (0: off, FROST-CLUSTERS; BIFROST 0.1)"},
+    {"ETA_GRAD", D, "0.2", "Time steps", EXPERT, "", "Gradient time-step eta (FROST-CLUSTERS; Rantala et al. 2023: 0.1)"},
+    {"ETA_JERK", D, "0", "Time steps", EXPERT, "", "Jerk time-step eta (0: off, FROST-CLUSTERS; Rantala et al. 2023: 0.1)"},
     {"ETA", D, "0", "Time steps", EXPERT, "",
-     "Velocity / acceleration time-step eta (0: off, FROST-CLUSTERS; BIFROST 0.2)"},
-    {"ETA_PERT", D, "0.02", "Time steps", EXPERT, "", "Perturbation time-step eta of subsystems (BIFROST Eq. 30)"},
+     "Velocity / acceleration time-step eta (0: off, FROST-CLUSTERS; Rantala et al. 2023: 0.2)"},
+    {"ETA_PERT", D, "0.02", "Time steps", EXPERT, "", "Perturbation time-step eta of subsystems (Rantala et al. 2023, Eq. 30)"},
     {"ETA_GBS", D, "1e-10", "Time steps", EXPERT, "", "GBS extrapolation tolerance of the LogH integrator"},
     {"ETA_RESTART", D, "1e-8", "Time steps", EXPERT, "",
      "Energy-error threshold of the per-subsystem LogH restart and the step-level restart (0: off)"},
@@ -162,7 +162,7 @@ const std::vector<ParamSpec> kParams = {
     {"E_REF", D, "0.0", "Subsystems", TEST, "",
      "|E0| of FLYBY_CM_EPS (Msun (km/s)^2) instead of the run's (0): a cut-out of a cluster as in the cluster"},
     {"NGB_WIDE_FAC", D, "0", "Subsystems", EXPERIMENT, "",
-     "Bound pairs with a < NGB_WIDE_FAC x R_NGB are neighbours (wide binaries; 0: off, BIFROST)"},
+     "Bound pairs with a < NGB_WIDE_FAC x R_NGB are neighbours (wide binaries; 0: off)"},
     {"MSTAR_THRESHOLD", I, "8", "Subsystems", EXPERIMENT, "",
      "Subsystems of at least this many bodies for MSTAR (not wired: printed only, every subsystem uses LogH)"},
 

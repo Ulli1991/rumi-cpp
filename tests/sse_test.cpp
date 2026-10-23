@@ -1,6 +1,6 @@
-// IC stellar evolution of very massive stars (src/ic_gen/sse.cpp), BIFROST Fig. 9 settings (Vink winds, Fryer 2012
+// IC stellar evolution of very massive stars (src/ic_gen/sse.cpp), settings of Rantala et al. (2023), Fig. 9 (Vink winds, Fryer 2012
 // rapid, strong PPISN, Z = 2e-4, 1 Gyr):
-//  - 100 Msun: BH of 41.6 Msun (BIFROST Fig. 9: most massive BH 41.6 Msun)
+//  - 100 Msun: BH of 41.6 Msun (Rantala et al. 2023, Fig. 9: most massive BH 41.6 Msun)
 //  - 101-130 Msun: BHs, at most the 45 Msun of strong pulsational pair instability (Belczynski et al. 2016; Banerjee
 //    et al. 2020). Hurley's clamp at 100 Msun left them in core helium burning (kw 4, 103-123 Msun, R = 1350 Rsun)
 //  - 150 Msun: pair-instability supernova, no remnant (kw 15)

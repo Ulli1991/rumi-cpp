@@ -4,7 +4,7 @@
 
 # ---- Run ----
 TEST_CASE = plummer                     # plummer, or a test: outer_planets / binary_test / binary_test_peri / triple_test
-TOTAL_TIME_MYR = 5.0                    # End time (Myr); BIFROST Fig. 9
+TOTAL_TIME_MYR = 5.0                    # End time (Myr); Rantala et al. 2023, Fig. 9
 DT_MAX_MYR = 1.0e-3                     # Integration interval (Myr): the level-0 step
 
 # ---- Star cluster (TEST_CASE = plummer) ----
@@ -13,7 +13,7 @@ PLUMMER_M_TOTAL = 8.1e4                 # Total mass (Msun); not used by kroupa_
 PLUMMER_R_HALF = 3.1                    # Half-mass radius (pc), or mass_size (SCIC mass-size relation)
 PLUMMER_MASS_DIST = kroupa_evolved      # equal / kroupa / kroupa_evolved (Kroupa IMF evolved with SSE)
 PLUMMER_AGE_GYR = 1.0                   # Age for kroupa_evolved (Gyr)
-PLUMMER_METALLICITY = 0.0002            # Z for kroupa_evolved (0.01 Z_sun, BIFROST Fig. 9)
+PLUMMER_METALLICITY = 0.0002            # Z for kroupa_evolved (0.01 Z_sun, Rantala et al. 2023, Fig. 9)
 PLUMMER_SEED = 42                       # Random seed of the initial conditions
 REMOVE_BH = false                       # Strip the black holes from the initial conditions
 
@@ -33,7 +33,7 @@ IMBH_E = 0.5                            # Eccentricity
 IMBH_SPIN = 0.0                         # Dimensionless spin of both BHs
 
 # ---- Physics ----
-COLLISIONAL = true                      # Unsoftened N-body with subsystems, PN and mergers (BIFROST)
+COLLISIONAL = true                      # Unsoftened N-body with subsystems, PN and mergers
 PN_ORDER = 31                           # Bitmask: 1 PN1, 2 PN2, 4 PN2.5, 8 PN3, 16 PN3.5, 32 BH spins (63: all)
 
 # ---- Stellar evolution ----

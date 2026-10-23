@@ -138,7 +138,7 @@ double secular_pn_et2(double eps, double j, double nu, int pn_order) {
 // kicks were simultaneous: the copy stayed equal to the state and the scheme was forward Euler (first order).
 int secular_evolve_pn(SecularPnState& s, double dt, double nu, double Gm, double c, int pn_order) {
     // Secular timestep criterion: eta_sec * min(eps / |eps'|, e_t^2 / |(e_t^2)'|) from the current state, re-evaluated
-    // every sub-step (t_GW ~ a^4 shrinks within one interval of an inspiral). BIFROST Eq. 30 also has omega/omega-dot,
+    // every sub-step (t_GW ~ a^4 shrinks within one interval of an inspiral). Eq. 30 of Rantala et al. (2023) also has omega/omega-dot,
     // but omega is an angle (near omega = 0 every call ran the step cap), and the drift of omega is the midpoint rule
     // of omega-dot(eps, j): exact while eps, j are constant (the A/B of 4ebc740).
     const double eta_sec = 0.01;
@@ -425,7 +425,7 @@ void secular_to_cartesian(const SecularBinary& bin, double G,
 // elements or angles are formed, so it holds at every e. The elements route it replaced (r, v -> a, e, omega, M ->
 // r, v) lost the phase at small e: one drift vs sixteen disagreed by 4e-8 at e = 1e-4, 1.6e-4 at e = 1e-6 and by
 // order 1 at e <= 1e-8 (the pericentre direction and the true anomaly are separately undefined there), and it froze
-// unbound pairs. Without PN this is the analytic Kepler solution, to which BIFROST's secular integrator reduces
+// unbound pairs. Without PN this is the analytic Kepler solution, to which the secular integrator of Rantala et al. (2023) reduces
 // (Rantala et al. 2023, sec. 3.10).
 // ============================================================================
 

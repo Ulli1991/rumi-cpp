@@ -405,7 +405,7 @@ void compute_timestep_subset(Particles& p, int start, int count, double G, doubl
 }
 
 // ==========================================================================
-// Standalone neighbor search (BIFROST Section 3.5)
+// Standalone neighbor search (Rantala et al. 2023, Section 3.5)
 // Lightweight N² tiled kernel that detects neighbor pairs without computing
 // forces or timesteps. Called once per HHS level BEFORE subsystem detection
 // and timestep computation.

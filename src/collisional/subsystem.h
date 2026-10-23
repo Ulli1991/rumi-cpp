@@ -175,7 +175,7 @@ struct SubsystemManager {
 
     // Perturbation timestep: clamp dt_adapt of subsystem members so the FSI
     // timestep resolves changes in orbital elements caused by external tidal
-    // perturbations (BIFROST Section 3.4.3).
+    // perturbations (Rantala et al. 2023, Section 3.4.3).
     // dt_pert = eta_pert * |v_rel| / |delta_a_tidal|
     // where delta_a_tidal = (a_j - a_i) + G*(m1+m2)/r^3 * r_rel
     // Call after enforce_shared_timestep, before partition_by_pivot.
@@ -242,7 +242,7 @@ struct SubsystemManager {
     // Clear all subsystems
     void clear();
 
-    // Mardling & Aarseth (2001) stability criterion for hierarchical triples (BIFROST Sec. 3.11); i_mut is the
+    // Mardling & Aarseth (2001) stability criterion for hierarchical triples (Rantala et al. 2023, Sec. 3.11); i_mut is the
     // mutual inclination of the inner and outer orbits in radians. Returns true if the triple is stable
     static bool mardling_stability(double a_in, double a_out, double e_out,
                                    double m1, double m2, double m3, double i_mut);

@@ -26,7 +26,7 @@ Levels:
 |---|---|---|---|---|---|
 | `PLUMMER_N` | int | `1000` | user |  | Number of stars |
 | `PLUMMER_M_TOTAL` | double | `3.79e2` | user |  | Total mass (Msun); not used by kroupa_evolved |
-| `PLUMMER_R_HALF` | string | `mass_size` | user | mass_size\|a number | Half-mass radius (pc), or mass_size: the SCIC mass-size relation (BIFROST App. A eq. A2-A3) |
+| `PLUMMER_R_HALF` | string | `mass_size` | user | mass_size\|a number | Half-mass radius (pc), or mass_size: the SCIC mass-size relation (Rantala et al. 2023, App. A eq. A2-A3) |
 | `PLUMMER_MASS_DIST` | string | `equal` | user | equal\|kroupa\|kroupa_evolved | Masses: equal, Kroupa IMF (ZAMS), or Kroupa IMF evolved with SSE to PLUMMER_AGE_GYR |
 | `PLUMMER_AGE_GYR` | double | `1.0` | user |  | Age of the population for kroupa_evolved (Gyr) |
 | `PLUMMER_METALLICITY` | double | `0.02` | user |  | Metallicity Z of the population for kroupa_evolved |
@@ -41,8 +41,8 @@ Levels:
 | `BINARY_POP` | string | `flatq_massive` | user | flatq_massive\|mass_rank\|bifrost | Pairing: flatq_massive (Rantala et al. 2023, App. A: flat q in [0.1, 1) above 5 Msun, random pairs below); mass_rank: heaviest with next heaviest; bifrost: deprecated alias of flatq_massive |
 | `BINARY_A_MIN_AU` | double | `0.01` | user |  | Smallest semi-major axis (AU), log-uniform in a |
 | `BINARY_A_MAX_AU` | double | `100.0` | user |  | Largest semi-major axis (AU) |
-| `R_BREAK_AU` | double | `0.0` | user |  | Remove artificial binaries with a < r_break (AU) from the ICs (BIFROST App. A); 0: IC_R_BREAK |
-| `IC_R_BREAK` | double | `0.0` | expert |  | r_break in units of BINARY_A_MAX_AU (BIFROST Table A1: a few); used only when R_BREAK_AU = 0 |
+| `R_BREAK_AU` | double | `0.0` | user |  | Remove artificial binaries with a < r_break (AU) from the ICs (Rantala et al. 2023, App. A); 0: IC_R_BREAK |
+| `IC_R_BREAK` | double | `0.0` | expert |  | r_break in units of BINARY_A_MAX_AU (Rantala et al. 2023, Table A1: a few); used only when R_BREAK_AU = 0 |
 | `BINARY_PERI_CHECK` | bool | `true` | expert |  | Redraw e (or a) until r_p = a (1 - e) > R1 + R2 (TDE radius / ISCO with BHs), FROST-CLUSTERS II sec. 2.3 |
 
 ## IMBH binary
@@ -60,7 +60,7 @@ Levels:
 
 | key | type | default | level | values | description |
 |---|---|---|---|---|---|
-| `COLLISIONAL` | bool | `false` | user |  | Unsoftened direct N-body with subsystems, PN and mergers (BIFROST); false: softened N-body |
+| `COLLISIONAL` | bool | `false` | user |  | Unsoftened direct N-body with subsystems, PN and mergers; false: softened N-body |
 | `PN_ORDER` | int | `7` | user |  | PN bitmask: 1 PN1, 2 PN2, 4 PN2.5, 8 PN3, 16 PN3.5, 32 BH spin couplings (63 all; 0 off) |
 | `M_PN` | double | `5.0` | expert |  | PN terms only for pairs with a member of at least this mass (Msun) |
 | `PN_BH_ONLY` | bool | `true` | expert |  | PN terms only for black holes (stellar type 14) of at least M_PN (false: every body of at least M_PN, 3-5x slower young clusters) |
@@ -105,12 +105,12 @@ Levels:
 
 | key | type | default | level | values | description |
 |---|---|---|---|---|---|
-| `ETA_FF` | double | `0.2` | expert |  | Free-fall time-step eta (BIFROST sec. 3.4) |
+| `ETA_FF` | double | `0.2` | expert |  | Free-fall time-step eta (Rantala et al. 2023, sec. 3.4) |
 | `ETA_FB` | double | `0.2` | expert |  | Fly-by time-step eta |
-| `ETA_GRAD` | double | `0.2` | expert |  | Gradient time-step eta (FROST-CLUSTERS; BIFROST 0.1) |
-| `ETA_JERK` | double | `0` | expert |  | Jerk time-step eta (0: off, FROST-CLUSTERS; BIFROST 0.1) |
-| `ETA` | double | `0` | expert |  | Velocity / acceleration time-step eta (0: off, FROST-CLUSTERS; BIFROST 0.2) |
-| `ETA_PERT` | double | `0.02` | expert |  | Perturbation time-step eta of subsystems (BIFROST Eq. 30) |
+| `ETA_GRAD` | double | `0.2` | expert |  | Gradient time-step eta (FROST-CLUSTERS; Rantala et al. 2023: 0.1) |
+| `ETA_JERK` | double | `0` | expert |  | Jerk time-step eta (0: off, FROST-CLUSTERS; Rantala et al. 2023: 0.1) |
+| `ETA` | double | `0` | expert |  | Velocity / acceleration time-step eta (0: off, FROST-CLUSTERS; Rantala et al. 2023: 0.2) |
+| `ETA_PERT` | double | `0.02` | expert |  | Perturbation time-step eta of subsystems (Rantala et al. 2023, Eq. 30) |
 | `ETA_GBS` | double | `1e-10` | expert |  | GBS extrapolation tolerance of the LogH integrator |
 | `ETA_RESTART` | double | `1e-8` | expert |  | Energy-error threshold of the per-subsystem LogH restart and the step-level restart (0: off) |
 | `N_ORB_SECULAR` | int | `3` | expert |  | Binaries with more orbits than this per step take the secular (orbit-averaged) path |
@@ -138,7 +138,7 @@ Levels:
 | `NGB_MASS_GAMMA` | double | `1e-3` | internal |  | Tidal ratio above which a mass-scaled neighbour joins a binary |
 | `NGB_MREF` | double | `0.0` | test |  | <m> of NGB_MASS_SCALING (Msun) instead of the cluster's (0) |
 | `E_REF` | double | `0.0` | test |  | \|E0\| of FLYBY_CM_EPS (Msun (km/s)^2) instead of the run's (0): a cut-out of a cluster as in the cluster |
-| `NGB_WIDE_FAC` | double | `0` | **experiment** |  | Bound pairs with a < NGB_WIDE_FAC x R_NGB are neighbours (wide binaries; 0: off, BIFROST) |
+| `NGB_WIDE_FAC` | double | `0` | **experiment** |  | Bound pairs with a < NGB_WIDE_FAC x R_NGB are neighbours (wide binaries; 0: off) |
 | `MSTAR_THRESHOLD` | int | `8` | **experiment** |  | Subsystems of at least this many bodies for MSTAR (not wired: printed only, every subsystem uses LogH) |
 
 ## Output

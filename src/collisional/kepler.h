@@ -28,7 +28,7 @@ void elements_to_cartesian(double a, double e, double inc, double Omega,
                            double r[3], double v[3]);
 
 // Solve Kepler's equation M = E - e*sin(E) for eccentric anomaly E
-// Uses Mikkola (1987) cubic start with BIFROST empirical correction
+// Uses Mikkola (1987) cubic start with the empirical correction of Rantala et al. (2023)
 // + Newton-Raphson refinement + bisection fallback for guaranteed convergence
 double solve_kepler(double M, double e, double tol = 1e-14);
 

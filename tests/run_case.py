@@ -36,7 +36,7 @@ MERGERS = dict(TEST_CASE="plummer", INTEGRATOR="hhs", TOTAL_TIME_MYR="2e-8", DT_
                PLUMMER_MASS_DIST="kroupa", BINARY_FRAC="0.5", BINARY_A_MIN_AU="0.005", BINARY_A_MAX_AU="0.02",
                BINARY_POP="mass_rank", BINARY_PERI_CHECK="false", PRINT_INTERVAL="1", PROFILING="false")
 # 1e5 Msun BH binary, a = 2e-3 pc > r_ngb (no subsystem), e = 0.5, ~10 orbits with PN1: only the global PN1
-# kick (BIFROST sec. 3.8) can precess it, 6.0e-5 rad/orbit
+# kick (Rantala et al. 2023, sec. 3.8) can precess it, 6.0e-5 rad/orbit
 PN1_WIDE = dict(TEST_CASE="binary_test", INTEGRATOR="hhs", BINARY_A_PC="2e-3", BINARY_E="0.5", BINARY_M1="5e4",
                 BINARY_M2="5e4", TOTAL_TIME_MYR="2.7e-4", DT_MAX_MYR="1.35e-6", DT_MIN_MYR="1e-16", SOFTENING_PC="0",
                 COLLISIONAL="true", R_NGB="1e-3", R_NGB_MAX="1e-3", PN_ORDER="1", M_PN="5.0", SSE_ENABLED="false",
@@ -75,7 +75,7 @@ PN_LOGH = dict(TEST_CASE="binary_test", INTEGRATOR="hhs", BINARY_A_PC="1e-7", BI
                BINARY_M2="500", TOTAL_TIME_MYR="2e-9", DT_MAX_MYR="2e-10", DT_MIN_MYR="1e-18", SOFTENING_PC="0",
                COLLISIONAL="true", PN_ORDER="31", M_PN="5.0", ETA_RESTART="1e-8", SSE_ENABLED="false",
                PRINT_INTERVAL="1", PROFILING="false")
-# Spinning BH binary in LogH (BIFROST sec. 3.7; PN_ORDER bit 32 = spin couplings), v/c ~ 0.02, ~21 orbits.
+# Spinning BH binary in LogH (Rantala et al. 2023, sec. 3.7; PN_ORDER bit 32 = spin couplings), v/c ~ 0.02, ~21 orbits.
 # Precession: e = 0, PN1 + spins, small chi1 perpendicular to L (simple precession about J), chi2 = 0.
 SPIN_PREC = dict(PN_LOGH, BINARY_E="0.0", PN_ORDER="33", BINARY_CHI1="0.1 0 0", BINARY_CHI2="0 0 0")
 # Total J = L_N + L_SO + S1 + S2: e = 0.5, two large misaligned spins, spin couplings only (no orbital PN
@@ -87,7 +87,7 @@ SPIN_J_PN1 = dict(SPIN_J, PN_ORDER="33")
 BINARIES50 = dict(BINARIES, PLUMMER_N="5000", PLUMMER_M_TOTAL="2000", BINARY_FRAC="0.5", TOTAL_TIME_MYR="1e-3")
 # Dense core (r_h = 0.05 pc), 50 % binaries of 1-20 AU: binary-single encounters form triples and multiplets.
 # Kept on the old mass-rank pairing: its max |dE/E| sits at the restart threshold and scatters by 10x over seeds
-# for either population (seeds 5-8, mass_rank 1.3e-8 - 1.8e-7, bifrost 2.7e-8 - 1.7e-7), so a population change
+# for either population (seeds 5-8, mass_rank 1.3e-8 - 1.8e-7, flatq_massive 2.7e-8 - 1.7e-7), so a population change
 # would only re-roll that scatter.
 TRIPLES = dict(BINARIES, PLUMMER_N="2000", PLUMMER_M_TOTAL="800", PLUMMER_R_HALF="0.05", BINARY_FRAC="0.5",
                BINARY_A_MIN_AU="1", BINARY_A_MAX_AU="20", TOTAL_TIME_MYR="2e-4", DT_MAX_MYR="1e-4",
@@ -186,7 +186,7 @@ COLL_TDE = dict(COLL_HEADON, TRIPLE_A_IN_PC="1e-7", TRIPLE_E_IN="1.0", TRIPLE_M1
                 TRIPLE_A_OUT_PC="1e-4", TRIPLE_E_OUT="0.0", TRIPLE_M3="4.0", TOTAL_TIME_MYR="4e-9", DT_MAX_MYR="1e-9",
                 DT_MIN_MYR="1e-18", M_PN="5.0")
 # BH binary reaching the merger distance: 10+10 Msun, circular, full PN (PN_ORDER 31), at a = 1.5 r_m, r_m = 10 R_S =
-# 20 G M / c^2 = 1.915e-11 pc (BIFROST sec. 3.14.1's conservative option; inside, 3.5PN turns radiation reaction into an
+# 20 G M / c^2 = 1.915e-11 pc (the conservative option of Rantala et al. 2023, sec. 3.14.1; inside, 3.5PN turns radiation reaction into an
 # energy gain at x ~ 0.11-0.14, docs/CASES.md C8); a 1 Msun star at 100 a makes it a 3-body subsystem. Merges within
 # 3e-12 Myr at r_sep / r_coll = 0.97 (measured).
 COLL_ISCO = dict(COLL_HEADON, TRIPLE_A_IN_PC="2.87e-11", TRIPLE_E_IN="0.0", TRIPLE_M1="10.0", TRIPLE_M2="10.0",
@@ -956,7 +956,7 @@ def triple_order(exe, label, cfg, rel):
 
 
 def triple_stability(exe, label, cfg, cases):
-    """Mardling & Aarseth (2001) as in BIFROST Sec. 3.11: R_p = a_out (1 - e_out) against
+    """Mardling & Aarseth (2001) as in Rantala et al. 2023, Sec. 3.11: R_p = a_out (1 - e_out) against
     2.8 [(1 + q_out)(1 + e_out) / sqrt(1 - e_out)]^(2/5) (1 - 0.3 i / pi) a_in. Each case (a_out / a_in, mutual
     inclination in degrees, stable?) must be classified so at detection (first step's type counts)."""
     ok = True
@@ -1118,7 +1118,7 @@ def ic_r_half(out):
 
 
 def ic_mass_size(exe, label, cfg, bound):
-    """BIFROST App. A (SCIC) eq. A2: without a user-given r_h, r_h / pc = 2.55 (M / 1e4 M_sun)^0.24 (Brown & Gnedin
+    """Rantala et al. 2023, App. A (SCIC) eq. A2: without a user-given r_h, r_h / pc = 2.55 (M / 1e4 M_sun)^0.24 (Brown & Gnedin
     2021); the same with PLUMMER_R_HALF absent and = mass_size, and the sampled cluster must have it."""
     m_tot = float(cfg["PLUMMER_M_TOTAL"])
     want = 2.55 * (m_tot / 1e4) ** 0.24
@@ -1132,7 +1132,7 @@ def ic_mass_size(exe, label, cfg, bound):
 
 
 def ic_com_virial(exe, label, cfg, bound):
-    """Binary centres of mass are sampled from the Plummer f(E) as single objects (BIFROST App. A, mcluster): the
+    """Binary centres of mass are sampled from the Plummer f(E) as single objects (Rantala et al. 2023, App. A, mcluster): the
     virial ratio of singles and centres of mass must be 1/2 within sampling noise (the deleted BINARY_COM_V = average,
     the mass-weighted mean of the two members' independent draws, gave 0.336: kinematically cold)."""
     q = ic_check(run_output(exe, cfg))[2]
@@ -1141,7 +1141,7 @@ def ic_com_virial(exe, label, cfg, bound):
 
 
 def ic_r_break(exe, label, cfg, bound):
-    """SCIC artificial-binary avoidance (BIFROST App. A): no two objects (singles, binary centres of mass) closer
+    """SCIC artificial-binary avoidance (Rantala et al. 2023, App. A): no two objects (singles, binary centres of mass) closer
     than r_break or bound with a < r_break after the re-sampling; angular re-sampling keeps the radial profile."""
     out = run_output(exe, cfg)
     m = re.search(r"IC_R_BREAK: r_break=(\S+) pc, close pairs before=(\d+) after=(\d+)", out)
@@ -1307,7 +1307,7 @@ def kepler_ae(p, q):
 
 
 def quad22_sdar(exe, label, cfg, bound):
-    """PLAN item 4c: the 2+2 quadruple of the BIFROST Fig. 11 stall (PN BH binary + a 0.019 AU stellar binary bound to
+    """PLAN item 4c: the 2+2 quadruple of the stall in our run of the Rantala et al. (2023) Fig. 11 setup (PN BH binary + a 0.019 AU stellar binary bound to
     it). With SDAR per pair (NBODY_SDAR_PN=1) the stellar binary is slowed although the subsystem has PN members: the
     step finishes within the test timeout (0.4 s on the login node; without it no step in 120 s), the slow-down is
     used (kappa_max > 1) and the energy stays within `bound`. Step-limit retries of the eccentric BH binary are allowed
@@ -2092,11 +2092,11 @@ CASES = {
     # partner (stale from the last force evaluation), so members got orbital time-steps down to level 29
     # and step 1 never finished (> 120 s; the 10 % binary production runs hung the same way). Measured
     # 2 s, 3.2e-10 / 6.0e-15 km/s (2 stellar collisions; their orbital L is not carried, so no L check).
-    # With the BIFROST population and the pericentre check (defaults since AUDIT F6): 6.6e-10, L 2.4e-14.
+    # With the flatq_massive population and the pericentre check (defaults since AUDIT F6): 6.6e-10, L 2.4e-14.
     "binaries_timestep": lambda exe: binaries(exe, "binaries", BINARIES, (1e-8, 1e-12)),
     # Before: 40 LogH give-ups (E_N + E_1PN cannot hold eta_restart under PN), |dE/E| 4.8e-5, |dL/L| 2.3e-5
     # unbooked. Measured 0 / 0 / 2.6e-13 km/s (the whole system is the PN subsystem, so all of it is booked).
-    # Spins in LogH (BIFROST sec. 3.7). Before: the spins were not in the GBS state vector, so they never
+    # Spins in LogH (Rantala et al. 2023, sec. 3.7). Before: the spins were not in the GBS state vector, so they never
     # changed (precession ratio 0, |dJ|/|J| 7.6e-6 with PN1), and the orbit had no spin-dependent terms.
     # Measured: precession ratio - 1 = 5.5e-3 (PN1 shifts the orbit; < 5e-7 with spin couplings only),
     # | |chi| - |chi0| | <= 3.0e-15 (Rodrigues rotations, norms restored after the extrapolation),
@@ -2114,14 +2114,14 @@ CASES = {
     "mergers_sse": lambda exe: sse_mass(exe, "mergers + SSE", dict(MERGERS, HOST_SUBTREE_MAX="0", SSE_ENABLED="true",
                                                                    TOTAL_TIME_MYR="5e-9"), 1e-6),
     # Before: the neighbour buffer (max(1000, N/10) pairs) truncated silently, 250 binaries stayed field
-    # particles at level ~30 and step 1 never finished. Measured: all 1250 detected, 1.1 s, 1.7e-13 (BIFROST
+    # particles at level ~30 and step 1 never finished. Measured: all 1250 detected, 1.1 s, 1.7e-13 (flatq_massive
     # population + pericentre check: 1.05e-10; HHS_CC 8.0e-11).
     "binaries50_detected": lambda exe: all_binaries(exe, "50 % binaries", BINARIES50, 1250),
     # HHS_CC (connected components): a pair made fast only by the v/a criterion must stay one component (before the
     # dominant-partner edges: precession off by 50 %), and binaries keep their strongest perturber (before: 10x dE)
     "cc_pn1_wide": lambda exe: precession(exe, "wide PN1 binary, HHS_CC", dict(PN1_WIDE, HHS_CC="true"), 0.1),
     "cc_binaries50": lambda exe: all_binaries(exe, "50 % binaries, HHS_CC", dict(BINARIES50, HHS_CC="true"), 1250),
-    # measured 5.0e-11 / 3.8e-11 = 1.3 (10 before binaries kept their perturbers); BIFROST population: 0.76
+    # measured 5.0e-11 / 3.8e-11 = 1.3 (10 before binaries kept their perturbers); flatq_massive population: 0.76
     # HHS_CC_MIN = 64: 542 -> 239 components, max|dE/E| 7.7e-11 vs plain 1.0e-10 (GPU 200k: 36.5 -> 10.9 s/step, plain 9.1)
     "cc_min_binaries50": lambda exe: cc_min_groups(exe, "50 % binaries", BINARIES50, 3.0),
     "cc_vs_plain_binaries50": lambda exe: cc_vs_plain(exe, "50 % binaries", BINARIES50, 3.0),
@@ -2264,13 +2264,13 @@ CASES = {
     # ETA_FF/FB = 10. Measured 2.8 before, 7.36e-7 after (v/a limited, ETA = 0.1)
     "va_without_grad": lambda exe: binaries(exe, "v/a with ETA_GRAD = 0", dict(VA_BINARY, ETA_GRAD="0", ETA="0.1"),
                                             (9.6e-7, 1e-12)),
-    # Restarts halve every eta (BIFROST sec. 3.19) but did not halve ETA (v/a): with v/a limiting, a retry repeated
+    # Restarts halve every eta (Rantala et al. 2023, sec. 3.19) but did not halve ETA (v/a): with v/a limiting, a retry repeated
     # the failed step, "dE not decreasing", and the step was accepted above ETA_RESTART. ETA_GRAD = 1000 keeps the
     # shared branch on without the gradient step limiting. Measured before 10 give-ups, 1.9e-5;
     # after 13 restarts, 0 give-ups, 2.87e-7
     "restart_halves_va": lambda exe: restarts(exe, "v/a restarts", dict(VA_BINARY, ETA_GRAD="1000", ETA="0.2",
                                                                        ETA_RESTART="1e-7"), 3.7e-7),
-    # SCIC initial conditions (BIFROST App. A). r_h from the mass-size relation when not given (before: 3.5 pc
+    # SCIC initial conditions (Rantala et al. 2023, App. A). r_h from the mass-size relation when not given (before: 3.5 pc
     # default, PLUMMER_R_HALF = mass_size not understood): 2000 stars, 1000 M_sun -> 1.463 pc. Measured r_h 1.86 %
     # off (seed 5; seeds 1-8 scatter -6 ... +3 %, rms 2.5 %, the median of 2000 draws)
     "ic_mass_size_rh": lambda exe: ic_mass_size(exe, "mass-size r_h", IC_EQUAL, 0.025),
@@ -2296,7 +2296,7 @@ CASES = {
                                                             dict(COLL_CONTACT, SDAR="false"), "STELLAR", 6.1e-11,
                                                             min_landings=1),
     # Fryer et al. 2012 rapid: fallback masses were used as fractions (BHs from 2.7 Msun, 3x too many). Measured
-    # after (200k evolved Kroupa, Z = 2e-4, 1 Gyr): 339 BHs 5.53-45 Msun (BIFROST Fig. 9: 357, 5.5-41.6); here 10k
+    # after (200k evolved Kroupa, Z = 2e-4, 1 Gyr): 339 BHs 5.53-45 Msun (Rantala et al. 2023, Fig. 9: 357, 5.5-41.6); here 10k
     "fryer_rapid_gap": lambda exe: remnant_masses(exe, "Fryer rapid", dict(BINARIES, PLUMMER_N="10000", PLUMMER_M_TOTAL="4000",
                                                   PLUMMER_MASS_DIST="kroupa_evolved", BINARY_FRAC="0",
                                                   SSE_METALLICITY="0.0002", SSE_REMNANT_MODEL="FRYER_RAPID",
@@ -2360,7 +2360,7 @@ CASES = {
         HIER_LOGH, TRIPLE_A_IN_PC="1e-4", TRIPLE_E_IN="1.5", TRIPLE_IN_START_Q="5", TRIPLE_M1="1", TRIPLE_M2="1",
         TRIPLE_A_OUT_PC="0.05", TRIPLE_E_OUT="0.3", TRIPLE_M3="1", TOTAL_TIME_MYR="2e-2", DT_MAX_MYR="1e-3",
         ETA_RESTART="0", DOMAIN_HALFSIZE_PC="1"), 1.3),
-    # 2+2 quadruple (quad22_test defaults = the BIFROST Fig. 11 stall, 200k, 50 % binaries): BH binary 20.7 + 14.1 Msun
+    # 2+2 quadruple (quad22_test defaults = the stall in our Rantala et al. (2023) Fig. 11 run, 200k, 50 % binaries): BH binary 20.7 + 14.1 Msun
     # (a = 58 AU) and a 0.79 + 0.105 Msun binary (a = 0.019 AU, ~1500 orbits per 1e-3 Myr, tidal ratio ~4e-12) bound to it
     # at ~0.003 pc, one PN subsystem. Without item 4c (SDAR off for whole PN subsystems): no step within 900 s on the
     # login node; with NBODY_SDAR_PN=1: 0.44 s, kappa_max 8.9e4, max|dE/E| 2.1e-16 (bound: round-off floor)

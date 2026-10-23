@@ -8,7 +8,7 @@
 
 // ============================================================================
 // Global PN1.0 kick for compact objects outside subsystems
-// (BIFROST Section 3.7) — now using EIH formulation directly
+// (Rantala et al. 2023, Section 3.7) — now using EIH formulation directly
 // ============================================================================
 
 void global_pn1_kick(Particles& p, int start, int count,

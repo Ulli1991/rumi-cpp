@@ -2,19 +2,19 @@
 // differences in double; tests/enzyme/symplectic/ has the same with exact Enzyme Jacobians and the parameter maps).
 //
 // 1. LogH leapfrog (logh_leapfrog_step) in the extended phase space z = (q, t; p, B), p = m v, p_t = B = -E.
-//    BIFROST (Rantala et al. 2023, Eqs. 2-3; Mikkola & Tanikawa 1999; Preto & Tremaine 1999): drift with
+//    Rantala et al. (2023, Eqs. 2-3; Mikkola & Tanikawa 1999; Preto & Tremaine 1999): drift with
 //    dt/ds = 1/(T + B), kicks with dv/ds = a / Ubar, Ubar = -U(q). Both sub-steps are exact flows of
 //    Gamma = ln(T + p_t) - ln(-U), so the leapfrog is symplectic in z: M^T J M = J. The code kicks with
 //    1/Omega, Omega = T(v_mid) + B (cubic): v' depends on v and B at fixed q, so the kick (and the step) is not
 //    symplectic in z; the exact flow of the code's equations keeps Omega dV, not dV (det = Omega(z) / Omega(z')).
 //    Measured (Enzyme, e = 0.5 binary, ds = 1e-2): defect 4.0e-2 (O(ds): 0.32 at ds = 0.1, 4e-3 at 1e-3), on the
-//    energy shell 1.9e-5 (O(ds^3)); the BIFROST kick 2.4e-16. The switch to the BIFROST kick was rejected by the
+//    energy shell 1.9e-5 (O(ds^3)); the Rantala et al. kick 2.4e-16. The switch to that kick was rejected by the
 //    200k cluster A/B (docs/CASES.md R2), so the code keeps 1/Omega: the defect is checked as a regression guard
 //    (it must stay at its measured O(ds) value, 1.3x bound), not against zero.
 // 2. Guards (pass now): time reversibility step(-ds) o step(ds) = id; the derivative commutes with translations and
 //    rotations (P, L); kepler_drift symplectic (the exact flow, Enzyme defect <= 4e-13 relative over e in
 //    [0, 10] and dt <= 1000 P).
-// Pass: LogH defect <= 1.3x measured (4.0e-2 n=2, 4.9e-2 n=3; the BIFROST kick gives < 1e-8), Kepler < 1e-7 (noise up to 5e-9 at e = 3),
+// Pass: LogH defect <= 1.3x measured (4.0e-2 n=2, 4.9e-2 n=3; the Rantala et al. kick gives < 1e-8), Kepler < 1e-7 (noise up to 5e-9 at e = 3),
 // reversibility < 1e-13, equivariance < 1e-10 (noise 6e-12). Measured with g++ 14 -O2, Raven login node.
 #include "logh.h"
 #include "kepler.h"
@@ -155,7 +155,7 @@ int main() {
         logh_map(zo, zb);
         double rev = 0.0;
         for (int j = 0; j < d; j++) rev = std::max(rev, std::fabs(zb[j] - z[j]) / std::max(1.0, std::fabs(z[j])));
-        std::printf("logh_leapfrog_step n=%d ds=1e-2: |M^T J M - J| = %.2e (BIFROST kick: 2e-16; code kick 1/Omega, CASES R2: 4e-2), "
+        std::printf("logh_leapfrog_step n=%d ds=1e-2: |M^T J M - J| = %.2e (Rantala et al. kick: 2e-16; code kick 1/Omega, CASES R2: 4e-2), "
                     "reversibility %.1e, translation %.1e, rotation %.1e\n", n, def, rev, tr, rot);
         // Regression guard for the 1/Omega kick kept after CASES R2: the O(ds) defect must not grow
         const double def_bound = 1.3 * (n == 2 ? 4.0e-2 : 4.9e-2);

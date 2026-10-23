@@ -9,7 +9,7 @@
 //   symrk_bench gauss <case> <s> <steps_per_orbit> <orbits> [log|poinc]
 //   symrk_bench gbs   <case> <orbits> [eta]
 //   symrk_bench lf    <case> <steps_per_orbit> <orbits>  plain LogH leapfrog, fixed ds, no GBS
-// NBODY_KICK_U=1 switches the production kick to BIFROST's 1/(-U) (gbs and lf modes; CASES R2 retest).
+// NBODY_KICK_U=1 switches the production kick to the 1/(-U) of Rantala et al. 2023 (gbs and lf modes; CASES R2 retest).
 // Cases: e09, e099 (equal-mass binary a = 1), kozai (tests/data/adv_kozai_triple.txt), quad (2+2), pn09 (1PN BH
 // binary e = 0.9, GM/(c^2 a) = 1e-3), harvest (ic.txt of harvest-2026-10-19/s404_s1025_1, path in argv[6] or env
 // SYMRK_HARVEST). One orbit = one period of the innermost (closest) pair.

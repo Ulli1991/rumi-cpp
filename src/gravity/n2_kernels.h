@@ -80,7 +80,7 @@ struct GradK {
     }
 };
 
-// GRAD_FRESH (fix 3): |g'_i| of the gradient time-step criteria (BIFROST sec. 3.4.4) as the GradK sum with
+// GRAD_FRESH (fix 3): |g'_i| of the gradient time-step criteria (Rantala et al. 2023, sec. 3.4.4) as the GradK sum with
 // coeff = G GRAD_COEFF from the current accelerations (snapshots = ax, ay, az; nothing corrected), stored in gmag
 // (inv_dt2 = 1). Evaluated with the time steps from the current state, as the tidal-tensor step of Grudic & Hopkins
 // 2020 (arXiv:1910.06349), instead of read from whichever gradient kick last wrote it
@@ -205,7 +205,7 @@ KOKKOS_INLINE_FUNCTION double ngb_radius(double r_ngb, double mi, double mj, dou
     return r_ngb * Kokkos::fmax(1.0, Kokkos::cbrt(Kokkos::fmax(mi, mj) * inv_mref));
 }
 
-// The neighbour criteria of NgbK (BIFROST sec. 3.5) for a pair with r2 < r_ngb_max^2 (dx = x_j - x_i, dv = v_j - v_i,
+// The neighbour criteria of NgbK (Rantala et al. 2023, sec. 3.5) for a pair with r2 < r_ngb_max^2 (dx = x_j - x_i, dv = v_j - v_i,
 // mu = G (m_i + m_j)): bound with a or r below r_ngb, or a fly-by reaching pericentre below r_ngb within the step
 // (Eq. 4). Shared by the O(N^2) kernel and the tree range search (dt_tree.h), so both give bit-identical pairs.
 KOKKOS_INLINE_FUNCTION bool ngb_pair_test(double dx, double dy, double dz, double r2, double dvx, double dvy, double dvz,
@@ -228,13 +228,13 @@ KOKKOS_INLINE_FUNCTION bool ngb_pair_test(double dx, double dy, double dz, doubl
         is_neighbor = (a_val < r_ngb || r_val < r_ngb || a_val < r_wide);
     } else if (r_val < r_ngb) {
         is_neighbor = true;
-    } else if (Kokkos::fabs(a_val) * (e_val - 1.0) < r_ngb && v_sq > EPS) {   // fly-by, BIFROST Eq. 4
+    } else if (Kokkos::fabs(a_val) * (e_val - 1.0) < r_ngb && v_sq > EPS) {   // fly-by, Rantala et al. 2023, Eq. 4
         is_neighbor = 0.5 * r_val / Kokkos::sqrt(v_sq) < pivot_dt;
     }
     return is_neighbor;
 }
 
-// Pairs i < j of the subset that BIFROST sec. 3.5 counts as neighbours: bound with a or r below r_ngb, or a
+// Pairs i < j of the subset that Rantala et al. (2023, sec. 3.5) count as neighbours: bound with a or r below r_ngb, or a
 // fly-by reaching pericentre below r_ngb within the step (Eq. 4). Appended to the neighbour buffers through an
 // atomic counter (order is irrelevant: detect_from_pairs sorts); NS = NM = 0, so run_n2 only drives the tiling.
 struct NgbK {
@@ -356,7 +356,7 @@ struct DtSinkCV : DtSink {
 };
 
 // Time steps of the sinks from the sources (HHS subset). Collisional mode also accumulates the
-// partner-free acceleration and jerk: jerk criterion (BIFROST sec. 3.4.5), and ax, ay, az are overwritten
+// partner-free acceleration and jerk: jerk criterion (Rantala et al. 2023, sec. 3.4.5), and ax, ay, az are overwritten
 // with that acceleration for the v/a, gradient and perturbation criteria that follow.
 // MN_IN (tree path, dt_tree.h): the minimum over the pair steps is already in dt (exact tree search); only the sums
 // are accumulated here, with the same per-pair expressions and order as without MN_IN, so they are bit-identical.

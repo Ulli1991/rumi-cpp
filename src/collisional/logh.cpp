@@ -7,13 +7,13 @@
 
 // ============================================================================
 // LogH: Logarithmic Hamiltonian regularization (Mikkola & Tanikawa 1999)
-// Implementation follows BIFROST (Rantala+ 2023) Section 3.3 and
+// Implementation follows Rantala et al. 2023, Section 3.3 and
 // FROST (Rantala+ 2021) Section 2.3.
 //
 // Time-Transformed Leapfrog (TTL) with Omega = T + B
 // where T = kinetic energy, B = -E₀ (positive for bound systems).
 //
-// BIFROST convention (Eq. 2-3): ds/dt = Omega, so dt/ds = 1/Omega.
+// Convention of Rantala et al. (2023), Eqs. 2-3: ds/dt = Omega, so dt/ds = 1/Omega.
 // ALL equations of motion have 1/Omega:
 //   dv/ds = a / Omega
 //   dx/ds = v / Omega
@@ -36,7 +36,7 @@
 //
 // B is constant for purely Newtonian dynamics (external perturbation handled
 // by FSI kicks, not inside LogH). When velocity-dependent forces (PN) are
-// present, B evolves per BIFROST Eq. (4):
+// present, B evolves per Rantala et al. 2023, Eq. (4):
 //   dB/ds = -Σ m_i * v_i · g_i / Omega
 // discretized with SYMMETRIC (trapezoidal) rule: half before kick, half after.
 //
@@ -104,7 +104,7 @@ double logh_total_energy(const LogHState& state, double G) {
 
 // ============================================================================
 // Single TTL leapfrog step in regularized time s
-// BIFROST convention: all operations scaled by 1/Omega for proper
+// Rantala et al. (2023) convention: all operations scaled by 1/Omega for proper
 // time reparameterization (preserves LRL vector in continuous limit).
 //
 // Implicit midpoint kick solved EXACTLY via cubic equation:
@@ -468,7 +468,7 @@ static void spin_from_chi(const LogHState& state, const double chi[3], int b, do
     for (int k = 0; k < 3; k++) S[k] = chi[k] * f;
 }
 
-// Spin-dependent PN accelerations (spin-orbit, spin-spin, Kerr quadrupole; BIFROST sec. 3.7) of a 2-body
+// Spin-dependent PN accelerations (spin-orbit, spin-spin, Kerr quadrupole; Rantala et al. 2023, sec. 3.7) of a 2-body
 // subsystem, evaluated at velocities eval_vel and dimensionless spins chi1, chi2; added to pn_out
 static void add_spin_accel(const LogHState& state, const double* eval_vel, const double chi1[3],
                            const double chi2[3], double G, double* pn_out) {
@@ -577,9 +577,9 @@ static void compute_pn_all_pairs(const LogHState& state, const PnGeom& geom, con
 
 // ============================================================================
 // Single TTL leapfrog step with PN corrections via auxiliary velocity technique
-// (Hellstrom & Mikkola 2010, BIFROST Section 3.4)
+// (Hellstrom & Mikkola 2010, Rantala et al. 2023, Section 3.4)
 //
-// BIFROST convention: ALL operations scaled by 1/Omega for proper time
+// Rantala et al. (2023) convention: ALL operations scaled by 1/Omega for proper time
 // reparameterization (no spurious precession in continuous limit).
 //
 // Each half-kick K(ε) splits as ABA:
@@ -779,7 +779,7 @@ void logh_leapfrog_steps_pn(LogHState& state, double ds, double G, double c_code
 
     for (int s = 0; s < nsteps; s++) {
         // ============ FIRST HALF-KICK: K(ds/2) = K_aux(ds/4) · K_phys(ds/2) · K_aux(ds/4) ============
-        // BIFROST Eq. (5): dw/ds = (1/Ω)[a + g(v)],  dv/ds = (1/Ω)[a + g(w)]
+        // Rantala et al. 2023, Eq. (5): dw/ds = (1/Ω)[a + g(v)],  dv/ds = (1/Ω)[a + g(w)]
         // K_aux kicks w by [a + g(v)],  K_phys kicks v by [a + g(w)]
         // External perturbations handled via FSI kicks, not inside LogH.
         k_aux(state, accel, pn_v, ds_quarter, Omega, G);
