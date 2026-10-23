@@ -855,13 +855,14 @@ def c21_sdar_outside_tide(exe):
     group dominates its tide: the FSI kicks then do work on a lagging phase, 8.1e-8 E_REF unbooked (the parent's
     9.8e-8 jump), not reduced by halving the steps (RESTART: 1.3e-7). Now outside perturbers count in kappa
     (Subsystem::ext_tidal) and a pair whose outside tidal energy swing per orbit exceeds FLYBY_CM_EPS E_REF keeps
-    kappa = 1: here nothing is slowed (= SDAR off)."""
+    kappa = 1: here nothing is slowed (= SDAR off). The cut-out is the Raven state under the IAU G: velocities x
+    sqrt(G_IAU / 4.302194e-3), interval and E_REF mapped to match (reproduces the old 6.91e-10, 15098 steps)."""
     cfg = dict(TEST_CASE="particle_file", IC_FILE=str(Path(__file__).parent / "data" / "c21_sdar_outside_tide.txt"),
-               TOTAL_TIME_MYR="1.0e-3", DT_MAX_MYR="1.0e-3", DT_MIN_MYR="1.0e-14", ETA="0", ETA_GRAD="0.2",
+               TOTAL_TIME_MYR="1.0001484143e-3", DT_MAX_MYR="1.0001484143e-3", DT_MIN_MYR="1.0e-14", ETA="0", ETA_GRAD="0.2",
                ETA_JERK="0", ETA_RESTART="1e-8", FLYBY_CM_EPS="1e-11", NGB_MASS_SCALING="true", SERIAL_N2_GPU="16384",
                TREE_THRESHOLD="100000", TREE_THETA="0.7", SDAR="true", COLLISIONAL="true", PN_ORDER="31",
                BH_MERGE_RADIUS="total", COLL_MASS_LOSS_C="0.3", TDE_ACCRETION_FRACTION="0.5", SSE_ENABLED="false",
-               PRINT_INTERVAL="1", PROFILING="false", E_REF="178136820.92837137", NGB_MREF="0.7363636363636357")
+               PRINT_INTERVAL="1", PROFILING="false", E_REF="178083956.5952146", NGB_MREF="0.7363636363636357")
     out = run_output(exe, cfg)
     gbs = sum(int(a) for a in re.findall(r"LogH=\d+ \(gbs=(\d+)", out))
     ok = check("c21: max|dE/E|", max(r[0] for r in diagnostics(out)), C21_SD_DE)
