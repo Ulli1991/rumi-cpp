@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Summarise the BIFROST Fig. 7 timing runs (make_runs.py): wall time of the first interval (BIFROST's measurement)
-and the median over the intervals run, against Fig. 7, with |dE/E| and where the time goes.
+"""Summarise the binary-cluster timing runs (make_runs.py): wall time of the first interval (the measurement of
+Rantala et al. 2023, Fig. 7) and the median over the intervals run, against that figure, with |dE/E| and where the time goes.
 
 Usage: summarize.py <run_dir>
 """
@@ -9,9 +9,9 @@ import statistics
 import sys
 from pathlib import Path
 
-# BIFROST Fig. 7 read off the figure (1 Raven node, T = 1e-3 Myr); text: 720, 67, 1.5 Myr per 24 h
+# Rantala et al. (2023), Fig. 7, read off the figure (1 Raven node, T = 1e-3 Myr); text: 720, 67, 1.5 Myr per 24 h
 # (0.120, 1.29, 57.6 s) and +25 %, +24 %, +3 % from f_bin = 10 % to 100 %
-BIFROST = {(10000, 0.1): 0.10, (10000, 0.5): 0.12, (10000, 1.0): 0.125,
+REF = {(10000, 0.1): 0.10, (10000, 0.5): 0.12, (10000, 1.0): 0.125,
            (100000, 0.1): 1.08, (100000, 0.5): 1.25, (100000, 1.0): 1.34,
            (1000000, 0.1): 57.0}
 
@@ -42,11 +42,11 @@ def parse(log):
 def main():
     d = Path(sys.argv[1])
     runs = sorted((parse(p) for p in d.glob("n*_f*_cm*.log")), key=lambda r: (r["n"], r["cm"], r["f"]))
-    print("| N | f_bin | c.o.m. | r_h [pc] | E_bin/|E| | BIFROST [s] | step 1 [s] | x BIFROST | median [s] (steps) |"
-          " x BIFROST | |dE/E| step 1 | |dE/E| end | mergers | restarts |")
+    print("| N | f_bin | c.o.m. | r_h [pc] | E_bin/|E| | ref. [s] | step 1 [s] | x ref. | median [s] (steps) |"
+          " x ref. | |dE/E| step 1 | |dE/E| end | mergers | restarts |")
     print("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
     for r in runs:
-        ref = BIFROST.get((r["n"], r["f"]), float("nan"))
+        ref = REF.get((r["n"], r["f"]), float("nan"))
         w = r["walls"]
         t1 = w[0] if w else float("nan")
         med = statistics.median(w) if w else float("nan")

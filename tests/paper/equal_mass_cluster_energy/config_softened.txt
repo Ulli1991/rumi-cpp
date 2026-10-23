@@ -1,4 +1,4 @@
-# BIFROST Fig. 8 (Rantala et al. 2023, arXiv:2210.02472, Sec. 5.2): unsoftened N = 162000 equal-mass Plummer
+# Rantala et al. (2023), Fig. 8, FROST-like softened comparison run (Sec. 5.2, black curve): same ICs, eps = 1e-3 pc, no subsystems.
 # cluster, 35 Myr. Source lines of every value: README.md next to this file. Production chain: job.sh in
 # /raven/ptmp/uli/cpp-nbody-runs/fig8-2026-10-22/s<seed>/ (PLUMMER_SEED, RESTART_*, WALLTIME_LIMIT set there).
 TEST_CASE = plummer
@@ -21,8 +21,8 @@ ETA_JERK = 0.1
 ETA_GBS = 1e-10                         # LogH end-time tolerance 1e-4 = NBODY_GBS_TTOL default
 R_NGB = 1e-3                            # pc, = eps_soft of the FROST-like run
 R_NGB_MAX = 0.1
-SOFTENING_PC = 0
-COLLISIONAL = true
+SOFTENING_PC = 1e-3                      # FROST-like Plummer softening eps = 1e-3 pc
+COLLISIONAL = false                     # softened, standard FSI only (no subsystems)
 PN_ORDER = 0                            # no PN (no BHs; equal-mass 0.5 Msun stars)
 SSE_ENABLED = false
 R_ESCAPE_RH = 100.0
@@ -35,6 +35,6 @@ RESTART_KEEP = 2
 RESTART_DIR = .
 RESTART_FILE = auto
 WALLTIME_LIMIT = 0
-STALL_RESTART = true
+STALL_RESTART = false
 SNAPSHOT_INTERVAL = 0
 CLUSTER_DIAG_INTERVAL = 1000            # Lagrangian radii every 1 Myr (no core collapse expected in 35 Myr)
