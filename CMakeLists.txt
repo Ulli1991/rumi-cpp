@@ -22,6 +22,7 @@ add_executable(nbody-kokkos
     ${SRC_DIR}/main.cpp
     ${SRC_DIR}/core/particles.cpp
     ${SRC_DIR}/core/params.cpp
+    ${SRC_DIR}/core/run_setup.cpp
     ${SRC_DIR}/core/mpi_comm.cpp
     ${SRC_DIR}/gravity/forces.cpp
     ${SRC_DIR}/gravity/tidal_field.cpp
@@ -253,6 +254,7 @@ if(DISABLE_PROFILING_FENCES)
     target_compile_definitions(nbody-kokkos PRIVATE DISABLE_PROFILING_FENCES)
     message(STATUS "Profiling fences disabled")
 endif()
+
 
 # Tests: `ctest --test-dir <build>` runs each case through tests/run_case.py
 enable_testing()
