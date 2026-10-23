@@ -1181,8 +1181,8 @@ void init_quad22_test(Particles& p, double m1, double m2, double a1, double e1, 
 }
 
 // TEST_CASE = particle_file: one particle per line, "m x y z vx vy vz [kw [radius]]" in Msun, pc, km/s (code units),
-// R_sun; '#' starts a comment. For isolated reruns of configurations taken from production runs (energy-jump cases).
-// kw defaults to 14 (BH) at and above 5 Msun, else 1 (main sequence), as the other test generators
+// R_sun; '#' starts a comment. For isolated reruns of configurations taken from production runs (energy-jump cases)
+// and external cluster ICs. kw defaults to 1 (main sequence) at every mass, R to 0 (no collisions)
 void init_particle_file(Particles& p, const std::string& path) {
     std::ifstream in(path);
     if (!in) { std::fprintf(stderr, "IC_FILE: cannot open %s\n", path.c_str()); std::exit(1); }
@@ -1190,15 +1190,17 @@ void init_particle_file(Particles& p, const std::string& path) {
     std::vector<int> kw;
     std::vector<double> rad;
     std::string line;
+    int n_no_kw = 0;
     while (std::getline(in, line)) {
         const auto hash = line.find('#');
         if (hash != std::string::npos) line.erase(hash);
         std::istringstream ss(line);
         std::array<double, 7> r;
         if (!(ss >> r[0] >> r[1] >> r[2] >> r[3] >> r[4] >> r[5] >> r[6])) continue;
-        int k = r[0] >= 5.0 ? 14 : 1;
+        int k = 1;
         double rr = 0.0;
         if (ss >> k) ss >> rr;
+        else n_no_kw++;
         rows.push_back(r); kw.push_back(k); rad.push_back(rr);
     }
     const int n = (int)rows.size();
@@ -1222,4 +1224,5 @@ void init_particle_file(Particles& p, const std::string& path) {
         Kokkos::deep_copy(p.stellar_radius, h_r);
     }
     std::printf("Particle file %s: %d particles\n", path.c_str(), n);
+    if (n_no_kw > 0) std::printf("  %d without a kw column: main sequence (kw = 1), radius 0\n", n_no_kw);
 }
