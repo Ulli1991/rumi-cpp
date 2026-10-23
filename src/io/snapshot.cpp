@@ -2,6 +2,7 @@
 #include "h5_util.h"
 #include "restart.h"
 #include "constants.h"
+#include "diagnostics.h"
 #ifdef ENABLE_COLLISIONAL
 #include "subsystem.h"
 #include "tidal_field.h"
@@ -232,8 +233,11 @@ std::string write_snapshot(const SnapshotOptions& opt, const Particles& p, const
             }
             h5::attr(H, "Tidal_JacobiRadius_pc", rj);
         }
-        h5::attr(H, "dE_rel", m.diag0.E_total != 0.0
-                                  ? (m.diag.E_total + sink - m.diag0.E_total) / std::fabs(m.diag0.E_total) : 0.0);
+        const double de_rel = m.diag0.E_total != 0.0
+                                  ? (m.diag.E_total + sink - m.diag0.E_total) / std::fabs(m.diag0.E_total) : 0.0;
+        note_dE_rel(std::fabs(de_rel));
+        h5::attr(H, "dE_rel", de_rel);
+        h5::attr(H, "dE_rel_max", dE_rel_max());
 
         for (int t : {4, 5}) {
             if (npart[t] == 0) continue;

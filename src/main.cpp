@@ -1683,6 +1683,8 @@ int main(int argc, char** argv) {
 
                     // the accepted step's energy change (STALL_DE_FACTOR)
                     step_de = (E_carry + g_energy_books.total_sink() - E_step_start) / (std::fabs(diag0.E_total) + 1e-30);
+                    note_dE_rel(std::fabs((E_carry + g_energy_books.total_sink() - diag0.E_total) /
+                                          (std::fabs(diag0.E_total) + 1e-30)));
                     // Restore original parameters after step (Rantala et al. 2023: "original parameters are restored")
                     g_collisional.eta_ff   = eta_ff_orig;
                     g_collisional.eta_fb   = eta_fb_orig;

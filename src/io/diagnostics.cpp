@@ -259,6 +259,10 @@ static double vec_mag(double x, double y, double z) {
     return std::sqrt(x*x + y*y + z*z);
 }
 
+static double g_dE_rel_max = 0.0;
+void note_dE_rel(double abs_dE) { if (abs_dE > g_dE_rel_max) g_dE_rel_max = abs_dE; }
+double dE_rel_max() { return g_dE_rel_max; }
+
 void compute_errors(const DiagnosticState& cur, const DiagnosticState& ini,
                     const Particles& p, bool is_cluster,
                     double& dE, double& dP, double& dL) {
@@ -272,6 +276,7 @@ void compute_errors(const DiagnosticState& cur, const DiagnosticState& ini,
     }
 #endif
     dE = (E_ini != 0.0) ? std::fabs((E_cur - E_ini) / E_ini) : 0.0;
+    note_dE_rel(dE);
 
     // For systems initialized in the COM frame (binary/triple tests), P0 ≈ 0
     // and |dP/P0| is meaningless. Use |dP|/M (absolute drift per unit mass) instead.
@@ -538,6 +543,7 @@ void print_final(const DiagnosticState& cur, const DiagnosticState& ini,
     std::printf("============================================================\n");
 
     std::printf("|dE/E0| = %.15e\n", dE);
+    std::printf("max |dE/E0| = %.15e (prints, snapshots, restart checks)\n", dE_rel_max());
     std::printf("|dP|/M  = %.15e km/s\n", dP);
     std::printf("|dL/L0| = %.15e\n", dL);
 #ifdef ENABLE_COLLISIONAL
