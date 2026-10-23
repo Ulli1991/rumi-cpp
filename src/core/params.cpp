@@ -267,7 +267,7 @@ const std::vector<ParamSpec> kParams = {
     {"QUAD_E2", D, "0.62", "Test problems", TEST, "", "quad22_test: binary B eccentricity"},
     {"QUAD_A_OUT_PC", D, "2.7e-3", "Test problems", TEST, "", "quad22_test: outer orbit semi-major axis (pc)"},
     {"QUAD_E_OUT", D, "0.48", "Test problems", TEST, "", "quad22_test: outer orbit eccentricity"},
-    {"IC_FILE", S, "", "Test problems", TEST, "", "particle_file: \"m x y z vx vy vz [kw [R]]\" per line (Msun, pc, km/s, R_sun)"},
+    {"IC_FILE", S, "", "Test problems", TEST, "", "particle_file: \"m x y z vx vy vz [kw [R]]\" per line (Msun, pc, km/s, R_sun); kw default 1 (main sequence), R 0"},
     {"QUAD_INCL_DEG", D, "30.0", "Test problems", TEST, "", "quad22_test: inclination of binary B's plane (deg)"},
     {"TRIPLE_INCL_DEG", D, "45.0", "Test problems", TEST, "", "triple_test: mutual inclination (deg)"},
     {"TRIPLE_OUTER_FIRST", B, "false", "Test problems", TEST, "", "triple_test: outer body at the lowest particle id"},

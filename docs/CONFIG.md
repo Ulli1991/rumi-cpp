@@ -219,7 +219,7 @@ Levels:
 | `QUAD_E2` | double | `0.62` | test |  | quad22_test: binary B eccentricity |
 | `QUAD_A_OUT_PC` | double | `2.7e-3` | test |  | quad22_test: outer orbit semi-major axis (pc) |
 | `QUAD_E_OUT` | double | `0.48` | test |  | quad22_test: outer orbit eccentricity |
-| `IC_FILE` | string | (empty) | test |  | particle_file: "m x y z vx vy vz [kw [R]]" per line (Msun, pc, km/s, R_sun) |
+| `IC_FILE` | string | (empty) | test |  | particle_file: "m x y z vx vy vz [kw [R]]" per line (Msun, pc, km/s, R_sun); kw default 1 (main sequence), R 0 |
 | `QUAD_INCL_DEG` | double | `30.0` | test |  | quad22_test: inclination of binary B's plane (deg) |
 | `TRIPLE_INCL_DEG` | double | `45.0` | test |  | triple_test: mutual inclination (deg) |
 | `TRIPLE_OUTER_FIRST` | bool | `false` | test |  | triple_test: outer body at the lowest particle id |
