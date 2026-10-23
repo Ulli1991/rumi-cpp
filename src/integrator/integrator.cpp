@@ -27,6 +27,8 @@
 #include "cm_tide.h"
 #endif
 #include <Kokkos_Core.hpp>
+#include <array>
+#include <unordered_map>
 #include <vector>
 #include <set>
 #include <map>
@@ -653,6 +655,156 @@ struct SubsysAdvanceCheck {
 static void advance_subsystems_in_range_impl(Particles& p, int start, int count, double G, double dt);
 // NBODY_ELEDGER: per-path booking residues (members' T + U change from the states + the path's own booking),
 // summed over a step, code units; printed and reset with the ELEDGER lines
+// NBODY_SUBSYS_TIDE=1 (prototype; host-accessible memory, no PN, no MPI or tree cross forces): the quadrupole tide of the
+// slow set on a bound 2-body subsystem of the fast set moves from the S<->F cross kicks into the pair's own advance. The
+// slow set does not move during a fast recursion, so its tidal tensor at the pair's c.o.m. is pushed there; the cross
+// kicks give both members their mass-weighted mean acceleration; the Kepler / secular advance applies the summed tensor
+// as kicks T (r_i - r_cm) in a Strang splitting with substeps of at most P (1 - e)^(3/2) / 16
+namespace subsys_tide {
+using Ten = std::array<double, 6>;   // xx yy zz xy xz yz
+static bool enabled() {
+    static const bool on = [] { const char* e = std::getenv("NBODY_SUBSYS_TIDE"); return e && std::atoi(e) != 0; }();
+    return on && g_collisional.enabled && g_collisional.pn_order == 0;
+}
+static std::unordered_map<long long, std::vector<Ten>> g_T;
+static double far_f() {   // sources beyond far_f x apocentre go into the tensor; nearer ones keep their exact kicks
+    static const double f = [] { const char* e = std::getenv("NBODY_SUBSYS_TIDE_F"); return e ? std::atof(e) : 10.0; }();
+    return f;
+}
+static long long key(int a, int b) {
+    if (a > b) std::swap(a, b);
+    return ((long long)a << 32) | (unsigned)b;
+}
+static struct Stats {
+    long long push = 0, com = 0, adv = 0, sub = 0;
+    ~Stats() {
+        if (push) std::printf("SUBSYS_TIDE: %lld tensors pushed, %lld c.o.m. kicks, %lld tidal advances, %lld substeps\n",
+                              push, com, adv, sub);
+    }
+} g_st;
+template <class F> static void for_pairs(const Particles& p, int s, int n, F f) {   // bound 2-body subsystems with both members in [s, s + n)
+    for (const auto& sub : g_subsystem_mgr.active) {
+        if (sub.n_bodies != 2 || sub.particle_ids.size() != 2 || !sub.is_secular || !(sub.orb.E_orb < 0.0)) continue;
+        const int i0 = g_subsystem_mgr.safe_pid_to_idx(sub.particle_ids[0]);
+        const int i1 = g_subsystem_mgr.safe_pid_to_idx(sub.particle_ids[1]);
+        if (i0 < s || i0 >= s + n || i1 < s || i1 >= s + n) continue;
+        if (p.particle_id(i0) != sub.particle_ids[0] || p.particle_id(i1) != sub.particle_ids[1]) continue;   // host copies
+        f(sub.particle_ids[0], sub.particle_ids[1], i0, i1, far_f() * sub.orb.a * (1.0 + sub.orb.e));
+    }
+}
+static std::vector<long long> push(Particles& p, int ss, int sn, int fs, int fn, double G, double tp = 0.0) {
+    std::vector<long long> keys;
+    if (!enabled() || sn <= 0 || fn <= 0) return keys;
+    Kokkos::fence();
+    for_pairs(p, fs, fn, [&](int pa, int pb, int i0, int i1, double dfar) {
+        const double m0 = p.mass(i0), m1 = p.mass(i1), M = m0 + m1;
+        const double R[3] = {(m0 * (p.x(i0) + tp * p.vx(i0)) + m1 * (p.x(i1) + tp * p.vx(i1))) / M,
+                             (m0 * (p.y(i0) + tp * p.vy(i0)) + m1 * (p.y(i1) + tp * p.vy(i1))) / M,
+                             (m0 * (p.z(i0) + tp * p.vz(i0)) + m1 * (p.z(i1) + tp * p.vz(i1))) / M};
+        Ten T{0, 0, 0, 0, 0, 0};
+        for (int j = ss; j < ss + sn; j++) {
+            if (j == i0 || j == i1) continue;
+            const double d[3] = {p.x(j) + tp * p.vx(j) - R[0], p.y(j) + tp * p.vy(j) - R[1], p.z(j) + tp * p.vz(j) - R[2]};
+            const double d2 = d[0] * d[0] + d[1] * d[1] + d[2] * d[2], id2 = 1.0 / d2;
+            if (d2 < dfar * dfar) continue;
+            const double gm = G * p.mass(j) * id2 / std::sqrt(d2);   // G m / d^3
+            T[0] += gm * (3.0 * d[0] * d[0] * id2 - 1.0); T[1] += gm * (3.0 * d[1] * d[1] * id2 - 1.0);
+            T[2] += gm * (3.0 * d[2] * d[2] * id2 - 1.0); T[3] += gm * 3.0 * d[0] * d[1] * id2;
+            T[4] += gm * 3.0 * d[0] * d[2] * id2; T[5] += gm * 3.0 * d[1] * d[2] * id2;
+        }
+        const long long k = key(pa, pb);
+        g_T[k].push_back(T);
+        keys.push_back(k);
+        g_st.push++;
+    });
+    return keys;
+}
+static void pop(const std::vector<long long>& keys) {
+    for (long long k : keys) {
+        auto it = g_T.find(k);
+        if (it == g_T.end() || it->second.empty()) continue;
+        it->second.pop_back();
+        if (it->second.empty()) g_T.erase(it);
+    }
+}
+static void com(Particles& p, int ss, int sn, int fs, int fn, double G) {
+    // slow -> fast cross kick: members get their mean acceleration plus the differential part of the near sources
+    if (!enabled()) return;
+    Kokkos::fence();
+    for_pairs(p, fs, fn, [&](int, int, int i0, int i1, double dfar) {
+        const double m0 = p.mass(i0), m1 = p.mass(i1), M = m0 + m1;
+        const double a[3] = {(m0 * p.ax(i0) + m1 * p.ax(i1)) / M, (m0 * p.ay(i0) + m1 * p.ay(i1)) / M,
+                             (m0 * p.az(i0) + m1 * p.az(i1)) / M};
+        const double R[3] = {(m0 * p.x(i0) + m1 * p.x(i1)) / M, (m0 * p.y(i0) + m1 * p.y(i1)) / M,
+                             (m0 * p.z(i0) + m1 * p.z(i1)) / M};
+        double an[2][3] = {{0, 0, 0}, {0, 0, 0}};
+        const int id[2] = {i0, i1};
+        for (int j = ss; j < ss + sn; j++) {
+            if (j == i0 || j == i1) continue;
+            const double d[3] = {p.x(j) - R[0], p.y(j) - R[1], p.z(j) - R[2]};
+            if (d[0] * d[0] + d[1] * d[1] + d[2] * d[2] >= dfar * dfar) continue;
+            for (int b = 0; b < 2; b++) {
+                const double q[3] = {p.x(j) - p.x(id[b]), p.y(j) - p.y(id[b]), p.z(j) - p.z(id[b])};
+                const double q2 = q[0] * q[0] + q[1] * q[1] + q[2] * q[2], f = G * p.mass(j) / (q2 * std::sqrt(q2));
+                for (int c = 0; c < 3; c++) an[b][c] += f * q[c];
+            }
+        }
+        for (int c = 0; c < 3; c++) {
+            const double mn = (m0 * an[0][c] + m1 * an[1][c]) / M;
+            const double v0 = a[c] + an[0][c] - mn, v1 = a[c] + an[1][c] - mn;
+            if (c == 0) { p.ax(i0) = v0; p.ax(i1) = v1; }
+            if (c == 1) { p.ay(i0) = v0; p.ay(i1) = v1; }
+            if (c == 2) { p.az(i0) = v0; p.az(i1) = v1; }
+        }
+        g_st.com++;
+    });
+}
+static bool tensor(int pa, int pb, Ten& T) {   // summed tensor of the pair (false: none pushed)
+    auto it = g_T.find(key(pa, pb));
+    if (it == g_T.end() || it->second.empty()) return false;
+    T = Ten{0, 0, 0, 0, 0, 0};
+    for (const auto& t : it->second) for (int c = 0; c < 6; c++) T[c] += t[c];
+    return true;
+}
+// Kepler drift of dt with the tidal kicks of T, substeps of at most P (1 - e)^(3/2) / 16; returns the substep count
+static int advance(double* p1, double* v1, double m1, double* p2, double* v2, double m2, double G, double c, double dt,
+                   const Ten& T) {
+    const double M = m1 + m2, mu = G * M;
+    const double dr[3] = {p2[0] - p1[0], p2[1] - p1[1], p2[2] - p1[2]}, dv[3] = {v2[0] - v1[0], v2[1] - v1[1], v2[2] - v1[2]};
+    const double r = std::sqrt(dr[0] * dr[0] + dr[1] * dr[1] + dr[2] * dr[2]);
+    const double E = 0.5 * (dv[0] * dv[0] + dv[1] * dv[1] + dv[2] * dv[2]) - mu / r;
+    if (!(E < 0.0)) return integrate_secular_binary(p1, v1, m1, p2, v2, m2, G, c, 0, dt);
+    const double a = -mu / (2.0 * E);
+    const double hx = dr[1] * dv[2] - dr[2] * dv[1], hy = dr[2] * dv[0] - dr[0] * dv[2], hz = dr[0] * dv[1] - dr[1] * dv[0];
+    const double e = std::sqrt(std::max(0.0, 1.0 - (hx * hx + hy * hy + hz * hz) / (mu * a)));
+    const double P = 2.0 * M_PI * std::sqrt(a * a * a / mu);
+    const double hres = P * std::pow(std::max(1.0 - e, 1e-6), 1.5) / 16.0;
+    const int n = (int)std::min(65536.0, std::max(1.0, std::ceil(dt / hres)));
+    const double h = dt / n;
+    auto kick = [&](double w) {
+        const double rc[3] = {(m1 * p1[0] + m2 * p2[0]) / M, (m1 * p1[1] + m2 * p2[1]) / M, (m1 * p1[2] + m2 * p2[2]) / M};
+        for (int b = 0; b < 2; b++) {
+            const double* q = b ? p2 : p1;
+            double* v = b ? v2 : v1;
+            const double d[3] = {q[0] - rc[0], q[1] - rc[1], q[2] - rc[2]};
+            v[0] += w * (T[0] * d[0] + T[3] * d[1] + T[4] * d[2]);
+            v[1] += w * (T[3] * d[0] + T[1] * d[1] + T[5] * d[2]);
+            v[2] += w * (T[4] * d[0] + T[5] * d[1] + T[2] * d[2]);
+        }
+    };
+    int subs = 0;
+    kick(0.5 * h);
+    for (int i = 0; i < n; i++) {
+        const int k = integrate_secular_binary(p1, v1, m1, p2, v2, m2, G, c, 0, h);
+        subs += k > 0 ? k : 1;
+        kick(i + 1 < n ? h : 0.5 * h);
+    }
+    g_st.adv++;
+    g_st.sub += n;
+    return subs;
+}
+}  // namespace subsys_tide
+
 static double g_led_sec2 = 0.0, g_led_sec2_pn = 0.0, g_led_sec3 = 0.0;
 static int g_led_n_sec2 = 0, g_led_n_sec3 = 0;
 static inline double pair_energy(double m1, const double* r1, const double* v1, double m2, const double* r2,
@@ -983,7 +1135,12 @@ void advance_subsystems_in_range_impl(Particles& p, int start, int count,
                 q[0] = m1_sec; q[7] = m2_sec;
                 for (int c = 0; c < 3; c++) { q[1 + c] = p1[c]; q[4 + c] = v1[c]; q[8 + c] = p2[c]; q[11 + c] = v2[c]; }
             }
-            substeps[k] = integrate_secular_binary(p1, v1, m1_sec, p2, v2, m2_sec, G, g_collisional.c_code, pn_b, dt);
+            subsys_tide::Ten tide_T;
+            const auto& sub_t = g_subsystem_mgr.active[secular_idx[k]];
+            if (subsys_tide::enabled() && !pn_b && subsys_tide::tensor(sub_t.particle_ids[0], sub_t.particle_ids[1], tide_T))
+                substeps[k] = subsys_tide::advance(p1, v1, m1_sec, p2, v2, m2_sec, G, g_collisional.c_code, dt, tide_T);
+            else
+                substeps[k] = integrate_secular_binary(p1, v1, m1_sec, p2, v2, m2_sec, G, g_collisional.c_code, pn_b, dt);
             if (substeps[k] < 0) {   // PN write-back not possible (C19): unchanged, integrated by LogH below
                 substeps[k] = 0;
                 evolved[k] = 0;
@@ -1616,6 +1773,9 @@ void fsi_step(Particles& p, int start, int count,
     if (forces_valid) {
         g_profiler.start();
         force_err_inject(p, start, count, count);
+        #ifdef ENABLE_COLLISIONAL
+        if (!tree_mode) subsys_tide::com(p, start, count, start, count, G);
+#endif
         kick_velocities(p, start, count, dt * FSI_KICK);
         g_profiler.stop(StepProfiler::DRIFT_KICK);
     } else if (tree_mode) {
@@ -1629,6 +1789,9 @@ void fsi_step(Particles& p, int start, int count,
         g_profiler.stop(StepProfiler::SELF_FORCE);
         g_profiler.start();
         force_err_inject(p, start, count, count);
+        #ifdef ENABLE_COLLISIONAL
+        if (!tree_mode) subsys_tide::com(p, start, count, start, count, G);
+#endif
         kick_velocities(p, start, count, dt * FSI_KICK);
         g_profiler.stop(StepProfiler::DRIFT_KICK);
     } else {
@@ -1637,6 +1800,9 @@ void fsi_step(Particles& p, int start, int count,
         g_profiler.stop(StepProfiler::SELF_FORCE, (long long)count * count);
         g_profiler.start();
         force_err_inject(p, start, count, count);
+        #ifdef ENABLE_COLLISIONAL
+        if (!tree_mode) subsys_tide::com(p, start, count, start, count, G);
+#endif
         kick_velocities(p, start, count, dt * FSI_KICK);
         g_profiler.stop(StepProfiler::DRIFT_KICK);
     }
@@ -1645,7 +1811,16 @@ void fsi_step(Particles& p, int start, int count,
     g_profiler.start();
 #ifdef ENABLE_COLLISIONAL
     if (p.collisional && !g_subsystem_mgr.active.empty()) {
-        advance_subsystems_in_range(p, start, count, G, dt * FSI_DRIFT);
+        {
+#ifdef ENABLE_COLLISIONAL
+            const auto tide_keys = !tree_mode ? subsys_tide::push(p, start, count, start, count, G, 0.5 * dt * FSI_DRIFT)
+                                              : std::vector<long long>{};
+#endif
+            advance_subsystems_in_range(p, start, count, G, dt * FSI_DRIFT);
+#ifdef ENABLE_COLLISIONAL
+            subsys_tide::pop(tide_keys);
+#endif
+        }
         g_profiler.stop(StepProfiler::SUBSYSTEM_INTEG);
         g_profiler.start();
         drift_field_only(p, start, count, dt * FSI_DRIFT);
@@ -1678,6 +1853,9 @@ void fsi_step(Particles& p, int start, int count,
         g_profiler.stop(StepProfiler::SELF_GRAD);
         g_profiler.start();
         force_err_inject(p, start, count, count);
+        #ifdef ENABLE_COLLISIONAL
+        if (!tree_mode) subsys_tide::com(p, start, count, start, count, G);
+#endif
         kick_velocities(p, start, count, dt * FSI_MOD_KICK);
         g_profiler.stop(StepProfiler::DRIFT_KICK);
     } else {
@@ -1689,6 +1867,9 @@ void fsi_step(Particles& p, int start, int count,
         g_profiler.stop(StepProfiler::SELF_GRAD, (long long)count * count);
         g_profiler.start();
         force_err_inject(p, start, count, count);
+        #ifdef ENABLE_COLLISIONAL
+        if (!tree_mode) subsys_tide::com(p, start, count, start, count, G);
+#endif
         kick_velocities(p, start, count, dt * FSI_MOD_KICK);
         g_profiler.stop(StepProfiler::DRIFT_KICK);
     }
@@ -1697,7 +1878,16 @@ void fsi_step(Particles& p, int start, int count,
     g_profiler.start();
 #ifdef ENABLE_COLLISIONAL
     if (p.collisional && !g_subsystem_mgr.active.empty()) {
-        advance_subsystems_in_range(p, start, count, G, dt * FSI_DRIFT);
+        {
+#ifdef ENABLE_COLLISIONAL
+            const auto tide_keys = !tree_mode ? subsys_tide::push(p, start, count, start, count, G, 0.5 * dt * FSI_DRIFT)
+                                              : std::vector<long long>{};
+#endif
+            advance_subsystems_in_range(p, start, count, G, dt * FSI_DRIFT);
+#ifdef ENABLE_COLLISIONAL
+            subsys_tide::pop(tide_keys);
+#endif
+        }
         g_profiler.stop(StepProfiler::SUBSYSTEM_INTEG);
         g_profiler.start();
         drift_field_only(p, start, count, dt * FSI_DRIFT);
@@ -1718,6 +1908,9 @@ void fsi_step(Particles& p, int start, int count,
         g_profiler.stop(StepProfiler::SELF_FORCE);
         g_profiler.start();
         force_err_inject(p, start, count, count);
+        #ifdef ENABLE_COLLISIONAL
+        if (!tree_mode) subsys_tide::com(p, start, count, start, count, G);
+#endif
         kick_velocities(p, start, count, dt * FSI_KICK);
         g_profiler.stop(StepProfiler::DRIFT_KICK);
     } else {
@@ -1726,6 +1919,9 @@ void fsi_step(Particles& p, int start, int count,
         g_profiler.stop(StepProfiler::SELF_FORCE, (long long)count * count);
         g_profiler.start();
         force_err_inject(p, start, count, count);
+        #ifdef ENABLE_COLLISIONAL
+        if (!tree_mode) subsys_tide::com(p, start, count, start, count, G);
+#endif
         kick_velocities(p, start, count, dt * FSI_KICK);
         g_profiler.stop(StepProfiler::DRIFT_KICK);
     }
@@ -3983,6 +4179,7 @@ static int hhs_fsi_recursive_impl(
     {
 #ifdef ENABLE_COLLISIONAL
         cm_tide::KickSrcScope cmt_src(slow_start, slow_count, pivot_dt, G);
+        if (!use_mpi && !use_tree_cross) subsys_tide::com(p, slow_start, slow_count, fast_start, fast_count, G);
 #endif
         kick_velocities(p, fast_start, fast_count, pivot_dt * FSI_KICK);
     }
@@ -3999,8 +4196,15 @@ static int hhs_fsi_recursive_impl(
     }
 
     // Step 3: Recurse on fast (first half) — always compute fresh timesteps
+#ifdef ENABLE_COLLISIONAL
+    const auto tide_keys1 = (!use_mpi && !use_tree_cross) ? subsys_tide::push(p, slow_start, slow_count, fast_start, fast_count, G)
+                                                           : std::vector<long long>{};
+#endif
     int k = hhs_fsi_recursive(p, dp, fast_start, fast_count, pivot_dt * 0.5,
                               G, soft2, dt_min, eta, false, tree_for_subs, depth + 1);
+#ifdef ENABLE_COLLISIONAL
+    subsys_tide::pop(tide_keys1);
+#endif
     n_removed += k;
     fast_count -= k;
     count -= k;
@@ -4056,14 +4260,22 @@ static int hhs_fsi_recursive_impl(
     {
 #ifdef ENABLE_COLLISIONAL
         cm_tide::KickSrcScope cmt_src(slow_start, slow_count, pivot_dt, G);
+        if (!use_mpi && !use_tree_cross) subsys_tide::com(p, slow_start, slow_count, fast_start, fast_count, G);
 #endif
         kick_velocities(p, fast_start, fast_count, pivot_dt * FSI_MOD_KICK);
     }
     g_profiler.stop(StepProfiler::DRIFT_KICK);
 
     // Step 5: Recurse on fast (second half)
+#ifdef ENABLE_COLLISIONAL
+    const auto tide_keys2 = (!use_mpi && !use_tree_cross) ? subsys_tide::push(p, slow_start, slow_count, fast_start, fast_count, G)
+                                                           : std::vector<long long>{};
+#endif
     k = hhs_fsi_recursive(p, dp, fast_start, fast_count, pivot_dt * 0.5,
                           G, soft2, dt_min, eta, false, tree_for_subs, depth + 1);
+#ifdef ENABLE_COLLISIONAL
+    subsys_tide::pop(tide_keys2);
+#endif
     n_removed += k;
     fast_count -= k;
     count -= k;
@@ -4128,6 +4340,7 @@ static int hhs_fsi_recursive_impl(
     {
 #ifdef ENABLE_COLLISIONAL
         cm_tide::KickSrcScope cmt_src(slow_start, slow_count, pivot_dt, G);
+        if (!use_mpi && !use_tree_cross) subsys_tide::com(p, slow_start, slow_count, fast_start, fast_count, G);
 #endif
         kick_velocities(p, fast_start, fast_count, pivot_dt * FSI_KICK);
     }
