@@ -1,15 +1,15 @@
-# cpp-nbody: development plan to match FROST / BIFROST / FROST-CLUSTERS in accuracy and speed
+# cpp-nbody: development plan (accuracy and speed targets from the literature)
 
 ## Context
 
 Goal (user, 2026-10-10): make cpp-nbody (Kokkos; HIP on MI300A, CUDA on A100) at least as accurate and as
 fast as the published Rantala codes. The viper session that held the working plan crashed; everything since
 37aa7bf was built only with HIP; commit 7a966b2 (secular-triple regression fix) was never checked on a GPU;
-work moves to raven (4x A100 per node — the hardware BIFROST was timed on). A newer copy of the repo with a
+work moves to raven (4x A100 per node — the hardware of the Rantala et al. 2023 timings). A newer copy of the repo with a
 literature plan exists on GitHub but cannot be fetched from raven (no credentials; user pulls it).
 
 Papers re-read from arXiv LaTeX, stored in `/raven/u/uli/papers/rantala/` (PDF + `src/<id>/manuscript.tex`):
-MSTAR 2001.03180, FROST 2011.14984, BIFROST 2210.02472, FROST-CLUSTERS I 2403.10602, II 2506.04330,
+MSTAR 2001.03180, FROST 2011.14984, Rantala et al. 2023 2210.02472, FROST-CLUSTERS I 2403.10602, II 2506.04330,
 III 2601.07917, letter 2503.21879.
 
 User decisions: (1) add SDAR inside the LogH/GBS batch and A/B it against LogH + secular, switching the
@@ -23,17 +23,17 @@ large N**.
 Accuracy (eta_ff = eta_fb = 0.2, eta_grad = eta_jerk = 0.1, eta_GBS 1e-10, interval 1e-3 Myr):
 - FROST: Kepler e = 0/0.9/0.99 over 1000 P follows eta^4, floors 1e-13 / 1e-12..1e-10 at eta 0.008, dP = 0;
   Sun + 4 giants (HHS) 1e-13 at eta 0.004, dL 1e-14; 1e6 softened Plummer 2e-10 after 12 Myr.
-- BIFROST Fig 8: 162k equal-mass unsoftened, per interval 8e-11, linear growth, 35 Myr.
+- Rantala et al. 2023 Fig 8: 162k equal-mass unsoftened, per interval 8e-11, linear growth, 35 Myr.
 - Fig 9: 200k evolved Kroupa (357 BHs, 5.5-41.6 Msun) 3e-7 at 5 Myr; without BHs 2e-8;
   Fig 10: all eta halved -> 5e-9, per interval < 5e-11.
 - Fig 11: 200k, f_bin 50 %: per interval 7e-10, total 6e-7 at 5 Myr.
 - Fig 12: IMBH inspiral + recoil 1e-6. Fig 13-15: N = 20k, f_bin 10 %, core collapse: 3e-4 at 4 Myr.
 
-Speed (one raven node, 4x A100, per 1e-3 Myr interval): BIFROST Fig 7: N = 1e4 / 1e5 / 1e6 ->
+Speed (one raven node, 4x A100, per 1e-3 Myr interval): Rantala et al. 2023 Fig 7: N = 1e4 / 1e5 / 1e6 ->
 0.12 s / 1.3 s / 58 s; f_bin 10 % -> 100 % costs +25 % (1e4, 1e5), +3 % (1e6). Strong scaling to
 ~40 N/1e6 GPUs. (Note: memory file `rantala-papers.md` says 5.8 s for 1e6 — wrong by 10x; fix it.)
 
-Method changes after BIFROST that the current Rantala code uses:
+Method changes after Rantala et al. 2023 that the current Rantala code uses:
 - FC-I A1: Omelyan gradient, ã(r) ≈ a(r + ε²/24 a) — same kernel as Newtonian forces.
 - FC-I A2: SDAR (Wang+2020) replaces LogH and the secular triple; GBS k_max 8; κ from perturbers
   (k_ref 1e-6), κ_max from c = 0.1 perturbation-change estimate; κ = 1 for PN subsystems.
@@ -44,7 +44,7 @@ Method changes after BIFROST that the current Rantala code uses:
   r_subsys 0.5 mpc, eta_GBS 1e-8, end-time 1e-2, interval 5e-3 Myr.
 - FC-III: node-local MPI shared-memory windows; Glebbeek collision mass loss f = 0.3 q/(1+q)²;
   Vink 2018 winds above 100 Msun; Mapelli-type rejuvenation.
-- BIFROST §6 lists slow-down for perturbed binaries as missing — the same physics as our open
+- Rantala et al. 2023 §6 lists slow-down for perturbed binaries as missing — the same physics as our open
   dense-core floor (tidal coupling of unresolved binaries sampled by FSI kicks).
 - MSTAR: MST coordinates, Deuflhard sequence, polynomial extrapolation, end-time step Δs = U(Δt − τ),
   parallel force loop × substep divisions (k_fix 8).
@@ -115,10 +115,10 @@ when noisy, notes in `VIPER_NOTES.md` (rename to `NOTES.md` later), commit per s
 
 ### M2 — Paper reproduction suite (the accuracy and speed baselines)
 Scripts under `tests/paper/` (ICs, config, expected numbers, plot): FROST Kepler/planets (already in
-ctest), BIFROST Fig 8 (162k equal mass, first 5 Myr), Fig 9 + Fig 10 (200k with/without BHs, eta and
+ctest), Rantala et al. 2023 Fig 8 (162k equal mass, first 5 Myr), Fig 9 + Fig 10 (200k with/without BHs, eta and
 eta/2, 5 Myr), Fig 11 (50 % binaries), core-collapse (20k, 10 %, r_h 0.5 pc, 4 Myr), Fig 7 timing grid
-(N = 1e4, 1e5, 1e6 × f_bin 10/50/100 %, one interval, mass-size relation as BIFROST App. A).
-IC generator additions needed: BIFROST-style binary population (log-uniform a, thermal e, uniform q
+(N = 1e4, 1e5, 1e6 × f_bin 10/50/100 %, one interval, mass-size relation as Rantala et al. 2023 App. A).
+IC generator additions needed: the binary population of Rantala et al. 2023 App. A (log-uniform a, thermal e, uniform q
 above 5 Msun instead of mass-rank pairing), FC-II multiplicity (Moe & Di Stefano / Offner), primordial
 triples. Output: a table of |dE/E| per interval and total, and s/interval, per run — the baseline every
 later change is measured against.
@@ -133,7 +133,7 @@ later change is measured against.
    candidates. Env switch `NBODY_SDAR`. Tests: isolated triple vs LogH reference (secular-averaged
    evolution agrees, energy books exact); Kozai-Lidov triple vs MSTAR paper Sec 5.3; binary-binary.
 3. Use SDAR for stable triples in place of the secular triple (A/B); keep the secular binary for
-   isolated short-period binaries (BIFROST still does).
+   isolated short-period binaries (as Rantala et al. 2023 do).
 4. Dense-core floor (r_h 0.03 pc, 2000 stars, 50 % binaries; test `dense_core_split` exists): try,
    in order, (a) perturbers as subsystem members (larger r_ngb for binaries, needs > 8 bodies → M4),
    (b) tidal tensor of the field applied inside LogH/SDAR through `ext_accel`, (c) resolution criterion
@@ -174,7 +174,7 @@ Tests: head-on star collision, TDE on parabolic orbit, BH binary to ISCO with re
    that the min-reduction and neighbour lists are bit-identical to O(N²) (cell bound on ff/fb/jerk
    and on r < r_ngb_max), used above a set-size threshold at the top levels.
 5. Subsystem cost: true device batching of LogH/SDAR for many small subsystems, or keep host threads
-   if faster on raven (72 cores/node); BIFROST's binary fraction is nearly free — ours is not yet.
+   if faster on raven (72 cores/node); the published timings (Rantala et al. 2023, Fig. 7) show the binary fraction nearly free — ours is not yet.
 6. MPI: node-local shared-memory window for the particle copy (FC-III), fused allgathers per call,
    then multi-node scaling to ~40 N/1e6 GPUs.
 
@@ -190,7 +190,7 @@ above a set-size threshold; optional Barnes randomisation of the tree frame. Gat
 - Every step: host ctest + GPU ctest on raven green; new test fails on the old code.
 - M1 gate: seed A/B table (3 seeds) with late |dE/E| ≤ f8676d6.
 - M2 onwards: the paper-suite table (|dE/E| per interval and total, s/interval) re-run for every
-  default change; no row may get worse in energy; speed rows compared to BIFROST Fig 7.
+  default change; no row may get worse in energy; speed rows compared to Rantala et al. 2023 Fig 7.
 - Long runs: Fig 9 with BHs to 5 Myr (target ≤ 3e-7, eta/2 ≤ 5e-9), Fig 11 50 % binaries
   (≤ 6e-7), core collapse (~3e-4).
 
@@ -213,7 +213,7 @@ Only the items below are adopted; everything else in those documents is referenc
 - C: 1e7 through core collapse (needs FMM + multi-node).
 
 ## Standing rules (added today)
-- Speed = sustained production speed (Myr/day over long runs), first-interval timings only as BIFROST footnote.
+- Speed = sustained production speed (Myr/day over long runs), first-interval timings only as a footnote against Rantala et al. 2023, Fig. 7.
 - Energy rule unchanged (3 seeds equal or better); at the 1e-11 noise floor judge by distribution over >=5 seeds.
 - GPU busy fraction (nsys) and the 1-16-node scaling curve at 1e6 are standing metrics next to s/step and |dE/E|.
 - Results must become rank-count independent (SCALING_DESIGN §6); new parallel stages sum in canonical order.
@@ -240,7 +240,7 @@ Only the items below are adopted; everything else in those documents is referenc
    P3 TaskContext, S||F and component concurrency -> P4 owner-computes tasks across ranks, NCCL joins, node windows.
    GPU-idle remedies from the review: event polling instead of fences, LPT order of LogH (REVIEW #6), few-sink kernel
    shape (REVIEW #7, 3 seeds), parallel GBS columns for stragglers (REVIEW #10).
-4. Validation ladder (HARD_PROBLEMS §6.2): equal-mass collapse 16-32k; mass-spectrum collapse; BIFROST §5.6;
+4. Validation ladder (HARD_PROBLEMS §6.2): equal-mass collapse 16-32k; mass-spectrum collapse; Rantala et al. 2023 §5.6;
    Rizzuto-type; DRAGON-II-like; Fig 9 to BH collapse; 1e6 flagship A.
    4b. Head-to-head with PeTar (user, 2026-10-12; github.com/lwang-astro/PeTar, Wang et al. 2020: P3T tree + SDAR +
    slow-down, galpy tidal field, the closest public code in scope). Same ICs written for both (cpp-nbody snapshot ->
@@ -249,13 +249,13 @@ Only the items below are adopted; everything else in those documents is referenc
    and the physics (Lagrangian radii, core collapse time, escaper rate, binary census) on seed ensembles.
 4c. SDAR per pair inside PN subsystems (2026-10-14): keep kappa = 1 only for pairs with a PN member, allow the
    slow-down for non-PN inner binaries of PN subsystems (needs SDAR in the PN / auxiliary-velocity LogH variant).
-   Motivation: BIFROST Fig. 11 run (200k, 50 % binaries) stalls on a 2+2 quadruple, BH binary 20.7 + 14.1 Msun
+   Motivation: our run of the Rantala et al. 2023 Fig. 11 setup (200k, 50 % binaries) stalls on a 2+2 quadruple, BH binary 20.7 + 14.1 Msun
    (a = 58 AU) with a 0.79 + 0.105 Msun binary (a = 0.019 AU, ~1000 orbits per interval, tidal ratio ~4e-12) bound
    to it at 0.003 pc: the whole subsystem has kappa = 1 (FROST-CLUSTERS I App. A2), LogH hits its step limit, steps
    take > 3 min. Check FC-I's reason for kappa = 1 per subsystem first; failing-first test built from this quadruple.
    Status 701b5a7: implemented behind NBODY_SDAR_PN=1 (default off). FC-I gives no reason for kappa = 1 ("in this
    study we do not use the slow-down for PN subsystems"). quad22_sdar passes (0.44 s vs no step in 120 s). Open: 200k
-   A/B from a restart of the fixed-IC Fig. 11 runs (bifrost-fixed-2026-10-14) at a PN-subsystem stall, then default.
+   A/B from a restart of the fixed-IC Fig. 11 runs of 2026-10-14 at a PN-subsystem stall, then default.
 5. Physics for A/B: multiplicity ICs (Moe & Di Stefano / Offner, triples, quadruples), spin-dependent recoil
    (Zlochower-Lousto), runtime SSE upgrade (M6), MSTAR for >8 bodies (M4), BSE/SEVN.
 6. Accuracy study for the far field (experiment I-1; statistical equivalence on ensembles) before M8 FMM.
@@ -372,7 +372,7 @@ W4 Honest PN books: conservative 1-3PN via pn_conserved_energy from states, 2.5/
 W5 Secular / C20 sec-inner paths: converge the s1340 (2.2e-7) / s1025 (2e-8) tolerance dependence; secular-GW book
    with convergence ctest.
 W6 Error-injection ctest for every booking path (E, P, L).
-W7 3-seed 200k A/B of the default changes, then BIFROST long-term set with honest books: Fig 9/10/11 (5 Myr),
+W7 3-seed 200k A/B of the default changes, then the long-term set of Rantala et al. 2023 with honest books: Fig 9/10/11 (5 Myr),
    Fig 8 (35 Myr), core collapse (4 Myr); quote |dE/E| only after W1-W6.
 W8 (research, parallel) ADM-Hamiltonian PN (to 3PN) + Gauss-IRK for PN binaries, RR as in-collocation force (A) vs
    symmetric RR-kick split (B), vs LogH+GBS; prototype only, verdict decides a production path.

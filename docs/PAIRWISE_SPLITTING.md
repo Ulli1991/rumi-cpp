@@ -50,7 +50,7 @@ of fast **pairs**, not with N_F². The top level still evaluates all slow pairs 
 Open points (literature check needed before coding):
 - HOLD (Pelupessy, Jänes & Portegies Zwart 2012, New Astron. 17, 711) is the published pairwise splitting, but
   second order (leapfrog); Jänes et al. 2014 compare HOLD, HHS and connected components (CC) and report trade-offs.
-  Why FROST/BIFROST chose particle-based HHS is to be checked.
+  Why FROST and Rantala et al. 2023 chose particle-based HHS is to be checked.
 - Error constants: the recursion makes A only approximately integrated; whether the effective order stays four
   with pair-based sets has to be measured (Kepler / planet floor tests, then the 200k energy rule on 3 seeds).
 - Pair classification needs the pair steps of all pairs touching the fast set (an O(N_F x N) pass, as the

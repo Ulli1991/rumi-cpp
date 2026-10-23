@@ -83,7 +83,7 @@ Later the same night:
   7.3 s vs 5.2 s): ~4300 calls per step each with inter-node allgathers. Next: one exchange per HHS level
   or node-local distribution.
 - Long runs on 1 node: 200k no binaries 1.2 Myr, |dE/E| ~1e-9 flat, dP 2e-16, dL 4e-15 (2.2 s/step);
-  10 % binaries 0.15 Myr, 1.1e-9 (BIFROST Fig. 9 with BHs: 3e-7 at 5 Myr).
+  10 % binaries 0.15 Myr, 1.1e-9 (Rantala et al. 2023 Fig. 9 with BHs: 3e-7 at 5 Myr).
 
 Tree check (65k Plummer, softened, 10 steps, 2 MI300A): direct FSI |dE/E| 2.6e-10 / 1.9e-11 / 1.3e-12 at
 eta 0.2 / 0.1 / 0.05 (order 3.8-3.9), 2.8 s/step. Tree (FSI with tree gradient term, not KDK) sits on its
@@ -116,7 +116,7 @@ Open, found on the way:
    intra-subsystem pairs only in the MPI version; a per-K-step state hash across ranks that stops
    the run on divergence.
 5. Deviations from the papers that need a decision before changing (A/B first): LogH as DKD with
-   explicit kicks (BIFROST Eqs. 31-33, KETJU), GBS details (MSTAR), stale data in the step criteria,
+   explicit kicks (Rantala et al. 2023 Eqs. 31-33, KETJU), GBS details (MSTAR), stale data in the step criteria,
    MSTAR not wired in.
 6. MPI speed, measure first with the step profiler: fuse accelerations + time steps into one
    allgather, NCCL/RCCL inside a node, MPI-4 persistent collectives, SERIAL_N2_GPU per machine.
@@ -143,8 +143,8 @@ Open, found on the way:
    exactly Newtonian far field: compact (spline/Wendland) softening or none, decided by the user.
 
 Full audit and review: `jax-hydro/research_notes/Rantala integrators/` (rantala_spec.md,
-cpp_nbody_code_review.md; local, not in a repo). The README's FROST and BIFROST DOIs are wrong:
-FROST is 10.1093/mnras/stab057, BIFROST 10.1093/mnras/stad1360; the HHS-FSI is FROST Algorithm 3.
+cpp_nbody_code_review.md; local, not in a repo). The README's FROST DOI is wrong:
+FROST is 10.1093/mnras/stab057 (the Rantala et al. 2023 link is fixed to 10.1093/mnras/stad1360); the HHS-FSI is FROST Algorithm 3.
 
 After cpp-nbody: the standalone Python/JAX/Pallas port (`~/jax-nbody/DESIGN.md`), measured against
 this code.
@@ -173,7 +173,7 @@ State when the viper session died (2026-10-10 02:44, hardware failure; apu/apude
 - Pending user decisions: dense-core floor (keep digging with single-binary reference tests, or park: findings in the
   dense-core section above); the two agreed speed items: wire the spline `Softening` into the kernels, CPU path,
   diagnostics and FMM, and build the FMM interaction lists on the GPU.
-- Later: full 5 Myr BIFROST Fig. 9 run with binaries; spin evolution (§3.9) exists but is never called; MSTAR for groups
+- Later: full 5 Myr Rantala et al. 2023 Fig. 9 run with binaries; spin evolution (§3.9) exists but is never called; MSTAR for groups
   of more than 8 bodies; far field item 7 above.
 
 On raven:

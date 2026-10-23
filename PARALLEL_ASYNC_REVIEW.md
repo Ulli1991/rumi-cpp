@@ -82,7 +82,7 @@ One call of `hhs_fsi_recursive` on a set P = S ∪ F (`integrator.cpp:2290-2440`
 ```
 
 H_S = T_S + V_SS and H_F = T_F + V_FF share no coordinates (V_SF is "held" and applied only in the kicks; Pelupessy,
-Jänes & Portegies Zwart 2012, §2.1, Eqs. 5-6 [1205.5668]; BIFROST §2.2: inter-level interactions "only include
+Jänes & Portegies Zwart 2012, §2.1, Eqs. 5-6 [1205.5668]; Rantala et al. 2023 §2.2: inter-level interactions "only include
 accelerations from faster hierarchy levels" and the scheme is "manifestly momentum-conserving" [2210.02472]). So steps
 2 and 3 (and 5 and 6) can execute in any order or at the same time, with *identical* floating-point results, as long
 as neither touches shared state. With HHS_CC (Jänes, Pelupessy & Portegies Zwart 2014, Eq. 21,
@@ -188,7 +188,7 @@ because the iteration does not converge.
   slices must be cut in physical time to land on the parent step; PN 2.5/3.5 dissipation spoils integrability; strongly
   interacting triples are chaotic and excluded. **Only worth it if a single subsystem is the critical path** of a level
   (the F3 "LogH retry stall" class of `AUDIT_2026-10.md`); there are thousands of independent subsystems, so parallelism
-  *across* subsystems is abundant and comes first (BIFROST §3.3: "even a large collection of subsystems can be
+  *across* subsystems is abundant and comes first (Rantala et al. 2023 §3.3: "even a large collection of subsystems can be
   simultaneously integrated in parallel").
 - **Cheaper alternative for a straggler: parallel extrapolation.** In GBS the substep sequences n_1, n_2, ..., n_k of one
   extrapolation are independent and can run on k threads (parallelism across the method). Ketcheson & bin Waheed 2014
@@ -247,7 +247,7 @@ implementation "does not scale well due to load-balancing issues"), which batchi
 | **GADGET-4** (Springel+2021 [2010.03567]) | hierarchical (HHS) integration; multi-bin balancing on a Peano-Hilbert curve; algorithm switch for thin bins | hierarchical cost K = N_0 + 3Σ2^(k−1)N_k vs one-sided (§4.2); PM skipped in thin bins (§4.3); FMM with thin bins "more or less forces" hierarchical integration (§4.4); balance within ~18 % in all three categories (Fig. 30); refuses timing-based balancing because it breaks binary reproducibility (§6.1) | count-based (not timing-based) switches keep results reproducible; relevant for our FMM plan |
 | **NBODY6++GPU** (Wang+2015 [1504.03687]) | regular force on GPU, irregular force + KS on CPU (AVX + OpenMP) | active-set selection as costly as the irregular force until a sorted time-step list (~5x faster; still ~7 % at 1e6, §3.3.1, §4.4); MPI + data movement ~half the time at 16 nodes; KS regularisation "can be inefficient" to parallelise with MPI, compute/comm ratio < 100 (§4.3, Table 2, §6) | keep few-body work in shared memory; audit O(N) work per call |
 | **PeTar** (Wang+2020 [2006.16560]) | isolated short-range clusters integrated in parallel on OpenMP threads; tree on MPI+GPU | load imbalance from big clusters and stable hierarchies: "the benefit of parallel computing is lost" (§8); flattens beyond ~160 cores at 1e5 (§7.2) | cost-ordered scheduling; split the largest cluster internally |
-| **FROST / BIFROST** (2011.14984 §5.2, §6.3; 2210.02472 §3.4, §4.2) | one rank per GPU; MPI-CPU loops when N is too small for GPUs, serial CPU below a few hundred; neighbour search per level on serial CPU, MPI-CPU or CUDA by count | scaling stalls at N_GPU ≈ 4(N/1e5) (FROST Eq. 55); 1e5 inefficient beyond 4 GPUs, 1e6 to 48 (BIFROST Fig. 6) | our 49 % at 4 GPUs (200k) is on that curve; the reference code itself uses the CPU for small levels |
+| **FROST; Rantala et al. 2023** (2011.14984 §5.2, §6.3; 2210.02472 §3.4, §4.2) | one rank per GPU; MPI-CPU loops when N is too small for GPUs, serial CPU below a few hundred; neighbour search per level on serial CPU, MPI-CPU or CUDA by count | scaling stalls at N_GPU ≈ 4(N/1e5) (FROST Eq. 55); 1e5 inefficient beyond 4 GPUs, 1e6 to 48 (Rantala et al. 2023 Fig. 6) | our 49 % at 4 GPUs (200k) is on that curve; the reference code itself uses the CPU for small levels |
 
 **Kokkos options.** `Kokkos::Experimental::Graph` maps to CUDA/HIP/SYCL graphs; topology is fixed after instantiation;
 no documented conditional nodes or node-parameter updates (Kokkos Programming Guide, "Graphs"). `partition_space`
@@ -346,8 +346,8 @@ GPU work (idea #3); GPU-batch only binned 2-body cases, and only if CPU GBS beco
 
 - **MPI-3 shared-memory windows** (Hoefler+2013, Computing 95, 1121, DOI 10.1007/s00607-013-0324-2
   [Hoefler2013_MPI+MPI]): stencil communication 30-60 % lower than send/recv (Fig. 6a); up to 8 % compute loss from
-  NUMA/false sharing unless `alloc_shared_noncontig` (Fig. 6b). FROST-CLUSTERS III (2601.07917 §2.1.2) states BIFROST
-  uses node-local shared windows so ranks "access the same single copy of the particle ensemble", with no numbers. For
+  NUMA/false sharing unless `alloc_shared_noncontig` (Fig. 6b). FROST-CLUSTERS III (2601.07917 §2.1.2) states that the
+  Rantala et al. code uses node-local shared windows so ranks "access the same single copy of the particle ensemble", with no numbers. For
   us: host-side tables (subsystem results when subsystems are distributed, idea #5) can go through a node window: each
   rank writes its slot, one barrier, everyone reads. GPU-resident arrays need IPC instead.
 - **CUDA/HIP IPC over NVLink** (raven: 4x A100-SXM4, all pairs NVLink3 ~100 GB/s per direction, MPCDF docs). Li+2019
@@ -542,7 +542,7 @@ host on every scalar).
 
 ### #2 Host-resident deep subtrees, task-parallel over components (largest gain at deep levels)
 
-*Literature:* FROST §5.2 (serial CPU code below a few hundred particles); BIFROST §3.4 (neighbour search per level on
+*Literature:* FROST §5.2 (serial CPU code below a few hundred particles); Rantala et al. 2023 §3.4 (neighbour search per level on
 CPU or GPU by count); ChaNGa-GPU (CPU below 250-500 targets); NBODY6++GPU and PeTar (few-body work on CPU threads);
 StarPU (device choice by cost model); GROMACS Fig. 7 (GPU kernels 5x less efficient than CPU at small inputs);
 Wahlgren+2025 (APU CPU latency advantage). Audit row 14: our current `SERIAL_N2_CPU` path is +38 % because it copies
@@ -728,7 +728,7 @@ IJNME 70, 291 (numbers UNVERIFIED) · Vouga+2009, arXiv 0907.0706 · Chandy & Mi
 Luding 2004, JCP 193, 306, arXiv physics/0302002 · Tang, Perumalla, Fujimoto, Karimabadi+ 2005, PADS
 [tang2005_pads_optimistic_physical_reverse] · Pelupessy, Jänes & Portegies Zwart 2012, New Astron. 17, 711, arXiv
 1205.5668 · Jänes, Pelupessy & Portegies Zwart 2014, A&A 570, A20, arXiv 1407.7105 · Rantala, Naab & Springel 2021
-(FROST), MNRAS 502, 5546, arXiv 2011.14984 · Rantala+2023 (BIFROST), MNRAS, arXiv 2210.02472 · Goodman, Heggie & Hut
+(FROST), MNRAS 502, 5546, arXiv 2011.14984 · Rantala+2023, MNRAS 522, 5180, arXiv 2210.02472 · Goodman, Heggie & Hut
 1993, ApJ 415, 715.
 
 **Runtimes and codes.** Kale & Krishnan 1993, OOPSLA · Acun+2014, SC14, DOI 10.1109/SC.2014.58 · Jetley+2008, IPDPS ·

@@ -88,7 +88,7 @@ The recursion on F repeats this with pivot τ/2. At the deepest levels, F holds 
 
 **Why direct collisional codes stop at a few hundred GPUs:**
 - **FROST §6.3:** scaling stalls at N_GPU^max ≈ 4 N/1e5, "as the particle number per GPU decreases and becomes smaller than the number of concurrent threads". Verified in the LaTeX, l.824-832.
-- **BIFROST §4:** scaling good to ≈ 40 N/1e6. 1e5 stalls at ~8 GPUs, 1e6 is "not ideal" beyond 48, 5e6 tested to 128 (LaTeX l.797-816). BIFROST's cost model is T ≈ T_N² N² + T_bin f_bin N (l.802-810). Their replicated, sink-sliced scatter-compute-gather is what our `mpi_comm.h` copies.
+- **Rantala et al. 2023 §4:** scaling good to ≈ 40 N/1e6. 1e5 stalls at ~8 GPUs, 1e6 is "not ideal" beyond 48, 5e6 tested to 128 (LaTeX l.797-816). Their cost model is T ≈ T_N² N² + T_bin f_bin N (l.802-810). Their replicated, sink-sliced scatter-compute-gather is what our `mpi_comm.h` copies.
 - **NBODY6++GPU (1504.03687 §4, via HARD_PROBLEMS §2.6):** saturates at 8–16 nodes, with MPI and data movement about half the time at 16 nodes. The KS part has a compute/communication ratio < 100.
 - **NbodyCP (2511.06181):** "near ideal" short tests to 16M stars on 16 raven nodes (via HARD_PROBLEMS update). The PDF text was not extractable, so mechanism and numbers are UNVERIFIED. It is a neighbour-scheme code, where the rarely updated regular force is the bulk.
 - **PeTar (2006.16560, HTML §6.3, §6.5, §7.2, read):**
@@ -96,11 +96,11 @@ The recursion on F repeats this with pivot τ/2. At the deepest levels, F holds 
   - A cluster spanning MPI processes gets "one MPI process … chosen to be the host for the cluster and others send particle data to it" (owner-computes).
   - Clusters run on OpenMP inside each process.
   - Scaling flattens at ~160 cores at 1e5 and ~640 at 1e6.
-- **FC-III (2601.07917, LaTeX l.158):** BIFROST uses "node-local MPI shared memory windows which enable multiple MPI ranks to access the same single copy of the ensemble on a shared memory compute node, reducing the volume of the network communication and the number of messages".
+- **FC-III (2601.07917, LaTeX l.158):** the Rantala et al. code uses "node-local MPI shared memory windows which enable multiple MPI ranks to access the same single copy of the ensemble on a shared memory compute node, reducing the volume of the network communication and the number of messages".
 - **FDPS (1601.03138), Taichi (2012.02207, 2205.12289):** only abstracts were readable. Taichi is OpenMP + AVX with HHS + FMM. METHODS_SURVEY §I reports 100× over direct at 1e6 at ε = 1e-7, and HHS-FSI + AR-chain in 2205.12289. Details of their level parallelisation: UNVERIFIED.
 - **Pelupessy+2012 / Jänes+2014 (via METHODS_SURVEY §A.3):** CC splitting is about 2× faster in binary-rich systems and stays flat through core collapse.
 
-The common pattern: everyone parallelises the O(N²) far part well, and the few-body/deep part is either serial (NB6++ KS) or parallel over independent clusters (PeTar, BIFROST LogH). Our design takes the second road and extends it to whole HHS subtrees.
+The common pattern: everyone parallelises the O(N²) far part well, and the few-body/deep part is either serial (NB6++ KS) or parallel over independent clusters (PeTar, Rantala et al. 2023 LogH). Our design takes the second road and extends it to whole HHS subtrees.
 
 ---
 
@@ -459,7 +459,7 @@ All of design 1 except B6. Intra-rank and inter-rank task execution (given the c
 T(n) = s_chain + s_task / min(n, n_task) + p / min(n, n_max) + c(n) − overlap
 
 **Parameters (all from the measured fits plus the estimates of §2):**
-- **200k** (p = 14, n_max = 8 from BIFROST's 40 N/1e6):
+- **200k** (p = 14, n_max = 8 from the 40 N/1e6 of Rantala et al. 2023):
   - s after Phase 0 = 6.8;
   - after (1): s = 4.1;
   - after (2): s_chain = 1.7, s_task = 2.0, n_task = 8;
@@ -470,7 +470,7 @@ T(n) = s_chain + s_task / min(n, n_task) + p / min(n, n_max) + c(n) − overlap
   - (2): s_chain = 2.0, s_task = 3.3, n_task = 16;
   - c = 0.4–0.6 s (NCCL; host staging about 2× more);
   - collective count ~600 per step, bandwidth term per full-N gather ~1 ms inter-node.
-- **1e7** (p = 4500 s, range 3000–6700 from N² × BIFROST's sub-N² density trend; n_max = 400):
+- **1e7** (p = 4500 s, range 3000–6700 from N² × the sub-N² density trend of Rantala et al. 2023; n_max = 400):
   - Phase 0 s ≈ 40 s (the unsplit energy check alone would be ~470 s);
   - (1): s = 15;
   - (2): s_chain = 5, s_task = 10, n_task = 64;
@@ -600,7 +600,7 @@ Error bars:
 ## 10. Literature notes and verification status
 
 - **FROST §6.3** (LaTeX read): N_GPU^max ≈ 4 N/1e5. One MPI task per GPU, scatter-compute-gather. MPI-parallel CPU loops when N is small; serial CPU below a few hundred particles.
-- **BIFROST §4** (LaTeX read): 40 N/1e6; 1e5 stalls at ~8 GPUs; 1e6 to 48; 5e6 to 128 on Raven A100; T = T_N² N² + T_bin f_bin N. Neighbour search on serial CPU, MPI-CPU or GPU by level size (l.330). Many small LogH systems integrated in parallel (l.440); whether on CPU or GPU is unstated.
+- **Rantala et al. 2023 §4** (LaTeX read): 40 N/1e6; 1e5 stalls at ~8 GPUs; 1e6 to 48; 5e6 to 128 on Raven A100; T = T_N² N² + T_bin f_bin N. Neighbour search on serial CPU, MPI-CPU or GPU by level size (l.330). Many small LogH systems integrated in parallel (l.440); whether on CPU or GPU is unstated.
 - **FC-III** (LaTeX l.158): node-local MPI shared-memory windows for a single ensemble copy per node.
 - **PeTar** (arXiv HTML §6.3/6.5/7.2): independent clusters with a host process per cluster; OpenMP inside each MPI process; FDPS load balance; flattening at 160/640 cores (1e5/1e6).
 - **FDPS 1601.03138:** UNVERIFIED (PDF unreadable here). Domain decomposition does not apply to our replicated design.

@@ -17,7 +17,7 @@ that is about 24 N² per step.
 - At N = 1e7 this is 2.4e15 pair evaluations per 1e-3 Myr step.
 - At about 1.5e11 FP64 pairs/s per A100 (UNVERIFIED practical rate), that is 1.6e4 GPU-s per step, or about 185
   GPU-days per Myr.
-- FROST/BIFROST scale to N_GPU ≈ 40 N/1e6 (BIFROST 2210.02472 §4, VERIFIED), so about 400 GPUs at 1e7. Even with
+- FROST and Rantala et al. 2023 scale to N_GPU ≈ 40 N/1e6 (2210.02472 §4, VERIFIED), so about 400 GPUs at 1e7. Even with
   ideal scaling that gives about 2 Myr/day.
 - Core collapse of a 1e7 cluster (BH subsystem) takes a few hundred Myr to about 1 Gyr. So pure O(N²) direct
   summation needs about a year of wall time per run.
@@ -252,7 +252,7 @@ rotation) and core-collapse times as an external check (§6-#5).
 
 | Method | What it is | Accuracy evidence | Fit | Verdict |
 |---|---|---|---|---|
-| HHS / HOLD / CC (Pelupessy, Jänes & Portegies Zwart 2012, 1205.5668; Jänes+ 2014, 1407.7105; HUAYNO in AMUSE) | Recursive Hamiltonian split by particle (HHS), by pair (HOLD) or by connected component (CC) | Momentum conserving; "excellent energy conservation" with symmetrised steps (VERIFIED abstract); 2nd order | FROST/BIFROST is the 4th-order FSI version of HHS. HOLD = pairwise split; CC = our CC task roots | **Test HOLD inside FSI** (§6-#1); CC already used |
+| HHS / HOLD / CC (Pelupessy, Jänes & Portegies Zwart 2012, 1205.5668; Jänes+ 2014, 1407.7105; HUAYNO in AMUSE) | Recursive Hamiltonian split by particle (HHS), by pair (HOLD) or by connected component (CC) | Momentum conserving; "excellent energy conservation" with symmetrised steps (VERIFIED abstract); 2nd order | FROST and Rantala et al. 2023 use the 4th-order FSI version of HHS. HOLD = pairwise split; CC = our CC task roots | **Test HOLD inside FSI** (§6-#1); CC already used |
 | Saha & Tremaine 1994 (AJ 108, 1962) | Symplectic individual steps for planetary systems (Wisdom-Holman base) | Needs a dominant central mass | Not for clusters | Reject |
 | Farr & Bertschinger 2007 (astro-ph/0611416, UNVERIFIED id) | Tree-structured adaptive symplectic splitting, Kepler sub-solves | Small-N tests | Idea already in HHS + Kepler drifts | Reject (nothing new) |
 | Hernandez & Bertschinger 2015 (1503.02728, local) | Pairwise Kepler-drift splitting, symplectic, time-reversible | Few-body | See §3 | Reject at large N |
@@ -260,11 +260,11 @@ rotation) and core-collapse times as an external check (§6-#5).
 | Shared step vs block | — | — | Block/HHS wins at any N with a wide range of dynamical times | Keep HHS |
 | Async/event-driven, task-based | See `PARALLEL_ASYNC_REVIEW.md` §3-4 | — | Conservative concurrency of independent components is the only safe form | Already planned (SCALING_DESIGN) |
 | Parareal / PFASST / MGRIT | Rejected before (chaos) | No new evidence found 2026-10-18 | — | Stays rejected |
-| PN at scale: KETJU (Rantala+ 2017, 1611.07614; Mannerkoski+ 2023, 2306.04963, UNVERIFIED id), BIFROST | PN only inside regularised regions; tree/GADGET outside | KETJU runs about 1e7-1e8 collisionless particles with a few PN regions | Our PN lives in subsystems, so cost scales with the number of compact pairs, not N | Nothing to change |
+| PN at scale: KETJU (Rantala+ 2017, 1611.07614; Mannerkoski+ 2023, 2306.04963, UNVERIFIED id), Rantala et al. 2023 | PN only inside regularised regions; tree/GADGET outside | KETJU runs about 1e7-1e8 collisionless particles with a few PN regions | Our PN lives in subsystems, so cost scales with the number of compact pairs, not N | Nothing to change |
 
 **Point for large N.** Taichi (2205.12289) is prior art for "HHS-FSI + FMM + regularisation", on CPUs at 1.3e6.
 Nothing in the literature combines HHS-FSI, a pairwise split, FMM and GPUs. That combination is the novel item, and
-it matches the "not a BIFROST clone" goal.
+the goal of this code.
 
 ---
 
@@ -272,7 +272,7 @@ it matches the "not a BIFROST clone" goal.
 
 At 1e7 with 10-50% binaries there are 1e6-5e6 binaries.
 
-**BIFROST evidence (2210.02472 §4, VERIFIED):**
+**Rantala et al. 2023 evidence (2210.02472 §4, VERIFIED):**
 - the binary fraction has "negligible effect" on wall time at 1e6 and 5e6, even with 2.5e6 binaries;
 - the cost is dominated by the O(N²) loops, because most binaries are secular or Kepler;
 - the large-N risk is stragglers (deep hierarchies), not the count (PeTar §8; our hand-over 2026-10-12).
@@ -299,16 +299,16 @@ At 1e7 with 10-50% binaries there are 1e6-5e6 binaries.
 | DRAGON (1602.00759) | NBODY6++GPU | 1e6 × 4 runs, 16 K20m each | 12 Gyr in about 8600 h; 2000-4000 h per t_rh |
 | DRAGON-II (2307.04805-07) | NBODY6++GPU | 1e6 (2 runs), up to 33% binaries | 2.2 M core-h for 19 runs over about 2 yr; 1e6 runs reached about 200 Myr |
 | PeTar (2006.16560) | P3T + SDAR; MPI + OpenMP (+ GPU tree) | 1e7 on 960 XC50 cores | 1106 / 1344 s per N-body time unit; about 2 Myr/day for a 6e6 M_sun cluster (our conversion) |
-| FROST/BIFROST (2011.14984, 2210.02472) | HHS-FSI, direct O(N²) | 5e6 on 128 A100 (tested); 2.5e6 binaries | Scales to N_GPU ≈ 40 N/1e6; 1.5 Myr/day at 1e6 on 4 A100 (BIFROST Fig. 7; memory note) |
+| FROST; Rantala et al. 2023 (2011.14984, 2210.02472) | HHS-FSI, direct O(N²) | 5e6 on 128 A100 (tested); 2.5e6 binaries | Scales to N_GPU ≈ 40 N/1e6; 1.5 Myr/day at 1e6 on 4 A100 (Rantala et al. 2023 Fig. 7; memory note) |
 | HiGPUs (1207.2367) | 6th-order Hermite, block steps, direct, no regularisation | 8e6 on 256 GPUs (CINECA) | "Few crossing times" only |
 | phi-GPU (1312.1789; Berczik+) | 4/6/8th-order Hermite, block steps | A few 1e6; large GPU clusters | About 50% of K20 peak in production |
 | Bonsai (1412.0659) | GPU tree, collisionless | 2.4e11 on 18,600 GPUs | 24.77 Pflops |
 | FDPS (1601.03138) | Tree framework | 1e9 on the full K computer | 30 ms/step minimum at 1e7 (latency floor) |
 | CMC (2106.02643) | Hénon Monte Carlo | 1e8 to core collapse | Wall time not extracted (UNVERIFIED; reported as days to weeks) |
-| FROST-CLUSTERS I-III (2403.10602, 2503.21879, 2506.04330, 2601.07917) | BIFROST + SEVN | Up to 2.4e6 (hierarchical assembly); 1e6 isolated | No wall times reported (checked in source) |
+| FROST-CLUSTERS I-III (2403.10602, 2503.21879, 2506.04330, 2601.07917) | Rantala et al. 2023 code + SEVN | Up to 2.4e6 (hierarchical assembly); 1e6 isolated | No wall times reported (checked in source) |
 
 **Lessons for multi-node.**
-1. **Direct O(N²) scales in GPU count with N** (BIFROST: 40 GPUs per 1e6). At 1e7 the problem is the cost per GPU,
+1. **Direct O(N²) scales in GPU count with N** (Rantala et al. 2023: 40 GPUs per 1e6). At 1e7 the problem is the cost per GPU,
    not the scaling.
 2. **NBODY6++GPU stops at about 16 GPUs at 1e6**, because its irregular part sits on the CPU and must be
    communicated. Any neighbour/near-field part we add must stay on the device and local in its domain.
@@ -411,7 +411,7 @@ cpp-nbody to core collapse. Pass: t_cc within the N-body seed scatter.
 |---|---|
 | 2001.03180 | MSTAR |
 | 2011.14984 | FROST |
-| 2210.02472 | BIFROST |
+| 2210.02472 | Rantala et al. 2023 |
 | 2403.10602 | FROST-CLUSTERS I |
 | 2503.21879, 2506.04330 | FROST-CLUSTERS II |
 | 2601.07917 | FROST-CLUSTERS III |

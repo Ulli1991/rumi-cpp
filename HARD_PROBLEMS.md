@@ -25,7 +25,7 @@ This is research and writing only; no code was changed.
 - Section numbers are those of the arXiv LaTeX sources.
 - **UNVERIFIED** marks a number we could not find in the source text.
 - "Our estimate" marks arithmetic of ours, not a paper's.
-- Abbreviations: BIFROST = Rantala+2023 (2210.02472); FROST = Rantala+2021 (2011.14984); FC-I/II/III = FROST-CLUSTERS I (2403.10602), II (2506.04330), III (2601.07917); NB6++ = NBODY6++GPU.
+- Abbreviations: R23 = Rantala+2023 (2210.02472); FROST = Rantala+2021 (2011.14984); FC-I/II/III = FROST-CLUSTERS I (2403.10602), II (2506.04330), III (2601.07917); NB6++ = NBODY6++GPU.
 
 ---
 
@@ -41,7 +41,7 @@ This is research and writing only; no code was changed.
    *What nobody has done:*
    - a direct N-body cluster of 1e7 stars;
    - 1e6 stars with a realistic (≈ 100 %) multiplicity through core collapse and into the post-collapse phase;
-   - any of this at BIFROST-level accuracy.
+   - any of this at the accuracy of regularised direct summation (R23).
 
 2. **The problem's cost does not depend on the cluster's density.** In pure gravity, the work per crossing time depends only on N. The number of crossing times to core collapse is (t_cc / t_rh) × 0.138 N / ln(γN), which also depends only on N.
 
@@ -57,10 +57,10 @@ This is research and writing only; no code was changed.
    **1e7 is out of reach without a far-field approximation (M8).** FROST's own projection agrees: about 4 weeks per 10 Myr at 1e7.
 
 3. **Our accuracy is the expensive part, and it is not what core collapse needs.**
-   - At 1e6 our code (like BIFROST) costs about 19,000–31,000 s per N-body time unit on 4 A100.
+   - At 1e6 our code costs about 19,000–31,000 s per N-body time unit on 4 A100 (R23 Fig. 7 is in the same range).
    - NB6++ needs 1500–3000 s on 16 K20X. PeTar needs about 120 s on 960 CPU cores, with all stars in binaries.
-   - Per unit of hardware, BIFROST-class integration is roughly 10–100× more expensive than these codes.
-   - The global energy error through core collapse is set by chaotic strong encounters, about 3e-4 regardless of the time-step parameter (BIFROST §5.6).
+   - Per unit of hardware, unsoftened direct summation with regularised subsystems is roughly 10–100× more expensive than these codes.
+   - The global energy error through core collapse is set by chaotic strong encounters, about 3e-4 regardless of the time-step parameter (R23 §5.6).
    - Results are statistically valid if energy is conserved to better than about 1/10 (Portegies Zwart & Boekholt 2014).
 
    High accuracy matters where errors are systematic rather than random:
@@ -216,7 +216,7 @@ Records:
 
 **Our position.**
 - MSTAR (Rantala+2020, 2001.03180) was built for regularised SMBH regions: |dE/E| ~1e-14.
-- BIFROST §6 names nuclear clusters with 1e7–1e8 particles as the reason for a tree or FMM.
+- R23 §6 names nuclear clusters with 1e7–1e8 particles as the reason for a tree or FMM.
 - **Verdict: not a near-term target.** It is the natural long-term target once FMM (M8) and MSTAR (M4) work.
 
 ### 1.4 100 % primordial multiplicity: binaries, triples, quadruples
@@ -237,7 +237,7 @@ Records:
 - **FC-II** is the only million-body run with triples: Offner fractions, f_trip up to 0.68 for primaries above 30 M☉, Moe & Di Stefano orbits, 10 Myr.
   - It has no quadruples.
   - It has no triple stellar evolution, as the paper says explicitly.
-- **BIFROST App. A** warns that artificial multiplets from random pairing "may lead to spurious formation of high-velocity stars or artificially enhanced merger rates".
+- **R23 App. A** warns that artificial multiplets from random pairing "may lead to spurious formation of high-velocity stars or artificially enhanced merger rates".
 
 **Why it is hard:**
 - A binary of period P costs work every orbit, so short periods dominate. log P down to 0.2 means days, against a Gyr cluster lifetime.
@@ -260,7 +260,7 @@ Records:
 **Who does this:**
 - Monte Carlo codes do it routinely: CMC with Fewbody + PN.
 - DRAGON-II used only orbit-averaged Peters decay, and applied kicks largely in post-processing.
-- BIFROST and the FC papers have PN up to 3.5 in regularised subsystems, plus Zlochower–Lousto recoil.
+- R23 and the FC papers have PN up to 3.5 in regularised subsystems, plus Zlochower–Lousto recoil.
 - **A direct-N-body measurement of capture and hierarchical-merger rates at 1e6 with full in-cluster PN is open.**
 
 **von Zeipel–Lidov–Kozai (ZLK) cycles.** In a hierarchical triple, the outer body drives slow oscillations of the inner binary's eccentricity and inclination. They can push the inner binary to merger. This is the archetype of a *secular*, systematic effect that numerical errors can bias.
@@ -284,9 +284,9 @@ Cost:
 - **GRIFFIN** (Lahén+2020, 1911.05093) and **LYRA** (Gutcke+2021, 2010.07311) resolve individual massive stars, but with softened gravity: 0.1 pc in GRIFFIN.
 - **Lahén+2025** (2410.01891) is the first star-by-star galaxy model with collisional dynamics.
   - KETJU regions (radius 3ε) around every star above 3 M☉, regularised inside.
-  - Validated against BIFROST at 10³–10⁴ stars.
+  - Validated against the R23 code at 10³–10⁴ stars.
   - Softened clusters showed "practically no evolution"; regularised ones expanded 10–100×.
-- BIFROST §7 calls full dwarf galaxies a goal once a tree or FMM exists.
+- R23 §7 calls full dwarf galaxies a goal once a tree or FMM exists.
 
 **For the user (hydro background) this is the most natural bridge problem:** a collisional N-body module inside a galaxy-scale hydro code. It is a different code architecture, though: hybrid softened/regularised, not O(N²).
 
@@ -322,7 +322,7 @@ Each encounter is a chaotic few-body problem that must be integrated to the end.
 
 ### 2.3 The stochastic energy error in core collapse
 
-BIFROST §5.6 (Figs. 13–15; N = 20k, 10 % binaries, r_h = 0.5 pc, 4 Myr, central density ×30):
+R23 §5.6 (Figs. 13–15; N = 20k, 10 % binaries, r_h = 0.5 pc, 4 Myr, central density ×30):
 - The total error reaches |ΔE/E| ≈ 3e-4, the same as NBODY6 with ETAI = ETAR = 0.01.
 - A run with η = 0.025 stays below 5e-7 until 2 Myr. After that, "the stochastic error from strong encounters in the collapsing core begins to dominate".
 - "The final energy error after the core collapse is essentially independent of the chosen η while it changes the elapsed wall-clock time linearly."
@@ -352,7 +352,7 @@ Consequences:
 - secular drifts in long-lived hierarchies (ZLK cycles, PN inspirals), where errors accumulate with sign instead of randomly;
 - an energy ledger tight enough to catch bugs.
 
-That is why BIFROST-level accuracy is valuable for few-body physics. It is *not* needed for the far field (see §4.6).
+That is why regularised few-body accuracy is valuable for few-body physics. It is *not* needed for the far field (see §4.6).
 
 ### 2.5 Relaxation-time scaling: how the cost grows with N
 
@@ -373,7 +373,7 @@ That is why BIFROST-level accuracy is valuable for few-body physics. It is *not*
 ### 2.6 GPU scaling limits
 
 **What the literature measures:**
-- **BIFROST §4 (Fig. 6):** good strong scaling up to N_GPU ≈ 40 N/1e6.
+- **R23 §4 (Fig. 6):** good strong scaling up to N_GPU ≈ 40 N/1e6.
   - 1e5 stalls at ~8 GPUs, already inefficient beyond 4.
   - 1e6 scales to 48 GPUs, "not ideal" with more.
   - 5e6 scales to 128, the largest tested.
@@ -385,7 +385,7 @@ That is why BIFROST-level accuracy is valuable for few-body physics. It is *not*
 - The far field becomes a smaller fraction of the work as N shrinks.
 
 **Our status:**
-- Our MPI design replicates all particles on every rank (`core/mpi_comm.h:53`), as BIFROST does.
+- Our MPI design replicates all particles on every rank (`core/mpi_comm.h:53`), as in R23.
 - 2 nodes gave no speed-up at 200k, because the small-set path and the subsystems are replicated (`VIPER_NOTES.md:70`).
 - We have no multi-node measurement at 1e6.
 - FC-III added node-local MPI shared-memory windows.
@@ -405,7 +405,7 @@ That is why BIFROST-level accuracy is valuable for few-body physics. It is *not*
   - Positions are reset from the new (m, a, e), keeping the angles.
   - Binary evolution is switched off inside r_strong = 10 a during strong encounters, "to avoid spurious binary evolution effects from osculating orbital elements".
 - **Triples:** no N-body cluster code has triple stellar evolution. MSE (Hamers+2021, 2011.04513) handles arbitrary multiples semi-secularly, and uses MSTAR for its direct mode.
-- **BIFROST §6** names BSE coupling to subsystems with more than two bodies as "the main challenge".
+- **R23 §6** names BSE coupling to subsystems with more than two bodies as "the main challenge".
 
 **Hydro analogy:** sub-grid physics coupled by operator splitting. The danger is calling the sub-grid model on osculating, instantaneous orbital elements while the orbit is being perturbed. It is like evaluating a cooling function on a shock-heated cell mid-shock.
 
@@ -441,9 +441,9 @@ What a code has to get right:
 
 | Setup | N | M [M☉] | r_h [pc] | t_cr [Myr] | s per 1e-3 Myr |
 |---|---|---|---|---|---|
-| BIFROST Fig. 9, 10 % binaries, defaults | 2e5 | 8.33e4 | 3.1 | 0.282 | 12.5 |
+| R23 Fig. 9, 10 % binaries, defaults | 2e5 | 8.33e4 | 3.1 | 0.282 | 12.5 |
 | Same, c.o.m. fly-by velocity | 2e5 | 8.33e4 | 3.1 | 0.282 | 5.4 |
-| BIFROST Fig. 7 mass–size IC, 10 % binaries, first interval | 1e6 | 4.14e5 | 6.23 | 0.360 | 36 (BIFROST: 57.6) |
+| R23 Fig. 7 mass–size IC, 10 % binaries, first interval | 1e6 | 4.14e5 | 6.23 | 0.360 | 36 (R23: 57.6) |
 
 - t_cr is the code's printed (r_h³/GM)^{1/2}.
 - The 1e6 row is from the Fig. 7 reproduction (`fig7-2026-10-11/summary.md`).
@@ -451,12 +451,12 @@ What a code has to get right:
 
 **Cost per crossing time** (pure gravity is scale-free, §2.5):
 - 2e5: 0.98 h (defaults), 0.42 h (c.o.m.).
-- 1e6: 3.6 h. In N-body units this is **19,300 s per N-body time unit** (31,000 s for BIFROST's 58 s).
+- 1e6: 3.6 h. In N-body units this is **19,300 s per N-body time unit** (31,000 s for the 58 s of R23 Fig. 7).
 - 1e7: ×100 from N² at fixed hardware, i.e. 360 h per crossing time on 4 A100.
 
 **Correction factors:**
-- **Production speed.** The 1e6 number is a first interval from fresh ICs. BIFROST §4 calls such numbers "the upper limit"; encounters, multiples and mergers slow later intervals. Our 200k runs show 2–3× (memory note `production-speed-metric`). We apply **×2–3**.
-- **Growth through collapse.** Central density rises ×30 in BIFROST §5.6, and by 10³–10⁶ in deep collapse, adding levels and binary activity. This is not quantified anywhere for HHS-FSI, so it is not included below. (Our expectation is ≤ 2×, because the core holds few stars.)
+- **Production speed.** The 1e6 number is a first interval from fresh ICs. R23 §4 calls such numbers "the upper limit"; encounters, multiples and mergers slow later intervals. Our 200k runs show 2–3× (memory note `production-speed-metric`). We apply **×2–3**.
+- **Growth through collapse.** Central density rises ×30 in R23 §5.6, and by 10³–10⁶ in deep collapse, adding levels and binary activity. This is not quantified anywhere for HHS-FSI, so it is not included below. (Our expectation is ≤ 2×, because the core holds few stars.)
 
 **Number of crossing times to collapse:** t_rh/t_cr = 0.138 N/ln(γN). With γ = 0.11:
 - 2e5: 2760.
@@ -485,7 +485,7 @@ With Gürkan's 0.07–0.1 t_rh instead of 0.2, all collapse costs halve.
 **Turning the 1e6 row into a plan (our estimate):**
 - **1 node:** 0.5–1 yr at first-interval speed; 1–3 yr at production speed.
 - **10 nodes (40 A100):**
-  - BIFROST shows scaling to ~48 GPUs at 1e6, "not ideal". Assume 50–70 % efficiency, i.e. a 5–7× speed-up over 1 node.
+  - R23 shows scaling to ~48 GPUs at 1e6, "not ideal". Assume 50–70 % efficiency, i.e. a 5–7× speed-up over 1 node.
   - **About 1.5–6 months** of wall clock.
   - About 70k–170k A100-hours.
 - **Cross-check with FROST's projection** (2011.14984 §6.3): 1e6 at η = 0.4 takes ~2 weeks per Gyr on ~40 GPUs, without binaries. That is ~2 weeks for our 860 Myr case, or ~1 month at η = 0.2.
@@ -502,7 +502,7 @@ With Gürkan's 0.07–0.1 t_rh instead of 0.2, all collapse costs halve.
 
 - **Top level:** 1e-3 Myr.
 - **Field stars in a collapsed core:** central density up to ~10⁶× the initial value, so ~1000× shorter dynamical times (our estimate). That is about 10 more HHS levels.
-- **Binaries:** primordial periods from 0.25 AU (BIFROST Fig. 7 minimum) to a few days (Moe & Di Stefano log P = 0.2) are 1e2–1e5 orbits per interval, handled by Kepler, secular or SDAR.
+- **Binaries:** primordial periods from 0.25 AU (R23 Fig. 7 minimum) to a few days (Moe & Di Stefano log P = 0.2) are 1e2–1e5 orbits per interval, handled by Kepler, secular or SDAR.
 - **PN BH binaries before merger:** orbit by orbit with κ = 1, 1e6–1e9 orbits in the final Myr. This is the critical path (`AUDIT_2026-10.md` F2/F3).
 
 ### 3.4 What others report, for comparison
@@ -510,7 +510,7 @@ With Gürkan's 0.07–0.1 t_rh instead of 0.2, all collapse costs halve.
 | Code | N, binaries | Cost | Hardware | Accuracy |
 |---|---|---|---|---|
 | Ours (Oct 2026) | 1e6, 10 % | 19,300 s per N-body unit (first interval) | 4 A100 | ~6e-10 after 1 interval |
-| BIFROST Fig. 7 | 1e6, 10–100 % | 31,000 s per N-body unit (58 s per interval) | 4 A100 | η = 0.2 |
+| R23 Fig. 7 | 1e6, 10–100 % | 31,000 s per N-body unit (58 s per interval) | 4 A100 | η = 0.2 |
 | FROST §6.3 | 1e6, no binaries | ~3600 s per N-body unit | 30–40 V100 | ~1e-10 |
 | NB6++ (1504.03687 §4.2, §5) | 1e6, 0 % / 5 % | 800 s / 1500–3000 s per N-body unit | 32 / 16 K20X | not reported numerically |
 | PeTar (2006.16560 §7.2) | 1e6, 0 % / 100 % | 63 / 121 s per N-body unit | 960 CPU cores | ~1e-3 cumulative in N = 250k core collapse |
@@ -558,7 +558,7 @@ The last two rows (DRAGON and CMC) were run on the same initial model.
 - N = 1e5 with f_bin = 1 to 12 Gyr (2110.15555).
 - 1e7 only as a start-up benchmark on CPUs.
 
-### 4.3 BIFROST / FROST-CLUSTERS (Rantala+2021–2026)
+### 4.3 Rantala et al.: FROST, R23, FROST-CLUSTERS (2021–2026)
 
 **What it is:**
 - Hierarchical 4th-order forward symplectic integration (HHS-FSI), with direct O(N²) forces on every active set.
@@ -575,7 +575,7 @@ The last two rows (DRAGON and CMC) were run on the same initial model.
 **Achieved:** the only million-body runs with full PN few-body physics and realistic multiplicity, but over 10–50 Myr.
 
 **Limits:**
-- "The maximum number of simulation particles for BIFROST is approximately a few million" (BIFROST §7).
+- "The maximum number of simulation particles [...] is approximately a few million" (R23 §7).
 - No FMM yet (§6).
 
 ### 4.4 Monte Carlo codes: CMC and MOCCA (the contrast)
@@ -616,13 +616,13 @@ The last two rows (DRAGON and CMC) were run on the same initial model.
 | Approximation | Who | What it costs in accuracy |
 |---|---|---|
 | Far-field force: tree/FMM, or neighbour scheme with infrequent far updates | PeTar, Taichi, NB6++ (AC) | energy errors of ~1e-4 to 1e-3 over core collapse; statistically harmless (§2.3–2.4) |
-| Stable hierarchies frozen, secular, or slowed down | NB6 ("mergers"), BIFROST (secular), PeTar/FC (SDAR) | orbital phase; resonances (SDAR §6) |
+| Stable hierarchies frozen, secular, or slowed down | NB6 ("mergers"), R23 (secular), PeTar/FC (SDAR) | orbital phase; resonances (SDAR §6) |
 | Orbit-averaged GW decay instead of PN in the equations of motion | NB6++, DRAGON-II | GW captures and eccentric mergers missed |
 | Binary evolution switched off during strong encounters | FC-II (r_strong) | consistency over small timescales |
 | Scaled-down N, inflated capture radii | Panamarev, Baumgardt+2018 | TDE and EMRI rates need rescaling |
 | Monte Carlo relaxation | CMC, MOCCA | no geometry, no small-N cores |
 
-**Our inference.** The defensible design for a 1e6–1e7 code that is still "BIFROST-accurate" puts its accuracy where errors are systematic:
+**Our inference.** The defensible design for a 1e6–1e7 code that keeps regularised few-body accuracy puts its accuracy where errors are systematic:
 - exact, unsoftened near field;
 - regularised few-body integration with PN;
 - exact energy books.
@@ -646,11 +646,11 @@ This is a decision for the user. It loosens our standing energy rule ("no |dE/E|
 | # | Gap | Evidence | Needed for |
 |---|---|---|---|
 | G1 | **No restart from disk.** `collisional/checkpoint.{h,cpp}` holds the in-memory rollback for adaptive restarts only. `NBODY_DUMP` writes a diagnostic dump (pid, m, x, v, subsystem id) without the subsystem or SSE state, and it cannot be read back. | `main.cpp:464-484` | everything longer than one 24 h job. Must be bit-identical on resume (test: run N steps, or N/2 + restart + N/2, compare). Must include subsystem/LogH/SDAR state, RNG state, SSE state, merger tree and energy books. |
-| G2 | **No science output.** No snapshots (BIFROST uses GADGET-like HDF5, FC-I §3.1). No Lagrangian radii, density centre, core radius or central density. No binary census (a, e, E_b distribution); no escaper or collision tables beyond `merger_tree.dat` and `escaper_log.dat`. | `io/diagnostics.h` | any comparison with BIFROST Figs. 13–14 or DRAGON-II. Data volume: DRAGON-II wrote 35 TB for 19 runs. FC-I §4.7 notes that binary–single encounters last ~4e-5 Myr, below any snapshot cadence, so event logs are needed. |
+| G2 | **No science output.** No snapshots (FC-I §3.1 uses GADGET-like HDF5). No Lagrangian radii, density centre, core radius or central density. No binary census (a, e, E_b distribution); no escaper or collision tables beyond `merger_tree.dat` and `escaper_log.dat`. | `io/diagnostics.h` | any comparison with R23 Figs. 13–14 or DRAGON-II. Data volume: DRAGON-II wrote 35 TB for 19 runs. FC-I §4.7 notes that binary–single encounters last ~4e-5 Myr, below any snapshot cadence, so event logs are needed. |
 | G3 | **No external tidal field** (isolated clusters only; escapers are removed at 100 r_h). | grep of `src/` | GCs to a Hubble time (§1.6); comparison with DRAGON, DRAGON-II, Kamlah+2022 (all tidally limited). A point-mass or log-potential tidal acceleration plus the matching energy term is small work. |
-| G4 | **Multi-node scaling unproven.** Replicated particles with allgather; 2 nodes gave no gain at 200k; never measured at 1e6. FC-III added node-local shared-memory windows. | `core/mpi_comm.h:53`, `VIPER_NOTES.md:70` | 1e6 in months, not years (§3.2). Target: BIFROST's 40 N/1e6 GPUs. |
+| G4 | **Multi-node scaling unproven.** Replicated particles with allgather; 2 nodes gave no gain at 200k; never measured at 1e6. FC-III added node-local shared-memory windows. | `core/mpi_comm.h:53`, `VIPER_NOTES.md:70` | 1e6 in months, not years (§3.2). Target: 40 N/1e6 GPUs (R23 §4). |
 | G5 | **O(N²) outside the force.** Collisional time-step sums (`AUDIT` F7: the tree prunes only the min-search), gradient (cross and self), and the energy check (13 % at 1e6). | `fig7` summary; `AUDIT` F7 | 1e7, together with M8. |
-| G6 | **Production speed versus BIFROST at 1e4–1e5.** We are 3–20× slower there (Fig. 7 reproduction). The cause is subsystem overhead; SDAR is now in but off by default. | `fig7-2026-10-11/summary.md` | the validation ladder (small N, many seeds). |
+| G6 | **Production speed at 1e4–1e5.** 3–20× slower than the published timings (R23 Fig. 7 reproduction). The cause is subsystem overhead; SDAR is now in but off by default. | `fig7-2026-10-11/summary.md` | the validation ladder (small N, many seeds). |
 
 ### 5.2 Per frontier problem
 
@@ -675,13 +675,13 @@ This is a decision for the user. It loosens our standing energy rule ("no |dE/E|
 - Long term.
 
 **100 % multiplicity (§1.4)**
-- Initial conditions have binaries only (`BINARY_POP = bifrost | mass_rank`).
+- Initial conditions have binaries only (`BINARY_POP = flatq_massive | mass_rank`).
 - Needed:
   - no triples or quadruples in clusters;
   - primary-mass-dependent fractions (Offner Table 1 / FC-II Table 3);
   - Moe & Di Stefano correlated P–q–e;
   - stability-checked hierarchies (Vynatheya+2022 / Mardling–Aarseth).
-- **No binary stellar evolution at all.** Options: SEVN binary module (FC-II), BSE (NB6++, PeTar), or MSE for multiples. BIFROST §6 calls subsystem coupling "the main challenge".
+- **No binary stellar evolution at all.** Options: SEVN binary module (FC-II), BSE (NB6++, PeTar), or MSE for multiples. R23 §6 calls subsystem coupling "the main challenge".
 
 **GW captures and hierarchical mergers (§1.5)**
 - PN up to 3.5 is in the subsystems, with pairwise EIH-type coefficients for groups up to 8.
@@ -719,7 +719,7 @@ NB6++ (the standard version) and DRAGON-II lack in-equation-of-motion PN.
 
 **Flagship A (first; fits our strengths): an evolved, BH-rich 1e6 cluster with realistic low-mass multiplicity, through BH-driven core collapse into balanced evolution, with full PN BH dynamics.**
 
-- **Setup.** Start from a 1 Gyr evolved population, as in BIFROST Fig. 9.
+- **Setup.** Start from a 1 Gyr evolved population, as in R23 Fig. 9.
   - Massive stars are already gone, so binary stellar evolution matters much less: low-mass main-sequence binaries rarely interact, except the closest.
   - BHs drive the collapse (DRAGON §4.6; Breen & Heggie 2013).
   - Multiplicity follows Moe & Di Stefano for solar types: ~50 % companions, 10 % triples and quadruples.
@@ -759,13 +759,13 @@ Each rung tests the physics of the flagships, compares with published numbers, a
 
 | Rung | Run | Compare with | Tests | Our estimated cost |
 |---|---|---|---|---|
-| 0 | Existing paper suite: FROST Kepler/planets; BIFROST Figs. 8–11 | BIFROST | integrator, binaries | done or in progress (M2) |
+| 0 | Existing paper suite: FROST Kepler/planets; R23 Figs. 8–11 | R23 | integrator, binaries | done or in progress (M2) |
 | 1 | Equal-mass Plummer, N = 16k and 32k, to and past core collapse | t_cc = 15.2 ± 0.1 t_rh (PZM02); gravothermal oscillations at 32k (Makino 1996; ⟨r_c⟩ ∝ N^{-1/3}) | relaxation, dynamically formed binaries as the only heat source, long-run stability | 16k: t_rh ≈ 300 t_cr, 15 t_rh ≈ 4500 t_cr. Small N is latency-bound; hours to days per t_cr is UNVERIFIED for our code. Measure the cost per t_cr at 16k first. |
 | 2 | Mass spectrum (Salpeter/Kroupa), N = 16k–64k, Plummer and King W₀ = 6 | t_cc/t_rh = 0.07–0.2 (Gürkan Table 2; PZM02 0.19 ± 0.08); Fujii & PZ 2014 m_max scaling | mass segregation, early collapse | ~100–200 t_cr per run; several seeds |
-| 3 | BIFROST §5.6: N = 20k, 10 % binaries, r_h = 0.5 pc, Kroupa, 4 Myr | |ΔE/E| ≈ 3e-4; central density ×30; Lagrangian radii and binary a, e (Figs. 13–15), plus NBODY6 | primordial binaries in collapse, stochastic error | ~70 t_cr; already in plan M2 |
+| 3 | R23 §5.6: N = 20k, 10 % binaries, r_h = 0.5 pc, Kroupa, 4 Myr | |ΔE/E| ≈ 3e-4; central density ×30; Lagrangian radii and binary a, e (Figs. 13–15), plus NBODY6 | primordial binaries in collapse, stochastic error | ~70 t_cr; already in plan M2 |
 | 4 | Rizzuto+2021-type dense cluster: N = 1.1e5, 10 % binaries, R_h = 0.6 pc, Z = 2e-4, ~15 Myr; or an FC-III isolated cluster at matching Σ_h | VMS ~400 M☉, IMBH in ≤ 3/8 realisations; FC-III fitting formulae | collisions, runtime SSE, PN BHs | needs runtime SSE (M6); 8 seeds |
 | 5 | DRAGON-II-like cluster: 1.2e5–3e5, R_h = 0.47–0.8 pc, 10–33 % binaries, tidal field | BH retention, VMS 365 M☉, IMBH channels (DRAGON-II II) | G3 tidal field, G1 restarts over weeks | weeks on one node |
-| 6 | BIFROST Fig. 9 cluster (2e5) to BH core collapse, ~150 Myr; then with Moe & Di Stefano multiplicity | DRAGON BH-collapse behaviour (§4.6); CMC run on the same IC | everything in Flagship A at 1/5 scale | 1–2 months, one node |
+| 6 | R23 Fig. 9 cluster (2e5) to BH core collapse, ~150 Myr; then with Moe & Di Stefano multiplicity | DRAGON BH-collapse behaviour (§4.6); CMC run on the same IC | everything in Flagship A at 1/5 scale | 1–2 months, one node |
 | 7 | 1e6 Flagship A | CMC on the same IC; DRAGON | scaling, restarts, output | 1–3 months, 10 nodes |
 
 **Cross-code check.** On rungs 6–7, run CMC (public) on the same initial model. Monte Carlo is where direct N-body earns its keep: deviations in the core, BH subsystems and hierarchies (§4.4).
@@ -780,7 +780,7 @@ Our assessment from the literature above.
 2. **A direct-vs-Monte-Carlo calibration at high binary fraction.**
    - Rodriguez+2016 did 5 % binaries; a 50–100 % version has not been done. This is cheap at 2e5.
 3. **Accuracy requirements for collisional cluster statistics.**
-   - A controlled ensemble study: BIFROST-level versus PeTar-level (far-field) accuracy, on the same core-collapse ICs, with seeds.
+   - A controlled ensemble study: regularised direct (R23-type) versus tree far-field (PeTar-type) accuracy, on the same core-collapse ICs, with seeds.
    - It extends Portegies Zwart & Boekholt 2014 from 3 bodies to clusters.
    - It also decides our FMM tolerance. A methods paper.
 4. **Quadruples and triple binary evolution in young-cluster runaways.** No code has this (FC-II: triples, no triple stellar evolution).
@@ -834,7 +834,7 @@ Search of talks, slides and 2024–2026 papers. **No completed 1e7 direct or hyb
 
 | Source | What it says (verified) |
 |---|---|
-| Spurzem, IAUS 398 / MODEST-25 slides (June 2025), wwwstaff.ari.uni-heidelberg.de/spurzem/talks/spurzem-modest25.pdf | "NBODY6++GPU with up to 16M particles (Benchmarks on raven at MPCDF)"; "The Future – DRAGON III 1m – 8m (16m?)"; PeTar and BIFROST named as "New competition" |
+| Spurzem, IAUS 398 / MODEST-25 slides (June 2025), wwwstaff.ari.uni-heidelberg.de/spurzem/talks/spurzem-modest25.pdf | "NBODY6++GPU with up to 16M particles (Benchmarks on raven at MPCDF)"; "The Future – DRAGON III 1m – 8m (16m?)"; PeTar and the Rantala et al. code named as "New competition" |
 | Li & Spurzem, NbodyCP, arXiv:2511.06181 | short test runs up to 16M stars on 16 Raven nodes (64 A100), "near ideal" speed-up; "simulations of several Gyrs will take months" |
 | Wu et al., DRAGON-III, arXiv:2510.03933 (MODEST-25) | 1M/4M/10M GC models for 1–10 Gyr "ongoing and planned"; HIP port for LUMI; results so far reach ~0.1 Gyr |
 | Bianchini et al., ROLLIN' I, arXiv:2603.26195 | 1.5M stars to 12 Gyr with NBODY6++GPU, ~400 days on 12–48 V100: the largest full-lifetime direct run |
@@ -842,4 +842,4 @@ Search of talks, slides and 2024–2026 papers. **No completed 1e7 direct or hyb
 | Rantala talks (KICC 2024, LISA AWG 2024, MODEST-25, Stockholm 2026) | up to 2.35M stars, binaries + triples, Nvidia/AMD; no 1e7 or FMM plan mentioned |
 
 Consequence for Flagship C: the competition for a 1e7 direct run is DRAGON-III (NBODY6++GPU, neighbour scheme, ~8–16M planned).
-A BIFROST-accurate 1e7 run with in-equation PN and high multiplicity remains open.
+A 1e7 run at regularised direct-summation accuracy with in-equation PN and high multiplicity remains open.

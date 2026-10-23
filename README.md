@@ -12,7 +12,7 @@ Softened gravity suitable for large-N collisionless problems (galaxy models, cos
 
 ### Collisional mode (`-DENABLE_COLLISIONAL=ON`)
 
-Unsoftened direct N-body with close encounter handling for star cluster simulations, following the [BIFROST](https://doi.org/10.1093/mnras/stae2255) prescription:
+Unsoftened direct N-body with close encounter handling for star cluster simulations, following the methods of [Rantala et al. 2023](https://doi.org/10.1093/mnras/stad1360):
 
 - **Subsystem detection**: neighbor-based detection of close encounters (flybys, binaries, hierarchical triples)
 - **LogH regularization**: logarithmic Hamiltonian integrator with Gragg-Bulirsch-Stoer (GBS) extrapolation for subsystems, handling arbitrarily close encounters

@@ -77,7 +77,7 @@ Status: **closed** (fixed, test, ensemble checked), **option** (fix kept as an o
 - **System:** 200k, 10 % binaries, seed 3, step 48: 19.3 + 6.2 Msun BH binary, P = 1 h, e = 0.63, with a 1.25 Msun
   star passing at 600 AU (tidal ratio ~1e-15), grouped as an unstable triple.
 - **Symptom:** 6.7M GBS steps, 200 s for one step (the binary integrated orbit by orbit for the whole fly-by).
-- **Cause:** the passing star is a BIFROST Eq. 4 neighbour, so the triple goes to LogH; no slow-down for PN members.
+- **Cause:** the passing star is a neighbour by Rantala et al. 2023, Eq. 4, so the triple goes to LogH; no slow-down for PN members.
 - **Fix:** 1809570, `WEAK_SPLIT_GAMMA` (default off): below that tidal ratio the binary is its own subsystem and the
   star a field particle (Mikkola & Aarseth 1996; NBODY6 unperturbed KS pairs).
 - **Test:** `weak_split_bh_binary` (5 particles, with 1e-6): no GBS steps (3.3M, 216 s without), |dE/E| 9.4e-12,
@@ -188,7 +188,7 @@ Status: **closed** (fixed, test, ensemble checked), **option** (fix kept as an o
   `pn1_energy` (from the EIH Lagrangian, Landau & Lifshitz sec. 106; none for n = 2). Checked with Enzyme two ways:
   energy consistency ratio 16.00 for n = 2, 3, 4 (20 configurations each), and the explicit acceleration against the
   Euler-Lagrange acceleration of the EIH Lagrangian (deviation 4-7e-4 of the PN1 part = O(v^2/c^2) at v/c ~ 0.01).
-  Test `pn1_energy_consistency` now requires 16 for n = 2, 3, 4 (pair sums: ~4). BIFROST includes these three-body
+  Test `pn1_energy_consistency` now requires 16 for n = 2, 3, 4 (pair sums: ~4). Rantala et al. 2023 include these three-body
   terms (sec. 3.7, conclusions); our code claimed them but had pair sums.
 - **Next:** the PN energy check of PN subsystems can be switched on again for PN1 (E_N + E_1PN conserved to
   O(v^4/c^4)); higher orders need their energies (2PN) and the radiated flux (2.5PN).
@@ -229,9 +229,9 @@ Status: **closed** (fixed, test, ensemble checked), **option** (fix kept as an o
   term exceeds the 2.5PN one with the opposite sign (B_3.5 / B_2.5 = -12.4 x at v^2 = 2 G M / r): radiation reaction
   pumps energy at every pericentre; the ISCO test binary widened ~80 x with a star at 100 a and unbound with the star
   at 1000 a (books closed, |dE/E| 5e-16). Correct implementation of the formula outside its range. Options: 3.5PN
-  only below some x, or the orbit-averaged correction; decide with the literature (what BIFROST / ARCHAIN do).
+  only below some x, or the orbit-averaged correction; decide with the literature (what Rantala et al. 2023 / ARCHAIN do).
   **Closed (2026-10-17):** no established code caps or tapers 3.5PN. All merge BH pairs at a fixed separation and
-  call PN unreliable inside it: BIFROST sec. 3.14.1 ISCO, with 10 R_S as the conservative option; KETJU-GADGET4 12 R_S;
+  call PN unreliable inside it: Rantala et al. 2023 sec. 3.14.1 ISCO, with 10 R_S as the conservative option; KETJU-GADGET4 12 R_S;
   Mannerkoski+2019 and Rantala+2025 ~10 R_S; Brem+2013 (NBODY6 PN) 5 R_S; NBODY7 4 R_S. Orbit-averaged, 2.5 + 3.5PN
   flips sign at pericentre x_p = 0.11-0.14 (e = 0.5-0.9; 0.21 circular with the 1PN energy). The old distance
   6 G M / c^2 (x = 1/6) lies beyond that. Now `collision_distance` merges BH pairs at 10 R_S = 20 G (m1 + m2) / c^2
@@ -245,7 +245,7 @@ Status: **closed** (fixed, test, ensemble checked), **option** (fix kept as an o
   eccentric: 1PN-accurate orbit averages from the literature); the 2PN / 3PN periapsis advance has no nu terms.
   Size ~x << 1 of the leading terms in the secular regime.
 - **Cluster effect:** all LogH BH binaries of runs with PN_ORDER >= 4 since 2026-02 had wrong inspirals (widening with
-  7, ~10 x too fast with 31); runs with PN binaries (flagship A, BIFROST Fig. 12) have to be repeated. The energy
+  7, ~10 x too fast with 31); runs with PN binaries (flagship A, Rantala et al. 2023 Fig. 12) have to be repeated. The energy
   error of the runs is unchanged (books); campaign case harvesting is unaffected.
 
 ## C9 Secular PN binaries and triples: 3.5PN rates, precession and mean motion (closed)
@@ -351,7 +351,7 @@ Status: **closed** (fixed, test, ensemble checked), **option** (fix kept as an o
 
 ## C13 Runtime SSE: 14.5 s of a 42 s interval at N = 1e6, unprofiled (closed)
 
-- **Found by:** the BIFROST Fig. 7 rerun (fig7-2026-10-17). The unprofiled "Other" bucket was 32 % of an interval at
+- **Found by:** the binary-cluster timing rerun (Rantala et al. 2023, Fig. 7 setup; fig7-2026-10-17). The unprofiled "Other" bucket was 32 % of an interval at
   N = 1e6, f_bin = 0.1, 45 % at 2e6 on 16 GPUs and 17-26 % at 1e4/1e5. With SSE_ENABLED = false it went away.
 - **System:** every run with SSE_ENABLED = true. `advance_stellar_evolution` runs once per interval.
 - **Measured (3e15078, 4 A100 ranks, 1e6 f = 0.1, per call):**
@@ -520,7 +520,7 @@ Status: **closed** (fixed, test, ensemble checked), **option** (fix kept as an o
   - Counter `SecPeriLogH` in the step summary.
   - Literature: PN orbits are quasi-Keplerian with different a_r, e_r, e_t, e_phi (Damour & Deruelle 1985; Memmesheimer
     et al. 2004). Osculating Newtonian elements oscillate at O(x a / r) along such an orbit, so a Newtonian write-back
-    is valid only while that is small. BIFROST and KETJU integrate PN binaries with regularised integrators.
+    is valid only while that is small. Rantala et al. 2023 and KETJU integrate PN binaries with regularised integrators.
 - **Tests:**
   - `c19_secular_peri` (run_case, E_REF / NGB_MREF of the parent): before the fix 1.22, now 7.65e-16 (bound 1e-15),
     the pair in LogH (1487 GBS steps).
@@ -823,7 +823,7 @@ Status: **closed** (fixed, test, ensemble checked), **option** (fix kept as an o
   (Arca Sedda et al. 2023-24, arXiv 2307.04805-07): in-cluster vs ejected mergers, remnant mass/spin/kick, repeated
   mergers. PeTar (Wang et al. 2020; src/ar_interaction.hpp "Dynamic_merge"): ids, period, a, e, pericentre distance
   and time, slow-down factor, both stars before/after. MOCCA (Askar et al. 2017, Hong et al. 2018): escaped / in-
-  cluster / GW-capture channels. BIFROST / FROST-CLUSTERS (Rantala et al. 2023-2026, papers/rantala/src): masses,
+  cluster / GW-capture channels. Rantala et al. 2023 and FROST-CLUSTERS (2023-2026, papers/rantala/src): masses,
   remnant and recoil per IMBH merger, no frequency-domain output. KETJU: SMBH remnant mass/spin/kick (Zlochower &
   Lousto 2015). Population inference uses chi_eff, chi_p (Schmidt et al. 2015 PRD 91, 024043), e at 10 Hz (LVK
   eccentricity searches) and, for LISA, e at 10 mHz (Breivik et al. 2016, Nishizawa et al. 2016).
@@ -995,14 +995,14 @@ Status: **closed** (fixed, test, ensemble checked), **option** (fix kept as an o
 
   ETA_FF never sets a step (pair fly-by step < free-fall step for every unbound field pair; bound pairs are
   subsystems). Halving all etas: -20 % per step at 1.9x cost; a 4th-order truncation error would drop 16x
-  (BIFROST Eq. 51, its Fig. 10: 3e-7 -> 5e-9 total). The background is therefore not eta-limited FSI truncation.
+  (Rantala et al. 2023, Eq. 51 and Fig. 10: 3e-7 -> 5e-9 total). The background is therefore not eta-limited FSI truncation.
   Remaining eta-independent suspects: the tidal-sampling budget FLYBY_CM_EPS (1e-11 |E0| per pair and step, the
   same scale; the EATTR_TID / STALL tidal estimates are 2-6e-12 per binary) and its TIDAL_STEP_RES floor (C5).
 - **Prepared, not yet run (session limit):** 0.7x scans, ETA_JERK 0.1, ETA 0.2 (v/a); class interventions
   bh / sub / single / deep5 x 0.5; FLYBY_CM_EPS 1e-12; TIDAL_FLOOR_ADAPT; one-rank ledger + DT_ATTR
   (`/raven/ptmp/uli/cpp-nbody-runs/fsibudget-2026-10-22/*/job.sh`).
 - **Decision so far:** no eta default change (no gain per cost). ETA_GRAD 0.1 costs nothing measurable (-10 %, within
-  noise; BIFROST's value) and is a candidate after a 3-seed check. The 5 Myr error is set by episodes (one triple in
+  noise; the value of Rantala et al. 2023) and is a candidate after a 3-seed check. The 5 Myr error is set by episodes (one triple in
   s101); the next lever is per-episode (ledger replay of a stall restart), and FLYBY_CM_EPS / TIDAL_FLOOR_ADAPT for
   the background.
 
@@ -1024,7 +1024,7 @@ Status: **closed** (fixed, test, ensemble checked), **option** (fix kept as an o
   - Integrators: Seyrich 2013 (arXiv 1302.4580) Gauss collocation on ADM PN Hamiltonians with spins; Tsang et al.
     2015 slimplectic (non-conservative variational) with a PN binary; Wu et al. explicit splittings for PN
     Hamiltonians (2026, arXiv 2607.01596).
-  - Regularised few-body codes (Mikkola & Merritt 2008, MSTAR/KETJU, BIFROST, SDAR, SpaceHub) all integrate the
+  - Regularised few-body codes (Mikkola & Merritt 2008, MSTAR/KETJU, Rantala et al. 2023, SDAR, SpaceHub) all integrate the
     harmonic EOM with auxiliary velocities (R2).
   - Splitting with a small perturbation: Laskar & Robutel 2001 SBAB_n, error O(eps h^2n + eps^2 h^2).
   - DJS 2000 (arXiv gr-qc/9912092v1) Eq. 4.16 prints 3 i3 E^2 in k(E, j). Their own radial action Eq. 4.12, and
@@ -1154,15 +1154,15 @@ Status: **closed** (fixed, test, ensemble checked), **option** (fix kept as an o
   energy error (1e-11 to 1e-10) is not set by LogH round-off or by the LogH kick. The next suspects are the FSI/field
   part and the subsystem boundaries; per-path ledger on these seeds (NBODY_ELEDGER).
 
-## R2 BIFROST's symplectic LogH kick 1/(-U) instead of 1/(T+B) (rejected by the cluster A/B; C12 open as a finding)
+## R2 The symplectic LogH kick 1/(-U) of Rantala et al. 2023 instead of 1/(T+B) (rejected by the cluster A/B; C12 open as a finding)
 
 - **Finding (Enzyme Jacobians, M^T J M - J):** the production LogH leapfrog is not symplectic in extended phase space.
-  - Since 8cd3029 (2026-02) the kick divides by the implicit Omega = T(v_mid) + B (cubic solve), not by BIFROST's
-    -U(x) (Mikkola & Tanikawa 1999). That kick depends on v, so it is no Hamiltonian flow: defect O(ds), 4e-2 at
+  - Since 8cd3029 (2026-02) the kick divides by the implicit Omega = T(v_mid) + B (cubic solve), not by
+    -U(x) (Rantala et al. 2023; Mikkola & Tanikawa 1999). That kick depends on v, so it is no Hamiltonian flow: defect O(ds), 4e-2 at
     ds = 0.01.
   - On the energy shell T + B = -U the two kicks agree, so only the off-shell part is extra; GBS extrapolation does
     not remove it.
-  - BIFROST's kick is symplectic to 6e-13 (test in branch worktree-agent-ae641fc52220640f6, tests/symplectic_test.cpp).
+  - The kick of Rantala et al. 2023 is symplectic to 6e-13 (test in branch worktree-agent-ae641fc52220640f6, tests/symplectic_test.cpp).
 - **A/B (NBODY_KICK_U):**
   - Isolated (agent): e = 0.999 binary 1.8e-11 vs 4.4e-9; 200-system ensemble median 1.2-4x better, but the p90/max
     of e >= 0.9 binaries 2-4x worse.
@@ -1198,7 +1198,7 @@ Status: **closed** (fixed, test, ensemble checked), **option** (fix kept as an o
   LRR eq. 233 (test pn1_energy_consistency, C7). RK4 of the exact EIH flow, e = 0.9: swing of E_N + E_1PN per orbit
   2.26e-2 / 1.35e-3 / 8.3e-5 at c^2 = 1e3 / 4e3 / 1.6e4 (x c^4 = 2.2e4: O(1/c^4)), periodic (back to 7e-11 after one
   orbit), 1.87e-6 at r > 1.5 a: exactly the LogH+GBS value, so the 1.9e-6 is the EIH truncation, not integrator error.
-  An ADM 1PN Hamiltonian (exact invariant, prototype 3.3e-13) is not adopted: no regularised code uses it (BIFROST
+  An ADM 1PN Hamiltonian (exact invariant, prototype 3.3e-13) is not adopted: no regularised code uses it (Rantala et al. 2023
   sec. 3.5, KETJU/MSTAR, Mikkola & Merritt 2008, SDAR all integrate harmonic-gauge EOM with auxiliary velocities); it
   is non-separable (implicit Gauss or Pihajoki 2015 copies instead of the explicit leapfrog), its coordinates differ
   from the harmonic ones of our 2PN-3.5PN terms at O(1/c^4), and 2.5/3.5PN are dissipative, so with PN_ORDER 31 there
