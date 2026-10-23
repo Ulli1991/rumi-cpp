@@ -106,7 +106,7 @@ double potential_change(const Particles& p, const std::vector<int>& touched, con
         for (int k = k0; k < k1; k++) term[k] = -G * d[k] * h_out(k - k0);
     }
 #ifdef USE_MPI
-    if (n_ranks > 1) MPI_Allreduce(MPI_IN_PLACE, term.data(), nT, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+    if (n_ranks > 1) MPI_Allreduce(MPI_IN_PLACE, term.data(), nT, MPI_DOUBLE, MPI_SUM, MPIComm::comm());
 #endif
     double dU = 0.0;
     for (double t : term) dU += t;
@@ -171,7 +171,7 @@ void advance_stellar_evolution(Particles& p, SSEContext& sse, double dt_myr,
         }
         g_profiler.mpi_start();
         MPI_Allgatherv(MPI_IN_PLACE, 0, MPI_DATATYPE_NULL, evo_res.data(), cnt.data(), dsp.data(), MPI_BYTE,
-                       MPI_COMM_WORLD);
+                       MPIComm::comm());
         g_profiler.mpi_stop();
     }
 #endif

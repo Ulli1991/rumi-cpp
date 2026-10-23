@@ -222,7 +222,7 @@ void force_err_inject(Particles& p, int start, int count, int set_count) {
             }, r2);
             double r0 = std::sqrt(r2 / s[0]);
 #ifdef USE_MPI
-            MPI_CHECK(MPI_Bcast(&r0, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD));
+            MPI_CHECK(MPI_Bcast(&r0, 1, MPI_DOUBLE, 0, MPIComm::comm()));
 #endif
             g_force_err_r0 = r0 > 0.0 ? r0 : 1.0;
             if (MPIComm::rank() == 0) std::printf("NBODY_FORCE_ERR: cell grids of edge %.4e / 2^l\n", g_force_err_r0);
@@ -242,7 +242,7 @@ void force_err_inject(Particles& p, int start, int count, int set_count) {
             }, s[0], s[1], s[2], s[3]);
             if (s[0] > 0.0) { mean[0] = s[1] / s[0]; mean[1] = s[2] / s[0]; mean[2] = s[3] / s[0]; }
 #ifdef USE_MPI
-            MPI_CHECK(MPI_Bcast(mean, 3, MPI_DOUBLE, 0, MPI_COMM_WORLD));
+            MPI_CHECK(MPI_Bcast(mean, 3, MPI_DOUBLE, 0, MPIComm::comm()));
 #endif
         }
         const double m0 = mean[0], m1 = mean[1], m2 = mean[2];
@@ -279,7 +279,7 @@ void force_err_inject(Particles& p, int start, int count, int set_count) {
             }
             al[3] = xc; al[4] = yc; al[5] = zc;
 #ifdef USE_MPI
-            MPI_CHECK(MPI_Bcast(al, 6, MPI_DOUBLE, 0, MPI_COMM_WORLD));
+            MPI_CHECK(MPI_Bcast(al, 6, MPI_DOUBLE, 0, MPIComm::comm()));
 #endif
         }
         const double wx = al[0], wy = al[1], wz = al[2], xc = al[3], yc = al[4], zc = al[5];
@@ -313,7 +313,7 @@ void force_err_inject(Particles& p, int start, int count, int set_count) {
     }, r2);
     double g[6] = {xc, yc, zc, std::sqrt(r2 / s[0]), std::sqrt(s[4] / count), 0.0};
 #ifdef USE_MPI
-    MPI_CHECK(MPI_Bcast(g, 6, MPI_DOUBLE, 0, MPI_COMM_WORLD));
+    MPI_CHECK(MPI_Bcast(g, 6, MPI_DOUBLE, 0, MPIComm::comm()));
 #endif
     if (!(g[3] > 0.0)) return;
     // M: Box-Muller N(0, 1/3) entries from the call counter

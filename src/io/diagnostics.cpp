@@ -186,7 +186,7 @@ double pe_fixed_blocks(const Particles& p, double G, double soft2) {
 #ifdef USE_MPI
     if (n_ranks > 1) {
         std::vector<double> all(PE_BLOCKS, 0.0);
-        MPI_Allreduce(blk.data(), all.data(), PE_BLOCKS, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+        MPI_Allreduce(blk.data(), all.data(), PE_BLOCKS, MPI_DOUBLE, MPI_SUM, MPIComm::comm());
         blk.swap(all);
     }
 #endif

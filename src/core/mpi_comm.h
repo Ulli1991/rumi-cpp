@@ -79,6 +79,13 @@ void init(int* argc, char*** argv);
 // Finalize MPI
 void finalize();
 
+#ifdef USE_MPI
+// The communicator of every RUMI++ collective (MPI_COMM_WORLD unless attach() set another)
+MPI_Comm comm();
+// Library use: run on comm (the host initialised MPI and owns the communicator); rank and size are comm's
+void attach(MPI_Comm comm);
+#endif
+
 // Get rank and size
 int rank();
 int size();

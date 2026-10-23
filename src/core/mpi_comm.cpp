@@ -17,13 +17,22 @@ namespace MPIComm {
 
 static int s_rank = 0;
 static int s_size = 1;
+#ifdef USE_MPI
+static MPI_Comm s_comm = MPI_COMM_WORLD;
+MPI_Comm comm() { return s_comm; }
+void attach(MPI_Comm c) {
+    s_comm = c;
+    MPI_CHECK(MPI_Comm_rank(s_comm, &s_rank));
+    MPI_CHECK(MPI_Comm_size(s_comm, &s_size));
+}
+#endif
 
 void init(int* argc, char*** argv) {
 #ifdef USE_MPI
     int provided;
     MPI_CHECK(MPI_Init_thread(argc, argv, MPI_THREAD_FUNNELED, &provided));
-    MPI_CHECK(MPI_Comm_rank(MPI_COMM_WORLD, &s_rank));
-    MPI_CHECK(MPI_Comm_size(MPI_COMM_WORLD, &s_size));
+    MPI_CHECK(MPI_Comm_rank(MPIComm::comm(), &s_rank));
+    MPI_CHECK(MPI_Comm_size(MPIComm::comm(), &s_size));
 
     if (s_rank == 0) {
         std::printf("MPI initialized: %d ranks\n", s_size);
@@ -46,15 +55,15 @@ int size() { return s_size; }
 
 void barrier() {
 #ifdef USE_MPI
-    MPI_CHECK(MPI_Barrier(MPI_COMM_WORLD));
+    MPI_CHECK(MPI_Barrier(MPIComm::comm()));
 #endif
 }
 
 void reduce_min_max_sum(const double* in, double* mn, double* mx, double* sum, int n) {
 #ifdef USE_MPI
-    MPI_CHECK(MPI_Allreduce(in, mn, n, MPI_DOUBLE, MPI_MIN, MPI_COMM_WORLD));
-    MPI_CHECK(MPI_Allreduce(in, mx, n, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD));
-    MPI_CHECK(MPI_Allreduce(in, sum, n, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD));
+    MPI_CHECK(MPI_Allreduce(in, mn, n, MPI_DOUBLE, MPI_MIN, MPIComm::comm()));
+    MPI_CHECK(MPI_Allreduce(in, mx, n, MPI_DOUBLE, MPI_MAX, MPIComm::comm()));
+    MPI_CHECK(MPI_Allreduce(in, sum, n, MPI_DOUBLE, MPI_SUM, MPIComm::comm()));
 #else
     for (int i = 0; i < n; i++) mn[i] = mx[i] = sum[i] = in[i];
 #endif
@@ -98,7 +107,7 @@ void DistributedParticles::distribute_initial(Particles& global_particles) {
     if (my_rank == 0) {
         N_total = global_particles.N;
     }
-    MPI_CHECK(MPI_Bcast(&N_total, 1, MPI_INT, 0, MPI_COMM_WORLD));
+    MPI_CHECK(MPI_Bcast(&N_total, 1, MPI_INT, 0, MPIComm::comm()));
 
     // Step 2: Compute force computation responsibility for each rank
     int base_count = N_total / n_ranks;
@@ -115,7 +124,7 @@ void DistributedParticles::distribute_initial(Particles& global_particles) {
 
     // Step 3: Broadcast collisional flag before allocating (rank 0 set it in init)
     int coll_flag = (my_rank == 0) ? (int)global_particles.collisional : 0;
-    MPI_CHECK(MPI_Bcast(&coll_flag, 1, MPI_INT, 0, MPI_COMM_WORLD));
+    MPI_CHECK(MPI_Bcast(&coll_flag, 1, MPI_INT, 0, MPIComm::comm()));
 
     // Step 4: Allocate local particles (full size on all ranks)
     local.allocate(N_total, (bool)coll_flag);
@@ -166,9 +175,9 @@ void DistributedParticles::distribute_initial(Particles& global_particles) {
         }
 
         // 3 broadcasts instead of 16
-        MPI_CHECK(MPI_Bcast(dbl_buf.data(), N_DBL_FIELDS * N_total, MPI_DOUBLE, 0, MPI_COMM_WORLD));
-        MPI_CHECK(MPI_Bcast(int_buf.data(), N_INT_FIELDS * N_total, MPI_INT, 0, MPI_COMM_WORLD));
-        MPI_CHECK(MPI_Bcast(i64_buf.data(), N_I64_FIELDS * N_total, MPI_INT64_T, 0, MPI_COMM_WORLD));
+        MPI_CHECK(MPI_Bcast(dbl_buf.data(), N_DBL_FIELDS * N_total, MPI_DOUBLE, 0, MPIComm::comm()));
+        MPI_CHECK(MPI_Bcast(int_buf.data(), N_INT_FIELDS * N_total, MPI_INT, 0, MPIComm::comm()));
+        MPI_CHECK(MPI_Bcast(i64_buf.data(), N_I64_FIELDS * N_total, MPI_INT64_T, 0, MPIComm::comm()));
 
         // Unpack into per-field host mirrors and copy to device
         auto h_x = Kokkos::create_mirror_view(local.x);
@@ -248,8 +257,8 @@ void DistributedParticles::distribute_initial(Particles& global_particles) {
             }
         }
 
-        MPI_CHECK(MPI_Bcast(coll_dbl.data(), N_COLL_DBL * N_total, MPI_DOUBLE, 0, MPI_COMM_WORLD));
-        MPI_CHECK(MPI_Bcast(coll_int.data(), N_COLL_INT * N_total, MPI_INT, 0, MPI_COMM_WORLD));
+        MPI_CHECK(MPI_Bcast(coll_dbl.data(), N_COLL_DBL * N_total, MPI_DOUBLE, 0, MPIComm::comm()));
+        MPI_CHECK(MPI_Bcast(coll_int.data(), N_COLL_INT * N_total, MPI_INT, 0, MPIComm::comm()));
 
         auto h_pid = Kokkos::create_mirror_view(local.particle_id);
         auto h_sid = Kokkos::create_mirror_view(local.subsystem_id);
@@ -357,8 +366,8 @@ bool DistributedParticles::replicas_agree(int step) const {
     f.add_view(local.mass, local.N);
     if (local.collisional) { f.add_view(local.particle_id, local.N); f.add_view(local.spin_vec, local.N); }
     unsigned long long mine = f.h, lo = 0, hi = 0;
-    MPI_CHECK(MPI_Allreduce(&mine, &lo, 1, MPI_UNSIGNED_LONG_LONG, MPI_MIN, MPI_COMM_WORLD));
-    MPI_CHECK(MPI_Allreduce(&mine, &hi, 1, MPI_UNSIGNED_LONG_LONG, MPI_MAX, MPI_COMM_WORLD));
+    MPI_CHECK(MPI_Allreduce(&mine, &lo, 1, MPI_UNSIGNED_LONG_LONG, MPI_MIN, MPIComm::comm()));
+    MPI_CHECK(MPI_Allreduce(&mine, &hi, 1, MPI_UNSIGNED_LONG_LONG, MPI_MAX, MPIComm::comm()));
     if (lo == hi) return true;
     if (MPIComm::rank() == 0)
         std::printf("REPLICA MISMATCH at step %d: ranks hold different particle states\n", step);
@@ -442,7 +451,7 @@ static ncclComm_t nccl_comm() {
     if (!comm) {
         ncclUniqueId id;
         if (MPIComm::rank() == 0) ncclGetUniqueId(&id);
-        MPI_CHECK(MPI_Bcast(&id, sizeof id, MPI_BYTE, 0, MPI_COMM_WORLD));
+        MPI_CHECK(MPI_Bcast(&id, sizeof id, MPI_BYTE, 0, MPIComm::comm()));
         if (ncclCommInitRank(&comm, MPIComm::size(), id, MPIComm::rank()) != ncclSuccess) {
             std::fprintf(stderr, "ncclCommInitRank failed\n");
             MPI_Abort(MPI_COMM_WORLD, 1);
@@ -523,7 +532,7 @@ void DistributedParticles::allgather_fields(const int* seg_start, const int* seg
                           Kokkos::subview(mpi_acc_send_buf, Kokkos::make_pair(0, n_send)));
         g_profiler.mpi_start();
         MPI_CHECK(MPI_Allgatherv(host_send_pinned.data(), n_send, MPI_DOUBLE, host_recv_pinned.data(),
-                                 mpi_counts.data(), mpi_displs.data(), MPI_DOUBLE, MPI_COMM_WORLD));
+                                 mpi_counts.data(), mpi_displs.data(), MPI_DOUBLE, MPIComm::comm()));
         g_profiler.mpi_stop(8.0 * (n_send_buf + n_recv_buf));   // bytes sent + received by this rank
         Kokkos::deep_copy(Kokkos::subview(mpi_acc_recv_buf, Kokkos::make_pair(0, n_recv)),
                           Kokkos::subview(host_recv_pinned, Kokkos::make_pair(0, n_recv)));
@@ -531,7 +540,7 @@ void DistributedParticles::allgather_fields(const int* seg_start, const int* seg
         Kokkos::fence();
         g_profiler.mpi_start();
         MPI_CHECK(MPI_Allgatherv(mpi_acc_send_buf.data(), n_send, MPI_DOUBLE, mpi_acc_recv_buf.data(),
-                                 mpi_counts.data(), mpi_displs.data(), MPI_DOUBLE, MPI_COMM_WORLD));
+                                 mpi_counts.data(), mpi_displs.data(), MPI_DOUBLE, MPIComm::comm()));
         g_profiler.mpi_stop(8.0 * (n_send_buf + n_recv_buf));   // bytes sent + received by this rank
     }
 
@@ -625,7 +634,7 @@ void DistributedParticles::allreduce_accelerations_subset(int start, int count) 
 
     g_profiler.mpi_start();
     MPI_CHECK(MPI_Allreduce(MPI_IN_PLACE, buf.data(), 3 * count, MPI_DOUBLE,
-                  MPI_SUM, MPI_COMM_WORLD));
+                  MPI_SUM, MPIComm::comm()));
     g_profiler.mpi_stop(16.0 * 3 * count);   // bytes sent + received by this rank
 
     Kokkos::parallel_for("unpack_allreduce", count, KOKKOS_LAMBDA(int ii) {
@@ -654,7 +663,7 @@ void DistributedParticles::allreduce_accelerations_subset(int start, int count) 
 
     g_profiler.mpi_start();
     MPI_CHECK(MPI_Allreduce(MPI_IN_PLACE, buf.data(), 3 * count, MPI_DOUBLE,
-                  MPI_SUM, MPI_COMM_WORLD));
+                  MPI_SUM, MPIComm::comm()));
     g_profiler.mpi_stop(16.0 * 3 * count);   // bytes sent + received by this rank
 
     for (int i = 0; i < count; i++) {
@@ -691,7 +700,7 @@ void DistributedParticles::allreduce_timestep_subset(int start, int count) {
 
     g_profiler.mpi_start();
     MPI_CHECK(MPI_Allreduce(MPI_IN_PLACE, buf.data(), count, MPI_DOUBLE,
-                  MPI_MIN, MPI_COMM_WORLD));
+                  MPI_MIN, MPIComm::comm()));
     g_profiler.mpi_stop(16.0 * count);   // bytes sent + received by this rank
 
     Kokkos::parallel_for("unpack_dt_allreduce", count, KOKKOS_LAMBDA(int ii) {
@@ -709,7 +718,7 @@ void DistributedParticles::allreduce_timestep_subset(int start, int count) {
 
     g_profiler.mpi_start();
     MPI_CHECK(MPI_Allreduce(MPI_IN_PLACE, buf.data(), count, MPI_DOUBLE,
-                  MPI_MIN, MPI_COMM_WORLD));
+                  MPI_MIN, MPIComm::comm()));
     g_profiler.mpi_stop(16.0 * count);   // bytes sent + received by this rank
 
     for (int i = 0; i < count; i++) h_dt(i) = buf[i];
