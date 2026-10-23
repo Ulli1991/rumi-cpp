@@ -74,8 +74,8 @@ void energy(double G, double* E_bodies, double* E_books);
 // The energy books one by one: escape, gw, merge, sse, pn, sd (SDAR), tidal (as E_books, cumulative)
 void books(double out[7]);
 const Ledger& ledger();
-// |E| of FLYBY_CM_EPS (the tidal-sampling budget eps |E_ref|): E_REF if the config sets it, else the internal energy
-// (centre-of-mass frame) of the set at the last set_particles
+// |E| of FLYBY_CM_EPS (the tidal-sampling budget eps |E_ref|): E_REF if the config sets it, else the set's energy scale
+// max(|E_int|, |PE|/2) in its centre-of-mass frame at the last set_particles
 double e_ref();
 // Mergers and collisions since the last call: the slot that keeps the product, the slot merged away, the
 // product's mass. Returns the number of events.

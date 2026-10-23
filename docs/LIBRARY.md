@@ -12,9 +12,12 @@ every call (`set_particles`, `advance`, `energy`); `G_CODE` is not used by the l
   the `Ledger`), `shift`, `set_mass` (in place, books the exact energy change in `E_sse` as the runtime SSE does) and a
   new `set_particles` (bodies added or removed: subsystems rebuilt; the energy jump booked in `Ledger::E_set`).
   `E_bodies + E_books - W_kick - E_set` is constant up to the integration error.
-- **E_ref of FLYBY_CM_EPS:** `E_REF` if the config sets it, else the set's internal energy in its centre-of-mass frame
-  at each `set_particles` (standalone runs recentre their ICs, so this is the standalone |E0|; it does not depend on the
-  host frame and follows the system actually integrated).
+- **E_ref of FLYBY_CM_EPS:** `E_REF` if the config sets it, else max(|E_int|, |PE|/2) of the set in its centre-of-mass
+  frame at each `set_particles`: |E0| of a virialised (standalone, recentred) cluster, independent of the host frame,
+  and not near zero while a forming set passes from unbound to bound (|E_int| alone made the budget vanish there).
+- **Stalls:** `SUBSYS_ADVANCE_LIMIT` stops a run whose subsystem needs more advances in one host step than the limit,
+  with the subsystem's members, a, e and dt, instead of advancing ever more slowly; SUBSYS_ERR lines are at most one
+  per subsystem and step.
 - **Step:** `advance(dt, G)` is one standalone HHS step (`INTEGRATOR = hhs`, `ETA_RESTART = 0`, i.e. `PRESET = cluster`).
   `ETA_RESTART > 0`, `SSE_ENABLED`, `TIDAL_FIELD`, `USE_TREE` and `INTEGER_POSITIONS` are refused.
 - **Mergers:** `merger_events` returns the kept and merged-away slots and the product mass since the last call.

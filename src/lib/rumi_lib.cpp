@@ -99,15 +99,17 @@ std::vector<int> present_slots(int& n) {
     return s;
 }
 
-// |internal energy| in the centre-of-mass frame (collective under MPI)
-double internal_energy(double G) {
+// energy scale of the set, centre-of-mass frame: max(|E_int|, |PE| / 2) (= |E| for a virialised cluster; does not
+// pass through zero while a forming set goes from unbound to bound). Collective under MPI.
+double energy_scale(double G) {
     Particles& p = W();
     const DiagnosticState d = compute_diagnostics(p, G, soft2);
     double M = 0;
     auto pm = p.mass;
     Kokkos::parallel_reduce("lib_mtot", p.N, KOKKOS_LAMBDA(int i, double& s) { s += pm(i); }, M);
     const double P2 = d.Px * d.Px + d.Py * d.Py + d.Pz * d.Pz;
-    return d.E_total - (M > 0 ? 0.5 * P2 / M : 0.0);
+    const double E_int = d.E_total - (M > 0 ? 0.5 * P2 / M : 0.0);
+    return std::max(std::fabs(E_int), 0.5 * std::fabs(d.PE));
 }
 }  // namespace
 
@@ -225,10 +227,10 @@ int set_particles(int n_in, const long long* id_in, const double* m_in, const do
     g_collisional.G = G;
     g_subsystem_mgr.allocate_ngb_buffers(std::max(1000, n / 10));
     g_subsystem_mgr.reset_ngb_count();
-    // |E_ref| of FLYBY_CM_EPS: E_REF, else the set's internal energy in its centre-of-mass frame (frame-independent;
-    // it follows the integrated set, so the budget stays the same fraction of the system's own binding energy)
+    // |E_ref| of FLYBY_CM_EPS: E_REF, else the set's energy scale in its centre-of-mass frame (frame-independent; it
+    // follows the integrated set, so the budget stays the same fraction of the system's own binding energy)
     if (g_collisional.flyby_cm_eps > 0.0 || g_collisional.subsys_err_tol > 0.0)
-        g_collisional.e_ref = rs.e_ref_set > 0.0 ? rs.e_ref_set : std::fabs(internal_energy(G));
+        g_collisional.e_ref = rs.e_ref_set > 0.0 ? rs.e_ref_set : energy_scale(G);
     if (rs.ngb_mass_scaling && g_collisional.ngb_inv_mref == 0.0) {   // <m> of the first set, fixed afterwards
         double s = 0; for (int i = 0; i < n; i++) s += m[i];
         g_collisional.ngb_inv_mref = rs.ngb_mref > 0.0 ? 1.0 / rs.ngb_mref : n / s;
