@@ -1266,6 +1266,16 @@ Status: **closed** (fixed, test, ensemble checked), **option** (fix kept as an o
   1.6e-13 (round-off of changed trajectories; the PN books take the lab-frame states, integrator.cpp).
 
 ## C28 Host N^2 packed driver broke the bit-identity of the tree time-step search (fixed)
+- **weak_split_bh_binary follow-up (2026-10-25, c26chk-1):** its |dE/E| 9.43e-12 -> 1.93e-11 is not a C26 flaw. The
+  secular path books exactly (NBODY_ELEDGER: secular residue 5e-16, the 1.9e-11 comes from the FSI kicks of the 3-body
+  pieces at depth 11-14). With a debug switch for the old scheme and a forced sub-step count N per call (scratch,
+  not committed): new scheme 1.929e-11 (N=1), 1.931e-11 (4), 1.933e-11 (16), 1.930e-11 (64) - converged already at
+  N=1; old simultaneous kicks 0.93e-11 (1), 1.56e-11 (4), 1.70e-11 (16), 1.90e-11 (64) - converging to the same value
+  from below. Ten 3e-13 IC perturbations: new 1.926-1.932e-11, old 0.916-0.928e-11 (deterministic, not noise). The old
+  pass came from the first-order phase error (binary phase at the FSI kicks) partly cancelling the kick error. Bound
+  re-measured: WEAK_SPLIT_DE 2.51e-11 (1.3x 1.93e-11).
+
+## C27 Host N^2 packed driver broke the bit-identity of the tree time-step search (fixed)
 
 - **Bug (since 5d91e1f):** `run_host_packed` (sources packed once per call) evaluates the pair time step with different
   floating-point contraction than the tree search of dt_tree.h: 1-3 ulp in dt for 12 of 2000 particles, so the exact-pruning
