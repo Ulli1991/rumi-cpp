@@ -14,7 +14,7 @@ import argparse
 import numpy as np
 from scipy.spatial import cKDTree
 
-G = 4.300917270036279e-3            # pc (km/s)^2 / Msun (RUMI++ constants.h)
+G = 4.302194e-3            # pc (km/s)^2 / Msun (RUMI++ constants.h)
 KMS_TO_PC_MYR = 1.0227122  # 1 km/s in pc/Myr
 
 

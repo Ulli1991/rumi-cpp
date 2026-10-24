@@ -5,14 +5,14 @@
 
 // Code units: pc, M_sun, km/s  (Gadget-style: time unit = 1 pc / 1 km/s)
 // Length: 1 pc, Mass: 1 M_sun, Velocity: 1 km/s, Time: 1 pc/(1 km/s) ≈ 0.978 Myr
-constexpr double G_CODE = 4.300917270036279e-3;      // G in pc³ M_sun⁻¹ TU⁻²: IAU 2015 nominal GM_sun 1.3271244e20 m³ s⁻²
+constexpr double G_CODE = 4.302194e-3;               // G in pc³ M_sun⁻¹ TU⁻²
 constexpr double TIME_UNIT_MYR = 0.977792;           // 1 code TU in Myr (for config/display)
 constexpr double TIME_UNIT_YR  = 977792.0;           // 1 code TU in years
 
 // Conversion factors
 constexpr double AU_TO_PC  = 4.84814e-6;             // 1 AU in pc (for outer planets init)
 constexpr double PC_TO_CM  = 3.08567758e18;          // 1 parsec in cm (for SSE interface)
-constexpr double MSUN_IN_G = 1.9884099e33;           // 1 M_sun in grams: GM_sun / G_CGS (snapshot units)
+constexpr double MSUN_IN_G = 1.989e33;               // 1 M_sun in grams (for SSE interface)
 constexpr double G_CGS     = 6.67430e-8;             // G in cm³ g⁻¹ s⁻² (for SSE interface)
 
 // Numerical stability

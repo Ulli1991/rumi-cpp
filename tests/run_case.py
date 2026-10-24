@@ -217,7 +217,7 @@ BH_FLYBY = dict(TEST_CASE="triple_test", INTEGRATOR="hhs", TRIPLE_A_IN_PC="2.2e-
                 FLYBY_CM_EPS="1e-11")
 # Kepler drift of an isolated binary subsystem: 1 + 1 Msun, a = 1e-5 pc (2 AU, P = 2.0944e-6 Myr), PN off, run for
 # T = 100.37 P as one step or as 16 steps of 6.27 P (both above N_ORB_SECULAR = 3: the secular binary path)
-G_CODE = 4.300917270036279e-3                 # constants.h: pc^3 Msun^-1 TU^-2
+G_CODE = 4.302194e-3                 # constants.h: pc^3 Msun^-1 TU^-2
 TU_MYR = 0.977792
 P_SEC_MYR = 2.0 * math.pi * math.sqrt(1e-15 / (G_CODE * 2.0)) * TU_MYR
 SEC_DRIFT = dict(TEST_CASE="binary_test", INTEGRATOR="hhs", BINARY_A_PC="1e-5", BINARY_E="0.0", BINARY_M1="1.0",
@@ -638,7 +638,7 @@ CMT_RES = dict(TEST_CASE="particle_file", IC_FILE=str(Path(__file__).parent / "d
                TREE_THETA="0.7", SDAR="true")
 CMT_ON = dict(CMT_RES, DT_MAX_MYR="0.0009072784277356841", TOTAL_TIME_MYR="0.018145568554713682")
 CMT_OFF = dict(CMT_RES, DT_MAX_MYR="0.0009345061256290109", TOTAL_TIME_MYR="0.018690122512580218")
-CMT_G = 4.300917270036279e-3
+CMT_G = 4.302194e-3
 
 
 def cmt_step_errors(out, ic, e_ref):
@@ -1634,9 +1634,9 @@ def peters_e_at_f(a_au, e, m_tot, f_target):
     """Independent check of gw_e_at_f: integrate Peters (1964) Eqs. 5.6-5.7 in time (RK4 on ln a, ln e; the track does
     not depend on the strength of the radiation, so beta = 1) from (a, e) towards the peak frequency f_target of Wen
     (2003) Eq. 37 (backward in time if the orbit is above it) and bisect the step that crosses it. The code's units
-    (G = 4.300917270036279e-3 pc (km/s)^2 / Msun from the IAU nominal G M_sun, 1 AU = 4.84813681109536e-6 pc, time unit
-    1 pc / (km/s))."""
-    GM = 4.300917270036279e-3 * m_tot               # pc (km/s)^2
+    (G = 4.302194e-3 pc (km/s)^2 / Msun, 1 AU = 4.84813681109536e-6 pc, time unit 1 pc / (km/s)): with IAU G M_sun
+    the frequencies differ by 1.5e-4 and e_10Hz by 1.6e-4 (G_CODE is 3e-4 above the IAU value)."""
+    GM = 4.302194e-3 * m_tot               # pc (km/s)^2
     au = 4.84813681109536e-6               # pc
     tu = 3.08567758e13                     # s
 
