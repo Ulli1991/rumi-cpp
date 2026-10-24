@@ -216,7 +216,7 @@ Status: **closed** (fixed, test, ensemble checked), **option** (fix kept as an o
   - B4 3PN: incomplete coefficients (several terms missing, same 1/r slip).
 - **Fix:** 2PN corrected in place (general frame, Blanchet eq. acc3PN). 2.5PN, 3PN, 3.5PN: Blanchet's c.o.m. relative
   acceleration a = -(G M / r^2)(A n + B v) (eqs. calAcoeff, calBcoeff; 3PN in modified harmonic coordinates, eq.
-  ABcoeffMH, no ln r'_0), computed once per pair (`pn_rel_highorder`), body 1 gets (m_2/M) a, body 2 -(m_1/M) a:
+  ABcoeffMH, no ln r'_0), computed once per pair (`pn_rel_highorder`; superseded by C27), body 1 gets (m_2/M) a, body 2 -(m_1/M) a:
   sum m a = 0 exactly (momentum to round-off), depends only on relative position and velocity (Galilean
   invariant, so the conservative 3PN part keeps its energy in any frame). The pair call stays bit-identical to the
   two single calls (NBODY_CHECK_EIH).
@@ -1232,3 +1232,36 @@ Status: **closed** (fixed, test, ensemble checked), **option** (fix kept as an o
   sec_inner_s3047 max|dP|/M (2.27e-12, 2.75e-12 km/s) and s3047 |dL/L| (5.0e-13) moved at round-off with the corrected
   trajectory; bounds set to 1.3x the new values. The convergence ctest itself needs NBODY_ETA_SEC (C23 branch) and comes
   with the C23 merge.
+
+## C27 KETJU reference cases (tests/mstar_reference): PN frame, general-frame PN2.5-3.5 and spins, remnants, Peters (fixed)
+
+- **Cases:** the 29 KETJU unit-test cases through `rumi_lib` (ctest label `ketju_reference`): 23 passed, 4 failed,
+  2 skipped (no spin I/O). Now 29 pass.
+- **PN frame (`binary_1pn`, `_threebody`):** LogH evaluated the PN terms with velocities relative to each call's
+  Newtonian c.o.m.; the EIH/2PN terms are not Galilean invariant and the Newtonian c.o.m. drifts under them (unequal
+  masses), so the frame changed every call (position error 66 at r ~ 80 for a binary moving at 0.0425 c, 0.57 in its
+  rest frame, after 1e5 time units). Now
+  `PN_FRAME = lab` (default): `LogHState::v_frame` adds the call's c.o.m. velocity back (logh.cpp `compute_pn_all_pairs`,
+  `rotate_spins`). `PN_FRAME = com` keeps the old per-call frame (Galilean invariant, as KETJU's host couplings;
+  `pn_boost_logh` runs it).
+- **General frame (`binary_full_pn_spin`, no-spin probes):** the m_B / M split of the c.o.m. relative 2.5-3.5PN
+  acceleration (C8) is consistent with the general-frame 1PN/2PN terms only in the PN c.o.m. frame: q = 1/3, v/c =
+  0.085, 300 orbits: 22 (of r ~ 80) from KETJU with 2.5PN, 2.6e-7 with the general-frame terms. Now all orders per
+  body, Blanchet eq. acc3PN (3PN modified harmonic via the gauge vector of eq. contacttransf), and the spin terms per
+  body (Thorne & Hartle 1985 eqs. 4.11, 4.17; `spin_pn_bodies`; in the c.o.m. frame equal to Kidder's to 1e-14).
+  KETJU vs RUMI++ per order (no spins, 1e6 time units): 1.6e-7 to 2.6e-7 absolute, positions ~4e4. `pn_highorder`
+  unchanged; `enzyme_pn_rr_balance` evaluates at Blanchet's c.o.m. relation with P_1PN and Q_2.5PN (the odd Q shift
+  in the 1PN terms is part of the 3.5PN relative acceleration): 3.5PN residual ratios 18-30 (c^-4).
+- **Spins in `rumi_lib`:** `set_spins` / `get_spins` (API 3), chi unclamped (KETJU's body 1 has chi = 4; KETJU caps
+  only the remnant). Spin cases: 6.2e-8 and 1.4e-7 of the 2e-7 tolerance.
+- **Remnant (`head_on_merger`):** 0.0547 eta (1 - delta^2 / 2) for every orbit gave 1.97265 for a head-on merger.
+  `bh_bh_remnant` scales with j = |r x v| / h_qc (h_qc from the quasi-circular orbital spin, J conservation from the
+  plunge, Buonanno, Kidder & Lehner 2008): j >= 1 the quasi-circular fits (any inspiral reaching 10 R_S), j -> 0 the
+  head-on NR limit eta^2 (0.0110 - 0.0088 eta) (Sperhake et al. 2011, PRD 84, 084038) without orbital spin or kick;
+  E_rad and kick with j^2, orbital spin with j (interpolation, not a fit); the BH spins enter the remnant spin
+  ((chi1 m1^2 + chi2 m2^2) / M^2, Barausse & Rezzolla 2009). Head-on: 1.99890.
+- **Peters shortcut (`binary_no_pn_one_host_step`):** merged a BH binary with PN_ORDER 0 at t = 0; now only with the
+  2.5PN bit (mergers.cpp).
+- **Bounds re-measured (lab frame):** `c19_secular_peri` 1.6e-15, `sec_inner_s1025` dL 7e-13, `sec_inner_merge` dP
+  1.6e-13 (round-off of changed trajectories; the PN books take the lab-frame states, integrator.cpp).
+
