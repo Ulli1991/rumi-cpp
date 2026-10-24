@@ -34,6 +34,9 @@ struct Octree {
     // Computed bottom-up after forces are evaluated (not during build)
     Kokkos::View<double*[3], Kokkos::LayoutRight> cell_accel;
 
+    // cell_dip(i, 0..8) = D_lq = sum m delta_l (a_q - a_bar_q), delta = x - cell_com; (i, 9..11) = sum m delta
+    Kokkos::View<double*[12], Kokkos::LayoutRight> cell_dip;
+
     // cell_size_sq_theta(i) = cell_half_width² / theta² (pre-computed for MAC)
     Kokkos::View<double*> cell_size_sq_theta;
 
@@ -70,6 +73,8 @@ struct Octree {
     // Dual cell accelerations for gradient correction
     Kokkos::View<double*[3], Kokkos::LayoutRight> cell_accel_slow;
     Kokkos::View<double*[3], Kokkos::LayoutRight> cell_accel_fast;
+    Kokkos::View<double*[12], Kokkos::LayoutRight> cell_dip_slow;
+    Kokkos::View<double*[12], Kokkos::LayoutRight> cell_dip_fast;
 
     // Group data for tree traversal (groups of spatially nearby particles)
     Kokkos::View<int*> group_start;     // start index in sorted array
@@ -84,6 +89,7 @@ struct Octree {
     double theta = 0.5;
     int n_leaf = 32;      // max particles per leaf cell
     int n_group = 64;     // particles per traversal group
+    bool grad_dipole = true;  // FSI gradient: cell acceleration dipole term (cell_dip) on accepted cells
 
     // Bounding box of the tree
     double box_cx, box_cy, box_cz;  // center

@@ -70,6 +70,7 @@ int hhs_cc_max = -1;   // -1: SERIAL_N2_GPU
 int hhs_cc_min = 0;
 int tree_threshold = 10000;
 double tree_theta = 0.5;
+bool tree_grad_dipole = true;
 int tree_n_leaf = 32;
 int tree_n_group = 64;
 // Global tree instance (rebuilt each top-level step)
@@ -1621,6 +1622,7 @@ void fsi_step(Particles& p, int start, int count,
     } else if (tree_mode) {
         g_profiler.start();
         g_octree.n_leaf = tree_n_leaf;
+        g_octree.grad_dipole = tree_grad_dipole;
         g_octree.n_group = tree_n_group;
         g_octree.build(p, start, count, tree_theta);
         tree_self_acceleration(p, g_octree, start, count, G, soft2);
@@ -1662,6 +1664,7 @@ void fsi_step(Particles& p, int start, int count,
         g_profiler.start();
         if (!tree_built) {
             g_octree.n_leaf = tree_n_leaf;
+            g_octree.grad_dipole = tree_grad_dipole;
             g_octree.n_group = tree_n_group;
             g_octree.build(p, start, count, tree_theta);
             tree_built = true;
@@ -2276,6 +2279,7 @@ static void fsi_step_distributed(DistributedParticles& dp, int start, int count,
         g_profiler.start();
         if (!tree_prebuilt) {
             g_octree.n_leaf = tree_n_leaf;
+            g_octree.grad_dipole = tree_grad_dipole;
             g_octree.n_group = tree_n_group;
             g_octree.build(dp.local, start, count, tree_theta);
             tree_prebuilt = true;
@@ -2329,6 +2333,7 @@ static void fsi_step_distributed(DistributedParticles& dp, int start, int count,
         g_profiler.start();
         if (!tree_prebuilt) {
             g_octree.n_leaf = tree_n_leaf;
+            g_octree.grad_dipole = tree_grad_dipole;
             g_octree.n_group = tree_n_group;
             g_octree.build(dp.local, start, count, tree_theta);
             tree_prebuilt = true;
@@ -3572,6 +3577,7 @@ static int hhs_fsi_recursive_impl(
             forces_valid = true;
         } else if (!global_tree_available && tree_eligible) {
             g_octree.n_leaf = tree_n_leaf;
+            g_octree.grad_dipole = tree_grad_dipole;
             g_octree.n_group = tree_n_group;
             g_octree.build(p, start, count, tree_theta);
             int my_g_off, my_g_cnt;

@@ -393,21 +393,27 @@ void Octree::compute_cell_accelerations(Particles& p) {
 
     if ((int)cell_accel.extent(0) != n_cells)
         cell_accel = Kokkos::View<double*[3], Kokkos::LayoutRight>("cell_accel", n_cells);
+    const bool dip = grad_dipole;
+    if (dip && (int)cell_dip.extent(0) != n_cells)
+        cell_dip = Kokkos::View<double*[12], Kokkos::LayoutRight>("cell_dip", n_cells);
 
     auto ax = p.ax;
     auto ay = p.ay;
     auto az = p.az;
     auto mass = p.mass;
     auto si = sorted_indices;
+    auto sp = sorted_pos;
     auto pbeg_v = cell_pbeg;
     auto pend_v = cell_pend;
     auto com = cell_com;
     auto ca = cell_accel;
+    auto cd = cell_dip;
     int nc = n_cells;
 
     constexpr int TEAM_SZ = TREE_CELL_TEAM;
-    // Scratch: 3 doubles per thread for partial sums (sax, say, saz)
-    size_t scratch_bytes = 3 * TEAM_SZ * sizeof(double);
+    constexpr int NS = 3 + 12;   // sum m a; dipole partials (cell_dip layout, a relative to the cell's first particle)
+    const int ns = dip ? NS : 3;
+    size_t scratch_bytes = NS * TEAM_SZ * sizeof(double);
 
     using team_policy = Kokkos::TeamPolicy<>;
     using team_member = team_policy::member_type;
@@ -420,42 +426,49 @@ void Octree::compute_cell_accelerations(Particles& p) {
             int c = team.league_rank();
             int tid = team.team_rank();
             int tsz = team.team_size();
-            scratch_t scratch(team.team_scratch(0), 3 * tsz);
+            scratch_t scratch(team.team_scratch(0), NS * tsz);
 
             double cell_m = com(c, 3);
             int b = pbeg_v(c), e = pend_v(c);
+            double l[NS];
+            for (int q = 0; q < NS; q++) l[q] = 0;
+            const double cx0 = com(c, 0), cy0 = com(c, 1), cz0 = com(c, 2);
+            double ar[3] = {0, 0, 0};
+            if (dip && e > b) { const int o0 = si(b); ar[0] = ax(o0); ar[1] = ay(o0); ar[2] = az(o0); }
 
             // Team-stride accumulation
-            double lax = 0, lay = 0, laz = 0;
             for (int i = b + tid; i < e; i += tsz) {
                 int orig = si(i);
                 double m = mass(orig);
-                lax += m * ax(orig);
-                lay += m * ay(orig);
-                laz += m * az(orig);
+                const double a3[3] = {ax(orig), ay(orig), az(orig)};
+                l[0] += m * a3[0];
+                l[1] += m * a3[1];
+                l[2] += m * a3[2];
+                if (dip) {
+                    const double md[3] = {m * (sp(i, 0) - cx0), m * (sp(i, 1) - cy0), m * (sp(i, 2) - cz0)};
+                    for (int u = 0; u < 3; u++)
+                        for (int v = 0; v < 3; v++) l[3 + 3 * u + v] += md[u] * (a3[v] - ar[v]);
+                    l[12] += md[0]; l[13] += md[1]; l[14] += md[2];
+                }
             }
 
-            // Write partials to scratch
-            scratch(tid)          = lax;
-            scratch(tid + tsz)    = lay;
-            scratch(tid + 2*tsz)  = laz;
+            for (int q = 0; q < ns; q++) scratch(tid + q * tsz) = l[q];
             team.team_barrier();
 
             // Thread 0 reduces and writes result
             if (tid == 0) {
-                double sax = 0, say = 0, saz = 0;
-                for (int t = 0; t < tsz; t++) {
-                    sax += scratch(t);
-                    say += scratch(t + tsz);
-                    saz += scratch(t + 2*tsz);
-                }
+                double t[NS];
+                for (int q = 0; q < ns; q++) { t[q] = 0; for (int r = 0; r < tsz; r++) t[q] += scratch(r + q * tsz); }
+                double ab[3] = {0, 0, 0};
                 if (cell_m > 0) {
                     double inv = 1.0 / cell_m;
-                    ca(c, 0) = sax * inv;
-                    ca(c, 1) = say * inv;
-                    ca(c, 2) = saz * inv;
-                } else {
-                    ca(c, 0) = ca(c, 1) = ca(c, 2) = 0;
+                    ab[0] = t[0] * inv; ab[1] = t[1] * inv; ab[2] = t[2] * inv;
+                }
+                ca(c, 0) = ab[0]; ca(c, 1) = ab[1]; ca(c, 2) = ab[2];
+                if (dip) {   // sum m delta (a - a_bar) = S + P (a_ref - a_bar)
+                    for (int u = 0; u < 3; u++)
+                        for (int v = 0; v < 3; v++) cd(c, 3 * u + v) = t[3 + 3 * u + v] + t[12 + u] * (ar[v] - ab[v]);
+                    cd(c, 9) = t[12]; cd(c, 10) = t[13]; cd(c, 11) = t[14];
                 }
             }
         });
@@ -470,21 +483,27 @@ void Octree::compute_active_cell_accelerations(Particles& p) {
 
     if ((int)cell_accel.extent(0) != n_cells)
         cell_accel = Kokkos::View<double*[3], Kokkos::LayoutRight>("cell_accel", n_cells);
+    const bool dip = grad_dipole;
+    if (dip && (int)cell_dip.extent(0) != n_cells)
+        cell_dip = Kokkos::View<double*[12], Kokkos::LayoutRight>("cell_dip", n_cells);
 
     auto ax = p.ax;
     auto ay = p.ay;
     auto az = p.az;
-    auto mass = p.mass;
     auto si = sorted_indices;
     auto flg = sorted_subset_flag;
     auto pbeg_v = cell_pbeg;
     auto pend_v = cell_pend;
     auto sp = sorted_pos;
+    auto com = cell_com;
     auto ca = cell_accel;
+    auto cd = cell_dip;
     int nc = n_cells;
 
     constexpr int TEAM_SZ = TREE_CELL_TEAM;
-    size_t scratch_bytes = 4 * TEAM_SZ * sizeof(double);  // m_active, max, may, maz
+    constexpr int NS = 4 + 12;   // m_active, sum m a; dipole partials about cell_com (a relative to a_ref)
+    const int ns = dip ? NS : 4;
+    size_t scratch_bytes = NS * TEAM_SZ * sizeof(double);
 
     using team_policy = Kokkos::TeamPolicy<>;
     using team_member = team_policy::member_type;
@@ -497,42 +516,47 @@ void Octree::compute_active_cell_accelerations(Particles& p) {
             int c = team.league_rank();
             int tid = team.team_rank();
             int tsz = team.team_size();
-            scratch_t scratch(team.team_scratch(0), 4 * tsz);
+            scratch_t scratch(team.team_scratch(0), NS * tsz);
 
             int b = pbeg_v(c), e = pend_v(c);
-
-            double lm = 0, lax = 0, lay = 0, laz = 0;
+            double l[NS];
+            for (int q = 0; q < NS; q++) l[q] = 0;
+            const double cx0 = com(c, 0), cy0 = com(c, 1), cz0 = com(c, 2);
+            double ar[3] = {0, 0, 0};
+            if (dip && e > b) { const int o0 = si(b); ar[0] = ax(o0); ar[1] = ay(o0); ar[2] = az(o0); }
             for (int i = b + tid; i < e; i += tsz) {
                 if (flg(i) == 2) continue;  // skip inactive particles
                 int orig = si(i);
                 double m = sp(i, 3);  // use sorted mass (consistent)
-                lm += m;
-                lax += m * ax(orig);
-                lay += m * ay(orig);
-                laz += m * az(orig);
+                const double a3[3] = {ax(orig), ay(orig), az(orig)};
+                l[0] += m;
+                l[1] += m * a3[0];
+                l[2] += m * a3[1];
+                l[3] += m * a3[2];
+                if (dip) {
+                    const double md[3] = {m * (sp(i, 0) - cx0), m * (sp(i, 1) - cy0), m * (sp(i, 2) - cz0)};
+                    for (int u = 0; u < 3; u++)
+                        for (int v = 0; v < 3; v++) l[4 + 3 * u + v] += md[u] * (a3[v] - ar[v]);
+                    l[13] += md[0]; l[14] += md[1]; l[15] += md[2];
+                }
             }
 
-            scratch(tid)          = lm;
-            scratch(tid + tsz)    = lax;
-            scratch(tid + 2*tsz)  = lay;
-            scratch(tid + 3*tsz)  = laz;
+            for (int q = 0; q < ns; q++) scratch(tid + q * tsz) = l[q];
             team.team_barrier();
 
             if (tid == 0) {
-                double sm = 0, sax = 0, say = 0, saz = 0;
-                for (int t = 0; t < tsz; t++) {
-                    sm  += scratch(t);
-                    sax += scratch(t + tsz);
-                    say += scratch(t + 2*tsz);
-                    saz += scratch(t + 3*tsz);
+                double t[NS];
+                for (int q = 0; q < ns; q++) { t[q] = 0; for (int r = 0; r < tsz; r++) t[q] += scratch(r + q * tsz); }
+                double ab[3] = {0, 0, 0};
+                if (t[0] > 0) {
+                    double inv = 1.0 / t[0];
+                    ab[0] = t[1] * inv; ab[1] = t[2] * inv; ab[2] = t[3] * inv;
                 }
-                if (sm > 0) {
-                    double inv = 1.0 / sm;
-                    ca(c, 0) = sax * inv;
-                    ca(c, 1) = say * inv;
-                    ca(c, 2) = saz * inv;
-                } else {
-                    ca(c, 0) = ca(c, 1) = ca(c, 2) = 0;
+                ca(c, 0) = ab[0]; ca(c, 1) = ab[1]; ca(c, 2) = ab[2];
+                if (dip) {
+                    for (int u = 0; u < 3; u++)
+                        for (int v = 0; v < 3; v++) cd(c, 3 * u + v) = t[4 + 3 * u + v] + t[13 + u] * (ar[v] - ab[v]);
+                    cd(c, 9) = t[13]; cd(c, 10) = t[14]; cd(c, 11) = t[15];
                 }
             }
         });
@@ -852,12 +876,18 @@ void Octree::compute_dual_cell_accelerations(Particles& p) {
         cell_accel_slow = Kokkos::View<double*[3], Kokkos::LayoutRight>("cell_accel_slow", n_cells);
         cell_accel_fast = Kokkos::View<double*[3], Kokkos::LayoutRight>("cell_accel_fast", n_cells);
     }
+    const bool dip = grad_dipole;
+    if (dip && (int)cell_dip_slow.extent(0) < n_cells) {
+        cell_dip_slow = Kokkos::View<double*[12], Kokkos::LayoutRight>("cell_dip_slow", n_cells);
+        cell_dip_fast = Kokkos::View<double*[12], Kokkos::LayoutRight>("cell_dip_fast", n_cells);
+    }
 
     auto ax = p.ax;
     auto ay = p.ay;
     auto az = p.az;
     auto mass = p.mass;
     auto si = sorted_indices;
+    auto sp = sorted_pos;
     auto flg = sorted_subset_flag;
     auto pbeg_v = cell_pbeg;
     auto pend_v = cell_pend;
@@ -865,11 +895,14 @@ void Octree::compute_dual_cell_accelerations(Particles& p) {
     auto com_f = cell_com_fast;
     auto ca_s = cell_accel_slow;
     auto ca_f = cell_accel_fast;
+    auto cd_s = cell_dip_slow;
+    auto cd_f = cell_dip_fast;
     int nc = n_cells;
 
     constexpr int TEAM_SZ = TREE_CELL_TEAM;
-    // Scratch: 6 doubles per thread (3 slow + 3 fast: ax,ay,az each)
-    size_t scratch_bytes = 6 * TEAM_SZ * sizeof(double);
+    constexpr int NH = 3 + 12;   // per subset: sum m a; dipole partials about that subset's com (a relative to a_ref)
+    const int nh = dip ? NH : 3;
+    size_t scratch_bytes = 2 * NH * TEAM_SZ * sizeof(double);
 
     using team_policy = Kokkos::TeamPolicy<>;
     using team_member = team_policy::member_type;
@@ -882,51 +915,53 @@ void Octree::compute_dual_cell_accelerations(Particles& p) {
             int c = team.league_rank();
             int tid = team.team_rank();
             int tsz = team.team_size();
-            scratch_t scratch(team.team_scratch(0), 6 * tsz);
+            scratch_t scratch(team.team_scratch(0), 2 * NH * tsz);
 
             int b = pbeg_v(c), e = pend_v(c);
             double ms = com_s(c, 3), mf = com_f(c, 3);
-
-            // Team-stride accumulation of 6 values
-            double lax_s = 0, lay_s = 0, laz_s = 0;
-            double lax_f = 0, lay_f = 0, laz_f = 0;
+            double l[2 * NH];
+            for (int q = 0; q < 2 * NH; q++) l[q] = 0;
+            const double cc[2][3] = {{com_s(c, 0), com_s(c, 1), com_s(c, 2)}, {com_f(c, 0), com_f(c, 1), com_f(c, 2)}};
+            double ar[3] = {0, 0, 0};
+            if (dip && e > b) { const int o0 = si(b); ar[0] = ax(o0); ar[1] = ay(o0); ar[2] = az(o0); }
 
             for (int i = b + tid; i < e; i += tsz) {
+                int f = flg(i);
+                if (f != 0 && f != 1) continue;  // skip flag=2 (not at this level)
                 int orig = si(i);
                 double m = mass(orig);
-                int f = flg(i);
-                if (f == 0) {
-                    lax_s += m * ax(orig); lay_s += m * ay(orig); laz_s += m * az(orig);
-                } else if (f == 1) {  // skip flag=2 (not at this level)
-                    lax_f += m * ax(orig); lay_f += m * ay(orig); laz_f += m * az(orig);
+                const double a3[3] = {ax(orig), ay(orig), az(orig)};
+                double* lh = l + f * NH;
+                lh[0] += m * a3[0]; lh[1] += m * a3[1]; lh[2] += m * a3[2];
+                if (dip) {
+                    const double md[3] = {m * (sp(i, 0) - cc[f][0]), m * (sp(i, 1) - cc[f][1]), m * (sp(i, 2) - cc[f][2])};
+                    for (int u = 0; u < 3; u++)
+                        for (int v = 0; v < 3; v++) lh[3 + 3 * u + v] += md[u] * (a3[v] - ar[v]);
+                    lh[12] += md[0]; lh[13] += md[1]; lh[14] += md[2];
                 }
             }
 
-            // Write partials to scratch
-            scratch(tid)          = lax_s;
-            scratch(tid + tsz)    = lay_s;
-            scratch(tid + 2*tsz)  = laz_s;
-            scratch(tid + 3*tsz)  = lax_f;
-            scratch(tid + 4*tsz)  = lay_f;
-            scratch(tid + 5*tsz)  = laz_f;
+            for (int h = 0; h < 2; h++)
+                for (int q = 0; q < nh; q++) scratch(tid + (h * NH + q) * tsz) = l[h * NH + q];
             team.team_barrier();
 
             // Thread 0 reduces across team and writes result
             if (tid == 0) {
-                double sax_s = 0, say_s = 0, saz_s = 0;
-                double sax_f = 0, say_f = 0, saz_f = 0;
-                for (int t = 0; t < tsz; t++) {
-                    sax_s += scratch(t);
-                    say_s += scratch(t + tsz);
-                    saz_s += scratch(t + 2*tsz);
-                    sax_f += scratch(t + 3*tsz);
-                    say_f += scratch(t + 4*tsz);
-                    saz_f += scratch(t + 5*tsz);
+                for (int h = 0; h < 2; h++) {
+                    double t[NH];
+                    for (int q = 0; q < nh; q++) { t[q] = 0; for (int r = 0; r < tsz; r++) t[q] += scratch(r + (h * NH + q) * tsz); }
+                    const double mh = h ? mf : ms;
+                    double ab[3] = {0, 0, 0};
+                    if (mh > 0) { double inv = 1.0 / mh; ab[0] = t[0] * inv; ab[1] = t[1] * inv; ab[2] = t[2] * inv; }
+                    auto ca = h ? ca_f : ca_s;
+                    ca(c, 0) = ab[0]; ca(c, 1) = ab[1]; ca(c, 2) = ab[2];
+                    if (dip) {
+                        auto cd = h ? cd_f : cd_s;
+                        for (int u = 0; u < 3; u++)
+                            for (int v = 0; v < 3; v++) cd(c, 3 * u + v) = t[3 + 3 * u + v] + t[12 + u] * (ar[v] - ab[v]);
+                        cd(c, 9) = t[12]; cd(c, 10) = t[13]; cd(c, 11) = t[14];
+                    }
                 }
-                if (ms > 0) { double inv = 1.0/ms; ca_s(c,0) = sax_s*inv; ca_s(c,1) = say_s*inv; ca_s(c,2) = saz_s*inv; }
-                else { ca_s(c,0) = ca_s(c,1) = ca_s(c,2) = 0; }
-                if (mf > 0) { double inv = 1.0/mf; ca_f(c,0) = sax_f*inv; ca_f(c,1) = say_f*inv; ca_f(c,2) = saz_f*inv; }
-                else { ca_f(c,0) = ca_f(c,1) = ca_f(c,2) = 0; }
             }
         });
 }
@@ -935,12 +970,15 @@ void Octree::deallocate() {
     cell_com = {};
     cell_vel = {};
     cell_accel = {};
+    cell_dip = {};
     cell_com_slow = {};
     cell_com_fast = {};
     cell_vel_slow = {};
     cell_vel_fast = {};
     cell_accel_slow = {};
     cell_accel_fast = {};
+    cell_dip_slow = {};
+    cell_dip_fast = {};
     cell_size_sq_theta = {};
     cell_children = {};
     cell_pbeg = {};

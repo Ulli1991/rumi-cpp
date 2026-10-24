@@ -222,6 +222,8 @@ const std::vector<ParamSpec> kParams = {
     {"TREE_THETA", D, "0.7", "Performance and parallelism", INTERNAL, "", "Tree opening angle"},
     {"TREE_N_LEAF", I, "32", "Performance and parallelism", INTERNAL, "", "Largest leaf cell"},
     {"TREE_N_GROUP", I, "64", "Performance and parallelism", INTERNAL, "", "Particles per tree traversal group"},
+    {"TREE_GRAD_DIPOLE", B, "true", "Performance and parallelism", INTERNAL, "",
+     "FSI gradient term of accepted tree cells with the acceleration dipole (monopole only: false)"},
     {"TREE_DT_MIN_N", I, "-1", "Performance and parallelism", INTERNAL, "",
      "Exact device-tree time-step search for sets of at least this many (0: off; -1: host builds 2048, GPU 65536, "
      "300000 with FLYBY_CM_VELOCITY)"},

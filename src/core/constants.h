@@ -200,6 +200,25 @@ void gradient_correction_interaction(double dx, double dy, double dz,
     cz += f * (r2_soft * daz - 3.0 * r_dot_a * dz);
 }
 
+// Dipole of the gradient term from an accepted cell: coeff (grad K) : (D + P w^T), K = (r2 I - 3 d d^T) / r2^(5/2) the
+// monopole kernel above; dip = {D (row-major, D_lq = sum m delta_l alpha_q), P = sum m delta}, w = a_bar - a_i
+KOKKOS_INLINE_FUNCTION
+void gradient_dipole_interaction(double dx, double dy, double dz, double wx, double wy, double wz,
+                                 double r2_soft, double coeff, const double* dip,
+                                 double& cx, double& cy, double& cz) {
+    const double D0 = dip[0] + dip[9] * wx, D1 = dip[1] + dip[9] * wy, D2 = dip[2] + dip[9] * wz;
+    const double D3 = dip[3] + dip[10] * wx, D4 = dip[4] + dip[10] * wy, D5 = dip[5] + dip[10] * wz;
+    const double D6 = dip[6] + dip[11] * wx, D7 = dip[7] + dip[11] * wy, D8 = dip[8] + dip[11] * wz;
+    const double Ddx = D0 * dx + D1 * dy + D2 * dz, Ddy = D3 * dx + D4 * dy + D5 * dz, Ddz = D6 * dx + D7 * dy + D8 * dz;
+    const double DTdx = D0 * dx + D3 * dy + D6 * dz, DTdy = D1 * dx + D4 * dy + D7 * dz, DTdz = D2 * dx + D5 * dy + D8 * dz;
+    const double tr = D0 + D4 + D8, dDd = dx * Ddx + dy * Ddy + dz * Ddz;
+    const double inv_r = fast_rsqrt(r2_soft), inv_r2 = inv_r * inv_r, inv_r5 = inv_r2 * inv_r2 * inv_r;
+    const double f5 = -3.0 * coeff * inv_r5, f7 = 15.0 * coeff * inv_r5 * inv_r2 * dDd;
+    cx += f7 * dx + f5 * (Ddx + DTdx + tr * dx);
+    cy += f7 * dy + f5 * (Ddy + DTdy + tr * dy);
+    cz += f7 * dz + f5 * (Ddz + DTdz + tr * dz);
+}
+
 // Gradient correction with Kahan summation.
 KOKKOS_INLINE_FUNCTION
 void gradient_correction_interaction_kahan(double dx, double dy, double dz,

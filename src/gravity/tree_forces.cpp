@@ -54,6 +54,8 @@ struct TreeWalkData {
     RawView pax, pay, paz;
     // Gradient: cell acceleration monopole
     Kokkos::View<double*[3], Kokkos::LayoutRight> cell_accel;
+    Kokkos::View<double*[12], Kokkos::LayoutRight> cell_dip;   // gradient: cell acceleration dipole (dipole != 0)
+    int dipole;
     // Timestep: particle velocity/mass/dt + cell velocity monopole
     RawView pvx, pvy, pvz, pm, dt_f;
     Kokkos::View<double*[3], Kokkos::LayoutRight> cell_vel;
@@ -124,6 +126,8 @@ static void tree_walk(const TreeWalkData& d, const char* name) {
     auto grp_sz    = d.grp_size;
     auto pax = d.pax, pay = d.pay, paz = d.paz;
     auto caccel    = d.cell_accel;
+    auto cdip      = d.cell_dip;
+    const int dipole = (Op == OP_GRADIENT) ? d.dipole : 0;
     auto pvx = d.pvx, pvy = d.pvy, pvz = d.pvz;
     auto dtf = d.dt_f;
     auto cvel      = d.cell_vel;
@@ -191,9 +195,11 @@ static void tree_walk(const TreeWalkData& d, const char* name) {
                             t_min_sq[k] = Kokkos::fmin(t_min_sq[k], Kokkos::fmin(eta_ff_sq * t_ff * t_ff, eta_fb_sq * t_fb * t_fb));
                         }
                     }
-                    if (Op == OP_GRADIENT)
-                        gradient_correction_interaction(dx, dy, dz, caccel(node, 0) - axi[k], caccel(node, 1) - ayi[k],
-                                                        caccel(node, 2) - azi[k], r2, coeff * cmass, cx[k], cy[k], cz[k]);
+                    if (Op == OP_GRADIENT) {
+                        const double dax = caccel(node, 0) - axi[k], day = caccel(node, 1) - ayi[k], daz = caccel(node, 2) - azi[k];
+                        gradient_correction_interaction(dx, dy, dz, dax, day, daz, r2, coeff * cmass, cx[k], cy[k], cz[k]);
+                        if (dipole) gradient_dipole_interaction(dx, dy, dz, dax, day, daz, r2, coeff, &cdip(node, 0), cx[k], cy[k], cz[k]);
+                    }
                 }
             } else if (cell_lf(node)) {
                 int lpbeg = cell_pb(node), lpend = cell_pe(node);
@@ -362,6 +368,7 @@ static void tree_walk(const TreeWalkData& d, const char* name) {
                             double day = caccel(node, 1) - ayi;
                             double daz = caccel(node, 2) - azi;
                             gradient_correction_interaction(dx, dy, dz, dax, day, daz, r2, coeff * cmass, cx, cy, cz);
+                            if (dipole) gradient_dipole_interaction(dx, dy, dz, dax, day, daz, r2, coeff, &cdip(node, 0), cx, cy, cz);
                         }
                     }
                 } else if (is_leaf) {
@@ -503,6 +510,8 @@ void tree_self_gradient_correction(Particles& p, const Octree& tree,
     auto d = make_base(p, tree, G, soft2, group_offset, ng);
     d.cell_com = tree.cell_com;
     d.cell_accel = tree.cell_accel;
+    d.cell_dip = tree.cell_dip;
+    d.dipole = tree.grad_dipole;
     d.coeff = G * dt * dt * GRAD_COEFF;
     tree_walk<OP_GRADIENT, FILT_ALL>(d, "tree_self_grad");
 }
@@ -554,6 +563,8 @@ void tree_cross_gradient_correction(Particles& p,
     // Cell structure + j-particles from j_tree
     d.cell_com = j_tree.cell_com;
     d.cell_accel = j_tree.cell_accel;
+    d.cell_dip = j_tree.cell_dip;
+    d.dipole = j_tree.grad_dipole;
     d.cell_size_sq_theta = j_tree.cell_size_sq_theta;
     d.cell_children = j_tree.cell_children;
     d.cell_pbeg = j_tree.cell_pbeg;
@@ -589,6 +600,8 @@ void tree_global_cross_gradient_correction(Particles& p, const Octree& tree,
     auto d = make_base(p, tree, G, soft2, 0, tree.n_groups);
     d.cell_com = (source_flag == 0) ? tree.cell_com_slow : tree.cell_com_fast;
     d.cell_accel = (source_flag == 0) ? tree.cell_accel_slow : tree.cell_accel_fast;
+    d.cell_dip = (source_flag == 0) ? tree.cell_dip_slow : tree.cell_dip_fast;
+    d.dipole = tree.grad_dipole;
     d.subset_flag = tree.sorted_subset_flag;
     d.coeff = G * dt * dt * GRAD_COEFF;
     d.match_flag = 1 - source_flag;
@@ -615,6 +628,8 @@ void tree_global_self_gradient_correction(Particles& p, const Octree& tree,
     auto d = make_base(p, tree, G, soft2, 0, tree.n_groups);
     d.cell_com = (subset_flag == 0) ? tree.cell_com_slow : tree.cell_com_fast;
     d.cell_accel = (subset_flag == 0) ? tree.cell_accel_slow : tree.cell_accel_fast;
+    d.cell_dip = (subset_flag == 0) ? tree.cell_dip_slow : tree.cell_dip_fast;
+    d.dipole = tree.grad_dipole;
     d.subset_flag = tree.sorted_subset_flag;
     d.coeff = G * dt * dt * GRAD_COEFF;
     d.match_flag = subset_flag;
@@ -653,6 +668,8 @@ void tree_all_gradient_on_subset(Particles& p, const Octree& tree,
     auto d = make_base(p, tree, G, soft2, 0, tree.n_groups);
     d.cell_com = tree.cell_com;
     d.cell_accel = tree.cell_accel;
+    d.cell_dip = tree.cell_dip;
+    d.dipole = tree.grad_dipole;
     d.subset_flag = tree.sorted_subset_flag;
     d.coeff = G * dt * dt * GRAD_COEFF;
     tree_walk<OP_GRADIENT, FILT_ACTIVE>(d, "tree_all_grad");

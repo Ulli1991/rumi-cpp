@@ -595,6 +595,7 @@ int main(int argc, char** argv) {
         tree_theta = cfg.get_double("TREE_THETA");
         tree_n_leaf = cfg.get_int("TREE_N_LEAF");
         tree_n_group = cfg.get_int("TREE_N_GROUP");
+        tree_grad_dipole = cfg.get_bool("TREE_GRAD_DIPOLE");
         // Exact tree searches for the HHS time steps and neighbours (gravity/dt_tree.h); forces stay direct
         // Exact tree searches on by default above the measured break-even set sizes (AUDIT F7; results are
         // bit-identical to O(N^2), so only speed changes). Host builds: ~1000-1500 for both searches (32 threads).

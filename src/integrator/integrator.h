@@ -27,6 +27,7 @@ extern int hhs_cc_min;                  // HHS_CC_MIN: components smaller than t
 extern int hhs_cc_max;                  // HHS_CC_MAX: largest set split, run locally on every rank (default max(SERIAL_N2_GPU, 16384))
 extern int tree_threshold;              // Particle count above which tree is used (default: 10000)
 extern double tree_theta;               // Opening angle (default: 0.5)
+extern bool tree_grad_dipole;            // FSI gradient: cell acceleration dipole on accepted cells
 extern int tree_n_leaf;                 // Max particles per leaf (default: 32)
 extern int tree_n_group;                // Particles per traversal group (default: 64)
 // Forward declaration for distributed particles

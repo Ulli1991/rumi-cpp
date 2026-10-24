@@ -1,6 +1,6 @@
 # Config reference
 
-All 154 keys of the config file (`config.txt`, or `--config <file>`), generated from the parameter table in `src/core/params.cpp` by `scripts/gen_config_md.py`. Every key has one default, in that table; an unknown key in a config file is an error. Each run writes the effective value of every key, and whether it came from the file or the default, to `run_params.txt`.
+All 155 keys of the config file (`config.txt`, or `--config <file>`), generated from the parameter table in `src/core/params.cpp` by `scripts/gen_config_md.py`. Every key has one default, in that table; an unknown key in a config file is an error. Each run writes the effective value of every key, and whether it came from the file or the default, to `run_params.txt`.
 
 Levels:
 
@@ -181,6 +181,7 @@ Levels:
 | `TREE_THETA` | double | `0.7` | internal |  | Tree opening angle |
 | `TREE_N_LEAF` | int | `32` | internal |  | Largest leaf cell |
 | `TREE_N_GROUP` | int | `64` | internal |  | Particles per tree traversal group |
+| `TREE_GRAD_DIPOLE` | bool | `true` | internal |  | FSI gradient term of accepted tree cells with the acceleration dipole (monopole only: false) |
 | `TREE_DT_MIN_N` | int | `-1` | internal |  | Exact device-tree time-step search for sets of at least this many (0: off; -1: host builds 2048, GPU 65536, 300000 with FLYBY_CM_VELOCITY) |
 | `TREE_NGB_MIN_N` | int | `-1` | internal |  | The same for the neighbour search (-1: host builds 2048, GPU 32768) |
 | `TREE_DT_CPU_MAX` | int | `0` | internal |  | Host-thread tree search for sets up to this size (host builds / APUs; 0: off) |
