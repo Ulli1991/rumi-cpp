@@ -1,10 +1,10 @@
 # Config reference
 
-All 158 keys of the config file (`config.txt`, or `--config <file>`), generated from the parameter table in `src/core/params.cpp` by `scripts/gen_config_md.py`. Every key has one default, in that table; an unknown key in a config file is an error. Each run writes the effective value of every key, and whether it came from the file or the default, to `run_params.txt`.
+All 162 keys of the config file (`config.txt`, or `--config <file>`), generated from the parameter table in `src/core/params.cpp` by `scripts/gen_config_md.py`. Every key has one default, in that table; an unknown key in a config file is an error. Each run writes the effective value of every key, and whether it came from the file or the default, to `run_params.txt`.
 
 Levels:
 
-- **user**: the choices of a run; these 52 keys are in `config.txt`.
+- **user**: the choices of a run; these 56 keys are in `config.txt`.
 - **expert**: accuracy and output knobs; the default is the production value.
 - **test**: parameters of the few-body test problems.
 - **internal**: performance tuning thresholds; results do not depend on them (or only through the reduction order).
@@ -58,6 +58,10 @@ Levels:
 | `IMBH_A_PC` | double | `1e-4` | user |  | Semi-major axis (pc) |
 | `IMBH_E` | double | `0.5` | user |  | Eccentricity |
 | `IMBH_SPIN` | double | `0.0` | user |  | Dimensionless spin of both BHs (along z) |
+| `IMBH_CUSP_N` | int | `0` | user |  | Extra stars bound to the IMBH binary in a power-law cusp (ADD_IMBH; 0: none) |
+| `IMBH_CUSP_GAMMA` | double | `1.75` | user |  | Cusp density slope rho ~ r^-gamma (7/4: Bahcall & Wolf 1976) |
+| `IMBH_CUSP_R_PC` | double | `0.01` | user |  | Outer radius of the cusp (pc) |
+| `IMBH_CUSP_M` | double | `1.0` | user |  | Mass of each cusp star (Msun; main sequence, R = M^0.8 R_sun) |
 
 ## Physics
 

@@ -67,6 +67,10 @@ const std::vector<ParamSpec> kParams = {
     {"IMBH_A_PC", D, "1e-4", "IMBH binary", USER, "", "Semi-major axis (pc)"},
     {"IMBH_E", D, "0.5", "IMBH binary", USER, "", "Eccentricity"},
     {"IMBH_SPIN", D, "0.0", "IMBH binary", USER, "", "Dimensionless spin of both BHs (along z)"},
+    {"IMBH_CUSP_N", I, "0", "IMBH binary", USER, "", "Extra stars bound to the IMBH binary in a power-law cusp (ADD_IMBH; 0: none)"},
+    {"IMBH_CUSP_GAMMA", D, "1.75", "IMBH binary", USER, "", "Cusp density slope rho ~ r^-gamma (7/4: Bahcall & Wolf 1976)"},
+    {"IMBH_CUSP_R_PC", D, "0.01", "IMBH binary", USER, "", "Outer radius of the cusp (pc)"},
+    {"IMBH_CUSP_M", D, "1.0", "IMBH binary", USER, "", "Mass of each cusp star (Msun; main sequence, R = M^0.8 R_sun)"},
 
     // ---- Physics ----
     {"COLLISIONAL", B, "false", "Physics", USER, "",

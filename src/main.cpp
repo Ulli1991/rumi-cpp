@@ -550,6 +550,16 @@ int main(int argc, char** argv) {
         double imbh_a_pc    = cfg.get_double("IMBH_A_PC");
         double imbh_e       = cfg.get_double("IMBH_E");
         double imbh_spin    = cfg.get_double("IMBH_SPIN");
+#ifdef ENABLE_COLLISIONAL
+        {
+            ImbhCuspParams cusp;
+            cusp.n = cfg.get_int("IMBH_CUSP_N");
+            cusp.gamma = cfg.get_double("IMBH_CUSP_GAMMA");
+            cusp.r_pc = cfg.get_double("IMBH_CUSP_R_PC");
+            cusp.m = cfg.get_double("IMBH_CUSP_M");
+            set_imbh_cusp(cusp);
+        }
+#endif
         // Artificial-binary avoidance (Rantala et al. 2023, App. A): IC_R_BREAK = r_break in units of BINARY_A_MAX_AU ("r_break ~ a
         // few times a_max", Table A1); R_BREAK_AU (absolute, AU) takes precedence when > 0
         double r_break_au   = cfg.get_double("R_BREAK_AU");
@@ -731,10 +741,10 @@ int main(int argc, char** argv) {
         }
 
 #ifdef ENABLE_COLLISIONAL
-        // Test cases (binary_test, triple_test): stellar radius of every non-BH body (collision tests; 0: none)
+        // Test cases: stellar radius of every non-BH body (collision tests; 0: none)
         {
             const double r_test = cfg.get_double("TEST_STELLAR_RADIUS_RSUN");
-            if (!resuming && r_test > 0.0 && test != "plummer" && p.collisional && (my_rank == 0 || !use_distributed)) {
+            if (!resuming && r_test > 0.0 && p.collisional && (my_rank == 0 || !use_distributed)) {
                 auto h_st = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.stellar_type);
                 auto h_sr = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.stellar_radius);
                 for (int i = 0; i < p.N; i++) h_sr(i) = h_st(i) < 10 ? r_test : 0.0;

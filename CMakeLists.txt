@@ -389,6 +389,15 @@ if(ENABLE_COLLISIONAL)
     add_test(NAME gauss_irk COMMAND gauss-irk-test)
 endif()
 add_test(NAME grad_force_consistency COMMAND grad-force-test)
+# MSTAR subsystems in the cluster code (NBODY_MSTAR=1; the cases skip without the module)
+if(ENABLE_MSTAR)
+    foreach(case mstar_big_group mstar_coll_group mstar_imbh_cusp mstar_dense_core)
+        add_test(NAME ${case} COMMAND Python3::Interpreter ${CMAKE_SOURCE_DIR}/tests/run_case.py
+                 $<TARGET_FILE:nbody-kokkos> ${case})
+        set_tests_properties(${case} PROPERTIES SKIP_RETURN_CODE 77 ENVIRONMENT
+            "OMP_NUM_THREADS=1;OMP_PROC_BIND=false;NBODY_CHECK_PIDMAP=1;NBODY_CHECK_SUBSYS=1;NBODY_CHECK_STELLAR_CACHE=1")
+    endforeach()
+endif()
 if(USE_MPI)
     foreach(case spin_mpi2 mergers_mpi2 mpi_1v2 rankcount_binaries rankcount_mergers rankcount_triples rankcount_natal_kicks)
         add_test(NAME ${case} COMMAND Python3::Interpreter ${CMAKE_SOURCE_DIR}/tests/run_case.py

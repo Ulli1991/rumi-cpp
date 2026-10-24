@@ -770,8 +770,9 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
         if ((int)members.size() > max_group) {
             static bool warned = false;
             if (!warned) {
-                std::printf("WARNING: %d-body group exceeds the subsystem limit %d (LOGH_MAX_BODIES; NBODY_MSTAR=1 "
-                            "raises it), left to the FSI (reported once)\n", (int)members.size(), max_group);
+                std::printf("WARNING: %d-body group exceeds LOGH_MAX_BODIES=%d (subsystem limit %d; NBODY_MSTAR=1 "
+                            "raises it), left to the FSI (reported once)\n", (int)members.size(), LOGH_MAX_BODIES,
+                            max_group);
                 warned = true;
             }
             continue;

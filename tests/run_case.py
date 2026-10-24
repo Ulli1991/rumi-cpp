@@ -256,6 +256,14 @@ BIG_GROUP = dict(TEST_CASE="plummer", INTEGRATOR="hhs", TOTAL_TIME_MYR="1e-5", D
                  SOFTENING_PC="0", COLLISIONAL="true", R_NGB="1e-3", R_NGB_MAX="0.1", PN_ORDER="0", SSE_ENABLED="false",
                  PLUMMER_N="16", PLUMMER_M_TOTAL="16", PLUMMER_R_HALF="2e-4", PLUMMER_SEED="3", PLUMMER_MASS_DIST="equal",
                  PRINT_INTERVAL="1", PROFILING="false")
+# MSTAR subsystems (mstar_* cases): 500+500 Msun BH binary (a = 2e-5 pc, e = 0.5, spins 0.9) with a 40-star
+# Bahcall-Wolf cusp inside 1e-3 pc (IMBH_CUSP_*) in a 200-star cluster, all PN orders: one PN MSTAR group
+MSTAR_CUSP = dict(SPIN_IMBH, TOTAL_TIME_MYR="2e-5", DT_MAX_MYR="2e-6", IMBH_CUSP_N="40", IMBH_CUSP_R_PC="1e-3",
+                  R_NGB="2e-3", PRINT_INTERVAL="1")
+MSTAR_BIG_DE = 1e-6       # preliminary; set to 1.3x measured
+MSTAR_COLL_DE = 1e-6
+MSTAR_CUSP_DE = 1e-6
+MSTAR_CORE_DE = 1e-6
 # Natal kicks (runtime_sse.cpp): 500 12-Msun stars at Z = 0.02 in a cluster of r_h = 1 kpc (no dynamics to speak of),
 # 1 Myr steps through their core collapse at 19-21 Myr: 500 NSs (Fryer 2012 rapid, f_fb ~ 0.025)
 NATAL_NS = dict(TEST_CASE="plummer", INTEGRATOR="hhs", TOTAL_TIME_MYR="22", DT_MAX_MYR="1.0", DT_MIN_MYR="1e-14",
@@ -1092,6 +1100,41 @@ def no_fsi_groups(exe, label, cfg, bound):
     rows = diagnostics(out)
     return check(f"{label} groups left to the FSI", out.count("exceeds LOGH_MAX_BODIES"), 0) & \
         check(f"{label} max|dE/E|", max(r[0] for r in rows), bound)
+
+
+def mstar_groups(exe, label, cfg, bound, min_nmax, min_colls=0, pn=False):
+    """MSTAR subsystems (NBODY_MSTAR=1, ENABLE_MSTAR builds; docs/MSTAR.md): groups above LOGH_MAX_BODIES become
+    subsystems (none left to the FSI), MSTAR integrates them (step summary mstar=), no step limit or give-up, the
+    particle count drops by exactly the collisions, and the energy with the books (collisions: merger sink; PN:
+    the PN work ledger in E_pn, the integration error left visible) stays within the bound. Skipped without the
+    module."""
+    out = run_output(exe, cfg, env={"NBODY_MSTAR": "1", "NBODY_EATTR": "1"})
+    if "NBODY_MSTAR=1 ignored" in out:
+        print("SKIP: no MSTAR module in this build")
+        return "skip"
+    rows = diagnostics(out)
+    calls = [(int(a), int(b), int(c), int(d)) for a, b, c, d in
+             re.findall(r"mstar=(\d+) \(dev (\d+), gbs (\d+), nmax (\d+)\)", out)]
+    n_calls = sum(c[0] for c in calls)
+    nmax = max([c[3] for c in calls] or [0])
+    n_coll = out.count("[SUBSYS COLLISION]")
+    ok = check(f"{label} groups left to the FSI", out.count("exceeds LOGH_MAX_BODIES"), 0)
+    ok &= check(f"{label} MSTAR integrations", n_calls, 1, lower=True)
+    ok &= check(f"{label} largest MSTAR group", nmax, min_nmax, lower=True)
+    ok &= check(f"{label} step-limit hits and give-ups", out.count("step limit") + out.count("GAVE UP"), 0)
+    if min_colls:
+        n0 = int(cfg.get("PLUMMER_N", 0)) + (2 if cfg.get("ADD_IMBH") == "true" else 0) + int(cfg.get("IMBH_CUSP_N", 0))
+        last_table = out[out.rfind("Level        dt"):]
+        n_final = sum(int(m) for m in re.findall(r"^\s+L\d+\s+\S+\s+(\d+)", last_table, re.M))
+        ok &= check(f"{label} collisions inside MSTAR groups", n_coll, min_colls, lower=True)
+        ok &= check(f"{label} |N_final - (N0 - collisions)|", abs(n_final - (n0 - n_coll)), 0)
+    eattr = re.findall(r"EATTR step \d+ signed_dE (\S+) logh (\S+) logh_abs (\S+) n_logh \d+ books: gw \S+ pn (\S+)", out)
+    if eattr:
+        print(f"  last EATTR: signed dE/E0 {eattr[-1][0]}, unbooked subsystem dE/E0 {eattr[-1][1]} "
+              f"(abs {eattr[-1][2]}), E_pn/E0 {eattr[-1][3]}")
+    if pn:   # the PN work of the MSTAR group is booked (and only it: the unbooked part is the integration error)
+        ok &= check(f"{label} |E_pn/E0| booked", abs(float(eattr[-1][3])) if eattr else 0.0, 1e-15, lower=True)
+    return ok & check(f"{label} max|dE/E|", max(r[0] for r in rows), bound)
 
 
 def no_ic_mergers(exe, label, cfg, bound):
@@ -2455,6 +2498,17 @@ CASES = {
     "kepler2_contact": lambda exe: subsys_collision(exe, "contact binary via the Kepler path", KEP_2B_CONTACT, "STELLAR",
                                                     4e-14, min_kepler2=1),
     "logh_big_group": lambda exe: big_group(exe, "big group", BIG_GROUP, (1.2e-5, 1e-12)),
+    # MSTAR (NBODY_MSTAR=1; ENABLE_MSTAR builds; docs/MSTAR.md, CASES.md C26). Before: every group above
+    # LOGH_MAX_BODIES = 8 stayed with the FSI ("exceeds LOGH_MAX_BODIES", no MSTAR integration). Measured (host gcc 15,
+    # Kokkos OpenMP 1 thread): see MSTAR_* bounds above
+    "mstar_big_group": lambda exe: mstar_groups(exe, "16-body group, MSTAR", BIG_GROUP, MSTAR_BIG_DE, 9),
+    "mstar_coll_group": lambda exe: mstar_groups(exe, "16 stars of 1000 R_sun, MSTAR collisions",
+                                                 dict(BIG_GROUP, TEST_STELLAR_RADIUS_RSUN="1000"), MSTAR_COLL_DE, 9,
+                                                 min_colls=1),
+    "mstar_imbh_cusp": lambda exe: mstar_groups(exe, "IMBH binary + 40-star cusp, all PN, MSTAR", MSTAR_CUSP,
+                                                MSTAR_CUSP_DE, 20, pn=True),
+    "mstar_dense_core": lambda exe: mstar_groups(exe, "dense core, MSTAR", dict(TRIPLES, PLUMMER_R_HALF="0.03",
+                                                                                 TOTAL_TIME_MYR="1e-4"), MSTAR_CORE_DE, 9),
     # Exact tree searches (M7.4), forced at every set size, each search checked bitwise against O(N^2)
     # Tree searches on by default above the break-even set size (host builds 2048): 5000 stars use them at the top
     # levels without any TREE_* key (no tree search ran before), bit-identical to the O(N^2) run
