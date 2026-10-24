@@ -107,8 +107,9 @@ class MstarKokkos {
     // the last accepted step).
     bool run(double time_interval);
 
+    struct Impl;   // public: CUDA extended lambdas cannot live in a private nested class
+
   private:
-    struct Impl;
     Impl* impl_;
 };
 

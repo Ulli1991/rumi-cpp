@@ -720,7 +720,7 @@ struct MstarKokkos::Impl {
     // pair key i N + j (-1: none), 8 r_sep, 9 r_coll, 10 type; from RES_PN the PN positions
     static constexpr int RES_PN = 12;
     DView<double*> res;
-    DView<long> ckey;
+    Kokkos::View<long, MemSpace> ckey;
     bool coll_on = false;
     Kokkos::View<double*, Kokkos::HostSpace> h_res;
     DView<double*> tmin;                // initial time step reduction
@@ -766,9 +766,9 @@ struct MstarKokkos::Impl {
         d.data = DView<double**>("mstar_data", K + 1, d.nvars + 1);
         res = DView<double*>("mstar_res", RES_PN + 3 * P);
         h_res = Kokkos::View<double*, Kokkos::HostSpace>("mstar_hres", RES_PN + 3 * P);
-        ckey = DView<long>("mstar_ckey");
+        ckey = Kokkos::View<long, MemSpace>("mstar_ckey");
         tmin = DView<double*>("mstar_tmin", 1);
-        errview = DView<ErrVal>("mstar_err");
+        errview = Kokkos::View<ErrVal, MemSpace>("mstar_err");
         bslot = K; cslot = K + 1;
     }
 
@@ -973,7 +973,7 @@ struct MstarKokkos::Impl {
     void launch_collision(int s, int s_prev) {
         const Dev dd = d;
         const int N = d.N;
-        const DView<long> key = ckey;
+        const Kokkos::View<long, MemSpace> key = ckey;
         if (!coll_on) {
             Kokkos::parallel_for("mstar_coll0", Kokkos::RangePolicy<ExecSpace>(0, 1), KOKKOS_LAMBDA(int) { key() = -1; });
             o.perf.launches++;
@@ -997,7 +997,7 @@ struct MstarKokkos::Impl {
     void launch_collision_res(int s, int s_prev) {
         const Dev dd = d;
         const int N = d.N;
-        const DView<long> key = ckey;
+        const Kokkos::View<long, MemSpace> key = ckey;
         const DView<double*> r = res;
         Kokkos::parallel_for("mstar_cres", Kokkos::RangePolicy<ExecSpace>(0, 1), KOKKOS_LAMBDA(int) {
             const long kq = key();
@@ -1103,7 +1103,7 @@ struct MstarKokkos::Impl {
             }
         }
         // extrapolation (gbs_extrapolate / extrapolate_single_variable)
-        const DView<ErrVal> errv = errview;
+        const Kokkos::View<ErrVal, MemSpace> errv = errview;
         const double atol = o.opt.gbs_absolute_tolerance, otol = o.opt.output_time_absolute_tolerance;
         const int KR = d.kmax;
         const int nv = d.nvars;
@@ -1163,7 +1163,7 @@ struct MstarKokkos::Impl {
         last_err.bad = h_res(5) != 0;
     }
     ErrVal last_err;
-    DView<ErrVal> errview;
+    Kokkos::View<ErrVal, MemSpace> errview;
 };
 
 // ---------------------------------------------------------------------------------------------------------------
