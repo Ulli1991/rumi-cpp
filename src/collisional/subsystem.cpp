@@ -4,6 +4,7 @@
 #include "host_exec.h"
 #include <climits>
 #include "subsystem.h"
+#include "pert_rates.h"
 #include "stellar_cache.h"
 #include "collisional_config.h"
 #include "constants.h"
@@ -1352,92 +1353,22 @@ static bool perturbation_timestep_md(const std::vector<Subsystem>& active, const
             double E_orb = 0.5 * v2 - mu * r_inv;
             double a = -mu / (2.0 * E_orb);  // negative for unbound (hyperbolic)
 
-            // Angular momentum vector: L = r × v
-            double Lx = ry*dvz - rz*dvy;
-            double Ly = rz*dvx - rx*dvz;
-            double Lz = rx*dvy - ry*dvx;
-            double L2 = Lx*Lx + Ly*Ly + Lz*Lz;
-            double L_mag = std::sqrt(L2);
-
-            // Eccentricity
-            double p_param = L2 / mu;  // semi-latus rectum
-            double e2 = 1.0 - p_param / a;
-            if (e2 < 0.0) e2 = 0.0;
-            double e = std::sqrt(e2);
-
-            // Decompose perturbation into radial (R) and tangential (T) components
-            // r_hat = r/|r|, t_hat = (L × r) / |L × r| (in orbital plane, perpendicular to r)
-            double rhat_x = rx * r_inv, rhat_y = ry * r_inv, rhat_z = rz * r_inv;
-            double f_R = fx*rhat_x + fy*rhat_y + fz*rhat_z;  // radial component
-
-            // Tangential: project out radial, then the in-plane component
-            // t_hat = (v - (v·r_hat)*r_hat) / |...| but simpler via cross product:
-            // t_hat = (L_hat × r_hat)
-            double L_inv = (L_mag > 1e-30) ? 1.0 / L_mag : 0.0;
-            double Lhat_x = Lx * L_inv, Lhat_y = Ly * L_inv, Lhat_z = Lz * L_inv;
-            double that_x = Lhat_y*rhat_z - Lhat_z*rhat_y;
-            double that_y = Lhat_z*rhat_x - Lhat_x*rhat_z;
-            double that_z = Lhat_x*rhat_y - Lhat_y*rhat_x;
-            double f_T = fx*that_x + fy*that_y + fz*that_z;  // tangential component
-
-            // Gauss planetary equations (e.g. Murray & Dermott Ch. 2.9):
-            //   ȧ = 2/(n√(1-e²)) * [e·sin(ν)·f_R + (1+e·cos(ν))·f_T]
-            //   ė = √(1-e²)/(na) * [sin(ν)·f_R + (cos(ν)+cos(E))·f_T]
-            //
-            // We compute sin(ν), cos(ν) from state vectors:
-            //   cos(ν) = (p/r - 1) / e   where p = L²/μ
-            //   sin(ν) = (r·v) * √p / (e·μ·r)  [via h = r² dν/dt]
-            double abs_a = std::fabs(a);
-            double n = std::sqrt(mu / (abs_a * abs_a * abs_a));  // mean motion
-            double sqrt_1me2 = std::sqrt(std::fabs(1.0 - e2));
-
-            double cos_nu, sin_nu;
-            if (e > 1e-12) {
-                cos_nu = (p_param * r_inv - 1.0) / e;
-                double rdot = (rx*dvx + ry*dvy + rz*dvz) * r_inv;  // r·v / |r|
-                sin_nu = rdot * std::sqrt(p_param) / (e * std::sqrt(mu));
-            } else {
-                // Nearly circular: ν from position angle
-                cos_nu = 1.0;
-                sin_nu = 0.0;
-            }
-
-            // cos(E) from cos(ν): cos(E) = (e + cos(ν)) / (1 + e·cos(ν))
-            double cos_E = (e + cos_nu) / (1.0 + e * cos_nu);
-
-            double adot = 0.0, edot = 0.0;
-            if (n > 1e-30 && sqrt_1me2 > 1e-30) {
-                adot = 2.0 / (n * sqrt_1me2) *
-                       (e * sin_nu * f_R + (1.0 + e * cos_nu) * f_T);
-
-                edot = sqrt_1me2 / (n * abs_a) *
-                       (sin_nu * f_R + (cos_nu + cos_E) * f_T);
-            }
+            // Element rates, vector forms for any orbit (pert_rates.h). The anomaly form (e = sqrt(1 - p/a), cos nu
+            // from e) lost e to cancellation: edot 190% off at e = 1e-8
+            const double r3[3] = {rx, ry, rz}, v3[3] = {dvx, dvy, dvz}, f3[3] = {fx, fy, fz};
+            const PertRates2<double> pr = pert_rates_2body(r3, v3, f3, mu);
+            const double Edot = pr.Edot, adot = pr.adot, e = pr.e, edot = pr.edot, gn = pr.gn;
+            const double Lx = ry * dvz - rz * dvy, Ly = rz * dvx - rx * dvz, Lz = rx * dvy - ry * dvx;
+            const double p_param = (Lx * Lx + Ly * Ly + Lz * Lz) / mu;  // semi-latus rectum (debug print)
 
             // dt_pert = η * min{ |a/ȧ|, |1/ė| }
-            double dt_a = 1e30, dt_e = 1e30;
-            if (std::fabs(adot) > 1e-30)
-                dt_a = std::fabs(a / adot);
-            if (std::fabs(edot) > 1e-30)
-                dt_e = 1.0 / std::fabs(edot);
+            double dt_a = std::fabs(adot) > 1e-30 ? std::fabs(a / adot) : 1e30;
+            double dt_e = std::fabs(edot) > 1e-30 ? 1.0 / std::fabs(edot) : 1e30;
             if (E_orb >= 0.0) {
-                // Unbound (fly-by) pair: the anomaly form above holds for e < 1 only (cos E = (e + cos nu) /
-                // (1 + e cos nu) diverges on the asymptote, 1 + e cos nu = p / r -> 0), and a unit change of e means
-                // nothing at e >> 1. Vector form, valid for any orbit: |a / adot| = |E / Edot| with Edot = v . f,
-                // and the relative change of the eccentricity vector e = (v x L) / mu - r_hat,
-                // de/dt = (f x L + v x (r x f)) / mu (Rantala et al. 2023, sec. 3.4.3: rates "from the positions, velocities and
-                // accelerations"). Seed 42, step 64: e = 346, cos E = 146, 1 / |edot| gave 5.7e-11 Myr
-                const double Edot = dvx * fx + dvy * fy + dvz * fz;
+                // Unbound (fly-by) pair: |E / Edot| and the relative change of the eccentricity vector (a unit
+                // change of e means nothing at e >> 1). Seed 42, step 64: e = 346, 1 / |edot| gave 5.7e-11 Myr
                 dt_a = std::fabs(Edot) > 1e-30 ? std::fabs(E_orb / Edot) : 1e30;
-                const double ex = (dvy * Lz - dvz * Ly) / mu - rx * r_inv;
-                const double ey = (dvz * Lx - dvx * Lz) / mu - ry * r_inv;
-                const double ez = (dvx * Ly - dvy * Lx) / mu - rz * r_inv;
-                const double rfx = ry * fz - rz * fy, rfy = rz * fx - rx * fz, rfz = rx * fy - ry * fx;
-                const double gx = ((fy * Lz - fz * Ly) + (dvy * rfz - dvz * rfy)) / mu;
-                const double gy = ((fz * Lx - fx * Lz) + (dvz * rfx - dvx * rfz)) / mu;
-                const double gz = ((fx * Ly - fy * Lx) + (dvx * rfy - dvy * rfx)) / mu;
-                const double en = std::sqrt(ex * ex + ey * ey + ez * ez), gn = std::sqrt(gx * gx + gy * gy + gz * gz);
-                dt_e = gn > 1e-30 ? en / gn : 1e30;
+                dt_e = gn > 1e-30 ? e / gn : 1e30;
             }
             dt_pert = std::min(dt_a, dt_e) * eta_pert;
             // TIDAL_FLOOR_ADAPT (C5, perturbed binaries sampled by the field kicks): the binary's local estimate of
@@ -1467,9 +1398,9 @@ static bool perturbation_timestep_md(const std::vector<Subsystem>& active, const
                 static const bool deep_log = std::getenv("NBODY_DEEP_LOG") != nullptr;
                 if (deep_log && dt_pert * TIME_UNIT_MYR < 1e-9)
                     std::printf("PERT2 pids %d %d type %d dt_pert %.3e Myr dt_a %.3e dt_e %.3e a %.3e e %.6g p/r %.3e "
-                                "cos_nu %.6g cos_E %.3e adot %.3e edot %.3e f %.3e r %.3e v %.3e\n",
+                                "adot %.3e edot %.3e f %.3e r %.3e v %.3e\n",
                                 sub.particle_ids[0], sub.particle_ids[1], (int)sub.type, dt_pert * TIME_UNIT_MYR,
-                                dt_a, dt_e, a, e, p_param * r_inv, cos_nu, cos_E, adot, edot, f_mag, r_mag, std::sqrt(v2));
+                                dt_a, dt_e, a, e, p_param * r_inv, adot, edot, f_mag, r_mag, std::sqrt(v2));
                 if (deep_log && dt_pert * TIME_UNIT_MYR < 1e-9) {   // each member's 3 nearest particles
                     auto ax_ = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p_dbg->x);
                     auto ay_ = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p_dbg->y);
