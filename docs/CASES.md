@@ -1232,3 +1232,45 @@ Status: **closed** (fixed, test, ensemble checked), **option** (fix kept as an o
   sec_inner_s3047 max|dP|/M (2.27e-12, 2.75e-12 km/s) and s3047 |dL/L| (5.0e-13) moved at round-off with the corrected
   trajectory; bounds set to 1.3x the new values. The convergence ctest itself needs NBODY_ETA_SEC (C23 branch) and comes
   with the C23 merge.
+
+## C27 MSTAR subsystems: groups above LOGH_MAX_BODIES on the GPU (optional GPLv3 module; NBODY_MSTAR, default off)
+
+C++ rewrite of the MSTAR regularised integrator (Rantala et al. 2020; public KETJU integrator, Mannerkoski et al.
+2023) with Kokkos support for GPUs, by Ulrich Steinwandel (src/mstar, `ENABLE_MSTAR`; docs/MSTAR.md).
+
+- **System:** subsystems of more than 8 bodies (IMBH with its cusp, dense cores, runaway-collision regions). Before:
+  LogH holds 8; larger groups were split along their bound pairs or left to the FSI ("exceeds LOGH_MAX_BODIES"), i.e.
+  integrated orbit by orbit by kicks. Failing-first cases: `mstar_big_group`, `mstar_coll_group`, `mstar_imbh_cusp`,
+  `mstar_dense_core` (all report groups left to the FSI / no MSTAR integration without the module or switch).
+- **Port:** KETJU eb96fd0 (+ the extra-force branch b60d16e) rewritten in C++/Kokkos; the C library stays as a test
+  reference. Agreement (`mstar_compare`): CPU bitwise for two bodies (Kepler e = 0.9, PN + spin binary, orbital BH
+  merger), 5e-14 - 1.3e-10 for 3 - 100 bodies; A100 round-off level (Kepler 6.5e-12, PN binary 7.5e-11; the merger
+  trigger follows the step sequence: t_merger 4 % apart). KETJU's 26 unit tests pass on the reference.
+- **vs LogH** (`mstar_vs_logh`, tolerance 1e-12): Kepler 10 orbits MSTAR 2.1e-12 from the analytic orbit with 159 GBS
+  steps, LogH 2.1e-12 at its own end time with 312; Pythagorean t = 10: MSTAR 7e-11, LogH 2.9e-11 against a 1e-14
+  reference. Finding: LogH's `integrate_to_time` lands 1.7e-8 (Kepler) / 8.6e-8 (Pythagorean) relative short of the
+  target time (its landing tolerance), larger than its integration error.
+- **A100 scaling** (`mstar-bench`, Plummer, tolerance 1e-10, ms per GBS step): N = 16 0.40, 128 0.48, 256 0.78,
+  512 1.4, 1024 3.3, 2048 8.3, 4096 27 (15 G pair interactions/s); serial KETJU: 1.6x slower at 64, 16x at 128, 77x
+  at 512. Latency: async launch 4.8 us, launch + fence 13.8 us, reduce + read-back 23 us; ~35 launches and one sync
+  per GBS step (all rows in lockstep). A thread-per-body force kernel was 5.6x slower at N = 1024 (team kernel kept).
+  The host-side O(N^2) Prim tree takes 20-24 % at N >= 1024 (open: device MST).
+- **Energy books:** B is carried as an extra GBS variable outside the error control; its extrapolated change is the
+  work of the PN (and extra) forces. Only that goes to `E_pn`; the rest of the members' T + U change minus collisions
+  is integration error, left unbooked and visible (`unbooked-mstar`, NBODY_EATTR). 62-body cusp with 2 BHs, all PN:
+  PN work 3.7e-4 |E0|, integration error 6.5e-14 |E0| (`pn_ledger`).
+- **Collisions** inside groups: tested after every accepted step (separation, or osculating pericentre inside the
+  collision distance and reached within one step); merged in the core as LogH collisions (no pericentre landing).
+- **Extra forces (KETJU branch b60d16e):** ported (linear field, static point masses, velocity-dependent `D v`).
+  Finding: the branch leaves B blind to the work of velocity-independent extra forces, so T + B drifts from U and the
+  time transformation no longer matches the dynamics: an e = 0.5 binary in a static point-mass field was 1.2e-2 off in
+  position and 1.6e-4 in energy after 4 orbits; with B following the work (`track_work`, default) 6.5e-13 and 9e-14
+  against RK4. Velocity-dependent drag through the aux-velocity path: 3.6e-13 against RK4, work ledger to 1.5e-13.
+- **Tide hook** (`NBODY_MSTAR_TIDE`, off): c.o.m. kicks for MSTAR members + the outside tidal tensor inside MSTAR.
+  Embedded group (`mstar_embedded_tide`, 20-body regular group in a Plummer cluster): internal error 1.3e-3 against
+  2.2e-2 for impulsive member kicks at kick spacing 1e-3 (~2 innermost orbits), but a 1e-3 floor from the neglected
+  octupole tide that impulsive kicks undercut at spacing 1e-4 (1.6e-4). Kept off; next: the tidal-tensor gradient.
+- **Cluster runs** (host build, NBODY_MSTAR=1): 16-body group 3.3e-10 |dE/E| (FSI-dominated), 1 collision inside a
+  group with N conserved, IMBH binary + 40-star cusp (42-body PN group) 2.0e-9 with E_pn booked, dense core (100 stars
+  in r_h = 2e-3 pc, 73-body group) 1.2e-6 (9.8e-7 with MSTAR off: FSI-dominated; MSTAR's own unbooked error 2.9e-12).
+- **200k gpudev A/B:** pending (docs: see the agent report).
