@@ -2,9 +2,10 @@
 
 RUMI++ integrates subsystems (tight groups found by the neighbour search) with LogH + GBS, which holds at most
 `LOGH_MAX_BODIES = 8` bodies. Larger groups (dense cores, an IMBH with its cusp, runaway-collision regions) used to be
-split along their bound pairs or left to the FSI. With the optional **MSTAR module** such groups are integrated as one
-regularised subsystem by the KETJU integrator (MSTAR: Rantala et al. 2020, MNRAS 492, 4131; Mannerkoski et al. 2023,
-MNRAS 524, 4062) or its Kokkos port, on the GPU for large groups.
+split along their bound pairs or left to the FSI. With the optional **MSTAR module** -- a C++ rewrite of the MSTAR
+regularised integrator (Rantala et al. 2020, MNRAS 492, 4131; public KETJU integrator, Mannerkoski et al. 2023, MNRAS
+524, 4062) with Kokkos support for GPUs, by Ulrich Steinwandel -- such groups are integrated as one regularised
+subsystem, on the GPU from `NBODY_MSTAR_CROSSOVER` bodies and on the host execution space below.
 
 ## Licence
 
@@ -26,8 +27,9 @@ NBODY_MSTAR=1 ./nbody-kokkos --config config.txt
 | `MSTAR_THRESHOLD` (config) | 9 | smallest group for MSTAR (groups above 8 always use MSTAR when it is on) |
 | `NBODY_MSTAR_MAX` | 1024 | largest group integrated as one subsystem (larger: split as without MSTAR) |
 | `NBODY_MSTAR_MAX_STEPS` | 2e6 | GBS steps after which a call gives up (then retried with subdivided steps, as LogH) |
-| `NBODY_MSTAR_TEAM_N` | 96 | groups up to this size run each GBS row inside one device team (one launch per step) |
-| `NBODY_MSTAR_CROSSOVER` | unset | set: the KETJU C library on the host below this size, where no collision check / PN ledger / step limit is needed |
+| `NBODY_MSTAR_TEAM_N` | 96 (host), 0 (device) | groups up to this size run each GBS row inside one team (one launch per step) |
+| `NBODY_MSTAR_CROSSOVER` | 64 (GPU builds) | groups of at least this size on the device, smaller ones on the host execution space |
+| `NBODY_MSTAR_TIDE` | off | `=1`: c.o.m. kicks for the members and the outside tide inside MSTAR (below) |
 
 The step summary shows `mstar=n (dev d, gbs g, nmax m)`: integrations, of them on the device, their GBS steps and the
 largest group. The GBS tolerance is `ETA_GBS`.
@@ -48,6 +50,26 @@ largest group. The GBS tolerance is `ETA_GBS`.
   extrapolated PN work; only that goes to `E_pn`. The rest of the members' T + U change (minus collisions) is
   integration error: it is **not** booked, so it shows in |dE/E|, in `SUBSYS_ERR` (kind `unbooked-mstar`) and in the
   `NBODY_EATTR` attribution. (LogH PN subsystems book their whole Newtonian change into `E_pn`.)
+
+## Tide of the outside bodies (`NBODY_MSTAR_TIDE`, experimental, off)
+
+By default the FSI kicks every member of a subsystem with the forces of the outside bodies (operator splitting: the
+tide acts impulsively at the kick spacing, which `FLYBY_CM_EPS` keeps fine enough). With `NBODY_MSTAR_TIDE=1` the
+members of an MSTAR group get the mass-weighted mean of their outside accelerations instead (c.o.m. kicks, momentum
+exact), and MSTAR applies the tide continuously: the tidal tensor of all outside bodies at the group's c.o.m. at the
+start of the call (`a = A x` about the c.o.m., `ExtraForces`; B follows its work). Its work on the members is an
+exchange with the outside bodies' potential that the global T + U contains: it is not booked, but separated from the
+integration error in the subsystem log (`ext_dE`). The host galaxy's tide stays impulsive (its time scale is ~100 Myr).
+Measured on an embedded group (`mstar_embedded_tide`): see `docs/CASES.md` C27. The tides need every particle on the
+device, so host subtrees are switched off (`HOST_SUBTREE_MAX = 0`).
+
+## Extra forces (module API)
+
+`rumi_mstar::ExtraForces` (C++ port of KETJU's experimental extra-force branch, b60d16e): a linear field
+`a = A (x - x0)`, static softened point masses, and a velocity-dependent `a = D v` (auxiliary-velocity scheme, as
+PN); evaluated on the device, off by default. B follows the work of all of them (`track_work`; KETJU's branch leaves
+B blind to the velocity-independent part, which put a binary in a static field 1e-2 off after a few orbits), and
+`pn_dB` / `ext_work` return the works.
 
 ## Device implementation (module)
 
