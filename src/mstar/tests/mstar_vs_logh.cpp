@@ -152,6 +152,7 @@ void case_run(const char* name, const State& s, double T, double tol, const Stat
 }  // namespace
 
 int main(int argc, char** argv) {
+    MPI_Init(&argc, &argv);   // KETJU needs MPI (or the serial stand-in)
     Kokkos::initialize(argc, argv);
     {
         {
@@ -176,5 +177,6 @@ int main(int argc, char** argv) {
     }
     std::printf("%s (%d failed checks)\n", g_fail ? "FAILED" : "PASSED", g_fail);
     Kokkos::finalize();
+    MPI_Finalize();
     return g_fail ? 1 : 0;
 }

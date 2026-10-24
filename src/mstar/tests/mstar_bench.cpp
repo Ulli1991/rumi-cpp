@@ -44,6 +44,7 @@ void plummer(int n, unsigned seed, std::vector<double>& m, std::vector<double>& 
 }  // namespace
 
 int main(int argc, char** argv) {
+    MPI_Init(&argc, &argv);   // KETJU needs MPI (or the serial stand-in)
     Kokkos::initialize(argc, argv);
     {
         const int nmax = argc > 1 ? std::atoi(argv[1]) : 4096;
@@ -102,5 +103,6 @@ int main(int argc, char** argv) {
         }
     }
     Kokkos::finalize();
+    MPI_Finalize();
     return 0;
 }

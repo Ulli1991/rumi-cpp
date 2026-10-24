@@ -16,6 +16,7 @@ set_target_properties(ketju-integrator PROPERTIES C_STANDARD 11 C_STANDARD_REQUI
 target_include_directories(ketju-integrator PUBLIC ${MSTAR_DIR}/ketju/include)
 target_link_libraries(ketju-integrator PUBLIC m)
 if(USE_MPI)
+    find_package(MPI REQUIRED COMPONENTS C)
     target_link_libraries(ketju-integrator PUBLIC MPI::MPI_C)
 else()
     target_include_directories(ketju-integrator PUBLIC ${MSTAR_DIR}/serial_mpi)

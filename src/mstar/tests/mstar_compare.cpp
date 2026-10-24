@@ -216,6 +216,7 @@ bool want(int argc, char** argv, const char* c) {
 }  // namespace
 
 int main(int argc, char** argv) {
+    MPI_Init(&argc, &argv);   // KETJU needs MPI (or the serial stand-in)
     Kokkos::initialize(argc, argv);
     {
         if (want(argc, argv, "kepler_e09")) {
@@ -309,5 +310,6 @@ int main(int argc, char** argv) {
         std::printf("%s (%d failed checks)\n", g_fail ? "FAILED" : "PASSED", g_fail);
     }
     Kokkos::finalize();
+    MPI_Finalize();
     return g_fail ? 1 : 0;
 }
