@@ -265,7 +265,9 @@ MSTAR_COLL_DE = 2.5e-8    # mstar_coll_group: 1.92e-8 measured (merger sink incl
 MSTAR_CUSP_DE = 2.6e-9    # mstar_imbh_cusp: 1.97e-9 measured (PN work in E_pn)
 MSTAR_CORE_DE = 1.6e-6    # mstar_dense_core: 1.21e-6 measured, FSI-dominated (9.8e-7 with MSTAR off, the groups split);
                           # MSTAR's own unbooked error 2.9e-12 (NBODY_EATTR)
-MSTAR_CUSP_TIDE_DE = 1e-6  # mstar_imbh_cusp_tide: preliminary
+MSTAR_CUSP_TIDE_DE = 5.8e-10  # mstar_imbh_cusp_tide: 4.50e-10 measured (2.0e-9 without the tide hook)
+MSTAR_PN_SUB_ERR = 1.5e-10    # PN cusp cases: unbooked subsystem error per print 1.12e-10 / 1.16e-10 measured (the
+                              # integration error of the PN group, which LogH PN subsystems book into E_pn)
 MSTAR_SUB_ERR = 4e-12     # max per-print sum |unbooked subsystem dE|/E0 (NBODY_EATTR logh_abs): 2.9e-12 measured (dense core)
 # Natal kicks (runtime_sse.cpp): 500 12-Msun stars at Z = 0.02 in a cluster of r_h = 1 kpc (no dynamics to speak of),
 # 1 Myr steps through their core collapse at 19-21 Myr: 500 NSs (Fryer 2012 rapid, f_fb ~ 0.025)
@@ -1105,7 +1107,7 @@ def no_fsi_groups(exe, label, cfg, bound):
         check(f"{label} max|dE/E|", max(r[0] for r in rows), bound)
 
 
-def mstar_groups(exe, label, cfg, bound, min_nmax, min_colls=0, pn=False, tide=False):
+def mstar_groups(exe, label, cfg, bound, min_nmax, min_colls=0, pn=False, tide=False, sub_bound=None):
     """MSTAR subsystems (NBODY_MSTAR=1, ENABLE_MSTAR builds; docs/MSTAR.md): groups above LOGH_MAX_BODIES become
     subsystems (none left to the FSI), MSTAR integrates them (step summary mstar=), no step limit or give-up, the
     particle count drops by exactly the collisions, and the energy with the books (collisions: merger sink; PN:
@@ -1136,7 +1138,7 @@ def mstar_groups(exe, label, cfg, bound, min_nmax, min_colls=0, pn=False, tide=F
         ok &= check(f"{label} |N_final - (N0 - collisions)|", abs(n_final - (n0 - n_coll)), 0)
     eattr = re.findall(r"EATTR step \d+ signed_dE (\S+) logh (\S+) logh_abs (\S+) n_logh \d+ books: gw \S+ pn (\S+)", out)
     ok &= check(f"{label} max unbooked subsystem |dE|/E0 per print (integration error)",
-                max([float(e[2]) for e in eattr] or [0.0]), MSTAR_SUB_ERR)
+                max([float(e[2]) for e in eattr] or [0.0]), sub_bound or MSTAR_SUB_ERR)
     if eattr:
         print(f"  last EATTR: signed dE/E0 {eattr[-1][0]}, unbooked subsystem dE/E0 {eattr[-1][1]} "
               f"(abs {eattr[-1][2]}), E_pn/E0 {eattr[-1][3]}")
@@ -2514,9 +2516,10 @@ CASES = {
                                                  dict(BIG_GROUP, TEST_STELLAR_RADIUS_RSUN="1000"), MSTAR_COLL_DE, 9,
                                                  min_colls=1),
     "mstar_imbh_cusp": lambda exe: mstar_groups(exe, "IMBH binary + 40-star cusp, all PN, MSTAR", MSTAR_CUSP,
-                                                MSTAR_CUSP_DE, 20, pn=True),
+                                                MSTAR_CUSP_DE, 20, pn=True, sub_bound=MSTAR_PN_SUB_ERR),
     "mstar_imbh_cusp_tide": lambda exe: mstar_groups(exe, "IMBH cusp, all PN, MSTAR + outside tide", MSTAR_CUSP,
-                                                     MSTAR_CUSP_TIDE_DE, 20, pn=True, tide=True),
+                                                     MSTAR_CUSP_TIDE_DE, 20, pn=True, tide=True,
+                                                     sub_bound=MSTAR_PN_SUB_ERR),
     # dense core: 100 stars (40 Msun, half in 1-20 AU binaries) inside r_h = 2e-3 pc: a 73-body MSTAR group
     "mstar_dense_core": lambda exe: mstar_groups(exe, "dense core, MSTAR", dict(TRIPLES, PLUMMER_N="100",
                                                  PLUMMER_M_TOTAL="40", PLUMMER_R_HALF="0.002", TOTAL_TIME_MYR="2e-5",
