@@ -13,6 +13,7 @@
 #include "collisional_config.h"
 #include "subsystem.h"
 #include "gw_output.h"
+#include "mstar_dispatch.h"
 #endif
 
 #ifdef ENABLE_COLLISIONAL
@@ -113,6 +114,17 @@ int apply_run_settings(const Config& cfg, RunSettings& rs) {
         g_collisional.r_escape_rh     = cfg.get_double("R_ESCAPE_RH");
         g_collisional.r_escape_rj     = cfg.get_double("R_ESCAPE_RJ");
         g_collisional.mstar_threshold = cfg.get_int("MSTAR_THRESHOLD");
+        {   // MSTAR: runtime switch NBODY_MSTAR (default off); needs a build with ENABLE_MSTAR (GPLv3 module)
+            const char* e = std::getenv("NBODY_MSTAR");
+            const bool want = e && std::atoi(e) != 0;
+            g_collisional.mstar = want && mstar_available();
+            if (const char* m = std::getenv("NBODY_MSTAR_MAX")) g_collisional.mstar_max = std::atoi(m);
+            if (want && !g_collisional.mstar && MPIComm::rank() == 0)
+                std::printf("WARNING: NBODY_MSTAR=1 ignored: this build has no MSTAR module (cmake -DENABLE_MSTAR=ON)\n");
+            else if (g_collisional.mstar && MPIComm::rank() == 0)
+                std::printf("MSTAR: groups of %d..%d bodies by MSTAR (KETJU integrator, Kokkos port; device from %d bodies)\n",
+                            g_collisional.mstar_threshold, g_collisional.mstar_max, mstar_crossover_n());
+        }
         g_collisional.sse_enabled     = cfg.get_bool("SSE_ENABLED");
         g_collisional.sse_metallicity = cfg.get_double("SSE_METALLICITY");
         g_collisional.sse_wind        = cfg.get_str("SSE_WIND_MODEL");

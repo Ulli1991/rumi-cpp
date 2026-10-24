@@ -169,8 +169,8 @@ const std::vector<ParamSpec> kParams = {
      "|E0| of FLYBY_CM_EPS (Msun (km/s)^2) instead of the run's (0): a cut-out of a cluster as in the cluster"},
     {"NGB_WIDE_FAC", D, "0", "Subsystems", EXPERIMENT, "",
      "Bound pairs with a < NGB_WIDE_FAC x R_NGB are neighbours (wide binaries; 0: off)"},
-    {"MSTAR_THRESHOLD", I, "8", "Subsystems", EXPERIMENT, "",
-     "Subsystems of at least this many bodies for MSTAR (not wired: printed only, every subsystem uses LogH)"},
+    {"MSTAR_THRESHOLD", I, "9", "Subsystems", EXPERIMENT, "",
+     "With NBODY_MSTAR=1 (ENABLE_MSTAR builds, docs/MSTAR.md): subsystems of at least this many bodies are integrated by MSTAR instead of LogH (those above LOGH_MAX_BODIES = 8 always)"},
 
     // ---- Output ----
     {"PRINT_INTERVAL", I, "1000", "Output", USER, "", "Diagnostics every this many steps"},
@@ -337,7 +337,10 @@ const std::vector<DebugEnvSpec> kDebugEnv = {
     {"NBODY_CM_TIDE_GAMMA", "=g: tidal strength 2 (a(1+e))^3 sum m_k/d_k^3 / M below which NBODY_CM_TIDE takes a binary (default 1e-3; leaves it above 4 g)"},
     {"NBODY_CM_TIDE_NRES", "=n: kicks per orbit that resolve a binary for NBODY_CM_TIDE (default 16: c.o.m. mode above spacing P/16, stays down to P/32)"},
     {"NBODY_GAUSS_IRK", "=1: compact Newtonian subsystems (2-4 bodies, no PN member, no collision candidate, no e >= 0.99 pair or hard encounter, no stable MA hierarchy, no SDAR slow-down) by the symplectic 8-stage Gauss-Legendre IRK instead of LogH+GBS, LogH+GBS if it does not converge (CASES.md C22; default off, A/B). At exit: `Gauss-IRK stats` line; step summary `irk=` / `irk_fb=`; SUBSYS_ERR kind `unbooked-irk`"},
+    {"NBODY_MSTAR", "=1: subsystems of MSTAR_THRESHOLD..NBODY_MSTAR_MAX bodies by MSTAR (optional GPLv3 module, ENABLE_MSTAR builds; docs/MSTAR.md); groups above LOGH_MAX_BODIES then become subsystems instead of staying with the FSI (default off)"},
+    {"NBODY_MSTAR_MAX", "=n: largest group integrated as one MSTAR subsystem (default 1024); larger groups are split along their bound pairs as without MSTAR"},
     {"NBODY_MSTAR_CROSSOVER", "=n: MSTAR groups of at least n bodies run on the device (Kokkos port), smaller ones by the KETJU C library on the host (default 64 on GPU builds, never on host-only builds; ENABLE_MSTAR builds)"},
+    {"NBODY_MSTAR_MAX_STEPS", "=n: GBS steps (accepted + failed) after which an MSTAR subsystem call gives up (not converged: retried with subdivided steps as LogH; default 2000000)"},
     {"NBODY_MSTAR_TEAM_N", "=n: MSTAR groups up to n bodies run every GBS row inside one device team, one launch per step (default 96; ENABLE_MSTAR builds)"},
     {"NBODY_SLOW0_STATS", "Statistics of small all-fast HHS sets, printed at the end"},
     {"NBODY_SMALL_FOR", "Largest loop run on the host where it can access device memory (default 256; 0: off)"},

@@ -13,6 +13,7 @@
 #include "kepler.h"
 #include "profiling.h"
 #include "stall.h"
+#include "mstar_dispatch.h"
 #include <Kokkos_Core.hpp>
 #include <algorithm>
 #include <cstring>
@@ -366,6 +367,13 @@ void SubsystemBatch::pack(const SubsystemManager& mgr, const Particles& p,
         off += sub.n_bodies;
     }
 
+    // Spin vectors of all members (MSTAR subsystems evolve the spins of their PN members)
+    has_flat_spin = gather && want_spins;
+    flat_spin.assign((size_t)total * 3, 0.0);
+    if (has_flat_spin)
+        for (int k = 0; k < total; k++)
+            for (int c = 0; c < 3; c++) flat_spin[k * 3 + c] = h_buf(body_member[k] * PACK_STRIDE + 7 + c);
+
     // Stellar radii and types of all members (SDAR collision candidates)
     flat_radius.assign(total, 0.0);
     flat_stype.assign(total, 0);
@@ -515,6 +523,16 @@ void SubsystemBatch::unpack(SubsystemManager& mgr, Particles& p, const HostSourc
         spin_indices.push_back(idx1);
         spin_values.insert(spin_values.end(), {stored_spins[s*6+3], stored_spins[s*6+4], stored_spins[s*6+5]});
     }
+    for (int s = 0; s < n_sub && has_flat_spin; s++) {   // MSTAR subsystems: their PN members' spins
+        if (s >= (int)mstar_used.size() || !mstar_used[s]) continue;
+        const auto& sub = mgr.active[s];
+        for (int b = 0; b < sub.n_bodies; b++) {
+            const int k = offset[s] + b;
+            if (flat_stype[k] != 14) continue;
+            spin_indices.push_back(pid_to_idx[sub.particle_ids[b]]);
+            spin_values.insert(spin_values.end(), {flat_spin[k * 3], flat_spin[k * 3 + 1], flat_spin[k * 3 + 2]});
+        }
+    }
     if (!spin_indices.empty()) {
         t_x0 = wall_now();
         int n_spin = (int)spin_indices.size();
@@ -553,6 +571,249 @@ void SubsystemBatch::unpack(SubsystemManager& mgr, Particles& p, const HostSourc
 // This prevents persistent B from drifting due to E_scale changes
 // when FSI kicks modify subsystem member velocities between calls.
 // ============================================================================
+
+// ============================================================================
+// MSTAR subsystems (g_collisional.mstar_group; docs/MSTAR.md): one group through the MSTAR dispatch interface
+// (mstar_dispatch.h; the GPLv3 module src/mstar implements it). Same normalisation as LogH (c.o.m. frame, fixed
+// scales, G = M = 1). Collisions are decided inside the call (the module checks every accepted step: separation or
+// osculating pericentre inside collision_distance's rule); the pair merges here as in the LogH path (c.o.m., momentum
+// exact, the change of T + U booked as dE_int) and the call continues for the rest of dt. Energy: the module's PN
+// work ledger gives the change of the Newtonian T + U by the PN forces (pn_dE); everything else the members' T + U
+// does besides collisions is integration error, left unbooked (visible in |dE/E|) and reported as the energy check.
+// ============================================================================
+static void mstar_integrate_one(SubsystemBatch& batch, int s, double G, double eta_gbs, double& dE_out, long& steps_out,
+                                bool& converged_out) {
+    const int nb = batch.n_bodies[s], off = batch.offset[s];
+    const double dt = batch.dt_target[s];
+    double* hpos = batch.flat_pos.data();
+    double* hvel = batch.flat_vel.data();
+    double* hmass = batch.flat_mass.data();
+    double* hpos_out = batch.flat_pos_out.data();
+    double* hvel_out = batch.flat_vel_out.data();
+    double M_total = 0, cm[3] = {0, 0, 0}, cmv[3] = {0, 0, 0};
+    for (int b = 0; b < nb; b++) {
+        const double mb = hmass[off + b];
+        M_total += mb;
+        for (int c = 0; c < 3; c++) { cm[c] += mb * hpos[(off + b) * 3 + c]; cmv[c] += mb * hvel[(off + b) * 3 + c]; }
+    }
+    for (int c = 0; c < 3; c++) { cm[c] /= M_total; cmv[c] /= M_total; }
+    if (!batch.stored_scales_set[s]) {   // first call: scales from the c.o.m.-frame kinetic energy (as LogH)
+        double T_cm = 0;
+        for (int b = 0; b < nb; b++) {
+            double v2 = 0;
+            for (int c = 0; c < 3; c++) { const double u = hvel[(off + b) * 3 + c] - cmv[c]; v2 += u * u; }
+            T_cm += 0.5 * hmass[off + b] * v2;
+        }
+        double V = std::sqrt(2.0 * T_cm / M_total);
+        if (V < 1e-30) V = 1.0;
+        batch.stored_V_scale[s] = V;
+        batch.stored_R_scale[s] = G * M_total / (V * V);
+        batch.stored_T_scale[s] = batch.stored_R_scale[s] / V;
+        batch.stored_E_scale[s] = M_total * V * V;
+        batch.stored_scales_set[s] = true;
+    }
+    const double V_scale = batch.stored_V_scale[s], R_scale = batch.stored_R_scale[s];
+    const double T_scale = batch.stored_T_scale[s], E_scale = batch.stored_E_scale[s];
+    batch.has_stored_aux_vel[s] = false;   // MSTAR restarts its auxiliary velocities every step (KETJU)
+
+    const double c_code = g_collisional.c_code;
+    const double c_norm = c_code > 0.0 ? c_code / V_scale : 0.0;
+    const bool pn_on = g_collisional.pn_order > 0 && c_code > 0.0;
+    constexpr double R_sun_to_pc = 2.254e-8;   // as mergers.cpp
+
+    // Live members (massless: placeholders of earlier collisions), PN bodies first (KETJU's layout)
+    std::vector<int> order;
+    order.reserve(nb);
+    int n_pn = 0;
+    for (int pass = 0; pass < 2; pass++)
+        for (int b = 0; b < nb; b++) {
+            const double mb = hmass[off + b];
+            if (!(mb > 0.0)) continue;
+            const bool pn = pn_on && g_collisional.pn_body(mb, batch.flat_stype[off + b]);
+            if (pn == (pass == 0)) { order.push_back(b); if (pn) n_pn++; }
+        }
+    int n = (int)order.size();
+    std::vector<double> m(n), x(3 * n), v(3 * n), S(3 * std::max(n_pn, 1), 0.0), R(n);
+    std::vector<char> bh(n);
+    std::vector<int> kw(n), idx(n);
+    for (int k = 0; k < n; k++) {
+        const int b = order[k];
+        m[k] = hmass[off + b] / M_total;
+        for (int c = 0; c < 3; c++) {
+            x[3 * k + c] = (hpos[(off + b) * 3 + c] - cm[c]) / R_scale;
+            v[3 * k + c] = (hvel[(off + b) * 3 + c] - cmv[c]) / V_scale;
+        }
+        kw[k] = batch.flat_stype[off + b];
+        bh[k] = kw[k] == 14;
+        R[k] = (kw[k] == 14 ? 0.0 : batch.flat_radius[off + b] * R_sun_to_pc) / R_scale;
+        idx[k] = k;
+        // spin angular momentum S = chi G m^2 / c (normalised units) of the PN bodies
+        if (k < n_pn && batch.has_flat_spin && c_norm > 0.0)
+            for (int c = 0; c < 3; c++) S[3 * k + c] = batch.flat_spin[(off + b) * 3 + c] * m[k] * m[k] / c_norm;
+    }
+    unsigned flags = 0;
+    if (pn_on && n_pn >= 2) {
+        const int po = g_collisional.pn_order;
+        if (po & 1) flags |= 1u | 2u;      // 1PN with the N-body (three-body) terms
+        if (po & 2) flags |= 4u;           // 2PN
+        if (po & 4) flags |= 8u;           // 2.5PN
+        if (po & 8) flags |= 16u;          // 3PN
+        if (po & 16) flags |= 32u;         // 3.5PN
+        if (po & PN_SPIN) flags |= 256u | 512u | 1024u;
+    }
+    auto energy = [&]() {   // Newtonian T + U of the state (normalised)
+        double T = 0, U = 0;
+        for (int i = 0; i < n; i++) {
+            T += 0.5 * m[i] * (v[3*i] * v[3*i] + v[3*i+1] * v[3*i+1] + v[3*i+2] * v[3*i+2]);
+            for (int j = i + 1; j < n; j++) {
+                double r2 = 0;
+                for (int c = 0; c < 3; c++) { const double d = x[3*i+c] - x[3*j+c]; r2 += d * d; }
+                U -= m[i] * m[j] / std::sqrt(r2);
+            }
+        }
+        return T + U;
+    };
+    const double E0 = energy();
+    double E_ref = E0, pn_dE = 0.0, t = 0.0;
+    const double dt_norm = dt / T_scale;
+    static const long max_steps = std::getenv("NBODY_MSTAR_MAX_STEPS") ? std::atol(std::getenv("NBODY_MSTAR_MAX_STEPS"))
+                                                                        : 2000000;
+    static const bool auto_dev = std::getenv("NBODY_MSTAR_CROSSOVER") != nullptr;
+    std::vector<int> ghost_of(nb, -1);
+    std::vector<double> ghost_d(3 * nb, 0.0);
+    auto& colls = batch.collisions[s];
+    long steps = 0;
+    bool reached = false, used_dev = false;
+    while (n >= 2) {
+        MstarGroup g;
+        g.n = n; g.n_pn = n_pn;
+        g.mass = m.data(); g.pos = x.data(); g.vel = v.data(); g.spin = S.data(); g.index = idx.data();
+        g.dt = dt_norm - t;
+        g.G = 1.0;
+        g.c = flags ? c_norm : 0.0;
+        g.pn_flags = flags;
+        g.tol = eta_gbs;
+        g.max_steps = max_steps;
+        // the port (collision check, PN ledger, step limit: the C library has none of them); NBODY_MSTAR_CROSSOVER:
+        // automatic choice (the C library below the crossover when none of those is needed)
+        g.device = auto_dev ? -1 : 1;
+        if (c_code > 0.0) {   // collisions as in the LogH path (coll_on: c_code > 0)
+            g.coll_R = R.data();
+            g.coll_bh = bh.data();
+            g.coll_c = c_norm;
+            g.coll_bh_max_single = g_collisional.bh_merge_max_single;
+        }
+        mstar_integrate(g);
+        used_dev = used_dev || g.used_device;
+        steps += g.steps + g.failed_steps;
+        t += g.t_reached;
+        pn_dE += g.pn_dE;
+        if (g.status == 0 && g.ok) { reached = true; break; }
+        if (g.status != 1) break;   // step limit
+        // --- collision of state bodies ci < cj: merge into the compact member (BH) or the heavier, at the c.o.m.
+        const int ci = g.coll_i, cj = g.coll_j;
+        const bool ci_keeps = (kw[ci] >= 10) != (kw[cj] >= 10) ? kw[ci] >= 10 : m[ci] >= m[cj];
+        const int kk = ci_keeps ? ci : cj, kg = ci_keeps ? cj : ci;
+        const double mk = m[kk], mg = m[kg], mm = mk + mg;
+        double xc[3], vc[3];
+        for (int c = 0; c < 3; c++) {
+            xc[c] = (mk * x[3*kk+c] + mg * x[3*kg+c]) / mm;
+            vc[c] = (mk * v[3*kk+c] + mg * v[3*kg+c]) / mm;
+        }
+        SubsystemCollision rec;
+        rec.type = g.coll_type == 1 ? MergerType::STELLAR_COLLISION
+                 : g.coll_type == 2 ? MergerType::TIDAL_DISRUPTION : MergerType::ISCO;
+        rec.pid_keep = batch.flat_pid[off + order[kk]];
+        rec.pid_gone = batch.flat_pid[off + order[kg]];
+        rec.kw_keep = kw[kk]; rec.kw_gone = kw[kg];
+        rec.m_keep = mk * M_total; rec.m_gone = mg * M_total;
+        for (int c = 0; c < 3; c++) {
+            rec.d_keep[c] = (x[3*kk+c] - xc[c]) * R_scale;
+            rec.d_gone[c] = (x[3*kg+c] - xc[c]) * R_scale;
+            rec.u_keep[c] = (v[3*kk+c] - vc[c]) * V_scale;
+            rec.u_gone[c] = (v[3*kg+c] - vc[c]) * V_scale;
+        }
+        rec.r_sep = g.coll_rsep * R_scale;
+        rec.r_coll = g.coll_rcoll * R_scale;
+        rec.t_rel = t * T_scale;
+        rec.n_members = nb;
+        rec.member_pids.assign(&batch.flat_pid[off], &batch.flat_pid[off] + nb);
+        const double E_before = energy();
+        ghost_of[order[kg]] = order[kk];
+        for (int c = 0; c < 3; c++) ghost_d[order[kg] * 3 + c] = x[3*kg+c] - xc[c];
+        for (int c = 0; c < 3; c++) { x[3*kk+c] = xc[c]; v[3*kk+c] = vc[c]; }
+        m[kk] = mm;
+        if (kw[kg] >= 10 || kw[kk] >= 10) kw[kk] = std::max(kw[kk], kw[kg]);
+        bh[kk] = kw[kk] == 14;
+        R[kk] = bh[kk] ? 0.0 : std::max(R[kk], R[kg]);
+        // two PN bodies: the remnant carries the sum of the spins until the core's remnant physics sets it
+        if (kk < n_pn && kg < n_pn)
+            for (int c = 0; c < 3; c++) S[3*kk+c] += S[3*kg+c];
+        const bool kg_pn = kg < n_pn;   // remove kg (the PN bodies stay first)
+        auto erase3 = [&](std::vector<double>& a) { a.erase(a.begin() + 3 * kg, a.begin() + 3 * kg + 3); };
+        erase3(x); erase3(v);
+        m.erase(m.begin() + kg); R.erase(R.begin() + kg); bh.erase(bh.begin() + kg); kw.erase(kw.begin() + kg);
+        order.erase(order.begin() + kg); idx.erase(idx.begin() + kg);
+        if (kg_pn) { erase3(S); n_pn--; }
+        n--;
+        if (n_pn < 2) flags = 0;
+        const double dE = energy() - E_before;
+        rec.dE_int = dE * E_scale;
+        batch.coll_dE[s] += rec.dE_int;
+        colls.push_back(rec);
+        E_ref += dE;
+    }
+    if (n < 2 && !reached) {   // one body left (from the start or after a collision): free drift to the end
+        for (int c = 0; c < 3 * n; c++) x[c] += v[c] * (dt_norm - t);
+        t = dt_norm;
+        reached = true;
+    }
+    // Write back (c.o.m. drifts uniformly), ghosts at their collision offsets from the remnant, placeholders co-move
+    const double cmf[3] = {cm[0] + cmv[0] * dt, cm[1] + cmv[1] * dt, cm[2] + cmv[2] * dt};
+    std::vector<int> slot(nb, -1);
+    for (int k = 0; k < n; k++) slot[order[k]] = k;
+    for (int b = 0; b < nb; b++) {
+        if (slot[b] >= 0) {
+            const int k = slot[b];
+            for (int c = 0; c < 3; c++) {
+                hpos_out[(off + b) * 3 + c] = x[3*k+c] * R_scale + cmf[c];
+                hvel_out[(off + b) * 3 + c] = v[3*k+c] * V_scale + cmv[c];
+            }
+            hmass[off + b] = m[k] * M_total;
+            if (k < n_pn && batch.has_flat_spin && c_norm > 0.0 && m[k] > 0.0)
+                for (int c = 0; c < 3; c++) batch.flat_spin[(off + b) * 3 + c] = S[3*k+c] * c_norm / (m[k] * m[k]);
+        } else if (ghost_of[b] >= 0) {
+            int r = ghost_of[b];
+            while (slot[r] < 0 && ghost_of[r] >= 0) r = ghost_of[r];
+            const int k = slot[r];
+            for (int c = 0; c < 3; c++) {
+                hpos_out[(off + b) * 3 + c] = (x[3*k+c] + ghost_d[b * 3 + c]) * R_scale + cmf[c];
+                hvel_out[(off + b) * 3 + c] = v[3*k+c] * V_scale + cmv[c];
+            }
+            hmass[off + b] = 0.0;
+        } else {
+            for (int c = 0; c < 3; c++) {
+                hpos_out[(off + b) * 3 + c] = hpos[(off + b) * 3 + c] + hvel[(off + b) * 3 + c] * dt;
+                hvel_out[(off + b) * 3 + c] = hvel[(off + b) * 3 + c];
+            }
+            hmass[off + b] = 0.0;
+        }
+    }
+    // Energy check: the integration error (T + U change minus collisions minus PN work) over |E0|
+    const double err = std::fabs(energy() - E_ref - pn_dE) / (std::fabs(E0) + 1e-300);
+    dE_out = reached ? err : 1e30;
+    converged_out = reached;
+    steps_out = steps;
+    batch.pn_dE[s] = pn_dE * E_scale;
+    batch.t_reached[s] = t * T_scale;
+    batch.mstar_used[s] = 1;
+    batch.stat_mstar++;
+    batch.stat_mstar_dev += used_dev ? 1 : 0;
+    batch.stat_mstar_gbs += steps;
+    batch.stat_mstar_nmax = std::max(batch.stat_mstar_nmax, nb);
+    if (!reached)
+        std::printf("      MSTAR step limit %ld: n=%d t=%.3e of %.3e (normalised)\n", steps, nb, t, dt_norm);
+}
 
 void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
     int n_sub = batch.n_subsystems;
@@ -595,7 +856,33 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
                                                                          : 2;
     const int host_threads = Kokkos::DefaultHostExecutionSpace().concurrency();
     const bool serial_subs = n_sub == 1 || n_sub <= stage_par_max;
+    // MSTAR subsystems first, one after the other on this thread (device kernels are not launched from inside the
+    // host-parallel loop below)
+    batch.mstar_used.assign(n_sub, 0);
+    batch.pn_dE.assign(n_sub, 0.0);
+    batch.stat_mstar = batch.stat_mstar_dev = batch.stat_mstar_nmax = 0;
+    batch.stat_mstar_gbs = 0;
+    std::vector<char> is_mstar(n_sub, 0);
+    double mstar_max_dE = 0.0, mstar_min_dE = 1e30;
+    int mstar_caps = 0;
+    for (int s = 0; s < n_sub; s++) {
+        if (!g_collisional.mstar_group(h_nbod(s), LOGH_MAX_BODIES)) continue;
+        is_mstar[s] = 1;
+        const double t_s0 = wall_now();
+        double dE = 0;
+        long steps = 0;
+        bool conv = false;
+        mstar_integrate_one(batch, s, G, eta_gbs, dE, steps, conv);
+        h_eerr(s) = dE;
+        h_conv(s) = conv ? 1 : 0;
+        gbs_per_sub[s] = (int)std::min<long>(steps, std::numeric_limits<int>::max());
+        mstar_max_dE = std::max(mstar_max_dE, dE);
+        mstar_min_dE = std::min(mstar_min_dE, dE);
+        if (!conv) mstar_caps++;
+        t_sub[s] = wall_now() - t_s0;
+    }
     auto integrate_one = [&](int s, int& gbs_sum, double& dE_max, double& dE_min, int& caps) {
+        if (is_mstar[s]) return;
         const double t_s0 = wall_now();
         int nb = h_nbod(s);
         int off = h_off(s);
@@ -1144,7 +1431,7 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
             rec.r_coll = coll[ci * LOGH_MAX_BODIES + cj] * R_scale;
             rec.t_rel = state.t * T_scale;
             rec.n_members = nb;
-            for (int b = 0; b < nb; b++) rec.member_pids[b] = batch.flat_pid[off + b];
+            rec.member_pids.assign(&batch.flat_pid[off], &batch.flat_pid[off] + nb);
             const double E_before = logh_total_energy(state, G_norm);
             ghost_of[live[kg]] = live[kk];
             for (int c = 0; c < 3; c++) ghost_d[live[kg]*3+c] = state.pos[kg*3+c] - xc[c];
@@ -1432,6 +1719,12 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
                                 Kokkos::Min<double>(min_dE), Kokkos::Sum<int>(cap_hit));
     }
     g_logh_prof.integ += wall_now() - t_i0;
+    for (int s = 0; s < n_sub; s++) total_gbs_steps += is_mstar[s] ? gbs_per_sub[s] : 0;
+    if (batch.stat_mstar > 0) {
+        max_dE = std::max(max_dE, mstar_max_dE);
+        min_dE = std::min(min_dE, mstar_min_dE);
+        cap_hit += mstar_caps;
+    }
     {
         double mx = 0.0, sum = 0.0;
         for (double t : t_sub) { mx = std::max(mx, t); sum += t; }

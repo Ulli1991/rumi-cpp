@@ -77,7 +77,7 @@ struct SubsystemCollision {
     double r_sep = 0, r_coll = 0;            // separation and collision distance at the decision (pc)
     double t_rel = 0;                        // time of the collision since the start of the call (code units)
     int n_members = 0;
-    int member_pids[8] = {};                 // the subsystem's members at the call (internal to the books above)
+    std::vector<int> member_pids;            // the subsystem's members at the call (n_members; internal to the books above)
     bool pl_booked = false;                  // P and L of the merge already booked by the caller (PN subsystems)
 };
 

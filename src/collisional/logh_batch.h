@@ -88,6 +88,16 @@ struct SubsystemBatch {
     int stat_irk = 0;              // integrations done by Gauss-IRK (NBODY_GAUSS_IRK, CASES.md C21)
     int stat_irk_fb = 0;           // ... chosen for Gauss-IRK but finished by LogH+GBS (no convergence, collision watch)
     std::vector<char> irk_used;    // per subsystem: integrated by Gauss-IRK
+    // MSTAR subsystems (g_collisional.mstar_group; docs/MSTAR.md): per subsystem
+    std::vector<char> mstar_used;  // integrated by MSTAR
+    std::vector<double> pn_dE;     // change of the members' Newtonian T + U by the PN forces (physical; MSTAR's PN
+                                   // work ledger); the rest of the T + U change (minus collisions) is integration error
+    int stat_mstar = 0, stat_mstar_dev = 0, stat_mstar_nmax = 0;
+    long stat_mstar_gbs = 0;
+    // Per-body spin vectors (chi, same layout as flat_mass) gathered when the spin couplings are on (has_flat_spin):
+    // MSTAR subsystems evolve and write back the spins of their PN members
+    std::vector<double> flat_spin;
+    bool has_flat_spin = false;
     std::vector<double> t_reached; // physical time each subsystem's GBS integration reached (code units)
     int stat_collisions = 0;       // collisions decided inside the integrations
     int stat_peri_landings = 0;    // candidate pericentres a step was forced onto
