@@ -10,6 +10,7 @@
 // Expansions of real distributions are stored in real form: degree n at offset n^2 as (a_0, a_1, b_1, ..., a_n, b_n),
 // v_n^m = a_m + i b_m, v_n^{-m} = (-1)^m conj(v_n^m).
 #include "fmm.h"
+#include "constants.h"
 #include <Kokkos_Complex.hpp>
 #include <Kokkos_Sort.hpp>
 #include <algorithm>
@@ -65,8 +66,7 @@ KOKKOS_INLINE_FUNCTION double kernel_g(double r2, int type, double h) {
     double r = Kokkos::sqrt(r2);
     if (type != 2 || r >= h) { double ir = 1.0 / r; return ir * ir * ir; }
     double hinv = 1.0 / h, u = r * hinv;
-    if (u < 0.5) return hinv * hinv * hinv * (10.666666666667 + u * u * (32.0 * u - 38.4));
-    return hinv * hinv * hinv * (21.333333333333 - 48.0 * u + 38.4 * u * u - 10.666666666667 * u * u * u - 0.066666666667 / (u * u * u));
+    return hinv * hinv * hinv * spline_g_inner(u);
 }
 
 KOKKOS_INLINE_FUNCTION uint64_t spread3(uint64_t v) {   // 21 bits -> every third bit

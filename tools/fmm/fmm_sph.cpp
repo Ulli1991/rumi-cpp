@@ -41,11 +41,11 @@ struct Kernel {
         // Monaghan & Lattanzio cubic spline potential and force (as in Gadget-2, h = 2.8 eps)
         double hinv = 1.0 / h, u = r * hinv;
         if (u < 0.5) {
-            g = hinv * hinv * hinv * (10.666666666667 + u * u * (32.0 * u - 38.4));
-            w = -hinv * (-2.8 + u * u * (5.333333333333 + u * u * (6.4 * u - 9.6)));
+            g = hinv * hinv * hinv * ((32.0 / 3.0) + u * u * (32.0 * u - 38.4));
+            w = -hinv * (-2.8 + u * u * ((16.0 / 3.0) + u * u * (6.4 * u - 9.6)));
         } else {
-            g = hinv * hinv * hinv * (21.333333333333 - 48.0 * u + 38.4 * u * u - 10.666666666667 * u * u * u - 0.066666666667 / (u * u * u));
-            w = -hinv * (-3.2 + 0.066666666667 / u + u * u * (10.666666666667 + u * (-16.0 + u * (9.6 - 2.133333333333 * u))));
+            g = hinv * hinv * hinv * ((64.0 / 3.0) - 48.0 * u + 38.4 * u * u - (32.0 / 3.0) * u * u * u - (1.0 / 15.0) / (u * u * u));
+            w = -hinv * (-3.2 + (1.0 / 15.0) / u + u * u * ((32.0 / 3.0) + u * (-16.0 + u * (9.6 - (32.0 / 15.0) * u))));
         }
     }
 };
