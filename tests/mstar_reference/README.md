@@ -28,7 +28,10 @@ kw 14, the others zero-radius stars), sets `PN_ORDER` from the case (`1pn`, `1pn
 Spins are not available through `rumi_lib` and are not compared. When RUMI++'s MSTAR exists, route the cases (or the
 MST ones) through it in `mstar_reference_adapter.cpp`.
 
-## Status (RUMI++ e494240)
+## Status
+
+FAIL cases are registered with `WILL_FAIL` (CMakeLists.txt) until fixed.
+
 
 | Case(s) | RUMI++ |
 |---|---|
@@ -37,7 +40,7 @@ MST ones) through it in `mstar_reference_adapter.cpp`.
 | `binary_full_pn_spin`, `..._generic_units` | skipped: no spin input/output in `rumi_lib`; KETJU's body 1 has chi = 4 (super-extremal) |
 | `binary_1pn`, `binary_1pn_threebody` | FAIL: LogH loads velocities relative to the subsystem's Newtonian c.o.m. (logh_batch.cpp) and evaluates EIH with them; KETJU uses the lab frame, here moving at 0.0425 c |
 | `head_on_merger` | FAIL: remnant 1.97265 < 1.99; the radiated-energy fit 0.0547 eta (1 - delta^2 / 2) (mergers.cpp) ignores the orbit (head-on NR ~0.06 %, quasi-circular ~4.8 %) |
-| `binary_no_pn_one_host_step` | FAIL: one call over 1e6: the Peters shortcut (GW_COALESCENCE, t_GW < dt) merges the binary at t = 0 although PN_ORDER = 0 (no radiation reaction) |
+| `binary_no_pn_one_host_step` | pass (the Peters shortcut needs radiation reaction, PN_ORDER 2.5PN bit) |
 
 ## Cases
 
