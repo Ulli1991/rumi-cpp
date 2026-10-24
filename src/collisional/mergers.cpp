@@ -245,8 +245,9 @@ std::vector<MergerEvent> detect_mergers(const SubsystemManager& mgr,
             ev.m_remnant = collision_remnant_mass(ctype, stype1, m1, stype2, m2);
         }
 
-        // GW coalescence timescale
-        if (ev.type == MergerType::NONE && sub.orb.a > 0) {
+        // GW coalescence timescale: compact remnants only (WD/NS/BH, kw 10-14); stars merge on contact above
+        const bool compact_pair = stype1 >= 10 && stype1 <= 14 && stype2 >= 10 && stype2 <= 14;
+        if (ev.type == MergerType::NONE && sub.orb.a > 0 && compact_pair) {
             double t_gw = gw_coalescence_time(sub.orb.a, sub.orb.e, m1, m2, G, c_code);
             // Triple: orbits to coalescence against LogH's per-call ceiling of 4e6 GBS steps at 64 per orbit
             // (logh_batch.cpp gbs_step_limit)
