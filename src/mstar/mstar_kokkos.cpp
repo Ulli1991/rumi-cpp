@@ -20,6 +20,7 @@
 
 #include "ketju_integrator/internal.h"
 #include "ketju_integrator/ketju_integrator.h"
+#include "mstar_dispatch.h"
 
 namespace rumi_mstar {
 
@@ -83,7 +84,12 @@ struct Dev {
     DView<double***> pos, vel, acc;                     // (slots, N, 3)
     DView<double**> u;                                  // (slots, N)
     DView<double***> spin, aspin, accvd, sder, pnv;     // (slots, max(Npn, 1), 3)
-    DView<double**> data;                               // (kmax + 1, nvars); row kmax: extrapolated result
+    DView<double*> crad;                                // collision radius per body
+    DView<char*> cbh;                                   // black hole flag per body
+    double cc = 0;                                      // c of the collision rule
+    bool cmax1 = false;
+    DView<double**> data;                               // (kmax + 1, nvars + 1); row kmax: extrapolated result;
+                                                        // column nvars: B (PN work ledger, outside the error control)
 
     // ---- tree proximity (mst.c: ketju_check_relative_proximity*) ----
     KOKKOS_INLINE_FUNCTION bool prox_nd1(int v1, int v2, int& d, int* path, int* sign) const {
@@ -395,6 +401,7 @@ struct Dev {
         Kokkos::parallel_for(Kokkos::TeamThreadRange(t, Npn), [&](int i) {
             for (int k = 0; k < 3; k++) data(ri, 7 + 6 * E + 3 * i + k) = spin(s, i, k);
         });
+        Kokkos::single(Kokkos::PerTeam(t), [&]() { data(ri, nvars) = scal(s, S_B); });
         t.team_barrier();
     }
     // update_system_from_gbs_result: data row `row` into slot s, then into_Cartesian_from_MST
@@ -420,6 +427,50 @@ struct Dev {
             for (int k = 0; k < 3; k++) vel(s, v, k) = x[k];
         });
         t.team_barrier();
+    }
+
+    // Collision test of pair i < j in slot s (RUMI++): separation inside the collision distance, or approaching
+    // with osculating pericentre inside it and the pericentre reached within dt_step. Returns true with rsep (the
+    // separation, or the osculating pericentre), rc and type.
+    KOKKOS_INLINE_FUNCTION bool pair_collides(int s, int i, int j, double dt_step, double& rsep, double& rc,
+                                              int& type) const {
+        rc = mstar_collision_distance(cbh(i) != 0, mass(i), crad(i), cbh(j) != 0, mass(j), crad(j), G, cc, cmax1, type);
+        if (!(rc > 0)) return false;
+        double dx[3], dv[3], r2 = 0, v2 = 0, rv = 0;
+        for (int k = 0; k < 3; k++) {
+            dx[k] = pos(s, j, k) - pos(s, i, k);
+            dv[k] = vel(s, j, k) - vel(s, i, k);
+            r2 += dx[k] * dx[k]; v2 += dv[k] * dv[k]; rv += dx[k] * dv[k];
+        }
+        const double r = sqrt(r2);
+        if (r < rc) { rsep = r; return true; }
+        if (rv >= 0 || !(dt_step > 0)) return false;
+        const double mu = G * (mass(i) + mass(j));
+        double h[3];
+        cross(dx, dv, h);
+        const double h2 = dot(h, h);
+        const double eps = 0.5 * v2 - mu / r;
+        const double e = sqrt(fmax(0.0, 1.0 + 2.0 * eps * h2 / (mu * mu)));
+        const double rp = h2 / (mu * (1.0 + e));
+        if (!(rp < rc)) return false;
+        // time to the pericentre on the osculating orbit
+        double tp;
+        if (fabs(e - 1.0) < 1e-8) {
+            tp = sqrt(2.0) / (3.0 * sqrt(mu)) * (r + 2.0 * rp) * sqrt(fmax(r - rp, 0.0));
+        } else if (eps < 0) {
+            const double a = -mu / (2.0 * eps), n = sqrt(mu / (a * a * a));
+            const double cE = fmin(1.0, fmax(-1.0, (1.0 - r / a) / e));
+            const double EE = acos(cE);
+            tp = (EE - e * sin(EE)) / n;
+        } else {
+            const double a = -mu / (2.0 * eps), n = sqrt(mu / (-a * a * a));
+            const double chF = fmax(1.0, (1.0 - r / a) / e);
+            const double F = acosh(chF);
+            tp = (e * sinh(F) - F) / n;
+        }
+        if (tp > dt_step) return false;
+        rsep = rp;
+        return true;
     }
 };
 
@@ -665,7 +716,12 @@ struct MstarKokkos::Impl {
     Dev d;
     int slots = 0, bslot = 0, cslot = 0, cap_N = -1, cap_pn = -1, cap_k = -1;
     int gbs_k = 4;
-    DView<double*> res;                 // per-step result read back to the host
+    // per-step result read back to the host: 0 T, 1 U, 2 time, 3 e0, 4 e1, 5 bad, 6 extrapolated B, 7 collision
+    // pair key i N + j (-1: none), 8 r_sep, 9 r_coll, 10 type; from RES_PN the PN positions
+    static constexpr int RES_PN = 12;
+    DView<double*> res;
+    DView<long> ckey;
+    bool coll_on = false;
     Kokkos::View<double*, Kokkos::HostSpace> h_res;
     DView<double*> tmin;                // initial time step reduction
     // host tree
@@ -685,6 +741,8 @@ struct MstarKokkos::Impl {
         slots = K + 2;
         const int E = std::max(N - 1, 1), P = std::max(Npn, 1);
         d.mass = DView<double*>("mstar_mass", N);
+        d.crad = DView<double*>("mstar_crad", N);
+        d.cbh = DView<char*>("mstar_cbh", N);
         d.parent = DView<int*>("mstar_parent", N);
         d.etp = DView<int*>("mstar_etp", N);
         d.level = DView<int*>("mstar_level", N);
@@ -705,9 +763,10 @@ struct MstarKokkos::Impl {
         d.accvd = DView<double***>("mstar_accvd", slots, P, 3);
         d.sder = DView<double***>("mstar_sder", slots, P, 3);
         d.pnv = DView<double***>("mstar_pnv", slots, P, 3);
-        d.data = DView<double**>("mstar_data", K + 1, d.nvars);
-        res = DView<double*>("mstar_res", 8 + 3 * P);
-        h_res = Kokkos::View<double*, Kokkos::HostSpace>("mstar_hres", 8 + 3 * P);
+        d.data = DView<double**>("mstar_data", K + 1, d.nvars + 1);
+        res = DView<double*>("mstar_res", RES_PN + 3 * P);
+        h_res = Kokkos::View<double*, Kokkos::HostSpace>("mstar_hres", RES_PN + 3 * P);
+        ckey = DView<long>("mstar_ckey");
         tmin = DView<double*>("mstar_tmin", 1);
         errview = DView<ErrVal>("mstar_err");
         bslot = K; cslot = K + 1;
@@ -829,6 +888,16 @@ struct MstarKokkos::Impl {
         Kokkos::deep_copy(sv, hv);
         Kokkos::deep_copy(ss, hs);
         Kokkos::deep_copy(Kokkos::subview(d.scal, s, (int)S_TIME), 0.0);
+        coll_on = (int)o.coll_R.size() == N;
+        d.cc = o.coll_c;
+        d.cmax1 = o.coll_bh_max_single;
+        if (coll_on) {
+            auto hr = Kokkos::create_mirror_view(d.crad);
+            auto hb = Kokkos::create_mirror_view(d.cbh);
+            for (int i = 0; i < N; i++) { hr(i) = o.coll_R[i]; hb(i) = (int)o.coll_bh.size() == N ? o.coll_bh[i] : 0; }
+            Kokkos::deep_copy(d.crad, hr);
+            Kokkos::deep_copy(d.cbh, hb);
+        }
         build_tree(o.pos.data(), o.vel.data(), s);
     }
     // slot s -> host state (time relative to the run start)
@@ -898,6 +967,50 @@ struct MstarKokkos::Impl {
     void total_energy(int s) {
         launch_force(s, 1);
         launch_energy(s);
+    }
+
+    // first colliding pair (smallest i N + j) of slot s into ckey; dt_step from the times of slots s and s_prev
+    void launch_collision(int s, int s_prev) {
+        const Dev dd = d;
+        const int N = d.N;
+        const DView<long> key = ckey;
+        if (!coll_on) {
+            Kokkos::parallel_for("mstar_coll0", Kokkos::RangePolicy<ExecSpace>(0, 1), KOKKOS_LAMBDA(int) { key() = -1; });
+            o.perf.launches++;
+            return;
+        }
+        Kokkos::parallel_reduce("mstar_coll", Kokkos::RangePolicy<ExecSpace>(0, N), KOKKOS_LAMBDA(int i, long& mn) {
+            const double dts = s_prev >= 0 ? dd.scal(s, S_TIME) - dd.scal(s_prev, S_TIME) : 0.0;
+            for (int j = i + 1; j < N; j++) {
+                double rsep, rc;
+                int ty;
+                if (dd.pair_collides(s, i, j, fabs(dts), rsep, rc, ty)) {
+                    const long kq = (long)i * N + j;
+                    if (kq < mn) mn = kq;
+                    break;
+                }
+            }
+        }, Kokkos::Min<long, MemSpace>(key));
+        o.perf.launches++;
+    }
+    // collision result of slot s into res(7..10)
+    void launch_collision_res(int s, int s_prev) {
+        const Dev dd = d;
+        const int N = d.N;
+        const DView<long> key = ckey;
+        const DView<double*> r = res;
+        Kokkos::parallel_for("mstar_cres", Kokkos::RangePolicy<ExecSpace>(0, 1), KOKKOS_LAMBDA(int) {
+            const long kq = key();
+            r(7) = -1;
+            if (kq < 0 || kq == Kokkos::reduction_identity<long>::min()) return;
+            const int i = (int)(kq / N), j = (int)(kq % N);
+            const double dts = s_prev >= 0 ? dd.scal(s, S_TIME) - dd.scal(s_prev, S_TIME) : 0.0;
+            double rsep = 0, rc = 0;
+            int ty = 0;
+            dd.pair_collides(s, i, j, fabs(dts), rsep, rc, ty);
+            r(7) = (double)kq; r(8) = rsep; r(9) = rc; r(10) = ty;
+        });
+        o.perf.launches++;
     }
 
     // estimate_initial_timestep on slot s
@@ -993,7 +1106,8 @@ struct MstarKokkos::Impl {
         const DView<ErrVal> errv = errview;
         const double atol = o.opt.gbs_absolute_tolerance, otol = o.opt.output_time_absolute_tolerance;
         const int KR = d.kmax;
-        Kokkos::parallel_reduce("mstar_extrap", Kokkos::RangePolicy<ExecSpace>(0, d.nvars),
+        const int nv = d.nvars;
+        Kokkos::parallel_reduce("mstar_extrap", Kokkos::RangePolicy<ExecSpace>(0, d.nvars + 1),
                                 KOKKOS_LAMBDA(int v, ErrVal& e) {
             double tt[MAX_K];
             for (int j = 0; j < k; j++) tt[j] = dd.data(j, v);
@@ -1007,6 +1121,7 @@ struct MstarKokkos::Impl {
                 }
             }
             const double result = tt[k - 1];
+            if (v == nv) { dd.data(KR, v) = result; return; }   // B: extrapolated, not error controlled
             if (!isfinite(result)) { e.bad = 1; return; }
             dd.data(KR, v) = result;
             const double er = fabs(tt[k - 1] - tt[k - 2]) / yscal;
@@ -1023,6 +1138,8 @@ struct MstarKokkos::Impl {
                                  KOKKOS_LAMBDA(const Team& t) { dd.team_unpack(t, cs, KR); });
             o.perf.launches++;
             total_energy(cs);
+            launch_collision(cs, bs);
+            launch_collision_res(cs, bs);
             const DView<double*> r = res;
             const int Npn = d.Npn;
             Kokkos::parallel_for("mstar_res", Kokkos::RangePolicy<ExecSpace>(0, 1), KOKKOS_LAMBDA(int) {
@@ -1032,8 +1149,9 @@ struct MstarKokkos::Impl {
                 r(3) = errv().e0;
                 r(4) = errv().e1;
                 r(5) = errv().bad;
+                r(6) = dd.data(KR, nv);
                 for (int i = 0; i < Npn; i++)
-                    for (int q = 0; q < 3; q++) r(8 + 3 * i + q) = dd.pos(cs, i, q);
+                    for (int q = 0; q < 3; q++) r(RES_PN + 3 * i + q) = dd.pos(cs, i, q);
             });
             o.perf.launches++;
             const double t0 = wall();
@@ -1160,6 +1278,31 @@ bool MstarKokkos::run(double time_interval) {
     };
     double U = read_scal(im.bslot, S_U);
     const double initial_B = read_scal(im.bslot, S_B);
+    coll_i = coll_j = -1;
+    coll_type = 0;
+    coll_rsep = coll_rcoll = 0;
+    pn_dB = 0;
+    auto take_collision = [&]() {
+        const long kq = (long)im.h_res(7);
+        coll_i = (int)(kq / n);
+        coll_j = (int)(kq % n);
+        coll_rsep = im.h_res(8);
+        coll_rcoll = im.h_res(9);
+        coll_type = (int)im.h_res(10);
+    };
+    if (im.coll_on) {   // a pair already inside its collision distance
+        im.launch_collision(im.bslot, -1);
+        im.launch_collision_res(im.bslot, -1);
+        Kokkos::deep_copy(im.h_res, im.res);
+        if (im.h_res(7) >= 0) {
+            take_collision();
+            double t;
+            im.download_state(im.bslot, t);
+            time = t_start;
+            perf.t_total += wall() - tw0;
+            return true;
+        }
+    }
     double dt = std::copysign(1.0, time_interval) * std::fmin(im.initial_timestep(im.bslot), std::fabs(time_interval) / 2);
     double Hstep = dt * U;
     bool finished = false, ok = true;
@@ -1227,15 +1370,19 @@ bool MstarKokkos::run(double time_interval) {
                                                 + ((double)n_pn * (n_pn - 1) * (opt.PN_flags & PN_THREEBODY ? n_pn - 2 : 1)));
         if (converged) {
             std::swap(im.bslot, im.cslot);
+            if (opt.PN_flags != 0 && n_pn >= 2) pn_dB += im.h_res(6) - B_now;   // PN work of the step
             U = im.h_res(1);
             B_now = im.h_res(1) - im.h_res(0);
             time = im.h_res(2);
             for (int i = 0; i < n_pn; i++)
-                for (int q = 0; q < 3; q++) pos[3 * i + q] = im.h_res(8 + 3 * i + q);
+                for (int q = 0; q < 3; q++) pos[3 * i + q] = im.h_res(Impl::RES_PN + 3 * i + q);
             perf.successful_steps += 1;
             steps_since_reconstruction += 1;
             const double remaining_time = time_interval - time;
-            if (std::fabs(remaining_time / time_interval) < opt.output_time_relative_tolerance
+            if (im.h_res(7) >= 0) {   // collision at the end of this step: stop here
+                take_collision();
+                finished = true;
+            } else if (std::fabs(remaining_time / time_interval) < opt.output_time_relative_tolerance
                 || std::fabs(remaining_time) < opt.output_time_absolute_tolerance) {
                 finished = true;
             } else {

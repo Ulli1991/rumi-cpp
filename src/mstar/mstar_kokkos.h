@@ -87,6 +87,20 @@ class MstarKokkos {
     std::vector<int> extra_index;               // caller indices; merged-away particles move to the end
     Options opt;
     Perf perf;
+    // Collision check after every accepted step (RUMI++ extension; rule: mstar_collision_distance in
+    // src/collisional/mstar_dispatch.h): coll_R[i] radius, coll_bh[i] black hole; empty coll_R: off. A hit stops
+    // run() at that step (coll_i < coll_j set, time = the step's end). Not maintained across KETJU BH mergers (the
+    // check is switched off after one).
+    std::vector<double> coll_R;
+    std::vector<char> coll_bh;
+    double coll_c = 0;
+    bool coll_bh_max_single = false;
+    int coll_i = -1, coll_j = -1, coll_type = 0;
+    double coll_rsep = 0, coll_rcoll = 0;
+    // PN work ledger (RUMI++ extension): sum over accepted steps of the extrapolated change of B = U - T by the PN
+    // kicks (B is carried as an extra GBS variable outside the error control); the Newtonian T + U changed by
+    // -pn_dB through the PN forces, the rest of its change is integration error. Zero without PN.
+    double pn_dB = 0;
     std::vector<MergerInfo> mergers;
 
     // ketju_run_integrator: advance by time_interval. Returns false if max_step_count was exceeded (state left at

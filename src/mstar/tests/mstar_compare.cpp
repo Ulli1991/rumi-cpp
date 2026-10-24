@@ -288,6 +288,66 @@ int main(int argc, char** argv) {
             o.team_max = 0;
             compare("imbh_cusp_pn_st", s, o, 0.05, 1.4e-13, 1e300, 1e300);
         }
+        if (want(argc, argv, "pn_ledger")) {
+            // PN work ledger: in the 2-BH cusp the Newtonian T + U changes by the PN forces (-pn_dB) plus the
+            // integration error; the error must stay at the GBS tolerance level while the PN part is much larger
+            Sys s = plummer(62, 2, 7, 0.05);
+            s.x[0] = 0.02; s.x[3] = -0.02;
+            const double vb = std::sqrt(0.1 / 0.04) / 2;
+            s.v[1] = vb; s.v[4] = -vb;
+            rumi_mstar::MstarKokkos M(2, 60);
+            M.opt.c = 30;
+            M.opt.PN_flags = 0x7ff;
+            M.opt.gbs_relative_tolerance = 1e-10;
+            M.mass = s.m; M.pos = s.x; M.vel = s.v; M.spin = {0.0005, 0, 0.001, 0, 0, -0.0008};
+            auto E = [&](const std::vector<double>& x, const std::vector<double>& v) {
+                double T = 0, W = 0;
+                for (int i = 0; i < s.n; i++) {
+                    T += 0.5 * s.m[i] * (v[3*i]*v[3*i] + v[3*i+1]*v[3*i+1] + v[3*i+2]*v[3*i+2]);
+                    for (int j = i + 1; j < s.n; j++) {
+                        double r2 = 0;
+                        for (int k = 0; k < 3; k++) r2 += (x[3*i+k] - x[3*j+k]) * (x[3*i+k] - x[3*j+k]);
+                        W -= s.m[i] * s.m[j] / std::sqrt(r2);
+                    }
+                }
+                return T + W;
+            };
+            const double E0 = E(s.x, s.v);
+            M.run(0.2);
+            const double dE = E(M.pos, M.vel) - E0, dE_pn = -M.pn_dB;
+            std::printf("pn_ledger: dE/E0 %.3e, PN part %.3e, rest (integration error) %.3e\n", dE / std::fabs(E0),
+                        dE_pn / std::fabs(E0), (dE - dE_pn) / std::fabs(E0));
+            check("pn_ledger", "|dE - dE_pn| / |E0|", std::fabs(dE - dE_pn) / std::fabs(E0), 8.4e-14);   // measured 6.46e-14
+            check("pn_ledger", "|E0| / |dE_pn| (PN visible)", std::fabs(E0) / std::fmax(std::fabs(dE_pn), 1e-300), 1e7);
+        }
+        if (want(argc, argv, "collision")) {
+            // two stars (R = 0.001) of a 40-star group heading for each other (head-on), and a second pair on a
+            // grazing hyperbolic passage with osculating pericentre 0.5 r_coll: both must stop the call at the
+            // first of them; the grazing one is decided on its osculating pericentre (r_sep < r_coll)
+            for (int variant = 0; variant < 2; variant++) {
+                Sys s = plummer(40, 0, 11);
+                for (int k = 0; k < 6; k++) { s.x[k] = 0; s.v[k] = 0; }
+                s.x[0] = 0.05; s.x[3] = -0.05;
+                if (variant == 0) { s.v[0] = -1; s.v[3] = 1; }
+                else {   // impact parameter b with pericentre 0.5 r_coll = 0.001: b^2 = rp^2 + 2 G M rp / v_inf^2
+                    const double rp = 0.001, vinf = 2.0, mu = 2.0 / 40, b = std::sqrt(rp * rp + 2 * mu * rp / (vinf * vinf));
+                    s.x[1] = b / 2; s.x[4] = -b / 2; s.v[0] = -1; s.v[3] = 1;
+                }
+                rumi_mstar::MstarKokkos M(0, 40);
+                M.opt.gbs_relative_tolerance = 1e-10;
+                M.mass = s.m; M.pos = s.x; M.vel = s.v;
+                M.coll_R.assign(40, 1e-5);
+                M.coll_R[0] = M.coll_R[1] = 0.001;
+                M.coll_bh.assign(40, 0);
+                M.run(1.0);
+                const char* nm = variant ? "coll_graze" : "coll_headon";
+                std::printf("%s: stop t=%.6f pair %d-%d r_sep=%.3e r_coll=%.3e type %d\n", nm, M.time, M.coll_i, M.coll_j,
+                            M.coll_rsep, M.coll_rcoll, M.coll_type);
+                check(nm, "pair != 0-1", (M.coll_i == 0 && M.coll_j == 1) ? 0.0 : 1.0, 0.0);
+                check(nm, "r_sep / r_coll", M.coll_rsep / M.coll_rcoll, 1.0);
+                check(nm, "t_stop (< 0.05)", M.time, 0.05);
+            }
+        }
         if (want(argc, argv, "bh_merger")) {
             // KETJU unit test head_on_merger: two BHs from rest at +-40 (G = c = 1) merge; remnant at the origin
             Sys s;

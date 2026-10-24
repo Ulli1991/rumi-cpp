@@ -62,6 +62,8 @@ bool host_path(MstarGroup& g) {
     g.steps = R.perf->successful_steps;
     g.failed_steps = R.perf->failed_steps;
     g.rel_energy_error = R.perf->relative_energy_error;
+    g.status = 0;
+    g.t_reached = g.dt;
     ketju_free_system(&R);
     return true;
 }
@@ -90,7 +92,25 @@ bool device_path(MstarGroup& g) {
     for (int i = 0; i < 3 * g.n_pn; i++) M->spin[i] = g.spin ? g.spin[i] : 0.0;
     if (g.index)
         for (int i = 0; i < g.n; i++) M->extra_index[i] = g.index[i];
+    M->coll_R.clear();
+    M->coll_bh.clear();
+    if (g.coll_R) {
+        M->coll_R.assign(g.coll_R, g.coll_R + g.n);
+        M->coll_bh.assign(g.n, 0);
+        if (g.coll_bh) for (int i = 0; i < g.n; i++) M->coll_bh[i] = g.coll_bh[i];
+        M->coll_c = g.coll_c;
+        M->coll_bh_max_single = g.coll_bh_max_single;
+    }
+    const double t0 = M->time;
     const bool ok = M->run(g.dt);
+    g.t_reached = M->time - t0;
+    g.coll_i = M->coll_i;
+    g.coll_j = M->coll_j;
+    g.coll_type = M->coll_type;
+    g.coll_rsep = M->coll_rsep;
+    g.coll_rcoll = M->coll_rcoll;
+    g.status = !ok ? 2 : (M->coll_i >= 0 ? 1 : 0);
+    g.pn_dE = -M->pn_dB;
     for (const auto& mi : M->mergers)
         g.mergers.push_back({mi.t_merger, mi.m1, mi.m2, mi.m_remnant, mi.chi1, mi.chi2, mi.chi_remnant, mi.v_kick,
                              mi.extra_index1, mi.extra_index2});
@@ -125,8 +145,13 @@ int mstar_crossover_n() {
 bool mstar_integrate(MstarGroup& g) {
     const double t0 = wall_s();
     g.mergers.clear();
-    const bool dev = g.device == 1 || (g.device < 0 && g.n >= mstar_crossover_n());
+    // The C library has no collision check, no PN work ledger and no non-fatal step limit: groups that need one of
+    // them always take the port (on the host execution space in host-only builds)
+    const bool needs_port = g.coll_R || (g.c > 0 && g.n_pn >= 2 && g.pn_flags) || g.max_steps > 0;
+    const bool dev = g.device == 1 || (g.device < 0 && (needs_port || g.n >= mstar_crossover_n()));
     g.used_device = dev ? 1 : 0;
+    g.coll_i = g.coll_j = -1;
+    g.pn_dE = 0;
     g.ok = dev ? device_path(g) : host_path(g);
     g.wall = wall_s() - t0;
     return g.ok;
