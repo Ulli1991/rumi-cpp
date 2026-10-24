@@ -80,6 +80,12 @@ target_link_libraries(mstar-vs-logh rumi-mstar ketju-reference)
 add_test(NAME mstar_vs_logh COMMAND mstar-vs-logh)
 set_tests_properties(mstar_vs_logh PROPERTIES ENVIRONMENT "OMP_NUM_THREADS=1;OMP_PROC_BIND=false")
 
+# Design measurement of the tide hook: an embedded group, impulsive member kicks vs c.o.m. kicks + continuous tide
+add_executable(mstar-embedded-tide ${MSTAR_DIR}/tests/mstar_embedded_tide.cpp)
+target_link_libraries(mstar-embedded-tide rumi-mstar)
+add_test(NAME mstar_embedded_tide COMMAND mstar-embedded-tide)
+set_tests_properties(mstar_embedded_tide PROPERTIES ENVIRONMENT "OMP_NUM_THREADS=1;OMP_PROC_BIND=false")
+
 # Scaling benchmark (N_sub 16..4096) and launch/sync latency; not a ctest
 add_executable(mstar-bench ${MSTAR_DIR}/tests/mstar_bench.cpp)
 target_link_libraries(mstar-bench rumi-mstar ketju-reference)

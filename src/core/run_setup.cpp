@@ -119,6 +119,12 @@ int apply_run_settings(const Config& cfg, RunSettings& rs) {
             const bool want = e && std::atoi(e) != 0;
             g_collisional.mstar = want && mstar_available();
             if (const char* m = std::getenv("NBODY_MSTAR_MAX")) g_collisional.mstar_max = std::atoi(m);
+            const char* td = std::getenv("NBODY_MSTAR_TIDE");
+            g_collisional.mstar_tide = g_collisional.mstar && td && std::atoi(td) != 0;
+            if (g_collisional.mstar_tide && host_subtree_max > 0) {   // the tides need every particle on the device
+                if (MPIComm::rank() == 0) std::printf("NBODY_MSTAR_TIDE: host subtrees off (HOST_SUBTREE_MAX = 0)\n");
+                host_subtree_max = 0;
+            }
             if (want && !g_collisional.mstar && MPIComm::rank() == 0)
                 std::printf("WARNING: NBODY_MSTAR=1 ignored: this build has no MSTAR module (cmake -DENABLE_MSTAR=ON)\n");
             else if (g_collisional.mstar && MPIComm::rank() == 0)

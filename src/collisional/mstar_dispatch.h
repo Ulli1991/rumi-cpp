@@ -78,6 +78,10 @@ struct MstarGroup {
     const char* coll_bh = nullptr;     // [n] 1: black hole
     double coll_c = 0;                 // speed of light for the ISCO / BH radii (units of the call; 0: none)
     bool coll_bh_max_single = false;
+    // Tide of the bodies outside the group (NBODY_MSTAR_TIDE; docs/MSTAR.md): a = tide_A x about the group's c.o.m.
+    // (the origin of pos), constant over the call; its work on the members is returned as ext_dE
+    bool tide = false;
+    double tide_A[9] = {};             // row-major, units of the call (1 / time^2)
     // out
     bool ok = false;                   // integrated to dt
     int status = 0;                    // 0 reached dt, 1 collision (coll_*), 2 step limit
@@ -86,7 +90,9 @@ struct MstarGroup {
     int coll_type = 0;
     double coll_rsep = 0, coll_rcoll = 0;   // separation at the decision (osculating pericentre if so decided)
     double pn_dE = 0;                  // change of the Newtonian T + U by the PN forces (extrapolated PN work, PN
-                                       // groups); the rest of the T + U change is integration error
+                                       // groups)
+    double ext_dE = 0;                 // change of the Newtonian T + U by the tide (tide = true); the rest of the
+                                       // T + U change (minus pn_dE and collisions) is integration error
     long steps = 0, failed_steps = 0;
     double rel_energy_error = 0;       // (B_end - B_start) / B_start, B = U - T (Newtonian; meaningful without PN)
     double wall = 0;                   // seconds

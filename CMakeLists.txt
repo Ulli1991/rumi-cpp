@@ -391,7 +391,7 @@ endif()
 add_test(NAME grad_force_consistency COMMAND grad-force-test)
 # MSTAR subsystems in the cluster code (NBODY_MSTAR=1; the cases skip without the module)
 if(ENABLE_MSTAR)
-    foreach(case mstar_big_group mstar_coll_group mstar_imbh_cusp mstar_dense_core)
+    foreach(case mstar_big_group mstar_coll_group mstar_imbh_cusp mstar_imbh_cusp_tide mstar_dense_core)
         add_test(NAME ${case} COMMAND Python3::Interpreter ${CMAKE_SOURCE_DIR}/tests/run_case.py
                  $<TARGET_FILE:nbody-kokkos> ${case})
         set_tests_properties(${case} PROPERTIES SKIP_RETURN_CODE 77 ENVIRONMENT

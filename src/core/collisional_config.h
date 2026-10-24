@@ -92,6 +92,7 @@ struct CollisionalConfig {
                                        // LOGH_MAX_BODIES = 8 always, when MSTAR is on)
     bool mstar = false;                // NBODY_MSTAR=1 and the module is built in
     int mstar_max = 1024;              // NBODY_MSTAR_MAX: largest group integrated as one subsystem
+    bool mstar_tide = false;           // NBODY_MSTAR_TIDE=1: c.o.m. kicks + continuous tide inside MSTAR groups
     // Group size limit of subsystem formation (logh_max: LOGH_MAX_BODIES)
     int subsys_max_bodies(int logh_max) const { return mstar ? (mstar_max > logh_max ? mstar_max : logh_max) : logh_max; }
     // A subsystem of n bodies is integrated by MSTAR

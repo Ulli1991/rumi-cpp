@@ -192,7 +192,20 @@ VecAcc<T> acc(std::vector<T>& v) { return VecAcc<T>{v.data()}; }
 // Persistent device buffers for the member gather and scatter (no View or host allocation per call)
 using Staging = DeviceStaging;
 Staging& staging() { return DeviceStaging::get<0>(); }
+
 }  // namespace
+
+// 3x3 tensor sum (NBODY_MSTAR_TIDE tidal tensors)
+struct Tide9 {
+    double a[9];
+    KOKKOS_INLINE_FUNCTION Tide9() { for (int q = 0; q < 9; q++) a[q] = 0; }
+    KOKKOS_INLINE_FUNCTION Tide9& operator+=(const Tide9& o) { for (int q = 0; q < 9; q++) a[q] += o.a[q]; return *this; }
+};
+namespace Kokkos {
+template <> struct reduction_identity<Tide9> {
+    KOKKOS_FORCEINLINE_FUNCTION static Tide9 sum() { return Tide9(); }
+};
+}  // namespace Kokkos
 
 void SubsystemBatch::allocate(int n_sub, int total_bodies) {
     n_subsystems = n_sub;
@@ -429,6 +442,46 @@ void SubsystemBatch::pack(const SubsystemManager& mgr, const Particles& p,
             }
         }
         off += sub.n_bodies;
+    }
+
+    // NBODY_MSTAR_TIDE: tidal tensor of every body outside an MSTAR subsystem at its c.o.m. (one device reduction per
+    // subsystem over all particles; positions replicated on every rank)
+    tide_A.assign((size_t)n_sub * 9, 0.0);
+    if (g_collisional.mstar && g_collisional.mstar_tide) {
+        static Kokkos::View<char*> mask;
+        if ((int)mask.extent(0) < p.N) mask = Kokkos::View<char*>("mstar_tide_mask", p.N);
+        auto px = p.x, py = p.y, pz = p.z, pm = p.mass;
+        for (int s = 0; s < n_sub; s++) {
+            if (!g_collisional.mstar_group(n_bodies[s], LOGH_MAX_BODIES)) continue;
+            double M = 0, X[3] = {0, 0, 0};
+            std::vector<int> idx(n_bodies[s]);
+            for (int b = 0; b < n_bodies[s]; b++) {
+                const int k = offset[s] + b;
+                idx[b] = member_indices[body_member[k]];
+                M += flat_mass[k];
+                for (int c = 0; c < 3; c++) X[c] += flat_mass[k] * flat_pos[k * 3 + c];
+            }
+            if (!(M > 0)) continue;
+            for (int c = 0; c < 3; c++) X[c] /= M;
+            Kokkos::View<int*, Kokkos::HostSpace> hidx(idx.data(), idx.size());
+            auto didx = Kokkos::create_mirror_view_and_copy(Kokkos::DefaultExecutionSpace::memory_space(), hidx);
+            const int nm = (int)idx.size();
+            auto mk = mask;
+            Kokkos::parallel_for("mstar_tide_mark", nm, KOKKOS_LAMBDA(int q) { mk(didx(q)) = 1; });
+            Tide9 T;
+            const double X0 = X[0], X1 = X[1], X2 = X[2];
+            Kokkos::parallel_reduce("mstar_tide", p.N, KOKKOS_LAMBDA(int k, Tide9& t) {
+                if (mk(k) || !(pm(k) > 0.0)) return;
+                const double d0 = px(k) - X0, d1 = py(k) - X1, d2 = pz(k) - X2;
+                const double r2 = d0 * d0 + d1 * d1 + d2 * d2;
+                const double ir2 = 1.0 / r2, ir3 = ir2 / sqrt(r2), gm = G * pm(k) * ir3;
+                const double d[3] = {d0, d1, d2};
+                for (int i = 0; i < 3; i++)
+                    for (int j = 0; j < 3; j++) t.a[3 * i + j] += gm * (3.0 * d[i] * d[j] * ir2 - (i == j ? 1.0 : 0.0));
+            }, Kokkos::Sum<Tide9>(T));
+            Kokkos::parallel_for("mstar_tide_unmark", nm, KOKKOS_LAMBDA(int q) { mk(didx(q)) = 0; });
+            for (int q = 0; q < 9; q++) tide_A[(size_t)s * 9 + q] = T.a[q];
+        }
     }
 }
 
@@ -674,7 +727,8 @@ static void mstar_integrate_one(SubsystemBatch& batch, int s, double G, double e
         return T + U;
     };
     const double E0 = energy();
-    double E_ref = E0, pn_dE = 0.0, t = 0.0;
+    double E_ref = E0, pn_dE = 0.0, ext_dE = 0.0, t = 0.0;
+    const bool tide = g_collisional.mstar_tide && (size_t)s * 9 + 8 < batch.tide_A.size();
     const double dt_norm = dt / T_scale;
     static const long max_steps = std::getenv("NBODY_MSTAR_MAX_STEPS") ? std::atol(std::getenv("NBODY_MSTAR_MAX_STEPS"))
                                                                         : 2000000;
@@ -694,6 +748,10 @@ static void mstar_integrate_one(SubsystemBatch& batch, int s, double G, double e
         g.tol = eta_gbs;
         g.max_steps = max_steps;
         g.device = -1;   // device from mstar_crossover_n() bodies (NBODY_MSTAR_CROSSOVER), host engine below
+        if (tide) {      // a = A x about the c.o.m.: normalised A' = A T_scale^2
+            g.tide = true;
+            for (int q = 0; q < 9; q++) g.tide_A[q] = batch.tide_A[(size_t)s * 9 + q] * T_scale * T_scale;
+        }
         if (c_code > 0.0) {   // collisions as in the LogH path (coll_on: c_code > 0)
             g.coll_R = R.data();
             g.coll_bh = bh.data();
@@ -705,6 +763,7 @@ static void mstar_integrate_one(SubsystemBatch& batch, int s, double G, double e
         steps += g.steps + g.failed_steps;
         t += g.t_reached;
         pn_dE += g.pn_dE;
+        ext_dE += g.ext_dE;
         if (g.status == 0 && g.ok) { reached = true; break; }
         if (g.status != 1) break;   // step limit
         // --- collision of state bodies ci < cj: merge into the compact member (BH) or the heavier, at the c.o.m.
@@ -797,11 +856,12 @@ static void mstar_integrate_one(SubsystemBatch& batch, int s, double G, double e
         }
     }
     // Energy check: the integration error (T + U change minus collisions minus PN work) over |E0|
-    const double err = std::fabs(energy() - E_ref - pn_dE) / (std::fabs(E0) + 1e-300);
+    const double err = std::fabs(energy() - E_ref - pn_dE - ext_dE) / (std::fabs(E0) + 1e-300);
     dE_out = reached ? err : 1e30;
     converged_out = reached;
     steps_out = steps;
     batch.pn_dE[s] = pn_dE * E_scale;
+    batch.ext_dE[s] = ext_dE * E_scale;
     batch.t_reached[s] = t * T_scale;
     batch.mstar_used[s] = 1;
     batch.stat_mstar++;
@@ -857,6 +917,7 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
     // host-parallel loop below)
     batch.mstar_used.assign(n_sub, 0);
     batch.pn_dE.assign(n_sub, 0.0);
+    batch.ext_dE.assign(n_sub, 0.0);
     batch.stat_mstar = batch.stat_mstar_dev = batch.stat_mstar_nmax = 0;
     batch.stat_mstar_gbs = 0;
     std::vector<char> is_mstar(n_sub, 0);

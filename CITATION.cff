@@ -9,8 +9,9 @@ authors:
 repository-code: "https://github.com/Ulli1991/rumi-cpp"
 license: BSD-3-Clause
 date-released: 2026-10-23
-# When built with ENABLE_MSTAR (optional GPLv3 module src/mstar: the KETJU/MSTAR integrator and its Kokkos port),
-# also cite the two MSTAR/KETJU papers below (src/mstar/README.md).
+# When built with ENABLE_MSTAR (optional GPLv3 module src/mstar: C++ rewrite of the MSTAR regularised integrator
+# (Rantala et al. 2020; public KETJU integrator, Mannerkoski et al. 2023) with Kokkos support for GPUs, by Ulrich
+# Steinwandel), also cite the two MSTAR/KETJU papers below (src/mstar/README.md).
 references:
   - type: article
     authors:
@@ -32,7 +33,7 @@ references:
     identifiers:
       - type: other
         value: "arXiv:2001.03180"
-    notes: "When built with ENABLE_MSTAR (required citation of the KETJU integrator)."
+    notes: "When built with ENABLE_MSTAR: C++ rewrite of the MSTAR regularised integrator (Rantala et al. 2020; public KETJU integrator, Mannerkoski et al. 2023) with Kokkos support for GPUs, by Ulrich Steinwandel. Required citation."
   - type: article
     authors:
       - family-names: Mannerkoski
@@ -45,4 +46,4 @@ references:
     identifiers:
       - type: other
         value: "arXiv:2306.04963"
-    notes: "When built with ENABLE_MSTAR (released KETJU integrator: PN, BH mergers and recoil, order control); et al."
+    notes: "When built with ENABLE_MSTAR: C++ rewrite of the MSTAR regularised integrator (Rantala et al. 2020; public KETJU integrator, Mannerkoski et al. 2023) with Kokkos support for GPUs, by Ulrich Steinwandel. Recommended citation (released KETJU integrator: PN, BH mergers and recoil, order control); et al."

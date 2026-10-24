@@ -98,6 +98,10 @@ struct SubsystemBatch {
     // MSTAR subsystems evolve and write back the spins of their PN members
     std::vector<double> flat_spin;
     bool has_flat_spin = false;
+    // NBODY_MSTAR_TIDE: tidal tensor of the outside bodies at each MSTAR subsystem's c.o.m. (9 per subsystem, row-major,
+    // code units 1 / time^2; filled by pack) and the work of that tide on the members' T + U in the call (physical)
+    std::vector<double> tide_A;
+    std::vector<double> ext_dE;
     std::vector<double> t_reached; // physical time each subsystem's GBS integration reached (code units)
     int stat_collisions = 0;       // collisions decided inside the integrations
     int stat_peri_landings = 0;    // candidate pericentres a step was forced onto

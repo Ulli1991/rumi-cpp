@@ -51,6 +51,11 @@ bool port_path(MstarGroup& g, bool on_host) {
         M->coll_c = g.coll_c;
         M->coll_bh_max_single = g.coll_bh_max_single;
     }
+    if (g.tide) {
+        M->opt.extra.vindep = true;
+        M->opt.extra.track_work = true;
+        for (int q = 0; q < 9; q++) M->opt.extra.A[q] = g.tide_A[q];
+    }
     const double t0 = M->time;
     const bool ok = M->run(g.dt);
     g.t_reached = M->time - t0;
@@ -60,7 +65,8 @@ bool port_path(MstarGroup& g, bool on_host) {
     g.coll_rsep = M->coll_rsep;
     g.coll_rcoll = M->coll_rcoll;
     g.status = !ok ? 2 : (M->coll_i >= 0 ? 1 : 0);
-    g.pn_dE = -M->pn_dB;
+    g.pn_dE = -M->pn_dB - M->ext_work;   // B also carries the tide's work
+    g.ext_dE = M->ext_work;
     for (const auto& mi : M->mergers)
         g.mergers.push_back({mi.t_merger, mi.m1, mi.m2, mi.m_remnant, mi.chi1, mi.chi2, mi.chi_remnant, mi.v_kick,
                              mi.extra_index1, mi.extra_index2});
@@ -99,6 +105,7 @@ bool mstar_integrate(MstarGroup& g) {
     g.used_device = dev ? 1 : 0;
     g.coll_i = g.coll_j = -1;
     g.pn_dE = 0;
+    g.ext_dE = 0;
     g.ok = port_path(g, !dev);
     g.wall = wall_s() - t0;
     return g.ok;

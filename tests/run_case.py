@@ -264,6 +264,7 @@ MSTAR_BIG_DE = 1e-6       # preliminary; set to 1.3x measured
 MSTAR_COLL_DE = 1e-6
 MSTAR_CUSP_DE = 1e-6
 MSTAR_CORE_DE = 1e-6
+MSTAR_CUSP_TIDE_DE = 1e-6
 # Natal kicks (runtime_sse.cpp): 500 12-Msun stars at Z = 0.02 in a cluster of r_h = 1 kpc (no dynamics to speak of),
 # 1 Myr steps through their core collapse at 19-21 Myr: 500 NSs (Fryer 2012 rapid, f_fb ~ 0.025)
 NATAL_NS = dict(TEST_CASE="plummer", INTEGRATOR="hhs", TOTAL_TIME_MYR="22", DT_MAX_MYR="1.0", DT_MIN_MYR="1e-14",
@@ -1102,13 +1103,16 @@ def no_fsi_groups(exe, label, cfg, bound):
         check(f"{label} max|dE/E|", max(r[0] for r in rows), bound)
 
 
-def mstar_groups(exe, label, cfg, bound, min_nmax, min_colls=0, pn=False):
+def mstar_groups(exe, label, cfg, bound, min_nmax, min_colls=0, pn=False, tide=False):
     """MSTAR subsystems (NBODY_MSTAR=1, ENABLE_MSTAR builds; docs/MSTAR.md): groups above LOGH_MAX_BODIES become
     subsystems (none left to the FSI), MSTAR integrates them (step summary mstar=), no step limit or give-up, the
     particle count drops by exactly the collisions, and the energy with the books (collisions: merger sink; PN:
     the PN work ledger in E_pn, the integration error left visible) stays within the bound. Skipped without the
     module."""
-    out = run_output(exe, cfg, env={"NBODY_MSTAR": "1", "NBODY_EATTR": "1"})
+    env = {"NBODY_MSTAR": "1", "NBODY_EATTR": "1"}
+    if tide:   # NBODY_MSTAR_TIDE: c.o.m. kicks + the outside tide inside MSTAR
+        env["NBODY_MSTAR_TIDE"] = "1"
+    out = run_output(exe, cfg, env=env)
     if "NBODY_MSTAR=1 ignored" in out:
         print("SKIP: no MSTAR module in this build")
         return "skip"
@@ -2507,6 +2511,8 @@ CASES = {
                                                  min_colls=1),
     "mstar_imbh_cusp": lambda exe: mstar_groups(exe, "IMBH binary + 40-star cusp, all PN, MSTAR", MSTAR_CUSP,
                                                 MSTAR_CUSP_DE, 20, pn=True),
+    "mstar_imbh_cusp_tide": lambda exe: mstar_groups(exe, "IMBH cusp, all PN, MSTAR + outside tide", MSTAR_CUSP,
+                                                     MSTAR_CUSP_TIDE_DE, 20, pn=True, tide=True),
     "mstar_dense_core": lambda exe: mstar_groups(exe, "dense core, MSTAR", dict(TRIPLES, PLUMMER_R_HALF="0.03",
                                                                                  TOTAL_TIME_MYR="1e-4"), MSTAR_CORE_DE, 9),
     # Exact tree searches (M7.4), forced at every set size, each search checked bitwise against O(N^2)
