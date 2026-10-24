@@ -223,7 +223,7 @@ void force_err_inject(Particles& p, int start, int count, int set_count) {
             }, r2);
             double r0 = std::sqrt(r2 / s[0]);
 #ifdef USE_MPI
-            MPI_CHECK(MPI_Bcast(&r0, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD));
+            MPI_CHECK(MPI_Bcast(&r0, 1, MPI_DOUBLE, 0, MPIComm::comm()));
 #endif
             g_force_err_r0 = r0 > 0.0 ? r0 : 1.0;
             if (MPIComm::rank() == 0) std::printf("NBODY_FORCE_ERR: cell grids of edge %.4e / 2^l\n", g_force_err_r0);
@@ -243,7 +243,7 @@ void force_err_inject(Particles& p, int start, int count, int set_count) {
             }, s[0], s[1], s[2], s[3]);
             if (s[0] > 0.0) { mean[0] = s[1] / s[0]; mean[1] = s[2] / s[0]; mean[2] = s[3] / s[0]; }
 #ifdef USE_MPI
-            MPI_CHECK(MPI_Bcast(mean, 3, MPI_DOUBLE, 0, MPI_COMM_WORLD));
+            MPI_CHECK(MPI_Bcast(mean, 3, MPI_DOUBLE, 0, MPIComm::comm()));
 #endif
         }
         const double m0 = mean[0], m1 = mean[1], m2 = mean[2];
@@ -280,7 +280,7 @@ void force_err_inject(Particles& p, int start, int count, int set_count) {
             }
             al[3] = xc; al[4] = yc; al[5] = zc;
 #ifdef USE_MPI
-            MPI_CHECK(MPI_Bcast(al, 6, MPI_DOUBLE, 0, MPI_COMM_WORLD));
+            MPI_CHECK(MPI_Bcast(al, 6, MPI_DOUBLE, 0, MPIComm::comm()));
 #endif
         }
         const double wx = al[0], wy = al[1], wz = al[2], xc = al[3], yc = al[4], zc = al[5];
@@ -314,7 +314,7 @@ void force_err_inject(Particles& p, int start, int count, int set_count) {
     }, r2);
     double g[6] = {xc, yc, zc, std::sqrt(r2 / s[0]), std::sqrt(s[4] / count), 0.0};
 #ifdef USE_MPI
-    MPI_CHECK(MPI_Bcast(g, 6, MPI_DOUBLE, 0, MPI_COMM_WORLD));
+    MPI_CHECK(MPI_Bcast(g, 6, MPI_DOUBLE, 0, MPIComm::comm()));
 #endif
     if (!(g[3] > 0.0)) return;
     // M: Box-Muller N(0, 1/3) entries from the call counter
@@ -908,6 +908,25 @@ void advance_subsystems_in_range_impl(Particles& p, int start, int count,
         const int s = eligible[k];
         adv_check.own(s);
         const auto& sub = g_subsystem_mgr.active[s];
+        if (subsys_advance_count(sub.particle_ids, dt, sub.orb.a, sub.orb.e, (int)sub.type)) {
+            constexpr double R_sun_to_pc = 2.254e-8;   // as mergers.cpp
+            auto& sc = StellarPropsCache::get();   // the members as RUMI++ has them, and its contact distance
+            std::vector<int> kw; std::vector<double> m, R;
+            for (int pid : sub.particle_ids) {
+                const int ii = g_subsystem_mgr.safe_pid_to_idx(pid);
+                kw.push_back(sc.type_of(p, pid)); R.push_back(sc.radius_of(pid)); m.push_back(ii >= 0 ? h_m(ii - start) : -1.0);
+                std::printf("SUBSYS_ADVANCE_LIMIT member pid %d m %.6g Msun kw %d R %.6g Rsun\n", pid, m.back(), kw.back(), R.back());
+            }
+            if (sub.n_bodies == 2) {
+                MergerType mt;
+                const double rc = collision_distance(kw[0], m[0], R[0] * R_sun_to_pc, kw[1], m[1], R[1] * R_sun_to_pc, G,
+                                                     g_collisional.c_code, mt);
+                std::printf("SUBSYS_ADVANCE_LIMIT pericentre %.6e pc = %.4g Rsun, contact distance %.6e pc = %.4g Rsun\n",
+                            sub.orb.a * (1 - sub.orb.e), sub.orb.a * (1 - sub.orb.e) / R_sun_to_pc, rc, rc / R_sun_to_pc);
+            }
+            std::fflush(stdout);
+            std::abort();
+        }
         if (to_logh[s]) {
             logh_idx.push_back(s);
         } else if (sub.is_secular && sub.n_bodies == 2) {
@@ -1022,7 +1041,8 @@ void advance_subsystems_in_range_impl(Particles& p, int start, int count,
         }
         if (g_collisional.subsys_err_tol > 0.0 && g_collisional.e_ref > 0.0 && MPIComm::rank() == 0)
             for (int k = 0; k < n_sec; k++)
-                if (evolved[k] && std::fabs(sec_res[k]) > g_collisional.subsys_err_tol * g_collisional.e_ref) {
+                if (evolved[k] && std::fabs(sec_res[k]) > g_collisional.subsys_err_tol * g_collisional.e_ref &&
+                    subsys_err_first(g_subsystem_mgr.active[secular_idx[k]].particle_ids)) {
                     const auto& sub = g_subsystem_mgr.active[secular_idx[k]];
                     const double* q = &sec_pre[14 * k];
                     auto& sc = StellarPropsCache::get();
@@ -1152,7 +1172,7 @@ void advance_subsystems_in_range_impl(Particles& p, int start, int count,
             {
                 const double res = tri_energy() - (E_tri0 - st.booked_gw);   // what is left after the fix (round-off)
                 if (g_collisional.subsys_err_tol > 0.0 && g_collisional.e_ref > 0.0 && MPIComm::rank() == 0 &&
-                    std::fabs(res) > g_collisional.subsys_err_tol * g_collisional.e_ref) {
+                    std::fabs(res) > g_collisional.subsys_err_tol * g_collisional.e_ref && subsys_err_first(sub.particle_ids)) {
                     std::printf("SUBSYS_ERR step %d secular_triple dE/E0 %.3e type %d n 3 dt %.3e a %.4e e %.5f m %.4g %.4g %.4g "
                                 "pids %d %d %d state", g_step_in_progress, res / g_collisional.e_ref, (int)sub.type,
                                 dt * TIME_UNIT_MYR, st.a_in, st.e_in, m1, m2, m3, sub.inner_binary_id, inner_j,
@@ -1448,7 +1468,7 @@ void advance_subsystems_in_range_impl(Particles& p, int start, int count,
         const double subsys_log = g_collisional.subsys_err_tol;
         auto log_subsys = [&](const Subsystem& sub, int nb, const char* kind, double d, int si) {
             if (subsys_log <= 0.0 || g_collisional.e_ref <= 0.0 || MPIComm::rank() != 0 ||
-                std::fabs(d) <= subsys_log * g_collisional.e_ref) return;
+                std::fabs(d) <= subsys_log * g_collisional.e_ref || !subsys_err_first(sub.particle_ids)) return;
             std::string msg;
             char buf[96];
             std::snprintf(buf, sizeof(buf), "SUBSYS_ERR step %d %s dE/E0 %.3e type %d n %d dt %.3e a %.4e e %.5f m",

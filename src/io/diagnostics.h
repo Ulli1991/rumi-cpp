@@ -62,6 +62,13 @@ struct EnergyAttribution {
 extern EnergyAttribution g_eattr;
 // Number of the top-level step in progress (main loop; SUBSYS_ERR lines)
 extern int g_step_in_progress;
+// SUBSYS_ERR lines: at most one per subsystem (its member pids) and top-level step; true for the one that prints.
+// The count of the others is printed when the step changes.
+bool subsys_err_first(const std::vector<int>& pids);
+// SUBSYS_ADVANCE_LIMIT: one advance of the subsystem (pids) in the current top-level step; past the limit the run
+// returns true (after printing the count) and the caller stops with the subsystem's state, instead of advancing it in
+// ever smaller steps
+bool subsys_advance_count(const std::vector<int>& pids, double dt, double a, double e, int type);
 
 // pe_known: the potential energy of exactly this state in this particle order (the last energy check's), reused
 DiagnosticState compute_diagnostics(const Particles& p, double G, double soft2, const double* pe_known = nullptr);

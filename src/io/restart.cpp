@@ -1,3 +1,4 @@
+#include "mpi_comm.h"
 #include "restart.h"
 #include "h5_util.h"
 #include "git_version.h"
@@ -504,7 +505,7 @@ std::string write_restart(const RestartOptions& opt, const Particles& p, const R
         h5::attr(f, "step", rs.step);
 #ifdef USE_MPI
         int nr = 1;
-        MPI_Comm_size(MPI_COMM_WORLD, &nr);
+        MPI_Comm_size(MPIComm::comm(), &nr);
         h5::attr(f, "n_ranks", nr);
 #else
         h5::attr(f, "n_ranks", 1);
@@ -591,7 +592,7 @@ std::string latest_restart(const std::string& dir) {
 bool any_rank(bool v) {
 #ifdef USE_MPI
     int in = v ? 1 : 0, out = 0;
-    MPI_Allreduce(&in, &out, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
+    MPI_Allreduce(&in, &out, 1, MPI_INT, MPI_MAX, MPIComm::comm());
     return out != 0;
 #else
     return v;
@@ -601,7 +602,7 @@ bool any_rank(bool v) {
 bool ranks_agree_on_run_state(const RunState& rs) {
 #ifdef USE_MPI
     int size = 1;
-    MPI_Comm_size(MPI_COMM_WORLD, &size);
+    MPI_Comm_size(MPIComm::comm(), &size);
     if (size == 1) return true;
     uint64_t h = 1469598103934665603ULL;
     auto add = [&](const void* d, size_t n) {
@@ -621,11 +622,11 @@ bool ranks_agree_on_run_state(const RunState& rs) {
     add(&nm, sizeof nm); add(&ne, sizeof ne); add(&nr, sizeof nr);
 #endif
     unsigned long long mine = h, lo = 0, hi = 0;
-    MPI_Allreduce(&mine, &lo, 1, MPI_UNSIGNED_LONG_LONG, MPI_MIN, MPI_COMM_WORLD);
-    MPI_Allreduce(&mine, &hi, 1, MPI_UNSIGNED_LONG_LONG, MPI_MAX, MPI_COMM_WORLD);
+    MPI_Allreduce(&mine, &lo, 1, MPI_UNSIGNED_LONG_LONG, MPI_MIN, MPIComm::comm());
+    MPI_Allreduce(&mine, &hi, 1, MPI_UNSIGNED_LONG_LONG, MPI_MAX, MPIComm::comm());
     if (lo == hi) return true;
     int rank = 0;
-    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_rank(MPIComm::comm(), &rank);
     if (rank == 0) std::printf("RESTART: ranks hold different run states at step %d; no restart file written\n", rs.step);
     return false;
 #else

@@ -61,6 +61,8 @@ void natal_kick(int pid, int seed, int kw_new, double fbfac, bool ecsn, double d
     dv[2] = scale * r2 * std::cos(two_pi * u[3]);
 }
 
+}  // namespace
+
 // Potential-energy change of a mass update m -> m' that touches the stars T (d_i = m'_i - m_i, zero elsewhere):
 //   U' - U = -G sum_{i<j} (m'_i m'_j - m_i m_j) / r_ij,   m'_i m'_j - m_i m_j = d_i mbar_j + mbar_i d_j  (exact),
 // mbar = (m + m') / 2, hence
@@ -106,13 +108,12 @@ double potential_change(const Particles& p, const std::vector<int>& touched, con
         for (int k = k0; k < k1; k++) term[k] = -G * d[k] * h_out(k - k0);
     }
 #ifdef USE_MPI
-    if (n_ranks > 1) MPI_Allreduce(MPI_IN_PLACE, term.data(), nT, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+    if (n_ranks > 1) MPI_Allreduce(MPI_IN_PLACE, term.data(), nT, MPI_DOUBLE, MPI_SUM, MPIComm::comm());
 #endif
     double dU = 0.0;
     for (double t : term) dU += t;
     return dU;
 }
-}  // namespace
 
 void advance_stellar_evolution(Particles& p, SSEContext& sse, double dt_myr,
                                 EnergyBookkeeping& books, double G) {
@@ -171,7 +172,7 @@ void advance_stellar_evolution(Particles& p, SSEContext& sse, double dt_myr,
         }
         g_profiler.mpi_start();
         MPI_Allgatherv(MPI_IN_PLACE, 0, MPI_DATATYPE_NULL, evo_res.data(), cnt.data(), dsp.data(), MPI_BYTE,
-                       MPI_COMM_WORLD);
+                       MPIComm::comm());
         g_profiler.mpi_stop();
     }
 #endif

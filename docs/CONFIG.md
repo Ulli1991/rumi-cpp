@@ -1,6 +1,6 @@
 # Config reference
 
-All 155 keys of the config file (`config.txt`, or `--config <file>`), generated from the parameter table in `src/core/params.cpp` by `scripts/gen_config_md.py`. Every key has one default, in that table; an unknown key in a config file is an error. Each run writes the effective value of every key, and whether it came from the file or the default, to `run_params.txt`.
+All 158 keys of the config file (`config.txt`, or `--config <file>`), generated from the parameter table in `src/core/params.cpp` by `scripts/gen_config_md.py`. Every key has one default, in that table; an unknown key in a config file is an error. Each run writes the effective value of every key, and whether it came from the file or the default, to `run_params.txt`.
 
 Levels:
 
@@ -18,6 +18,8 @@ Levels:
 | `TOTAL_TIME_MYR` | double | `0.23` | user |  | End time (Myr) |
 | `DT_MAX_MYR` | double | `1.6e-3` | user |  | Integration interval (Myr): the level-0 step; diagnostics, restarts and snapshots count these steps |
 | `PRESET` | string | `production` | user | production\|cluster | Accuracy defaults: production (the table defaults) or cluster (FLYBY_CM_EPS = 1e-7, ETA_RESTART = 0 where the file does not set them; N <~ 1e4 star clusters, docs/CONFIG.md notes) |
+| `G_OVERRIDE` | double | `0` | expert |  | Gravitational constant in pc^3 Msun^-1 (km/s)^2 (0: G_CODE); replays of runs coupled to a host code that sets G |
+| `DT_MAX_CODE` | double | `0` | expert |  | Integration interval in code time units, overriding DT_MAX_MYR when > 0 (bit-exact replays of coupled runs) |
 | `DT_MIN_MYR` | double | `1.0e-14` | expert |  | Smallest time step (Myr): the deepest HHS level |
 | `INTEGRATOR` | string | `hhs` | internal | hhs\|fsi | hhs: adaptive HHS-FSI (FROST Algorithm 3); fsi: every particle on the fastest occupied level (tests) |
 
@@ -141,6 +143,7 @@ Levels:
 | `E_REF` | double | `0.0` | test |  | \|E0\| of FLYBY_CM_EPS (Msun (km/s)^2) instead of the run's (0): a cut-out of a cluster as in the cluster |
 | `NGB_WIDE_FAC` | double | `0` | **experiment** |  | Bound pairs with a < NGB_WIDE_FAC x R_NGB are neighbours (wide binaries; 0: off) |
 | `MSTAR_THRESHOLD` | int | `8` | **experiment** |  | Subsystems of at least this many bodies for MSTAR (not wired: printed only, every subsystem uses LogH) |
+| `SUBSYS_ADVANCE_LIMIT` | int | `0` | expert |  | A subsystem advanced more often than this in one top-level step stops the run with its state (0: off; hosts that must not stall) |
 
 ## Output
 
