@@ -449,6 +449,8 @@ void SubsystemBatch::pack(const SubsystemManager& mgr, const Particles& p,
     tide_A.assign((size_t)n_sub * 9, 0.0);
     if (g_collisional.mstar && g_collisional.mstar_tide) {
         static Kokkos::View<char*> mask;
+        static bool hook = (Kokkos::push_finalize_hook([] { mask = Kokkos::View<char*>(); }), true);
+        (void)hook;
         if ((int)mask.extent(0) < p.N) mask = Kokkos::View<char*>("mstar_tide_mask", p.N);
         auto px = p.x, py = p.y, pz = p.z, pm = p.mass;
         for (int s = 0; s < n_sub; s++) {
