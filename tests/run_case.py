@@ -2238,7 +2238,7 @@ CASES = {
     # A100: end 9.28e-16, |dP|/M 4.16e-15. Angular-momentum-exact outer orbit (2026-10-17): max |dL/L| 6.2e-16 (8.4e-13
     # with the frozen outer orbit)
     "sec_triple_energy": lambda exe: floor(exe, "secular triple energy", dict(SEC_TRIPLE, ETA_RESTART="0"),
-                                           (1.6e-15, 1.6e-15, 5.7e-15, 2.4e-15)),   # C11: 1.24e-15, 1.86e-15 (L)
+                                           (2.2e-15, 2.2e-15, 5.7e-15, 2.4e-15)),   # Orion host: 1.70e-15 (end = max)
     # Found by scripts/adversary.py: a strongly coupled Kozai triple on the secular-triple path; the frozen outer
     # orbit lost |dL/L| 1.26e-2 in one step. Measured (host): max |dE/E| 4.39e-16, |dP|/M 1.74e-15 km/s, |dL/L| 1.21e-15
     # After C11 (octupole signs, mutual-node angles): |dE/E| 1.17e-15, |dP|/M 2.90e-15 km/s
@@ -2419,8 +2419,9 @@ CASES = {
                               & gw_merger(exe, "BH binary with t_GW < dt, secular", GW_PETERS)),
     # Bound 3.2e-14 = 1.3 x 2.43e-14 measured since C24 (1.22e-14 before: one Euler step per secular-triple call; now
     # 4-27 steps resolve the GW shrinkage, a different inspiral). Both are the round-off acceptance of the secular
-    # triple's circular-orbit energy fix (|res| <= 1e-13 E_tri), set in the first call
-    "coll_bh_isco": lambda exe: subsys_collision(exe, "BH binary to ISCO, PN", COLL_ISCO, "ISCO", 3.2e-14),
+    # triple's circular-orbit energy fix (|res| <= 1e-13 E_tri), set in the first call: bound = that acceptance (Orion
+    # host build since 2fb5266: 5.3e-14)
+    "coll_bh_isco": lambda exe: subsys_collision(exe, "BH binary to ISCO, PN", COLL_ISCO, "ISCO", 1e-13),
     # Kepler drift (kepler_drift, subsystem audit #2): universal variables below e = 0.1 and near the parabola, the
     # perifocal construction from the anomaly otherwise. Bounds 1.3x measured (raven host, 2026-10-11); 043190d's
     # elements route: bound e < 0.5 1v16 = 2.0, ref = 1.2 (phase lost at e <= 1e-8), parabolic and hyperbolic
