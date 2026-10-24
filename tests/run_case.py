@@ -2498,7 +2498,7 @@ CASES = {
     "kepler2_contact": lambda exe: subsys_collision(exe, "contact binary via the Kepler path", KEP_2B_CONTACT, "STELLAR",
                                                     4e-14, min_kepler2=1),
     "logh_big_group": lambda exe: big_group(exe, "big group", BIG_GROUP, (1.2e-5, 1e-12)),
-    # MSTAR (NBODY_MSTAR=1; ENABLE_MSTAR builds; docs/MSTAR.md, CASES.md C26). Before: every group above
+    # MSTAR (NBODY_MSTAR=1; ENABLE_MSTAR builds; docs/MSTAR.md, CASES.md C27). Before: every group above
     # LOGH_MAX_BODIES = 8 stayed with the FSI ("exceeds LOGH_MAX_BODIES", no MSTAR integration). Measured (host gcc 15,
     # Kokkos OpenMP 1 thread): see MSTAR_* bounds above
     "mstar_big_group": lambda exe: mstar_groups(exe, "16-body group, MSTAR", BIG_GROUP, MSTAR_BIG_DE, 9),
