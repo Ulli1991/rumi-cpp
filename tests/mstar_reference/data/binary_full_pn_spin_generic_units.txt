@@ -1,0 +1,27 @@
+# MSTAR reference case, produced by running the KETJU integrator (ketju_generator/, GPLv3).
+# Origin: ketju-integrator unit-tests/integration.cpp (binary_system_full_pn_spin_generic_units)
+case binary_full_pn_spin_generic_units
+kind integration
+# binary_full_pn_spin in G = 0.0634, c = 12354: lengths / (G/c^2), times / (G/c^3), velocities / c, spins / (G/c) must reproduce it.
+# Units: G and c as given; spin = spin angular momentum S (chi = c S / (G m^2)).
+# BH mergers between PN bodies at merger_distance_Rs * 2 G (m1 + m2) / c^2.
+G 0.063399999999999998
+c 12354
+pn all
+ketju_pn_flags 1855
+gbs_tol 1e-12
+t_end 3.36253231607416e-08
+merger_distance_Rs 12
+# body id pn mass x y z vx vy vz sx sy sz
+body 1 1 0.5 1.661628969311207e-08 0 0 0 1050.0900000000001 0 5.1319410717176617e-06 0 0
+body 2 1 1.5 -1.661628969311207e-08 0 0 0 -1050.0900000000001 0 0 5.1319410717176617e-06 0
+# KETJU result
+ketju_steps 994
+ketju_relative_energy_error 5.132898e-01
+final_time 3.3625323160741534e-08
+final_n 2
+final_n_pn 2
+tol_rel 1.988000e-07
+final_body 1 1 0.5 -2.8323530548848179e-08 -1.7712231956990544e-05 3.6870472628350981e-08 23.965293815271806 -1887.5621529231785 649.66932695164132 -4.2826927191146138e-06 -1.627669809160994e-07 2.8229185512722649e-06
+final_body 2 1 1.5 -8.2724968853291213e-10 -1.7721978166638951e-05 2.6273812201489346e-08 -6.3878189094076818 -70.016933887397215 -217.14621646222034 -1.5527146490317221e-06 -4.4663637835186592e-06 1.9943647950038428e-06
+# merger seq id_survivor id_absorbed m1 m2 m_remnant chi_remnant v_kick t_merger

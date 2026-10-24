@@ -1,0 +1,30 @@
+# MSTAR reference case, produced by running the KETJU integrator (ketju_generator/, GPLv3).
+# Origin: ketju-integrator unit-tests/integration.cpp (binary_system_no_pn)
+case binary_no_pn
+kind integration
+# Newtonian; ketju_relative_energy_error is the energy error of the run.
+# Units: G and c as given; spin = spin angular momentum S (chi = c S / (G m^2)).
+# BH mergers between PN bodies at merger_distance_Rs * 2 G (m1 + m2) / c^2.
+G 1
+c 1
+pn none
+ketju_pn_flags 0
+gbs_tol 1e-12
+t_end 1000000
+merger_distance_Rs 12
+# body id pn mass x y z vx vy vz sx sy sz
+body 1 1 1 40 0 0 0 0.085000000000000006 0 1 0 0
+body 2 1 1 -40 0 0 0 -0.085000000000000006 0 0 1 0
+# KETJU result
+ketju_steps 655
+ketju_relative_energy_error 4.508801e-12
+final_time 1000000.0000000015
+final_n 2
+final_n_pn 2
+tol_rel 1.310000e-08
+final_body 1 1 1 28.093181918941369 -31.029347244215433 0 0.054508072228355797 0.06082081069120545 0 1 0 0
+final_body 2 1 1 -28.093181918941369 31.029347244215433 0 -0.054508072228355797 -0.06082081069120545 0 0 1 0
+# the original test's expected final state (old AR-CHAIN integrator, gbs tol 1e-14): the reference for other codes
+expected_body 1 1 1 28.093181660139404 -31.029347533391817 0 0.054508072683221241 0.060820810188436096 0 1 0 0
+expected_body 2 1 1 -28.093181660139404 31.029347533391817 0 -0.054508072683221241 -0.060820810188436096 0 0 1 0
+# merger seq id_survivor id_absorbed m1 m2 m_remnant chi_remnant v_kick t_merger
