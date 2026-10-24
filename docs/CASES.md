@@ -1265,3 +1265,15 @@ Status: **closed** (fixed, test, ensemble checked), **option** (fix kept as an o
 - **Bounds re-measured (lab frame):** `c19_secular_peri` 1.6e-15, `sec_inner_s1025` dL 7e-13, `sec_inner_merge` dP
   1.6e-13 (round-off of changed trajectories; the PN books take the lab-frame states, integrator.cpp).
 
+## C28 Host N^2 packed driver broke the bit-identity of the tree time-step search (fixed)
+
+- **Bug (since 5d91e1f):** `run_host_packed` (sources packed once per call) evaluates the pair time step with different
+  floating-point contraction than the tree search of dt_tree.h: 1-3 ulp in dt for 12 of 2000 particles, so the exact-pruning
+  check (`TREE_DT CHECK FAILED`) aborted 10 tests (tree_dt_binaries*, _triples, _mergers, _tidal*, tree_default_on).
+- **Bisection (treedt-1/-2):** passes at 5d91e1f^, fails at 5d91e1f and every later commit; 90dddec (dipole), c536fc0,
+  9655a15 are innocent. Restoring Kokkos::fmin/fmax (variant A) or a non-inlined pair_dt (C) does not help; the old tiled
+  driver (B) passes all tree_dt tests.
+- **Fix:** host backends use `run_tiled<TILE_SIZE, 1, 1>` again (the n2_fmin/n2_fmax inline compares stay). The packed
+  driver's speed gain is given up until its pair expression is made contraction-proof in both paths.
+- **Open, separate:** weak_split_bh_binary (|dE/E| 1.93e-11 vs bound 1.23e-11) already fails at 5d91e1f^ and a381a27, with
+  or without this fix; not a tree issue.

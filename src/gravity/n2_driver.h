@@ -368,6 +368,8 @@ void run_n2(const char* name, int i0, int ni, int j0, int nj, const K& k) {
     if (n2_detail::set_size(ni) >= big_tile_min) { n2_detail::run_tiled_p<256>(name, i0, ni, j0, nj, k); return; }
     n2_detail::run_tiled_p<TILE_SIZE>(name, i0, ni, j0, nj, k);
 #else
-    n2_detail::run_host_packed(name, i0, ni, j0, nj, k);
+    // run_host_packed (5d91e1f) changes the FMA contraction of the pair expressions against the tree search of dt_tree.h
+    // (1-3 ulp in dt, ctest tree_dt_*: the tree search must be bit-identical), so the host path stays run_tiled<1, 1, 1>
+    n2_detail::run_tiled<TILE_SIZE, 1, 1>(name, i0, ni, j0, nj, k);
 #endif
 }
