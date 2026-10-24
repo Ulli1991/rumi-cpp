@@ -1,5 +1,5 @@
 // RUMI++ MSTAR module (GPLv3, see src/mstar/LICENSE)
-// Copyright (C) 2026 RUMI++ authors.
+// Copyright (C) 2026 Ulrich Steinwandel.
 // Licensed under the GPLv3 license (or, at your option, any later version).
 //
 // Single-task stand-in for the subset of MPI that the KETJU integrator library uses, so that the vendored library

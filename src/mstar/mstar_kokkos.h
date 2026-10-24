@@ -2,13 +2,13 @@
 // Copyright (C) 2020-2022 Antti Rantala, Matias Mannerkoski, and contributors.
 // Licensed under the GPLv3 license.
 // See LICENSE.md or <https://www.gnu.org/licenses/> for details.
-// Modified 2026 by the RUMI++ authors: Kokkos (device-resident) port of the KETJU integrator, derived from
-// src/mstar/ketju/src/{integration.c, mst.c, pn.c}; see src/mstar/README.md for the list of changes.
+// Modified by Ulrich Steinwandel, 2026: rewritten in C++ with Kokkos support (GPU).
+// Copyright (C) 2026 Ulrich Steinwandel. Licensed under the GPLv3 license.
 //
 // MSTAR on Kokkos. The algorithm is KETJU's (Rantala et al. 2020, MNRAS 492, 4131; Mannerkoski et al. 2023,
 // MNRAS 524, 4062): logarithmic-Hamiltonian leapfrog in minimum-spanning-tree relative coordinates, GBS
 // extrapolation with adaptive order (Hairer, Norsett & Wanner II.9), PN 1-3.5 + spin terms (pn.c), BH mergers
-// (bh_mergers.c, called on the host through the vendored C library). Differences from the C library:
+// (bh_mergers.c, C++ port in mstar_mergers.cpp, on the host). Differences from the C library:
 //  - all GBS rows (substep divisions) of a step run concurrently on the device, in lockstep: one launch for the
 //    forces and one for kick+drift per substep stage, 2 k_max stages per step; small groups run every row inside
 //    one team (one launch per step);
@@ -28,7 +28,9 @@
 namespace rumi_mstar {
 
 using ExecSpace = Kokkos::DefaultExecutionSpace;
+using HostExecSpace = Kokkos::DefaultHostExecutionSpace;
 using MemSpace = ExecSpace::memory_space;
+template <class Exec> struct Engine;   // the integrator on one execution space (mstar_kokkos.cpp)
 template <class T> using DView = Kokkos::View<T, Kokkos::LayoutRight, MemSpace>;
 
 // PN flags: KETJU's enum ketju_PN_flags values
@@ -54,6 +56,7 @@ struct Options {
     bool enable_bh_merger_kicks = true;
     double G = 1.0, c = 1.0;
     int team_rows_max_n = 96;          // N <= this: every GBS row inside one team (one launch per step)
+    bool host_engine = false;          // run on the host execution space (small groups in GPU builds)
 };
 
 struct Perf {
@@ -107,10 +110,10 @@ class MstarKokkos {
     // the last accepted step).
     bool run(double time_interval);
 
-    struct Impl;   // public: CUDA extended lambdas cannot live in a private nested class
-
   private:
-    Impl* impl_;
+    template <class Exec> bool run_on(Engine<Exec>& im, double time_interval);
+    Engine<ExecSpace>* dev_ = nullptr;       // device engine (the default execution space)
+    Engine<HostExecSpace>* host_ = nullptr;  // host engine (small groups; the same object as dev_ in host builds)
 };
 
 // Launch + fence cost of an empty kernel and of a minimal reduction read back to the host (microseconds),

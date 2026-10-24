@@ -1,5 +1,5 @@
 // RUMI++ MSTAR module (GPLv3, see src/mstar/LICENSE)
-// Copyright (C) 2026 RUMI++ authors.
+// Copyright (C) 2026 Ulrich Steinwandel.
 // Licensed under the GPLv3 license (or, at your option, any later version).
 //
 // Scaling benchmark of the Kokkos MSTAR port against the KETJU C library (one host core): Plummer spheres of

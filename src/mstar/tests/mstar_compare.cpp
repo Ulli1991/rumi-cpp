@@ -1,5 +1,5 @@
 // RUMI++ MSTAR module (GPLv3, see src/mstar/LICENSE)
-// Copyright (C) 2026 RUMI++ authors.
+// Copyright (C) 2026 Ulrich Steinwandel.
 // Licensed under the GPLv3 license (or, at your option, any later version).
 //
 // The Kokkos port (mstar_kokkos.cpp) against the vendored KETJU C library (src/mstar/ketju), same options, same
@@ -366,6 +366,46 @@ int main(int argc, char** argv) {
             check("bh_merger", "n_K - 1", std::fabs(b.n - 1.0), 0);
             check("bh_merger", "|m_C - m_K|", std::fabs(a.m[0] - b.m[0]), 1e-12);
             check("bh_merger", "|x_K|", std::fabs(b.x[0]) + std::fabs(b.x[1]), 1e-8);
+        }
+        if (want(argc, argv, "bh_merger_orbit")) {
+            // inspiral and merger of a spinning unequal-mass pair (masses 1, 0.6, chi 0.5 and 0.7 misaligned; KETJU
+            // unit test merger_from_orbit set-up): remnant from the C++ port of bh_mergers.c against the reference
+            struct ketju_system R;
+            ketju_create_system(&R, 2, 0, MPI_COMM_WORLD);
+            R.constants->c = 1; R.constants->G = 1;
+            R.options->PN_flags = KETJU_PN_ALL;
+            R.options->gbs_relative_tolerance = 1e-12;
+            R.options->output_time_relative_tolerance = 1e-12;
+            const double m[2] = {1.0, 0.6}, x[6] = {40, 0, 0, -40, 0, 0}, v[6] = {0, 0.05, 0, 0, 0, 0};
+            const double S[6] = {0.5 * 0.6, 0, 0.5 * 0.8, 0, 0.7 * 0.36 * 0.6, -0.7 * 0.36 * 0.8};
+            for (int i = 0; i < 2; i++) {
+                R.physical_state->mass[i] = m[i];
+                for (int k = 0; k < 3; k++) {
+                    R.physical_state->pos[i][k] = x[3 * i + k];
+                    R.physical_state->vel[i][k] = v[3 * i + k];
+                    R.physical_state->spin[i][k] = S[3 * i + k];
+                }
+            }
+            ketju_run_integrator(&R, 1e6);
+            rumi_mstar::MstarKokkos M(2, 0);
+            M.opt.c = 1; M.opt.PN_flags = 0x7ff; M.opt.gbs_relative_tolerance = 1e-12;
+            M.opt.output_time_relative_tolerance = 1e-12;
+            M.mass = {m[0], m[1]};
+            M.pos.assign(x, x + 6); M.vel.assign(v, v + 6); M.spin.assign(S, S + 6);
+            M.run(1e6);
+            const bool both = R.num_mergers == 1 && M.mergers.size() == 1;
+            check("bh_merger_orbit", "one merger each", both ? 0.0 : 1.0, 0.0);
+            if (both) {
+                const auto& a = R.merger_infos[0];
+                const auto& b = M.mergers[0];
+                std::printf("bh_merger_orbit: t %.10g / %.10g, m_rem %.12f / %.12f, chi_rem %.10f / %.10f, v_kick %.6e / %.6e\n",
+                            a.t_merger, b.t_merger, a.m_remnant, b.m_remnant, a.chi_remnant, b.chi_remnant, a.v_kick, b.v_kick);
+                check("bh_merger_orbit", "|dt_merger| / t", std::fabs(a.t_merger - b.t_merger) / a.t_merger, 1e-12);   // measured: identical (CPU)
+                check("bh_merger_orbit", "|dm_rem| / m_rem", std::fabs(a.m_remnant - b.m_remnant) / a.m_remnant, 1e-13);
+                check("bh_merger_orbit", "|dchi_rem|", std::fabs(a.chi_remnant - b.chi_remnant), 1e-12);
+                check("bh_merger_orbit", "|dv_kick| / v_kick", std::fabs(a.v_kick - b.v_kick) / a.v_kick, 1e-9);
+            }
+            ketju_free_system(&R);
         }
         std::printf("%s (%d failed checks)\n", g_fail ? "FAILED" : "PASSED", g_fail);
     }

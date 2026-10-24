@@ -2,9 +2,11 @@
 // Copyright (C) 2020-2022 Antti Rantala, Matias Mannerkoski, and contributors.
 // Licensed under the GPLv3 license.
 // See LICENSE.md or <https://www.gnu.org/licenses/> for details.
-// Modified 2026 by the RUMI++ authors: Kokkos (device-resident) port of src/mstar/ketju/src/integration.c
-// (leapfrog, GBS extrapolation, step control), mst.c (tree proximity, Prim tree) and pn.c (PN accelerations);
-// see mstar_kokkos.h for the differences from the C library and src/mstar/README.md.
+// Modified by Ulrich Steinwandel, 2026: rewritten in C++ with Kokkos support (GPU).
+// Copyright (C) 2026 Ulrich Steinwandel. Licensed under the GPLv3 license.
+//
+// C++/Kokkos rewrite of reference/ketju/src/integration.c (leapfrog, GBS extrapolation, step control), mst.c (tree
+// proximity, Prim tree) and pn.c (PN accelerations); see mstar_kokkos.h for the differences and src/mstar/README.md.
 
 #include "mstar_kokkos.h"
 
@@ -18,9 +20,9 @@
 #include <limits>
 #include <stdexcept>
 
-#include "ketju_integrator/internal.h"
-#include "ketju_integrator/ketju_integrator.h"
 #include "mstar_dispatch.h"
+#include "mstar_mergers.h"
+#include <type_traits>
 
 namespace rumi_mstar {
 
@@ -67,28 +69,32 @@ template <> struct reduction_identity<rumi_mstar::Acc4> {
 
 namespace rumi_mstar {
 
-using Team = Kokkos::TeamPolicy<ExecSpace>::member_type;
 enum { S_TIME = 0, S_B = 1, S_T = 2, S_U = 3 };
 enum { R_POS = 0, R_VEL = 3, R_AUX = 6 };
 
 // All device data of one group. Slots: GBS rows 0..kmax-1, then two state slots (current = "base" = KETJU's state
 // backup, and the candidate built from the extrapolated row), whose roles swap on an accepted step.
-struct Dev {
+template <class Exec>
+struct DevT {
+    using Mem = typename Exec::memory_space;
+    template <class T> using V = Kokkos::View<T, Kokkos::LayoutRight, Mem>;
+    using Team = typename Kokkos::TeamPolicy<Exec>::member_type;
+
     int N = 0, E = 0, Npn = 0, Nd = 2, root = 0, nvars = 0, kmax = 10;
     unsigned flags = 0;
     double G = 1, c = 1;
-    DView<double*> mass;
-    DView<int*> parent, etp, level, path_off, path_edge, ehi, elo;
-    DView<double**> scal, root_s;                       // (slots, 4), (slots, 9)
-    DView<double***> epos, evel, eaux;                  // (slots, E, 3)
-    DView<double***> pos, vel, acc;                     // (slots, N, 3)
-    DView<double**> u;                                  // (slots, N)
-    DView<double***> spin, aspin, accvd, sder, pnv;     // (slots, max(Npn, 1), 3)
-    DView<double*> crad;                                // collision radius per body
-    DView<char*> cbh;                                   // black hole flag per body
+    V<double*> mass;
+    V<int*> parent, etp, level, path_off, path_edge, ehi, elo;
+    V<double**> scal, root_s;                       // (slots, 4), (slots, 9)
+    V<double***> epos, evel, eaux;                  // (slots, E, 3)
+    V<double***> pos, vel, acc;                     // (slots, N, 3)
+    V<double**> u;                                  // (slots, N)
+    V<double***> spin, aspin, accvd, sder, pnv;     // (slots, max(Npn, 1), 3)
+    V<double*> crad;                                // collision radius per body
+    V<char*> cbh;                                   // black hole flag per body
     double cc = 0;                                      // c of the collision rule
     bool cmax1 = false;
-    DView<double**> data;                               // (kmax + 1, nvars + 1); row kmax: extrapolated result;
+    V<double**> data;                               // (kmax + 1, nvars + 1); row kmax: extrapolated result;
                                                         // column nvars: B (PN work ledger, outside the error control)
 
     // ---- tree proximity (mst.c: ketju_check_relative_proximity*) ----
@@ -475,7 +481,8 @@ struct Dev {
 };
 
 // pn.c compute_PN_acc_single (Thorne & Hartle 1985 1PN + spin; Blanchet 2014 2-3.5PN, binary terms)
-KOKKOS_FUNCTION void Dev::pn_single(int s, int i, bool aux) const {
+template <class Exec>
+KOKKOS_FUNCTION void DevT<Exec>::pn_single(int s, int i, bool aux) const {
     double a_out[3] = {0, 0, 0}, sd_out[3] = {0, 0, 0};
     const int Np = Npn;
     const double G2 = G * G, G3 = G2 * G, G4 = G2 * G2;
@@ -711,7 +718,13 @@ KOKKOS_FUNCTION void Dev::pn_single(int s, int i, bool aux) const {
 
 // ---------------------------------------------------------------------------------------------------------------
 
-struct MstarKokkos::Impl {
+template <class Exec>
+struct Engine {
+    using Dev = DevT<Exec>;
+    using Mem = typename Exec::memory_space;
+    using Team = typename Dev::Team;
+    template <class T> using V = Kokkos::View<T, Kokkos::LayoutRight, Mem>;
+
     MstarKokkos& o;
     Dev d;
     int slots = 0, bslot = 0, cslot = 0, cap_N = -1, cap_pn = -1, cap_k = -1;
@@ -719,15 +732,15 @@ struct MstarKokkos::Impl {
     // per-step result read back to the host: 0 T, 1 U, 2 time, 3 e0, 4 e1, 5 bad, 6 extrapolated B, 7 collision
     // pair key i N + j (-1: none), 8 r_sep, 9 r_coll, 10 type; from RES_PN the PN positions
     static constexpr int RES_PN = 12;
-    DView<double*> res;
-    Kokkos::View<long, MemSpace> ckey;
+    V<double*> res;
+    Kokkos::View<long, Mem> ckey;
     bool coll_on = false;
     Kokkos::View<double*, Kokkos::HostSpace> h_res;
-    DView<double*> tmin;                // initial time step reduction
+    V<double*> tmin;                // initial time step reduction
     // host tree
     std::vector<int> h_parent, h_etp, h_level, h_off, h_pe, h_ehi, h_elo;
 
-    explicit Impl(MstarKokkos& owner) : o(owner) {}
+    explicit Engine(MstarKokkos& owner) : o(owner) {}
 
     void allocate() {
         const int N = o.n, Npn = o.n_pn, K = o.opt.gbs_kmax;
@@ -740,35 +753,35 @@ struct MstarKokkos::Impl {
         cap_N = N; cap_pn = Npn; cap_k = K;
         slots = K + 2;
         const int E = std::max(N - 1, 1), P = std::max(Npn, 1);
-        d.mass = DView<double*>("mstar_mass", N);
-        d.crad = DView<double*>("mstar_crad", N);
-        d.cbh = DView<char*>("mstar_cbh", N);
-        d.parent = DView<int*>("mstar_parent", N);
-        d.etp = DView<int*>("mstar_etp", N);
-        d.level = DView<int*>("mstar_level", N);
-        d.path_off = DView<int*>("mstar_poff", N + 1);
-        d.ehi = DView<int*>("mstar_ehi", E);
-        d.elo = DView<int*>("mstar_elo", E);
-        d.scal = DView<double**>("mstar_scal", slots, 4);
-        d.root_s = DView<double**>("mstar_root", slots, 9);
-        d.epos = DView<double***>("mstar_epos", slots, E, 3);
-        d.evel = DView<double***>("mstar_evel", slots, E, 3);
-        d.eaux = DView<double***>("mstar_eaux", slots, E, 3);
-        d.pos = DView<double***>("mstar_pos", slots, N, 3);
-        d.vel = DView<double***>("mstar_vel", slots, N, 3);
-        d.acc = DView<double***>("mstar_acc", slots, N, 3);
-        d.u = DView<double**>("mstar_u", slots, N);
-        d.spin = DView<double***>("mstar_spin", slots, P, 3);
-        d.aspin = DView<double***>("mstar_aspin", slots, P, 3);
-        d.accvd = DView<double***>("mstar_accvd", slots, P, 3);
-        d.sder = DView<double***>("mstar_sder", slots, P, 3);
-        d.pnv = DView<double***>("mstar_pnv", slots, P, 3);
-        d.data = DView<double**>("mstar_data", K + 1, d.nvars + 1);
-        res = DView<double*>("mstar_res", RES_PN + 3 * P);
+        d.mass = V<double*>("mstar_mass", N);
+        d.crad = V<double*>("mstar_crad", N);
+        d.cbh = V<char*>("mstar_cbh", N);
+        d.parent = V<int*>("mstar_parent", N);
+        d.etp = V<int*>("mstar_etp", N);
+        d.level = V<int*>("mstar_level", N);
+        d.path_off = V<int*>("mstar_poff", N + 1);
+        d.ehi = V<int*>("mstar_ehi", E);
+        d.elo = V<int*>("mstar_elo", E);
+        d.scal = V<double**>("mstar_scal", slots, 4);
+        d.root_s = V<double**>("mstar_root", slots, 9);
+        d.epos = V<double***>("mstar_epos", slots, E, 3);
+        d.evel = V<double***>("mstar_evel", slots, E, 3);
+        d.eaux = V<double***>("mstar_eaux", slots, E, 3);
+        d.pos = V<double***>("mstar_pos", slots, N, 3);
+        d.vel = V<double***>("mstar_vel", slots, N, 3);
+        d.acc = V<double***>("mstar_acc", slots, N, 3);
+        d.u = V<double**>("mstar_u", slots, N);
+        d.spin = V<double***>("mstar_spin", slots, P, 3);
+        d.aspin = V<double***>("mstar_aspin", slots, P, 3);
+        d.accvd = V<double***>("mstar_accvd", slots, P, 3);
+        d.sder = V<double***>("mstar_sder", slots, P, 3);
+        d.pnv = V<double***>("mstar_pnv", slots, P, 3);
+        d.data = V<double**>("mstar_data", K + 1, d.nvars + 1);
+        res = V<double*>("mstar_res", RES_PN + 3 * P);
         h_res = Kokkos::View<double*, Kokkos::HostSpace>("mstar_hres", RES_PN + 3 * P);
-        ckey = Kokkos::View<long, MemSpace>("mstar_ckey");
-        tmin = DView<double*>("mstar_tmin", 1);
-        errview = Kokkos::View<ErrVal, MemSpace>("mstar_err");
+        ckey = Kokkos::View<long, Mem>("mstar_ckey");
+        tmin = V<double*>("mstar_tmin", 1);
+        errview = Kokkos::View<ErrVal, Mem>("mstar_err");
         bslot = K; cslot = K + 1;
     }
 
@@ -837,7 +850,7 @@ struct MstarKokkos::Impl {
         }
         d.root = root;
         // upload
-        auto up_i = [](DView<int*>& dv, const std::vector<int>& hv, int n) {
+        auto up_i = [](V<int*>& dv, const std::vector<int>& hv, int n) {
             auto hm = Kokkos::create_mirror_view(dv);
             for (int q = 0; q < n; q++) hm(q) = hv[q];
             Kokkos::deep_copy(dv, hm);
@@ -846,7 +859,7 @@ struct MstarKokkos::Impl {
         up_i(d.etp, h_etp, N);
         up_i(d.level, h_level, N);
         up_i(d.path_off, h_off, N + 1);
-        if ((int)d.path_edge.extent(0) < (int)h_pe.size()) d.path_edge = DView<int*>("mstar_pe", h_pe.size() + N);
+        if ((int)d.path_edge.extent(0) < (int)h_pe.size()) d.path_edge = V<int*>("mstar_pe", h_pe.size() + N);
         up_i(d.path_edge, h_pe, (int)h_pe.size());
         up_i(d.ehi, h_ehi, N - 1);
         up_i(d.elo, h_elo, N - 1);
@@ -926,7 +939,7 @@ struct MstarKokkos::Impl {
     void launch_force(int slot0, int nslots) {
         const Dev dd = d;
         const int N = d.N;
-        Kokkos::parallel_for("mstar_force", Kokkos::TeamPolicy<ExecSpace>(nslots * N, Kokkos::AUTO),
+        Kokkos::parallel_for("mstar_force", Kokkos::TeamPolicy<Exec>(nslots * N, Kokkos::AUTO),
                              KOKKOS_LAMBDA(const Team& t) {
             const int s = slot0 + t.league_rank() / N, i = t.league_rank() % N;
             Acc4 a;
@@ -952,7 +965,7 @@ struct MstarKokkos::Impl {
     // T, U (from u), B = U - T of slot s, and the result vector
     void launch_energy(int s) {
         const Dev dd = d;
-        Kokkos::parallel_for("mstar_energy", Kokkos::TeamPolicy<ExecSpace>(1, Kokkos::AUTO),
+        Kokkos::parallel_for("mstar_energy", Kokkos::TeamPolicy<Exec>(1, Kokkos::AUTO),
                              KOKKOS_LAMBDA(const Team& t) {
             const double T = dd.team_T(t, s);
             dd.team_U(t, s);
@@ -973,13 +986,13 @@ struct MstarKokkos::Impl {
     void launch_collision(int s, int s_prev) {
         const Dev dd = d;
         const int N = d.N;
-        const Kokkos::View<long, MemSpace> key = ckey;
+        const Kokkos::View<long, Mem> key = ckey;
         if (!coll_on) {
-            Kokkos::parallel_for("mstar_coll0", Kokkos::RangePolicy<ExecSpace>(0, 1), KOKKOS_LAMBDA(int) { key() = -1; });
+            Kokkos::parallel_for("mstar_coll0", Kokkos::RangePolicy<Exec>(0, 1), KOKKOS_LAMBDA(int) { key() = -1; });
             o.perf.launches++;
             return;
         }
-        Kokkos::parallel_reduce("mstar_coll", Kokkos::RangePolicy<ExecSpace>(0, N), KOKKOS_LAMBDA(int i, long& mn) {
+        Kokkos::parallel_reduce("mstar_coll", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(int i, long& mn) {
             const double dts = s_prev >= 0 ? dd.scal(s, S_TIME) - dd.scal(s_prev, S_TIME) : 0.0;
             for (int j = i + 1; j < N; j++) {
                 double rsep, rc;
@@ -990,16 +1003,16 @@ struct MstarKokkos::Impl {
                     break;
                 }
             }
-        }, Kokkos::Min<long, MemSpace>(key));
+        }, Kokkos::Min<long, Mem>(key));
         o.perf.launches++;
     }
     // collision result of slot s into res(7..10)
     void launch_collision_res(int s, int s_prev) {
         const Dev dd = d;
         const int N = d.N;
-        const Kokkos::View<long, MemSpace> key = ckey;
-        const DView<double*> r = res;
-        Kokkos::parallel_for("mstar_cres", Kokkos::RangePolicy<ExecSpace>(0, 1), KOKKOS_LAMBDA(int) {
+        const Kokkos::View<long, Mem> key = ckey;
+        const V<double*> r = res;
+        Kokkos::parallel_for("mstar_cres", Kokkos::RangePolicy<Exec>(0, 1), KOKKOS_LAMBDA(int) {
             const long kq = key();
             r(7) = -1;
             if (kq < 0 || kq == Kokkos::reduction_identity<long>::min()) return;
@@ -1018,7 +1031,7 @@ struct MstarKokkos::Impl {
         const Dev dd = d;
         double t2min = DBL_MAX;
         const int N = d.N;
-        Kokkos::parallel_reduce("mstar_dt0", Kokkos::RangePolicy<ExecSpace>(0, N), KOKKOS_LAMBDA(int i, double& mn) {
+        Kokkos::parallel_reduce("mstar_dt0", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(int i, double& mn) {
             const double mi = dd.mass(i);
             const int Li = dd.level(i);
             for (int j = i + 1; j < N; j++) {
@@ -1061,7 +1074,7 @@ struct MstarKokkos::Impl {
         const int k = gbs_k, N = d.N, bs = bslot;
         const Dev dd = d;
         if (N <= o.opt.team_rows_max_n) {
-            Kokkos::parallel_for("mstar_rows_team", Kokkos::TeamPolicy<ExecSpace>(k, Kokkos::AUTO),
+            Kokkos::parallel_for("mstar_rows_team", Kokkos::TeamPolicy<Exec>(k, Kokkos::AUTO),
                                  KOKKOS_LAMBDA(const Team& t) {
                 const int ri = t.league_rank(), s = ri, nsub = 2 * (ri + 1);
                 const double h = H / nsub;
@@ -1077,7 +1090,7 @@ struct MstarKokkos::Impl {
             });
             o.perf.launches++;
         } else {
-            Kokkos::parallel_for("mstar_rows_start", Kokkos::TeamPolicy<ExecSpace>(k, Kokkos::AUTO),
+            Kokkos::parallel_for("mstar_rows_start", Kokkos::TeamPolicy<Exec>(k, Kokkos::AUTO),
                                  KOKKOS_LAMBDA(const Team& t) {
                 const int ri = t.league_rank(), s = ri;
                 const double h = H / (2 * (ri + 1));
@@ -1089,7 +1102,7 @@ struct MstarKokkos::Impl {
             for (int st = 0; st < 2 * k; st++) {
                 const int ri0 = st / 2;   // rows with 2 (ri + 1) > st
                 launch_force(ri0, k - ri0);
-                Kokkos::parallel_for("mstar_rows_kd", Kokkos::TeamPolicy<ExecSpace>(k - ri0, Kokkos::AUTO),
+                Kokkos::parallel_for("mstar_rows_kd", Kokkos::TeamPolicy<Exec>(k - ri0, Kokkos::AUTO),
                                      KOKKOS_LAMBDA(const Team& t) {
                     const int ri = ri0 + t.league_rank(), s = ri, nsub = 2 * (ri + 1);
                     const double h = H / nsub;
@@ -1103,11 +1116,11 @@ struct MstarKokkos::Impl {
             }
         }
         // extrapolation (gbs_extrapolate / extrapolate_single_variable)
-        const Kokkos::View<ErrVal, MemSpace> errv = errview;
+        const Kokkos::View<ErrVal, Mem> errv = errview;
         const double atol = o.opt.gbs_absolute_tolerance, otol = o.opt.output_time_absolute_tolerance;
         const int KR = d.kmax;
         const int nv = d.nvars;
-        Kokkos::parallel_reduce("mstar_extrap", Kokkos::RangePolicy<ExecSpace>(0, d.nvars + 1),
+        Kokkos::parallel_reduce("mstar_extrap", Kokkos::RangePolicy<Exec>(0, d.nvars + 1),
                                 KOKKOS_LAMBDA(int v, ErrVal& e) {
             double tt[MAX_K];
             for (int j = 0; j < k; j++) tt[j] = dd.data(j, v);
@@ -1122,27 +1135,27 @@ struct MstarKokkos::Impl {
             }
             const double result = tt[k - 1];
             if (v == nv) { dd.data(KR, v) = result; return; }   // B: extrapolated, not error controlled
-            if (!isfinite(result)) { e.bad = 1; return; }
+            if (!Kokkos::isfinite(result)) { e.bad = 1; return; }
             dd.data(KR, v) = result;
             const double er = fabs(tt[k - 1] - tt[k - 2]) / yscal;
             const double el = fabs(tt[k - 2] - tt[k - 3]) / yscal;
             if (er > e.e0) e.e0 = er;
             if (el > e.e1) e.e1 = el;
-        }, Kokkos::Sum<ErrVal, MemSpace>(errv));
+        }, Kokkos::Sum<ErrVal, Mem>(errv));
         o.perf.launches++;
         // candidate state from the extrapolated row (computed whether or not the step converged; garbage when the
         // extrapolation was not finite, then discarded)
         const int cs = cslot;
         {
-            Kokkos::parallel_for("mstar_unpack", Kokkos::TeamPolicy<ExecSpace>(1, Kokkos::AUTO),
+            Kokkos::parallel_for("mstar_unpack", Kokkos::TeamPolicy<Exec>(1, Kokkos::AUTO),
                                  KOKKOS_LAMBDA(const Team& t) { dd.team_unpack(t, cs, KR); });
             o.perf.launches++;
             total_energy(cs);
             launch_collision(cs, bs);
             launch_collision_res(cs, bs);
-            const DView<double*> r = res;
+            const V<double*> r = res;
             const int Npn = d.Npn;
-            Kokkos::parallel_for("mstar_res", Kokkos::RangePolicy<ExecSpace>(0, 1), KOKKOS_LAMBDA(int) {
+            Kokkos::parallel_for("mstar_res", Kokkos::RangePolicy<Exec>(0, 1), KOKKOS_LAMBDA(int) {
                 r(0) = dd.scal(cs, S_T);
                 r(1) = dd.scal(cs, S_U);
                 r(2) = dd.scal(cs, S_TIME);
@@ -1163,12 +1176,12 @@ struct MstarKokkos::Impl {
         last_err.bad = h_res(5) != 0;
     }
     ErrVal last_err;
-    Kokkos::View<ErrVal, MemSpace> errview;
+    Kokkos::View<ErrVal, Mem> errview;
 };
 
 // ---------------------------------------------------------------------------------------------------------------
 
-MstarKokkos::MstarKokkos(int num_pn, int num_other) : impl_(new Impl(*this)) { reset(num_pn, num_other); }
+MstarKokkos::MstarKokkos(int num_pn, int num_other) { reset(num_pn, num_other); }
 void MstarKokkos::reset(int num_pn, int num_other) {
     perf = Perf();
     mergers.clear();
@@ -1182,7 +1195,10 @@ void MstarKokkos::reset(int num_pn, int num_other) {
     extra_index.resize(n);
     for (int i = 0; i < n; i++) extra_index[i] = i;
 }
-MstarKokkos::~MstarKokkos() { delete impl_; }
+MstarKokkos::~MstarKokkos() {
+    delete dev_;
+    if ((void*)host_ != (void*)dev_) delete host_;
+}
 
 static int num_gbs_substeps(int row) { return 2 * row; }
 static int gbs_total_cost(int k) {
@@ -1193,68 +1209,17 @@ static int gbs_total_cost(int k) {
 static double gbs_new_stepsize_fac(double scaled_err, int k) { return 0.94 * std::pow(0.65 / scaled_err, 1.0 / (2 * k - 1)); }
 
 // BH mergers through the vendored C library (bh_mergers.c) on a host mirror; returns the number merged
-// ketju_do_bh_mergers' condition on the PN positions in o.pos
-static bool bh_merger_due(const MstarKokkos& o) {
-    if (o.n_pn < 2) return false;
-    const double fac = o.opt.bh_merger_distance_in_Rs * 2 * o.opt.G / (o.opt.c * o.opt.c);
-    for (int i = 0; i < o.n_pn; ++i)
-        for (int j = i + 1; j < o.n_pn; ++j) {
-            double r2 = 0;
-            for (int k = 0; k < 3; ++k) { const double dr = o.pos[3 * i + k] - o.pos[3 * j + k]; r2 += dr * dr; }
-            if (std::sqrt(r2) < fac * (o.mass[i] + o.mass[j])) return true;
-        }
-    return false;
-}
-// The full host state (o.pos, o.vel, o.spin, o.time = absolute time) must be current.
-static int host_bh_mergers(MstarKokkos& o) {
-    struct ketju_system R;
-    ketju_create_system(&R, o.n_pn, o.n - o.n_pn, MPI_COMM_SELF);
-    R.constants->G = o.opt.G;
-    R.constants->c = o.opt.c;
-    R.options->PN_flags = o.opt.PN_flags;
-    R.options->max_tree_distance = o.opt.max_tree_distance;
-    R.options->bh_merger_distance_in_Rs = o.opt.bh_merger_distance_in_Rs;
-    R.options->enable_bh_merger_kicks = o.opt.enable_bh_merger_kicks;
-    R.physical_state->time = o.time;
-    for (int i = 0; i < o.n; i++) {
-        R.physical_state->mass[i] = o.mass[i];
-        for (int k = 0; k < 3; k++) {
-            R.physical_state->pos[i][k] = o.pos[3 * i + k];
-            R.physical_state->vel[i][k] = o.vel[3 * i + k];
-        }
+bool MstarKokkos::run(double time_interval) {
+    if (opt.host_engine || std::is_same<ExecSpace, HostExecSpace>::value) {
+        if (!host_) host_ = new Engine<HostExecSpace>(*this);
+        return run_on(*host_, time_interval);
     }
-    for (int i = 0; i < o.n_pn; i++)
-        for (int k = 0; k < 3; k++) R.physical_state->spin[i][k] = o.spin[3 * i + k];
-    std::vector<int> extra(o.extra_index);
-    R.particle_extra_data = extra.data();
-    R.particle_extra_data_elem_size = sizeof(int);
-    ketju_construct_MST(&R);
-    const int merged = ketju_do_bh_mergers(&R);
-    for (int m = 0; m < R.num_mergers; m++) {
-        const auto& mi = R.merger_infos[m];
-        o.mergers.push_back({mi.t_merger, mi.m1, mi.m2, mi.m_remnant, mi.chi1, mi.chi2, mi.chi_remnant, mi.v_kick,
-                             extra[mi.extra_index1], extra[mi.extra_index2]});
-    }
-    // full particle list: the merged-away entries stay at the end of extra_index (KETJU's extra data rule)
-    o.extra_index = extra;
-    o.n = R.num_particles;
-    o.n_pn = R.num_pn_particles;
-    o.mass.assign(R.physical_state->mass, R.physical_state->mass + o.n);
-    o.pos.resize(3 * o.n);
-    o.vel.resize(3 * o.n);
-    o.spin.resize(3 * o.n_pn);
-    for (int i = 0; i < o.n; i++)
-        for (int k = 0; k < 3; k++) {
-            o.pos[3 * i + k] = R.physical_state->pos[i][k];
-            o.vel[3 * i + k] = R.physical_state->vel[i][k];
-        }
-    for (int i = 0; i < o.n_pn; i++)
-        for (int k = 0; k < 3; k++) o.spin[3 * i + k] = R.physical_state->spin[i][k];
-    ketju_free_system(&R);
-    return merged;
+    if (!dev_) dev_ = new Engine<ExecSpace>(*this);
+    return run_on(*dev_, time_interval);
 }
 
-bool MstarKokkos::run(double time_interval) {
+template <class Exec>
+bool MstarKokkos::run_on(Engine<Exec>& im, double time_interval) {
     const double tw0 = wall();
     if (n < 2) {
         for (int i = 0; i < n; ++i)
@@ -1263,7 +1228,6 @@ bool MstarKokkos::run(double time_interval) {
         perf.t_total += wall() - tw0;
         return true;
     }
-    Impl& im = *impl_;
     im.allocate();
     im.gbs_k = opt.gbs_kmax >= 4 ? 4 : opt.gbs_kmax;
     const double t_start = time;
@@ -1313,7 +1277,7 @@ bool MstarKokkos::run(double time_interval) {
             double t_now;
             im.download_state(im.bslot, t_now);
             time = t_start + t_now;            // merger times are absolute (KETJU records the run-relative time)
-            const int num_merged = host_bh_mergers(*this);
+            const int num_merged = do_bh_mergers(*this);
             time = t_now;
             if (num_merged) {
                 if (n < 2) {
@@ -1375,7 +1339,7 @@ bool MstarKokkos::run(double time_interval) {
             B_now = im.h_res(1) - im.h_res(0);
             time = im.h_res(2);
             for (int i = 0; i < n_pn; i++)
-                for (int q = 0; q < 3; q++) pos[3 * i + q] = im.h_res(Impl::RES_PN + 3 * i + q);
+                for (int q = 0; q < 3; q++) pos[3 * i + q] = im.h_res(im.RES_PN + 3 * i + q);
             perf.successful_steps += 1;
             steps_since_reconstruction += 1;
             const double remaining_time = time_interval - time;

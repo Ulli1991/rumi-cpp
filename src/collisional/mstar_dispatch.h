@@ -2,8 +2,8 @@
 // RUMI++ core: thin interface to the optional MSTAR module.
 //
 // MSTAR (minimum-spanning-tree algorithmic regularisation; Rantala et al. 2020, MNRAS 492, 4131; Mannerkoski et al.
-// 2023, MNRAS 524, 4062) integrates subsystems larger than LogH's LOGH_MAX_BODIES. Its implementation (the KETJU
-// integrator library and its Kokkos port) lives in the separate, GPLv3-licensed module src/mstar, compiled only with
+// 2023, MNRAS 524, 4062) integrates subsystems larger than LogH's LOGH_MAX_BODIES. Its implementation (a C++/Kokkos
+// rewrite of the KETJU integrator) lives in the separate, GPLv3-licensed module src/mstar, compiled only with
 // the CMake option ENABLE_MSTAR=ON (binaries built so are GPLv3). The core never includes module code: it calls the
 // functions below, which the module implements (src/mstar/mstar_dispatch.cpp) or, without the module, the BSD stub
 // mstar_dispatch_stub.cpp does (mstar_available() = false; every call fails, the caller keeps its LogH/FSI path).
@@ -70,8 +70,8 @@ struct MstarGroup {
     double bh_merge_rs = 12;
     bool bh_kicks = true;              // merger recoil (Zlochower & Lousto 2015 fits)
     long max_steps = -1;               // > 0: give up after this many attempted steps (ok = false)
-    int device = -1;                   // -1: automatic (device above the crossover size), 0: host C library, 1: device
-    // Collisions (device path only): after every accepted step, a pair closer than mstar_collision_distance, or
+    int device = -1;                   // -1: automatic (device from mstar_crossover_n() bodies), 0: host, 1: device
+    // Collisions: after every accepted step, a pair closer than mstar_collision_distance, or
     // approaching with osculating pericentre inside it and reaching that pericentre within one step, stops the call
     // (status 1) at that step; the caller merges the pair and calls again for the rest of dt
     const double* coll_R = nullptr;    // [n] radius per body (units of pos; nullptr: no collision check)
@@ -90,7 +90,7 @@ struct MstarGroup {
     long steps = 0, failed_steps = 0;
     double rel_energy_error = 0;       // (B_end - B_start) / B_start, B = U - T (Newtonian; meaningful without PN)
     double wall = 0;                   // seconds
-    int used_device = 0;               // 1: the Kokkos port ran it
+    int used_device = 0;               // 1: ran on the device execution space
     std::vector<MstarMerger> mergers;
 };
 

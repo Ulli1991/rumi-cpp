@@ -678,7 +678,6 @@ static void mstar_integrate_one(SubsystemBatch& batch, int s, double G, double e
     const double dt_norm = dt / T_scale;
     static const long max_steps = std::getenv("NBODY_MSTAR_MAX_STEPS") ? std::atol(std::getenv("NBODY_MSTAR_MAX_STEPS"))
                                                                         : 2000000;
-    static const bool auto_dev = std::getenv("NBODY_MSTAR_CROSSOVER") != nullptr;
     std::vector<int> ghost_of(nb, -1);
     std::vector<double> ghost_d(3 * nb, 0.0);
     auto& colls = batch.collisions[s];
@@ -694,9 +693,7 @@ static void mstar_integrate_one(SubsystemBatch& batch, int s, double G, double e
         g.pn_flags = flags;
         g.tol = eta_gbs;
         g.max_steps = max_steps;
-        // the port (collision check, PN ledger, step limit: the C library has none of them); NBODY_MSTAR_CROSSOVER:
-        // automatic choice (the C library below the crossover when none of those is needed)
-        g.device = auto_dev ? -1 : 1;
+        g.device = -1;   // device from mstar_crossover_n() bodies (NBODY_MSTAR_CROSSOVER), host engine below
         if (c_code > 0.0) {   // collisions as in the LogH path (coll_on: c_code > 0)
             g.coll_R = R.data();
             g.coll_bh = bh.data();

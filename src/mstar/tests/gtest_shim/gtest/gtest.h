@@ -1,5 +1,5 @@
 // RUMI++ MSTAR module (GPLv3, see src/mstar/LICENSE)
-// Copyright (C) 2026 RUMI++ authors.
+// Copyright (C) 2026 Ulrich Steinwandel.
 // Licensed under the GPLv3 license (or, at your option, any later version).
 //
 // Minimal stand-in for the part of the GoogleTest API used by the KETJU unit tests (src/mstar/ketju/unit-tests),

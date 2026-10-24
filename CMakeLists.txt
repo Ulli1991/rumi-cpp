@@ -290,7 +290,7 @@ if(BUILD_RUMI_LIBRARY)
     if(ENABLE_MSTAR)
         target_link_libraries(rumi PUBLIC rumi-mstar)
         target_compile_definitions(rumi PRIVATE ENABLE_MSTAR)
-        set(_rumi_mstar_libs "$<TARGET_FILE:rumi-mstar> $<TARGET_FILE:ketju-integrator> ")
+        set(_rumi_mstar_libs "$<TARGET_FILE:rumi-mstar> ")
     endif()
     target_include_directories(rumi PRIVATE ${CMAKE_BINARY_DIR}/generated ${SRC_DIR}/core ${SRC_DIR}/gravity
                                ${SRC_DIR}/integrator ${SRC_DIR}/ic_gen ${SRC_DIR}/io ${SRC_DIR}/collisional ${SRC_DIR}/lib)
