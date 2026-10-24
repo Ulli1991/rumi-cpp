@@ -30,6 +30,7 @@ struct LogHState {
     double aux_spin1[3], aux_spin2[3];
     bool has_spins;                          // true for 2-body BH binaries with spins
     double c_code;                           // speed of light (normalized units)
+    double v_frame[3];                       // lab velocity of the state's frame (normalized): PN terms take v + v_frame
 
     // SDAR slow-down (Mikkola & Aarseth 1996; Wang, Nitadori & Makino 2020, MNRAS 493, 3398, hereafter W20;
     // FROST-CLUSTERS I, Rantala et al. 2024, App. A2, hereafter FC-I): n_sd disjoint inner binaries

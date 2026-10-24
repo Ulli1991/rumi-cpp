@@ -522,6 +522,13 @@ static void compute_pn_all_pairs(const LogHState& state, const PnGeom& geom, con
                                   double* pn_out, const double* chi1 = nullptr, const double* chi2 = nullptr) {
     int n = state.n_bodies;
     std::memset(pn_out, 0, n * 3 * sizeof(double));
+    // Lab-frame velocities: the EIH and 2PN terms are not Galilean invariant (KETJU evaluates them in the lab frame)
+    double lab_vel[LOGH_MAX_BODIES * 3];
+    if (state.v_frame[0] != 0.0 || state.v_frame[1] != 0.0 || state.v_frame[2] != 0.0) {
+        for (int i = 0; i < n; i++)
+            for (int k = 0; k < 3; k++) lab_vel[i*3+k] = eval_vel[i*3+k] + state.v_frame[k];
+        eval_vel = lab_vel;
+    }
     // NBODY_CHECK_EIH=1 (tests): every evaluation must equal the direct functions (eih1_nbody_acceleration, and
     // eih_pn_acceleration of each body of a pair) bit for bit
     static const bool check_eih = std::getenv("NBODY_CHECK_EIH") != nullptr;

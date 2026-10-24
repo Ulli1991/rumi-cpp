@@ -110,6 +110,7 @@ int apply_run_settings(const Config& cfg, RunSettings& rs) {
         g_collisional.m_pn            = cfg.get_double("M_PN");
         g_collisional.pn_bh_only      = cfg.get_bool("PN_BH_ONLY");
         g_collisional.pn_order        = cfg.get_int("PN_ORDER");
+        g_collisional.pn_frame_com    = cfg.get_str("PN_FRAME") == "com";
         g_collisional.r_escape_rh     = cfg.get_double("R_ESCAPE_RH");
         g_collisional.r_escape_rj     = cfg.get_double("R_ESCAPE_RJ");
         g_collisional.mstar_threshold = cfg.get_int("MSTAR_THRESHOLD");

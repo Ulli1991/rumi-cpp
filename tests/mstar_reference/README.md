@@ -38,7 +38,7 @@ FAIL cases are registered with `WILL_FAIL` (CMakeLists.txt) until fixed.
 | `binary_no_pn`, `binary_full_pn_no_spin` | pass (against the original test's expected state) |
 | `instant_*` (4), `merger_from_orbit`, `mst_*` (16) | pass |
 | `binary_full_pn_spin`, `..._generic_units` | skipped: no spin input/output in `rumi_lib`; KETJU's body 1 has chi = 4 (super-extremal) |
-| `binary_1pn`, `binary_1pn_threebody` | FAIL: LogH loads velocities relative to the subsystem's Newtonian c.o.m. (logh_batch.cpp) and evaluates EIH with them; KETJU uses the lab frame, here moving at 0.0425 c |
+| `binary_1pn`, `binary_1pn_threebody` | pass: LogH evaluates the PN terms with lab-frame velocities (`LogHState::v_frame`); before, with velocities relative to the Newtonian c.o.m. of each call, which moves at 0.0425 c here and drifts under EIH for unequal masses |
 | `head_on_merger` | FAIL: remnant 1.97265 < 1.99; the radiated-energy fit 0.0547 eta (1 - delta^2 / 2) (mergers.cpp) ignores the orbit (head-on NR ~0.06 %, quasi-circular ~4.8 %) |
 | `binary_no_pn_one_host_step` | pass (the Peters shortcut needs radiation reaction, PN_ORDER 2.5PN bit) |
 

@@ -499,8 +499,6 @@ if(RUMI_KETJU_REFERENCE_TESTS AND ENABLE_COLLISIONAL)
         set_tests_properties(ketju_ref_${case} PROPERTIES SKIP_RETURN_CODE 77 LABELS ketju_reference
                              ENVIRONMENT "OMP_NUM_THREADS=1")
     endforeach()
-    # Known failures (tests/mstar_reference/README.md): EIH terms with subsystem-CM velocities, not lab-frame
-    set_tests_properties(ketju_ref_binary_1pn ketju_ref_binary_1pn_threebody PROPERTIES WILL_FAIL TRUE)
     # Known failure: radiated-energy fit ignores the orbit (head-on remnant 1.97265 < 1.99)
     set_tests_properties(ketju_ref_head_on_merger PROPERTIES WILL_FAIL TRUE)
     # KETJU's own call pattern, one call over the whole interval: the Peters shortcut must not merge a binary without

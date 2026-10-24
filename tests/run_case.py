@@ -60,7 +60,7 @@ TIDAL_FLOOR_DE = 3.07e-9    # tidal_floor_bh_binary: 2.36e-9 measured (host buil
 TIDAL_FLOOR_LOGH = 8200     # tidal_floor_bh_binary: 6308 LogH calls measured (1024 with the fixed floor)
 FLYBY_GROUP_STEPS = 39400  # flyby_group_floor: 30304 measured (host build)
 FLYBY_GROUP_DE = 5.8e-10   # flyby_group_floor: 4.42e-10 measured (host build)
-C19_PERI_DE = 1e-15       # c19_secular_peri: 7.65e-16 measured (host build; 1.22 of the pair, 6.7e-4 E_REF, before the fix)
+C19_PERI_DE = 1.6e-15     # c19_secular_peri: 1.225e-15 measured (PN_FRAME lab; 7.65e-16 com)
 C21_SD_DE = 9.0e-10       # c21_sdar_outside_tide: 6.91e-10 measured (host build; 1.81e-5 before the fix, own |E0|)
 C21_SD_GBS = 19600        # c21_sdar_outside_tide: 15098 GBS steps measured (119579 before the fix)
 PN_BH_ONLY_DE = 7.7e-10   # pn_bh_only: 5.93e-10 measured (host build)
@@ -610,7 +610,7 @@ def tidal_floor_bh_binary(exe):
 # booked P / L sinks); GBS steps bound). Before C20: s432 |dP|/M 3.5e-13, |dL/L| 1.9e-13; s1025 2.0e-12, 3.2e-13
 SEC_INNER_CASES = {
     "s101_s432_1": ("306584304.2034864", "0.4037126187872738", (SEC_DE_432, 2.95e-12, 2.5e-13), 1000),
-    "s404_s1025_1": ("367882904.67611593", "0.40210304758978715", (SEC_DE_1025, 5.6e-12, 3.6e-13), 5000),
+    "s404_s1025_1": ("367882904.67611593", "0.40210304758978715", (SEC_DE_1025, 5.6e-12, 7.0e-13), 5000),  # dL 5.34e-13 (lab)
     "s404_s3047_0": ("367882904.67611593", "0.40210304758978715", (SEC_DE_3047, 3.6e-12, 6.6e-13), 2000),
 }
 SEC_INNER_WALL = 20.0   # s per run (0.03-0.11 s measured on the login node; 470 s, 748 s, > 900 s before)
@@ -767,7 +767,7 @@ def sec_inner_merge(exe):
     ok = check("merger events", len(re.findall(r"\[MERGER #\d+\]", out)), 1, lower=True)
     ok &= check("merger events (at most)", len(re.findall(r"\[MERGER #\d+\]", out)), 1)
     ok &= check("max|dE/E| with merger sink", max(r[0] for r in rows), 2.3e-14)   # 1.73e-14 measured
-    ok &= check("max|dP|/M [km/s]", max(r[1] for r in rows), 7.8e-14)              # 6.03e-14 measured
+    ok &= check("max|dP|/M [km/s]", max(r[1] for r in rows), 1.6e-13)              # 1.22e-13 measured (PN_FRAME lab)
     return ok & check("max|dL/L| with L sink", max(r[2] for r in rows), 3.9e-12)   # 2.98e-12 measured
 
 
@@ -1188,7 +1188,8 @@ def remnant_masses(exe, label, cfg, bh_min, ns_max, m_max):
 
 def boost_invariance(exe, label, cfg, boosts, bound):
     """The relative orbit of an isolated binary must not depend on a uniform velocity of the whole system (G-1; PN
-    terms in the subsystem frame, KETJU: Mannerkoski et al. 2023 sec. 2.2): |dr| / |r| at the end, boosted vs not."""
+    terms in the subsystem frame, PN_FRAME = com for LogH, as KETJU's host couplings: Mannerkoski et al. 2023 sec. 2.2):
+    |dr| / |r| at the end, boosted vs not."""
     def rel(b):
         _, rows = run_output(exe, dict(cfg, TEST_BOOST_KMS=b), dump=True)
         return binary_rel(rows)
@@ -2307,7 +2308,9 @@ CASES = {
     # 4.3e-12 along y). Secular PN binary: 1.2e-3 before (the reshaped orbit kept the rounding error of a, a phase
     # error over 1e4-1e5 orbits per step); 9.1e-8 after (absolute-coordinate rounding)
     # round-off noise, not monotonic in the boost (PN_ORDER 1 alone 7e-12 - 1.8e-11); 1.18e-11 after the PN2-3.5 fix (C8)
-    "pn_boost_logh": lambda exe: boost_invariance(exe, "PN LogH binary", PN_LOGH, ["30,0,0", "300,0,0", "0,300,0"], 1.6e-11),
+    # PN_FRAME = com (each call's c.o.m.); the default lab frame is an inertial frame, not Galilean invariant at 1PN
+    "pn_boost_logh": lambda exe: boost_invariance(exe, "PN LogH binary", dict(PN_LOGH, PN_FRAME="com"),
+                                                  ["30,0,0", "300,0,0", "0,300,0"], 1.6e-11),
     "pn_boost_secular": lambda exe: boost_invariance(exe, "PN secular binary", SEC_BH_TIGHT,
                                                      ["30,0,0", "300,0,0", "0,300,0"], 2.2e-7),
     # AUDIT G row 1a: 1000 binaries of 250-450 AU (just above r_ngb = 206 AU) in 2000 stars. Plain: the pairs are FSI

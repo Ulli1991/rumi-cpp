@@ -82,6 +82,7 @@ struct CollisionalConfig {
     double m_pn = 5.0;                 // minimum mass (M_sun) for global PN1.0
     bool pn_bh_only = true;            // PN_BH_ONLY: PN terms only for black holes (pn_body)
     int pn_order = 7;                  // bitmask: 1=PN1, 2=PN2, 4=PN2.5, 8=PN3, 16=PN3.5
+    bool pn_frame_com = false;         // PN_FRAME = com: PN velocities relative to each LogH call's c.o.m. | lab (default)
 
     // Escaper removal
     double r_escape_rh = 100.0;        // escape radius in half-mass radii

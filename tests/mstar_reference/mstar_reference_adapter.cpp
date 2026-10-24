@@ -66,7 +66,7 @@ MstarRefStatus mstar_reference_run(const MstarRefCase& c, MstarRefResult& r) {
     FILE* f = std::fopen("ketju_reference.cfg", "w");
     if (!f) return MstarRefStatus::NotApplicable;
     std::fprintf(f, "COLLISIONAL = true\nPRESET = cluster\nSSE_ENABLED = false\nTIDAL_FIELD = none\nSOFTENING_PC = 0\n"
-                    "PN_ORDER = %d\nETA_GBS = %.3g\nN_ORB_SECULAR = 1000000000\nSECULAR_TRIPLES = false\nSDAR = false\n"
+                    "PN_ORDER = %d\nPN_FRAME = lab\nETA_GBS = %.3g\nN_ORB_SECULAR = 1000000000\nSECULAR_TRIPLES = false\nSDAR = false\n"
                     "PRINT_INTERVAL = 0\nPROFILING = off\nGW_CENSUS_TGW_MYR = 0\n",
                  pn, c.gbs_tol);
     std::fclose(f);
