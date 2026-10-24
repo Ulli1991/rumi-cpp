@@ -1161,6 +1161,8 @@ void SubsystemManager::fill_cm_velocity(const Particles& p, int lo, int hi, Kokk
                                    sc.data(), n_sub));
     }
     auto fscale = raw(scale_v);
+    auto pax = raw(p.ax), pay = raw(p.ay), paz = raw(p.az);   // external only (the force kernel skips member pairs)
+    const double tpert = g_collisional.tidal_step_pert;
     small_for("cm_vel_members", n_sub, KOKKOS_LAMBDA(int k) {
         const int a = base + buf(k), e = base + buf(k + 1);
         double M = 0, px = 0, py = 0, pz = 0, cx = 0, cy = 0, cz = 0;
@@ -1190,6 +1192,11 @@ void SubsystemManager::fill_cm_velocity(const Particles& p, int lo, int hi, Kokk
                     const double rp = sa * (1.0 - ecc);
                     kfl = res * 2.0 * M_PI * Kokkos::sqrt(rp * rp * rp / mu);
                     if (adapt) kfl *= fscale(k);   // C5: below 1 where the binary's tidal estimate exceeds its share
+                    if (tpert > 0.0) {   // TIDAL_STEP_PERT: the external tide's time, not the pericentre passage
+                        const double fx = pax(j) - pax(i), fy = pay(j) - pay(i), fz = paz(j) - paz(i);
+                        const double fm = Kokkos::sqrt(fx * fx + fy * fy + fz * fz);
+                        if (fm > 0.0) kfl = Kokkos::fmax(kfl, tpert * Kokkos::sqrt(r / fm));
+                    }
                     muv = pm(i) * pm(j) / M * Kokkos::sqrt(mu * (1.0 + ecc) / (sa * (1.0 - ecc)));
                 } else {
                     kfl = res * pericentre_passage_time(rx, ry, rz, ux, uy, uz, mu);

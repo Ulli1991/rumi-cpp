@@ -1,6 +1,6 @@
 # Config reference
 
-All 159 keys of the config file (`config.txt`, or `--config <file>`), generated from the parameter table in `src/core/params.cpp` by `scripts/gen_config_md.py`. Every key has one default, in that table; an unknown key in a config file is an error. Each run writes the effective value of every key, and whether it came from the file or the default, to `run_params.txt`.
+All 160 keys of the config file (`config.txt`, or `--config <file>`), generated from the parameter table in `src/core/params.cpp` by `scripts/gen_config_md.py`. Every key has one default, in that table; an unknown key in a config file is an error. Each run writes the effective value of every key, and whether it came from the file or the default, to `run_params.txt`.
 
 Levels:
 
@@ -135,6 +135,7 @@ Levels:
 | `FLYBY_CM_VELOCITY` | bool | `false` | **experiment** |  | Fly-by step of subsystem members with the c.o.m. velocity (FROST-CLUSTERS II sec. 2.1) |
 | `FLYBY_CM_EPS` | double | `1e-11` | internal |  | Tidal-sampling pair step: energy a slow particle's kicks put into a subsystem per step <= this x \|E0\| (0: off) |
 | `TIDAL_STEP_RES` | double | `1.0` | internal |  | Floor of the FLYBY_CM_EPS step: this x P (1 - e)^(3/2) of a bound binary, this x the shortest pair pericentre passage 2 pi r_p / v_p of an unbound pair or larger subsystem (0: none) |
+| `TIDAL_STEP_PERT` | double | `0` | **experiment** |  | Bound 2-body subsystems: tidal-sampling step not below TIDAL_STEP_PERT x sqrt(r / \|a_ext,2 - a_ext,1\|), the members' external tidal time (0: off) |
 | `TIDAL_FLOOR_ADAPT` | bool | `false` | internal |  | Bound binaries whose local tidal estimate at the TIDAL_STEP_RES floor, mu \|T\| v_p floor (T: tidal acceleration of all perturbers), exceeds their share FLYBY_CM_EPS x \|E0\| take the floor x sqrt(share / estimate) (resolved kicks: error ~ dt^2; C5); others unchanged |
 | `FLYBY_NGB_CM` | bool | `true` | internal |  | Distant fly-by neighbour test of a binary member against the binary's c.o.m. |
 | `NGB_MASS_SCALING` | bool | `true` | internal |  | Pair neighbour radius r_ngb max(1, m / <m>)^(1/3) (PeTar Eq. 12); the extra pairs join only as strong perturbers of a binary |

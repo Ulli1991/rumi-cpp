@@ -33,6 +33,7 @@ struct CollisionalConfig {
     double e_ref = 0.0;                //   |E0| of the run
     double tidal_step_res = 1.0;       // TIDAL_STEP_RES: floor of the FLYBY_CM_EPS step, this x P (1 - e)^(3/2) of a bound binary or
                                        // the shortest pair pericentre passage of other subsystems (0: none)
+    double tidal_step_pert = 0.0;      // TIDAL_STEP_PERT: floor of the tidal-sampling step of bound 2-body subsystems, this x their external tidal time
     bool tidal_floor_adapt = false;    // TIDAL_FLOOR_ADAPT: floor x sqrt(share / local tidal estimate) for bound binaries above their share (C5)
     bool flyby_ngb_cm = true;
     long long subsys_advance_limit = 0; // SUBSYS_ADVANCE_LIMIT: stop when one subsystem needs more advances in a top-level step (0: off)
