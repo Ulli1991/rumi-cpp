@@ -46,14 +46,6 @@ struct ErrVal {
         return *this;
     }
 };
-struct Acc4 {
-    double x, y, z, u;
-    KOKKOS_INLINE_FUNCTION Acc4() : x(0), y(0), z(0), u(0) {}
-    KOKKOS_INLINE_FUNCTION Acc4& operator+=(const Acc4& o) {
-        x += o.x; y += o.y; z += o.z; u += o.u;
-        return *this;
-    }
-};
 
 }  // namespace
 }  // namespace rumi_mstar
@@ -62,14 +54,11 @@ namespace Kokkos {
 template <> struct reduction_identity<rumi_mstar::ErrVal> {
     KOKKOS_FORCEINLINE_FUNCTION static rumi_mstar::ErrVal sum() { return rumi_mstar::ErrVal(); }
 };
-template <> struct reduction_identity<rumi_mstar::Acc4> {
-    KOKKOS_FORCEINLINE_FUNCTION static rumi_mstar::Acc4 sum() { return rumi_mstar::Acc4(); }
-};
 }  // namespace Kokkos
 
 namespace rumi_mstar {
 
-enum { S_TIME = 0, S_B = 1, S_T = 2, S_U = 3 };
+enum { S_TIME = 0, S_B = 1, S_T = 2, S_U = 3, S_W = 4, NSCAL = 5 };
 enum { R_POS = 0, R_VEL = 3, R_AUX = 6 };
 
 // All device data of one group. Slots: GBS rows 0..kmax-1, then two state slots (current = "base" = KETJU's state
@@ -98,7 +87,8 @@ struct DevT {
     V<char*> cbh;                                   // black hole flag per body
     double cc = 0;                                      // c of the collision rule
     bool cmax1 = false;
-    V<double**> data;                               // (kmax + 1, nvars + 1); row kmax: extrapolated result;
+    V<double**> data;                               // (kmax + 1, nvars + 2); row kmax: extrapolated result;
+                                                    // column nvars + 1: W, work of the extra velocity-independent forces
                                                         // column nvars: B (PN work ledger, outside the error control)
 
     // ---- tree proximity (mst.c: ketju_check_relative_proximity*) ----
@@ -248,7 +238,7 @@ struct DevT {
 
     // ---- team building blocks ----
     KOKKOS_INLINE_FUNCTION void team_copy(const Team& t, int from, int to) const {
-        Kokkos::parallel_for(Kokkos::TeamThreadRange(t, 4), [&](int q) { scal(to, q) = scal(from, q); });
+        Kokkos::parallel_for(Kokkos::TeamThreadRange(t, (int)NSCAL), [&](int q) { scal(to, q) = scal(from, q); });
         Kokkos::parallel_for(Kokkos::TeamThreadRange(t, 9), [&](int q) { root_s(to, q) = root_s(from, q); });
         Kokkos::parallel_for(Kokkos::TeamThreadRange(t, E), [&](int e) {
             for (int k = 0; k < 3; k++) { epos(to, e, k) = epos(from, e, k); evel(to, e, k) = evel(from, e, k); }
@@ -436,7 +426,7 @@ struct DevT {
                 }
             }, w);
             t.team_barrier();
-            Kokkos::single(Kokkos::PerTeam(t), [&]() { scal(s, S_B) -= w * dt; });
+            Kokkos::single(Kokkos::PerTeam(t), [&]() { scal(s, S_B) -= w * dt; scal(s, S_W) += w * dt; });
             t.team_barrier();
             return;
         }
@@ -462,13 +452,14 @@ struct DevT {
         Kokkos::parallel_for(Kokkos::TeamThreadRange(t, Npn), [&](int i) {
             for (int k = 0; k < 3; k++) data(ri, 7 + 6 * E + 3 * i + k) = spin(s, i, k);
         });
-        Kokkos::single(Kokkos::PerTeam(t), [&]() { data(ri, nvars) = scal(s, S_B); });
+        Kokkos::single(Kokkos::PerTeam(t), [&]() { data(ri, nvars) = scal(s, S_B); data(ri, nvars + 1) = scal(s, S_W); });
         t.team_barrier();
     }
     // update_system_from_gbs_result: data row `row` into slot s, then into_Cartesian_from_MST
     KOKKOS_INLINE_FUNCTION void team_unpack(const Team& t, int s, int row) const {
         Kokkos::single(Kokkos::PerTeam(t), [&]() {
             scal(s, S_TIME) = data(row, 0);
+            scal(s, S_W) = 0;   // the work counter restarts at every step
             for (int q = 0; q < 6; q++) root_s(s, q) = data(row, 1 + q);
         });
         Kokkos::parallel_for(Kokkos::TeamThreadRange(t, E), [&](int e) {
@@ -821,7 +812,7 @@ struct Engine {
         d.path_off = V<int*>("mstar_poff", N + 1);
         d.ehi = V<int*>("mstar_ehi", E);
         d.elo = V<int*>("mstar_elo", E);
-        d.scal = V<double**>("mstar_scal", slots, 4);
+        d.scal = V<double**>("mstar_scal", slots, NSCAL);
         d.root_s = V<double**>("mstar_root", slots, 9);
         d.epos = V<double***>("mstar_epos", slots, E, 3);
         d.evel = V<double***>("mstar_evel", slots, E, 3);
@@ -836,7 +827,7 @@ struct Engine {
         d.sder = V<double***>("mstar_sder", slots, P, 3);
         d.pnv = V<double***>("mstar_pnv", slots, N, 3);
         d.aext = V<double***>("mstar_aext", slots, N, 3);
-        d.data = V<double**>("mstar_data", K + 1, d.nvars + 1);
+        d.data = V<double**>("mstar_data", K + 1, d.nvars + 2);
         res = V<double*>("mstar_res", RES_PN + 3 * P);
         h_res = Kokkos::View<double*, Kokkos::HostSpace>("mstar_hres", RES_PN + 3 * P);
         ckey = Kokkos::View<long, Mem>("mstar_ckey");
@@ -961,6 +952,7 @@ struct Engine {
         Kokkos::deep_copy(sv, hv);
         Kokkos::deep_copy(ss, hs);
         Kokkos::deep_copy(Kokkos::subview(d.scal, s, (int)S_TIME), 0.0);
+        Kokkos::deep_copy(Kokkos::subview(d.scal, s, (int)S_W), 0.0);
         coll_on = (int)o.coll_R.size() == N;
         d.cc = o.coll_c;
         d.cmax1 = o.coll_bh_max_single;
@@ -999,28 +991,23 @@ struct Engine {
     void launch_force(int slot0, int nslots) {
         const Dev dd = d;
         const int N = d.N;
-        Kokkos::parallel_for("mstar_force", Kokkos::TeamPolicy<Exec>(nslots * N, Kokkos::AUTO),
-                             KOKKOS_LAMBDA(const Team& t) {
-            const int s = slot0 + t.league_rank() / N, i = t.league_rank() % N;
-            Acc4 a;
-            Kokkos::parallel_reduce(Kokkos::TeamThreadRange(t, N), [&](int j, Acc4& sum) {
-                if (j == i) return;
+        // one thread per (slot, i), the j loop sequential (deterministic; all threads of a warp read the same j)
+        Kokkos::parallel_for("mstar_force", Kokkos::RangePolicy<Exec>(0, nslots * N), KOKKOS_LAMBDA(int q) {
+            const int s = slot0 + q / N, i = q % N;
+            double a[3] = {0, 0, 0}, ui = 0;
+            for (int j = 0; j < N; j++) {
+                if (j == i) continue;
                 double dr[3];
                 const double r2 = dd.separation(s, i, j, dr);
                 const double invr = 1. / sqrt(r2);
                 const double Ginvr3 = dd.G * invr * invr * invr;
                 const double mj = dd.mass(j);
-                if (j > i) sum.u += mj * invr;
-                sum.x += mj * (dr[0] * Ginvr3);
-                sum.y += mj * (dr[1] * Ginvr3);
-                sum.z += mj * (dr[2] * Ginvr3);
-            }, Kokkos::Sum<Acc4>(a));
-            Kokkos::single(Kokkos::PerTeam(t), [&]() {
-                double ai[3] = {a.x, a.y, a.z};
-                dd.extra_vindep(s, i, ai);
-                dd.acc(s, i, 0) = ai[0]; dd.acc(s, i, 1) = ai[1]; dd.acc(s, i, 2) = ai[2];
-                dd.u(s, i) = a.u;
-            });
+                if (j > i) ui += mj * invr;
+                for (int k = 0; k < 3; k++) a[k] += mj * (dr[k] * Ginvr3);
+            }
+            dd.extra_vindep(s, i, a);
+            for (int k = 0; k < 3; k++) dd.acc(s, i, k) = a[k];
+            dd.u(s, i) = ui;
         });
         o.perf.launches++;
     }
@@ -1135,7 +1122,7 @@ struct Engine {
     void gbs_step(double H) {
         const int k = gbs_k, N = d.N, bs = bslot;
         const Dev dd = d;
-        if (N <= o.opt.team_rows_max_n) {
+        if (N <= (std::is_same<Exec, HostExecSpace>::value ? o.opt.team_rows_max_n : o.opt.team_rows_max_n_device)) {
             Kokkos::parallel_for("mstar_rows_team", Kokkos::TeamPolicy<Exec>(k, Kokkos::AUTO),
                                  KOKKOS_LAMBDA(const Team& t) {
                 const int ri = t.league_rank(), s = ri, nsub = 2 * (ri + 1);
@@ -1182,7 +1169,7 @@ struct Engine {
         const double atol = o.opt.gbs_absolute_tolerance, otol = o.opt.output_time_absolute_tolerance;
         const int KR = d.kmax;
         const int nv = d.nvars;
-        Kokkos::parallel_reduce("mstar_extrap", Kokkos::RangePolicy<Exec>(0, d.nvars + 1),
+        Kokkos::parallel_reduce("mstar_extrap", Kokkos::RangePolicy<Exec>(0, d.nvars + 2),
                                 KOKKOS_LAMBDA(int v, ErrVal& e) {
             double tt[MAX_K];
             for (int j = 0; j < k; j++) tt[j] = dd.data(j, v);
@@ -1196,7 +1183,7 @@ struct Engine {
                 }
             }
             const double result = tt[k - 1];
-            if (v == nv) { dd.data(KR, v) = result; return; }   // B: extrapolated, not error controlled
+            if (v >= nv) { dd.data(KR, v) = result; return; }   // B, W: extrapolated, not error controlled
             if (!Kokkos::isfinite(result)) { e.bad = 1; return; }
             dd.data(KR, v) = result;
             const double er = fabs(tt[k - 1] - tt[k - 2]) / yscal;
@@ -1225,6 +1212,7 @@ struct Engine {
                 r(4) = errv().e1;
                 r(5) = errv().bad;
                 r(6) = dd.data(KR, nv);
+                r(11) = dd.data(KR, nv + 1);
                 for (int i = 0; i < Npn; i++)
                     for (int q = 0; q < 3; q++) r(RES_PN + 3 * i + q) = dd.pos(cs, i, q);
             });
@@ -1309,6 +1297,7 @@ bool MstarKokkos::run_on(Engine<Exec>& im, double time_interval) {
     coll_type = 0;
     coll_rsep = coll_rcoll = 0;
     pn_dB = 0;
+    ext_work = 0;
     auto take_collision = [&]() {
         const long kq = (long)im.h_res(7);
         coll_i = (int)(kq / n);
@@ -1398,6 +1387,7 @@ bool MstarKokkos::run_on(Engine<Exec>& im, double time_interval) {
         if (converged) {
             std::swap(im.bslot, im.cslot);
             if (im.work_on) pn_dB += im.h_res(6) - B_now;   // work of the non-Newtonian forces
+            if (opt.extra.vindep && opt.extra.track_work) ext_work += im.h_res(11);   // of the extra vindep forces
             U = im.h_res(1);
             B_now = im.h_res(1) - im.h_res(0);
             time = im.h_res(2);

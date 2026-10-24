@@ -34,7 +34,7 @@ bool port_path(MstarGroup& g, bool on_host) {
     M->opt.bh_merger_distance_in_Rs = g.bh_merge_rs;
     M->opt.enable_bh_merger_kicks = g.bh_kicks;
     M->opt.max_step_count = g.max_steps;
-    if (const char* e = std::getenv("NBODY_MSTAR_TEAM_N")) M->opt.team_rows_max_n = std::atoi(e);
+    if (const char* e = std::getenv("NBODY_MSTAR_TEAM_N")) M->opt.team_rows_max_n = M->opt.team_rows_max_n_device = std::atoi(e);
     for (int i = 0; i < g.n; i++) {
         M->mass[i] = g.mass[i];
         for (int k = 0; k < 3; k++) { M->pos[3 * i + k] = g.pos[3 * i + k]; M->vel[3 * i + k] = g.vel[3 * i + k]; }

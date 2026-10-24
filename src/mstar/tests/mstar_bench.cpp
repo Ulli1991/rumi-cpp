@@ -63,7 +63,7 @@ int main(int argc, char** argv) {
             rumi_mstar::MstarKokkos M(0, n);
             M.opt.gbs_relative_tolerance = 1e-10;
             M.opt.max_step_count = steps;
-            M.opt.team_rows_max_n = teamn;
+            M.opt.team_rows_max_n = M.opt.team_rows_max_n_device = teamn;
             M.mass = m; M.pos = x; M.vel = v;
             // warm-up (allocations) with 2 steps
             M.opt.max_step_count = 2;

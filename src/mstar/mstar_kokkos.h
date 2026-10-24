@@ -74,7 +74,8 @@ struct Options {
     double bh_merger_distance_in_Rs = 12;
     bool enable_bh_merger_kicks = true;
     double G = 1.0, c = 1.0;
-    int team_rows_max_n = 96;          // N <= this: every GBS row inside one team (one launch per step)
+    int team_rows_max_n = 96;          // host engine: N <= this runs every GBS row inside one team
+    int team_rows_max_n_device = 0;    // device engine: the same (A100: the staged path is faster at every N)
     bool host_engine = false;          // run on the host execution space (small groups in GPU builds)
     ExtraForces extra;                 // extra forces (off)
 };
@@ -125,6 +126,9 @@ class MstarKokkos {
     // control); the Newtonian T + U changed by -pn_dB through these forces, the rest of its change is integration
     // error. Zero without them.
     double pn_dB = 0;
+    // Work of the extra velocity-independent forces alone (track_work): the Newtonian T + U changed by ext_work through
+    // them and by -(pn_dB + ext_work) through the velocity-dependent ones (PN, extra)
+    double ext_work = 0;
     std::vector<MergerInfo> mergers;
 
     // ketju_run_integrator: advance by time_interval. Returns false if max_step_count was exceeded (state left at

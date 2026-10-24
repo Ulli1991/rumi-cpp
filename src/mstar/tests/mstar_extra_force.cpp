@@ -268,6 +268,7 @@ void static_field() {
         check(nm, "|dE_total/E0| (error visible)", std::fabs(E1 - E0) / std::fabs(E0), variant ? 1.5e-13 : 1.2e-13);
         check(nm, "|W_ext/E0| (external work)", std::fabs(W_ext / E0), 1e-6, true);
         check(nm, "|ledger - W_ext| / |W_ext|", std::fabs(ledger - W_ext) / std::fabs(W_ext), variant ? 1.5e-11 : 2.1e-10);
+        check(nm, "|ext_work - W_ext| / |W_ext|", std::fabs(M.ext_work - W_ext) / std::fabs(W_ext), variant ? 6.7e-11 : 1.4e-10);   // measured 5.2e-11 / 1.06e-10
     }
 }
 

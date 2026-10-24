@@ -98,7 +98,7 @@ Run run_k(const Sys& sy, const Opt& o, double T, rumi_mstar::Perf* perf_out = nu
     M.opt.output_time_relative_tolerance = o.out_tol;
     M.opt.enable_bh_mergers = o.mergers;
     M.opt.bh_merger_distance_in_Rs = o.merge_rs;
-    M.opt.team_rows_max_n = o.team_max;
+    M.opt.team_rows_max_n = M.opt.team_rows_max_n_device = o.team_max;
     M.mass = sy.m;
     M.pos = sy.x;
     M.vel = sy.v;
