@@ -28,7 +28,7 @@ NBODY_MSTAR=1 ./nbody-kokkos --config config.txt
 | `NBODY_MSTAR_MAX` | 1024 | largest group integrated as one subsystem (larger: split as without MSTAR) |
 | `NBODY_MSTAR_MAX_STEPS` | 2e6 | GBS steps after which a call gives up (then retried with subdivided steps, as LogH) |
 | `NBODY_MSTAR_TEAM_N` | 96 (host), 0 (device) | groups up to this size run each GBS row inside one team (one launch per step) |
-| `NBODY_MSTAR_CROSSOVER` | 64 (GPU builds) | groups of at least this size on the device, smaller ones on the host execution space |
+| `NBODY_MSTAR_CROSSOVER` | 32 (GPU builds) | groups of at least this size on the device, smaller ones on the host execution space |
 | `NBODY_MSTAR_TIDE` | off | `=1`: c.o.m. kicks for the members and the outside tide inside MSTAR (below) |
 
 The step summary shows `mstar=n (dev d, gbs g, nmax m)`: integrations, of them on the device, their GBS steps and the

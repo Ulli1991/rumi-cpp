@@ -1254,7 +1254,8 @@ C++ rewrite of the MSTAR regularised integrator (Rantala et al. 2020; public KET
   512 1.4, 1024 3.3, 2048 8.3, 4096 27 (15 G pair interactions/s); serial KETJU: 1.6x slower at 64, 16x at 128, 77x
   at 512. Latency: async launch 4.8 us, launch + fence 13.8 us, reduce + read-back 23 us; ~35 launches and one sync
   per GBS step (all rows in lockstep). A thread-per-body force kernel was 5.6x slower at N = 1024 (team kernel kept).
-  The host-side O(N^2) Prim tree takes 20-24 % at N >= 1024 (open: device MST).
+  The O(N^2) Prim tree (every 10 steps and at each call) takes 16-24 % at N >= 1024, on the host and in one device
+  team alike (open: a parallel MST, e.g. Boruvka). Device from 32 bodies (NBODY_MSTAR_CROSSOVER).
 - **Energy books:** B is carried as an extra GBS variable outside the error control; its extrapolated change is the
   work of the PN (and extra) forces. Only that goes to `E_pn`; the rest of the members' T + U change minus collisions
   is integration error, left unbooked and visible (`unbooked-mstar`, NBODY_EATTR). 62-body cusp with 2 BHs, all PN:
