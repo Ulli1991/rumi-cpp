@@ -48,13 +48,6 @@ MstarRefStatus mstar_reference_run(const MstarRefCase& c, MstarRefResult& r) {
         r.skip_reason = "unknown PN set " + c.pn;
         return MstarRefStatus::NotApplicable;
     }
-    if (pn & 32) {
-        for (const auto& b : c.bodies)
-            if (b.s[0] != 0 || b.s[1] != 0 || b.s[2] != 0) {
-                r.skip_reason = "BH spins: rumi_lib has no spin input/output (and KETJU's body 1 has chi = 4)";
-                return MstarRefStatus::NotApplicable;
-            }
-    }
     // KETJU units -> natural (G = c = 1) -> RUMI++
     const double G = G_CODE, cl = C_CODE;
     const double Lk = c.G / (c.c * c.c), Vk = c.c, Tk = c.G / (c.c * c.c * c.c);
@@ -96,6 +89,11 @@ MstarRefStatus mstar_reference_run(const MstarRefCase& c, MstarRefResult& r) {
         r.skip_reason = "rumi_lib set_particles failed";
         return MstarRefStatus::NotApplicable;
     }
+    // spins: KETJU's S -> chi = c S / (G m^2) (unclamped: KETJU's body 1 of the spin cases has chi = 4)
+    std::vector<double> chi(3 * n, 0.0);
+    for (int i = 0; i < n; ++i)
+        for (int k = 0; k < 3; ++k) chi[3 * i + k] = c.bodies[i].s[k] * c.c / (c.G * c.bodies[i].m * c.bodies[i].m);
+    rumi_lib::set_spins(chi.data());
     double E0, B0, E1, B1;
     rumi_lib::energy(G, &E0, &B0);
     for (int s = 0; s < n_host; ++s)
@@ -123,6 +121,7 @@ MstarRefStatus mstar_reference_run(const MstarRefCase& c, MstarRefResult& r) {
         r.mergers.push_back(e);
     }
     rumi_lib::get_state(m.data(), x.data(), v.data());
+    rumi_lib::get_spins(chi.data());
     for (int i = 0; i < n; ++i) {
         if (m[i] <= 0) continue;
         MstarRefBody b;
@@ -132,10 +131,10 @@ MstarRefStatus mstar_reference_run(const MstarRefCase& c, MstarRefResult& r) {
         for (int k = 0; k < 3; ++k) {
             b.x[k] = x[3 * i + k] / fx;
             b.v[k] = v[3 * i + k] / fv;
+            b.s[k] = chi[3 * i + k] * c.G * b.m * b.m / c.c;
         }
         r.bodies.push_back(b);
     }
-    r.has_spins = false;
     rumi_lib::kokkos_finalize();
     return MstarRefStatus::Ok;
 }

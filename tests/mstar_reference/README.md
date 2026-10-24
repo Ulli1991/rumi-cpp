@@ -25,7 +25,7 @@ The adapter scales each case to RUMI++ units (mass unit 1e6 Msun, length G M / c
 kw 14, the others zero-radius stars), sets `PN_ORDER` from the case (`1pn`, `1pn+threebody` -> 1, `dynamic_all` -> 31,
 `all` -> 63), `ETA_GBS` = the case's GBS tolerance, `N_ORB_SECULAR` huge, `SECULAR_TRIPLES = false`, `SDAR = false`,
 `NBODY_GBS_TTOL = 1e-12` (KETJU's output-time tolerance), and advances in `KETJU_REF_HOST_STEPS` (default 1000) calls.
-Spins are not available through `rumi_lib` and are not compared. When RUMI++'s MSTAR exists, route the cases (or the
+Spins go through `rumi_lib::set_spins`/`get_spins` (chi = c S / (G m^2), unclamped) and are compared. When RUMI++'s MSTAR exists, route the cases (or the
 MST ones) through it in `mstar_reference_adapter.cpp`.
 
 ## Status
@@ -37,7 +37,7 @@ FAIL cases are registered with `WILL_FAIL` (CMakeLists.txt) until fixed.
 |---|---|
 | `binary_no_pn`, `binary_full_pn_no_spin` | pass (against the original test's expected state) |
 | `instant_*` (4), `merger_from_orbit`, `mst_*` (16) | pass |
-| `binary_full_pn_spin`, `..._generic_units` | skipped: no spin input/output in `rumi_lib`; KETJU's body 1 has chi = 4 (super-extremal) |
+| `binary_full_pn_spin`, `..._generic_units` | pass: spins through `rumi_lib` (API 3), unclamped as in KETJU (body 1 chi = 4); PN2.5-3.5 and the spin terms per body in the general frame (Blanchet 2014 eq. acc3PN, Thorne & Hartle 1985), as KETJU |
 | `binary_1pn`, `binary_1pn_threebody` | pass: LogH evaluates the PN terms with lab-frame velocities (`LogHState::v_frame`); before, with velocities relative to the Newtonian c.o.m. of each call, which moves at 0.0425 c here and drifts under EIH for unequal masses |
 | `head_on_merger` | pass: remnant 1.99890 (head-on NR limit, Sperhake et al. 2011); the remnant fits scale with the orbital angular momentum at the merger (`bh_bh_remnant`, mergers.cpp) |
 | `binary_no_pn_one_host_step` | pass (the Peters shortcut needs radiation reaction, PN_ORDER 2.5PN bit) |

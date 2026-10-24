@@ -20,6 +20,9 @@ every call (`set_particles`, `advance`, `energy`); `G_CODE` is not used by the l
   per subsystem and step.
 - **Step:** `advance(dt, G)` is one standalone HHS step (`INTEGRATOR = hhs`, `ETA_RESTART = 0`, i.e. `PRESET = cluster`).
   `ETA_RESTART > 0`, `SSE_ENABLED`, `TIDAL_FIELD`, `USE_TREE` and `INTEGER_POSITIONS` are refused.
+- **Spins:** `set_spins` / `get_spins` by slot, dimensionless chi vectors (after `set_particles`, which zeroes them):
+  the PN spin couplings of BH binaries (`PN_ORDER` bit 32) and the merger remnants (`get_spins` gives the remnant's
+  fitted spin in the kept slot). Not clamped: |chi| > 1 is integrated as given (as KETJU does).
 - **Mergers:** `merger_events` returns the kept and merged-away slots and the product mass since the last call.
 - **Kokkos:** `kokkos_initialize(threads, device)` after `MPI_Init`, `kokkos_finalize()` before `MPI_Finalize`; an
   already initialised Kokkos (e.g. the host's own) is left alone. All staging is explicit `deep_copy` (any backend).
@@ -36,7 +39,7 @@ every call (`set_particles`, `advance`, `energy`); `G_CODE` is not used by the l
   build time (GIZMO's Makefile reads it from `librumi.a` with `strings` and stops on a mismatch with the version its
   `rumi_coupling.cc` expects) and records the commit for provenance (GIZMO: run log and snapshot header).
 - Versions: 1 = first prototype (set_particles, kick, shift, advance, get_state); 2 = attach_comm, set_mass,
-  ledger, e_ref, save_state/load_state, build_id.
+  ledger, e_ref, save_state/load_state, build_id; 3 = set_spins, get_spins.
 
 ## Build
 
