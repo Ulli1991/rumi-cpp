@@ -592,7 +592,7 @@ double kepler_time_to_pericentre(const double r[3], const double v[3], double mu
     if (r_peri) *r_peri = p / (1.0 + e);
     constexpr double inf = std::numeric_limits<double>::infinity();
     if (e < 1e-12) return 0.0;                                  // circular: every point is the pericentre
-    if (std::fabs(1.0 - e) < 1e-6) {
+    if (std::fabs(1.0 - e) < 1e-6 && std::fabs(eps) * rr < 1e-6 * mu) {   // parabolic in energy too: a bound radial orbit (e = 1, p = 0) takes the ellipse branch
         // Near-parabolic: Barker's equation, t - t_p = sqrt(p^3 / mu) (D + D^3 / 3) / 2 with D = tan(nu / 2) =
         // r.v / sqrt(mu p) (relative error O(|1 - e|); the caller iterates on the pericentre anyway)
         const double D = rv / std::sqrt(mu * p);
