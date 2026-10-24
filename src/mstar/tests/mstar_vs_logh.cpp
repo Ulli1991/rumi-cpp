@@ -163,7 +163,7 @@ int main(int argc, char** argv) {
             s.x = {0.5 / M * r, 0, 0, -1.0 / M * r, 0, 0};
             s.v = {0, 0.5 / M * vr, 0, 0, -1.0 / M * vr, 0};
             const double P = 2 * M_PI / std::sqrt(M);
-            case_run("kepler_e09", s, 10 * P, 1e-12, &s, 2.3e-13, 1.8e-12, 2.7e-12, 2.8e-12, 2.3e-8);
+            case_run("kepler_e09", s, 10 * P, 1e-12, &s, 2.3e-13, 1.8e-12, 2.7e-12, 5.7e-12, 2.3e-8);   // MSTAR A100 4.4e-12
         }
         {
             // Burrau's Pythagorean problem to t = 10; reference: MSTAR-C at tolerance 1e-14

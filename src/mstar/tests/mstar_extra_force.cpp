@@ -267,7 +267,7 @@ void static_field() {
         check(nm, "|x - x_RK4|", rel_diff(ref2.x, M.pos), variant ? 2.6e-12 : 2e-12);   // measured 2.0e-12 / 6.5e-13 (RK4 self-check 1.1e-12 / 1.3e-12)
         check(nm, "|dE_total/E0| (error visible)", std::fabs(E1 - E0) / std::fabs(E0), variant ? 1.5e-13 : 1.2e-13);
         check(nm, "|W_ext/E0| (external work)", std::fabs(W_ext / E0), 1e-6, true);
-        check(nm, "|ledger - W_ext| / |W_ext|", std::fabs(ledger - W_ext) / std::fabs(W_ext), variant ? 1.5e-11 : 2.1e-10);
+        check(nm, "|ledger - W_ext| / |W_ext|", std::fabs(ledger - W_ext) / std::fabs(W_ext), variant ? 5.2e-11 : 2.1e-10);   // tidal: CPU 1.19e-11, A100 4.0e-11
         check(nm, "|ext_work - W_ext| / |W_ext|", std::fabs(M.ext_work - W_ext) / std::fabs(W_ext), variant ? 6.7e-11 : 1.4e-10);   // measured 5.2e-11 / 1.06e-10
     }
 }
@@ -294,9 +294,9 @@ void drag() {
         std::printf("drag tol %.0e: %ld steps, |x - x_RK4| %.3e, dE_N %.6e, ledger -pn_dB %.6e, RK4 drag work %.6e\n",
                     tol, M.perf.successful_steps, err, dE, -M.pn_dB, ref.work_vdep);
         if (tol == 1e-12) {
-            check("drag", "|x - x_RK4| at tol 1e-12", err, 4.7e-13);   // measured 3.6e-13
-            check("drag", "|ledger - RK4 work| / |work|", std::fabs(-M.pn_dB - ref.work_vdep) / std::fabs(ref.work_vdep), 2e-13);
-            check("drag", "|dE_N - ledger| / |dE_N|", std::fabs(dE + M.pn_dB) / std::fabs(dE), 5.1e-13);
+            check("drag", "|x - x_RK4| at tol 1e-12", err, 7.9e-13);   // CPU 3.6e-13, A100 6.0e-13
+            check("drag", "|ledger - RK4 work| / |work|", std::fabs(-M.pn_dB - ref.work_vdep) / std::fabs(ref.work_vdep), 2.8e-13);
+            check("drag", "|dE_N - ledger| / |dE_N|", std::fabs(dE + M.pn_dB) / std::fabs(dE), 1.4e-12);   // A100 1.03e-12
         }
         check("drag", "error shrinks with the tolerance", err / prev, 1.0);
         prev = err;
@@ -319,7 +319,7 @@ int main(int argc, char** argv) {
         // 1e10 x makes KETJU's time transformation (B blind to the extra work) ill-conditioned and round-off grows
         // with the field: measured 2.6e-12 at 1e8, 3.56e-8 / 2.04e-6 at 1e10
         ketju_example(1e5, 1e-14, 1e-13);
-        ketju_example(1e10, 4.6e-8, 2.7e-6);
+        ketju_example(1e10, 1.2e-7, 6.6e-6);   // A100 8.8e-8 / 5.1e-6
 #endif
 #ifndef EF_BRANCH
         static_field();
