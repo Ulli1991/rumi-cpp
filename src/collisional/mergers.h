@@ -36,9 +36,10 @@ void execute_merger(const MergerEvent& event, Particles& p,
                     SubsystemManager& mgr, EnergyBookkeeping& books,
                     double G, double c_code = 0.0);
 
-// BH-BH merger remnant properties (Zlochower+ 2015 fitting formulas)
+// BH-BH merger remnant properties: quasi-circular fits scaled with the orbital angular momentum (head-on limit);
+// L_orb: orbital angular momentum (direction), dx, dv: relative separation and velocity at the decision
 void bh_bh_remnant(double m1, double m2, const double chi1[3], const double chi2[3],
-                   const double L_orb[3], double& m_rem, double chi_rem[3],
+                   const double L_orb[3], const double dx[3], const double dv[3], double& m_rem, double chi_rem[3],
                    double v_kick[3], double G, double c_code);
 
 // Peters (1964) GW coalescence timescale

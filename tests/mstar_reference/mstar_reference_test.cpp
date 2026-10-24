@@ -242,6 +242,9 @@ int main(int argc, char** argv) {
         return 77;
     }
     if (!r.has_spins && R.c.kind != "mst") std::printf("NOTE %s: spins not reported, not compared\n", R.c.name.c_str());
+    for (size_t k = 0; k < r.mergers.size(); ++k)
+        std::printf("INFO merger %zu: ids %d + %d, remnant %.6f (KETJU %.6f)\n", k, r.mergers[k].id1, r.mergers[k].id2,
+                    r.mergers[k].m_remnant, k < R.mergers.size() ? R.mergers[k].m_remnant : 0.0);
     if (R.c.kind == "mst") check_mst(R, r);
     else check_dynamics(R, r);
     std::printf("%s %s (%d failed checks)\n", g_fail ? "FAIL" : "PASS", R.c.name.c_str(), g_fail);
