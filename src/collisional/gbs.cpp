@@ -156,7 +156,8 @@ void collision_scan(const LogHState& s, double G, const double* coll, int skip_i
             const double tau = kepler_time_to_pericentre(q.r, q.v, q.mu, &rp) * sd_factor(s, i, j);
             if (rp < rc && tau < out.tau) {
                 out.tau = tau; out.pi = i; out.pj = j;
-                out.tscale = std::sqrt(rp * rp * rp / q.mu);   // duration of the pericentre passage
+                const double rq = std::max(rp, rc);   // a radial infall has rp ~ 0: land on the contact passage instead
+                out.tscale = std::sqrt(rq * rq * rq / q.mu);   // duration of the pericentre passage
             }
         }
 }
@@ -276,8 +277,9 @@ int GBSIntegrator::integrate_to_time(LogHState& state, double t_target, double G
         if (!at_peri) return false;
         peri_landings++;
         const double rc = coll[peri_i * LOGH_MAX_BODIES + peri_j];
-        if (std::min(rp, q.rr) < rc) {
-            coll_i = peri_i; coll_j = peri_j; coll_rsep = std::min(rp, q.rr);
+        const double r_dec = (q.rv >= 0.0 || tau <= peri_tol) ? std::min(rp, q.rr) : q.rr;   // forced by 8 aims: decide on the actual separation
+        if (r_dec < rc) {
+            coll_i = peri_i; coll_j = peri_j; coll_rsep = r_dec;
             return true;
         }
         peri_misses++;                       // perturbed: the actual pericentre clears r_coll
