@@ -89,7 +89,11 @@ struct DevT {
     V<double***> epos, evel, eaux;                  // (slots, E, 3)
     V<double***> pos, vel, acc;                     // (slots, N, 3)
     V<double**> u;                                  // (slots, N)
-    V<double***> spin, aspin, accvd, sder, pnv;     // (slots, max(Npn, 1), 3)
+    V<double***> spin, aspin, sder;                 // (slots, max(Npn, 1), 3)
+    V<double***> accvd, pnv;                        // (slots, N, 3): velocity-dependent acceleration, velocities
+    V<double***> aext;                              // (slots, N, 3): extra velocity-independent acceleration
+    ExtraForces ex;                                 // extra forces (RUMI++ port of KETJU's extra-force branch)
+    bool vdep_on = false;                           // the auxiliary-velocity scheme is used (PN pairs or ex.vdep)
     V<double*> crad;                                // collision radius per body
     V<char*> cbh;                                   // black hole flag per body
     double cc = 0;                                      // c of the collision rule
@@ -307,6 +311,7 @@ struct DevT {
                 if (j > i) ui += mj * invr;
                 for (int k = 0; k < 3; k++) a[k] += mj * (dr[k] * Ginvr3);
             }
+            extra_vindep(s, i, a);
             for (int k = 0; k < 3; k++) acc(s, i, k) = a[k];
             u(s, i) = ui;
         });
@@ -322,20 +327,51 @@ struct DevT {
         Kokkos::single(Kokkos::PerTeam(t), [&]() { scal(s, S_U) = U; });
         t.team_barrier();
     }
+    // Extra velocity-independent acceleration of body i of slot s added to a (KETJU extra-force branch:
+    // extra_vindep_force, applied after the Newtonian forces): a += A (x - x0) + sum_k -G M_k (x - X_k) / (|x - X_k|^2
+    // + eps^2)^(3/2)
+    KOKKOS_INLINE_FUNCTION void extra_vindep(int s, int i, double* a) const {
+        if (!ex.vindep) return;
+        double x[3] = {pos(s, i, 0) - ex.x0[0], pos(s, i, 1) - ex.x0[1], pos(s, i, 2) - ex.x0[2]};
+        double e[3];
+        for (int r = 0; r < 3; r++) e[r] = ex.A[3 * r] * x[0] + ex.A[3 * r + 1] * x[1] + ex.A[3 * r + 2] * x[2];
+        for (int q = 0; q < ex.n_pm; q++) {
+            double d[3], d2 = ex.pm_eps2;
+            for (int k = 0; k < 3; k++) { d[k] = pos(s, i, k) - ex.pm_x[q][k]; d2 += d[k] * d[k]; }
+            const double f = -G * ex.pm_m[q] / (d2 * sqrt(d2));
+            for (int k = 0; k < 3; k++) e[k] += f * d[k];
+        }
+        for (int k = 0; k < 3; k++) { a[k] += e[k]; aext(s, i, k) = e[k]; }
+    }
+    // velocity-dependent accelerations (PN, extra) with velocities and spins physical or auxiliary (aux)
     KOKKOS_INLINE_FUNCTION void team_pn_acc(const Team& t, int s, bool aux) const {
-        // velocities of the PN particles (update_vel(PHYSICAL / AUXILIARY) restricted to the particles used)
-        Kokkos::parallel_for(Kokkos::TeamThreadRange(t, Npn), [&](int i) {
+        // velocities (update_vel(PHYSICAL / AUXILIARY), restricted to the PN particles without extra forces)
+        const int nv = ex.vdep ? N : Npn;
+        Kokkos::parallel_for(Kokkos::TeamThreadRange(t, nv), [&](int i) {
             double v[3];
             vertex_vel(s, i, aux ? R_AUX : R_VEL, v);
             for (int k = 0; k < 3; k++) pnv(s, i, k) = v[k];
         });
         t.team_barrier();
-        Kokkos::parallel_for(Kokkos::TeamThreadRange(t, Npn), [&](int i) { pn_single(s, i, aux); });
+        if (flags != 0) Kokkos::parallel_for(Kokkos::TeamThreadRange(t, Npn), [&](int i) { pn_single(s, i, aux); });
+        else Kokkos::parallel_for(Kokkos::TeamThreadRange(t, Npn), [&](int i) {
+            for (int k = 0; k < 3; k++) { accvd(s, i, k) = 0; sder(s, i, k) = 0; }
+        });
+        if (ex.vdep) {   // extra_vdep_force: a += D v for every body (after the PN part)
+            t.team_barrier();
+            Kokkos::parallel_for(Kokkos::TeamThreadRange(t, N), [&](int i) {
+                double a[3];
+                for (int r = 0; r < 3; r++) a[r] = i < Npn ? accvd(s, i, r) : 0.0;
+                for (int r = 0; r < 3; r++)
+                    a[r] += ex.D[3 * r] * pnv(s, i, 0) + ex.D[3 * r + 1] * pnv(s, i, 1) + ex.D[3 * r + 2] * pnv(s, i, 2);
+                for (int r = 0; r < 3; r++) accvd(s, i, r) = a[r];
+            });
+        }
         t.team_barrier();
     }
     KOKKOS_INLINE_FUNCTION double eacc_vd(int s, int e, int k) const {
         const int hi = ehi(e), lo = elo(e);
-        return (hi < Npn ? accvd(s, hi, k) : 0.0) - (lo < Npn ? accvd(s, lo, k) : 0.0);
+        return accvd(s, hi, k) - accvd(s, lo, k);
     }
     // integration.c auxiliary_kick (into eaux) / physical_kick (into evel)
     KOKKOS_INLINE_FUNCTION void team_pn_subkick(const Team& t, int s, double dt, bool physical) const {
@@ -343,7 +379,8 @@ struct DevT {
         if (physical) {
             Kokkos::single(Kokkos::PerTeam(t), [&]() {
                 double dB = 0;
-                for (int i = 0; i < Npn; i++)
+                const int nb = ex.vdep ? N : Npn;
+                for (int i = 0; i < nb; i++)
                     for (int k = 0; k < 3; k++) dB += mass(i) * pnv(s, i, k) * accvd(s, i, k);
                 scal(s, S_B) -= dB * dt;
             });
@@ -357,7 +394,7 @@ struct DevT {
         });
         Kokkos::single(Kokkos::PerTeam(t), [&]() {
             for (int k = 0; k < 3; k++) {
-                const double a = acc(s, root, k) + (root < Npn ? accvd(s, root, k) : 0.0);
+                const double a = acc(s, root, k) + accvd(s, root, k);
                 if (physical) root_s(s, R_VEL + k) += dt * a; else root_s(s, R_AUX + k) += dt * a;
             }
         });
@@ -371,7 +408,7 @@ struct DevT {
     // integration.c kick (forces of slot s already computed)
     KOKKOS_INLINE_FUNCTION void team_kick(const Team& t, int s, double ds) const {
         const double dt = ds / scal(s, S_U);
-        if (flags != 0 && Npn >= 2) {
+        if (vdep_on) {
             team_pn_subkick(t, s, dt / 2, false);
             team_pn_subkick(t, s, dt, true);
             team_pn_subkick(t, s, dt / 2, false);
@@ -384,6 +421,24 @@ struct DevT {
                 for (int k = 0; k < 3; k++) root_s(s, R_VEL + k) += dt * acc(s, root, k);
             });
             t.team_barrier();
+        }
+        if (ex.vindep && ex.track_work) {
+            // RUMI++: B follows the work of the extra velocity-independent forces, sum m (v_old + v_new) / 2 . a_ext dt
+            // (the exact kinetic-energy change of their kick), so that T + B = U stays consistent (KETJU's branch
+            // leaves B unchanged: the time transformation then drifts from U with the external work)
+            double w = 0;
+            Kokkos::parallel_reduce(Kokkos::TeamThreadRange(t, N), [&](int v, double& sum) {
+                double x[3];
+                vertex_vel(s, v, R_VEL, x);
+                for (int k = 0; k < 3; k++) {
+                    sum += mass(v) * 0.5 * (vel(s, v, k) + x[k]) * aext(s, v, k);
+                    vel(s, v, k) = x[k];
+                }
+            }, w);
+            t.team_barrier();
+            Kokkos::single(Kokkos::PerTeam(t), [&]() { scal(s, S_B) -= w * dt; });
+            t.team_barrier();
+            return;
         }
         Kokkos::parallel_for(Kokkos::TeamThreadRange(t, N), [&](int v) {
             double x[3];
@@ -729,6 +784,7 @@ struct Engine {
     Dev d;
     int slots = 0, bslot = 0, cslot = 0, cap_N = -1, cap_pn = -1, cap_k = -1;
     int gbs_k = 4;
+    bool work_on = false;   // B carries non-Newtonian work (PN, extra forces): the ledger pn_dB is kept
     // per-step result read back to the host: 0 T, 1 U, 2 time, 3 e0, 4 e1, 5 bad, 6 extrapolated B, 7 collision
     // pair key i N + j (-1: none), 8 r_sep, 9 r_coll, 10 type; from RES_PN the PN positions
     static constexpr int RES_PN = 12;
@@ -748,6 +804,9 @@ struct Engine {
         if (o.opt.max_tree_distance > MAX_ND) throw std::runtime_error("MSTAR: max_tree_distance > 8");
         d.N = N; d.E = N - 1; d.Npn = Npn; d.Nd = o.opt.max_tree_distance; d.kmax = K;
         d.flags = o.opt.PN_flags; d.G = o.opt.G; d.c = o.opt.c;
+        d.ex = o.opt.extra;
+        d.vdep_on = (d.flags != 0 && Npn >= 2) || d.ex.vdep;
+        work_on = d.vdep_on || (d.ex.vindep && d.ex.track_work);
         d.nvars = 1 + 3 + 3 + 6 * (N - 1) + 3 * Npn;
         if (N == cap_N && Npn == cap_pn && K == cap_k) return;
         cap_N = N; cap_pn = Npn; cap_k = K;
@@ -773,9 +832,10 @@ struct Engine {
         d.u = V<double**>("mstar_u", slots, N);
         d.spin = V<double***>("mstar_spin", slots, P, 3);
         d.aspin = V<double***>("mstar_aspin", slots, P, 3);
-        d.accvd = V<double***>("mstar_accvd", slots, P, 3);
+        d.accvd = V<double***>("mstar_accvd", slots, N, 3);
         d.sder = V<double***>("mstar_sder", slots, P, 3);
-        d.pnv = V<double***>("mstar_pnv", slots, P, 3);
+        d.pnv = V<double***>("mstar_pnv", slots, N, 3);
+        d.aext = V<double***>("mstar_aext", slots, N, 3);
         d.data = V<double**>("mstar_data", K + 1, d.nvars + 1);
         res = V<double*>("mstar_res", RES_PN + 3 * P);
         h_res = Kokkos::View<double*, Kokkos::HostSpace>("mstar_hres", RES_PN + 3 * P);
@@ -956,7 +1016,9 @@ struct Engine {
                 sum.z += mj * (dr[2] * Ginvr3);
             }, Kokkos::Sum<Acc4>(a));
             Kokkos::single(Kokkos::PerTeam(t), [&]() {
-                dd.acc(s, i, 0) = a.x; dd.acc(s, i, 1) = a.y; dd.acc(s, i, 2) = a.z;
+                double ai[3] = {a.x, a.y, a.z};
+                dd.extra_vindep(s, i, ai);
+                dd.acc(s, i, 0) = ai[0]; dd.acc(s, i, 1) = ai[1]; dd.acc(s, i, 2) = ai[2];
                 dd.u(s, i) = a.u;
             });
         });
@@ -1229,6 +1291,7 @@ bool MstarKokkos::run_on(Engine<Exec>& im, double time_interval) {
         return true;
     }
     im.allocate();
+    Kokkos::deep_copy(im.d.accvd, 0.0);   // bodies without velocity-dependent forces keep zero
     im.gbs_k = opt.gbs_kmax >= 4 ? 4 : opt.gbs_kmax;
     const double t_start = time;
     time = 0;
@@ -1334,7 +1397,7 @@ bool MstarKokkos::run_on(Engine<Exec>& im, double time_interval) {
                                                 + ((double)n_pn * (n_pn - 1) * (opt.PN_flags & PN_THREEBODY ? n_pn - 2 : 1)));
         if (converged) {
             std::swap(im.bslot, im.cslot);
-            if (opt.PN_flags != 0 && n_pn >= 2) pn_dB += im.h_res(6) - B_now;   // PN work of the step
+            if (im.work_on) pn_dB += im.h_res(6) - B_now;   // work of the non-Newtonian forces
             U = im.h_res(1);
             B_now = im.h_res(1) - im.h_res(0);
             time = im.h_res(2);

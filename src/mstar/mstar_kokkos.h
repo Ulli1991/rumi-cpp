@@ -40,6 +40,25 @@ enum : unsigned {
     PN_SPIN_ALL = PN_1_5_SPIN | PN_2_0_SPIN | PN_SPIN_EVOL
 };
 
+// Extra forces (C++ port of KETJU's experimental extra-force branch, Mannerkoski 2022, b60d16e): forces besides
+// the Newtonian and PN ones, evaluated on the device. Velocity-independent part (positions only; added to the Newtonian
+// accelerations): a linear field a = A (x - x0) (e.g. a tidal tensor) and static point masses (Plummer-softened).
+// Velocity-dependent part (through the auxiliary-velocity scheme exactly as PN; its work enters B like the PN work):
+// a = D v. All constant during one run() call; off by default.
+struct ExtraForces {
+    static constexpr int MAX_PM = 4;
+    bool vindep = false;
+    double A[9] = {};            // row-major 3x3
+    double x0[3] = {};
+    int n_pm = 0;
+    double pm_m[MAX_PM] = {};
+    double pm_x[MAX_PM][3] = {};
+    double pm_eps2 = 0;
+    bool track_work = true;      // B follows their work (RUMI++ fix; false: KETJU's branch, B unchanged)
+    bool vdep = false;
+    double D[9] = {};            // row-major 3x3
+};
+
 // KETJU's ketju_integration_options (same defaults) + the natural constants; softening options not ported
 struct Options {
     int gbs_kmax = 10;
@@ -57,6 +76,7 @@ struct Options {
     double G = 1.0, c = 1.0;
     int team_rows_max_n = 96;          // N <= this: every GBS row inside one team (one launch per step)
     bool host_engine = false;          // run on the host execution space (small groups in GPU builds)
+    ExtraForces extra;                 // extra forces (off)
 };
 
 struct Perf {
@@ -100,9 +120,10 @@ class MstarKokkos {
     bool coll_bh_max_single = false;
     int coll_i = -1, coll_j = -1, coll_type = 0;
     double coll_rsep = 0, coll_rcoll = 0;
-    // PN work ledger (RUMI++ extension): sum over accepted steps of the extrapolated change of B = U - T by the PN
-    // kicks (B is carried as an extra GBS variable outside the error control); the Newtonian T + U changed by
-    // -pn_dB through the PN forces, the rest of its change is integration error. Zero without PN.
+    // Work ledger of the non-Newtonian forces (RUMI++ extension): sum over accepted steps of the extrapolated
+    // change of B = U - T by the PN and extra-force kicks (B is carried as an extra GBS variable outside the error
+    // control); the Newtonian T + U changed by -pn_dB through these forces, the rest of its change is integration
+    // error. Zero without them.
     double pn_dB = 0;
     std::vector<MergerInfo> mergers;
 
