@@ -260,11 +260,13 @@ BIG_GROUP = dict(TEST_CASE="plummer", INTEGRATOR="hhs", TOTAL_TIME_MYR="1e-5", D
 # Bahcall-Wolf cusp inside 1e-3 pc (IMBH_CUSP_*) in a 200-star cluster, all PN orders: one PN MSTAR group
 MSTAR_CUSP = dict(SPIN_IMBH, TOTAL_TIME_MYR="2e-5", DT_MAX_MYR="2e-6", IMBH_CUSP_N="40", IMBH_CUSP_R_PC="1e-3",
                   R_NGB="2e-3", PRINT_INTERVAL="1")
-MSTAR_BIG_DE = 1e-6       # preliminary; set to 1.3x measured
-MSTAR_COLL_DE = 1e-6
-MSTAR_CUSP_DE = 1e-6
-MSTAR_CORE_DE = 1e-6
-MSTAR_CUSP_TIDE_DE = 1e-6
+MSTAR_BIG_DE = 4.3e-10    # mstar_big_group: 3.32e-10 measured (host gcc 15; FSI-dominated, MSTAR calls ~1e-15)
+MSTAR_COLL_DE = 2.5e-8    # mstar_coll_group: 1.92e-8 measured (merger sink included)
+MSTAR_CUSP_DE = 2.6e-9    # mstar_imbh_cusp: 1.97e-9 measured (PN work in E_pn)
+MSTAR_CORE_DE = 1.6e-6    # mstar_dense_core: 1.21e-6 measured, FSI-dominated (9.8e-7 with MSTAR off, the groups split);
+                          # MSTAR's own unbooked error 2.9e-12 (NBODY_EATTR)
+MSTAR_CUSP_TIDE_DE = 1e-6  # mstar_imbh_cusp_tide: preliminary
+MSTAR_SUB_ERR = 4e-12     # max per-print sum |unbooked subsystem dE|/E0 (NBODY_EATTR logh_abs): 2.9e-12 measured (dense core)
 # Natal kicks (runtime_sse.cpp): 500 12-Msun stars at Z = 0.02 in a cluster of r_h = 1 kpc (no dynamics to speak of),
 # 1 Myr steps through their core collapse at 19-21 Myr: 500 NSs (Fryer 2012 rapid, f_fb ~ 0.025)
 NATAL_NS = dict(TEST_CASE="plummer", INTEGRATOR="hhs", TOTAL_TIME_MYR="22", DT_MAX_MYR="1.0", DT_MIN_MYR="1e-14",
@@ -1133,6 +1135,8 @@ def mstar_groups(exe, label, cfg, bound, min_nmax, min_colls=0, pn=False, tide=F
         ok &= check(f"{label} collisions inside MSTAR groups", n_coll, min_colls, lower=True)
         ok &= check(f"{label} |N_final - (N0 - collisions)|", abs(n_final - (n0 - n_coll)), 0)
     eattr = re.findall(r"EATTR step \d+ signed_dE (\S+) logh (\S+) logh_abs (\S+) n_logh \d+ books: gw \S+ pn (\S+)", out)
+    ok &= check(f"{label} max unbooked subsystem |dE|/E0 per print (integration error)",
+                max([float(e[2]) for e in eattr] or [0.0]), MSTAR_SUB_ERR)
     if eattr:
         print(f"  last EATTR: signed dE/E0 {eattr[-1][0]}, unbooked subsystem dE/E0 {eattr[-1][1]} "
               f"(abs {eattr[-1][2]}), E_pn/E0 {eattr[-1][3]}")
@@ -2513,8 +2517,10 @@ CASES = {
                                                 MSTAR_CUSP_DE, 20, pn=True),
     "mstar_imbh_cusp_tide": lambda exe: mstar_groups(exe, "IMBH cusp, all PN, MSTAR + outside tide", MSTAR_CUSP,
                                                      MSTAR_CUSP_TIDE_DE, 20, pn=True, tide=True),
-    "mstar_dense_core": lambda exe: mstar_groups(exe, "dense core, MSTAR", dict(TRIPLES, PLUMMER_R_HALF="0.03",
-                                                                                 TOTAL_TIME_MYR="1e-4"), MSTAR_CORE_DE, 9),
+    # dense core: 100 stars (40 Msun, half in 1-20 AU binaries) inside r_h = 2e-3 pc: a 73-body MSTAR group
+    "mstar_dense_core": lambda exe: mstar_groups(exe, "dense core, MSTAR", dict(TRIPLES, PLUMMER_N="100",
+                                                 PLUMMER_M_TOTAL="40", PLUMMER_R_HALF="0.002", TOTAL_TIME_MYR="2e-5",
+                                                 DT_MAX_MYR="1e-5"), MSTAR_CORE_DE, 40),
     # Exact tree searches (M7.4), forced at every set size, each search checked bitwise against O(N^2)
     # Tree searches on by default above the break-even set size (host builds 2048): 5000 stars use them at the top
     # levels without any TREE_* key (no tree search ran before), bit-identical to the O(N^2) run
