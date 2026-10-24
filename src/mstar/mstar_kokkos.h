@@ -17,7 +17,8 @@
 //  - reductions (T, U, forces) are deterministic team reductions, so results agree with the C library to round-off
 //    (not bitwise) and are bitwise reproducible run to run;
 //  - one device->host copy per GBS step (errors, energies, time, BH positions);
-//  - the MST is built on the host by dense Prim, O(N^2), giving KETJU's tree (Prim, float edge weights);
+//  - the MST by dense Prim, O(N^2), giving KETJU's tree (Prim, float edge weights): on the host, or in one device
+//    team from Options::device_tree_min_n bodies;
 //  - not ported: star-star softening, no_star_star_gravity, the divide-and-conquer MST, MPI.
 
 #pragma once
@@ -77,6 +78,8 @@ struct Options {
     int team_rows_max_n = 96;          // host engine: N <= this runs every GBS row inside one team
     int team_rows_max_n_device = 0;    // device engine: the same (A100: the staged path is faster at every N)
     bool host_engine = false;          // run on the host execution space (small groups in GPU builds)
+    int device_tree_min_n = 256;       // device engine: the MST on the device from this size (host Prim below)
+    bool device_tree_everywhere = false;   // tests: the team MST on the host engine too
     ExtraForces extra;                 // extra forces (off)
 };
 

@@ -6,7 +6,7 @@
 // initial state: agreement of the final states to round-off growth, and accuracy against independent references
 // (Kepler: analytic; energies). ctest mstar_compare (CPU builds; GPU via NBODY_* job). Usage:
 //   mstar-compare [case ...] [--bench]      cases: kepler_e09 pythagorean core100 core100_staged pn_binary
-//                                            imbh_cusp_pn bh_merger  (default: all)
+//                                            imbh_cusp_pn device_tree bh_merger bh_merger_orbit pn_ledger collision (default: all)
 // Bounds: 1.3x the larger measured value of the CPU (gcc 15 -O2, Kokkos OpenMP 1 thread; bitwise for two bodies)
 // and the A100 (CUDA 13.2; FMA contraction and team reductions make the GBS step sequence differ at the
 // tolerance-1e-12 round-off floor) builds, noted at each case.
@@ -91,8 +91,10 @@ Run run_c(const Sys& sy, const Opt& o, double T) {
     return r;
 }
 
+bool g_device_tree = false;   // force the one-team Prim tree (device_tree case)
 Run run_k(const Sys& sy, const Opt& o, double T, rumi_mstar::Perf* perf_out = nullptr) {
     rumi_mstar::MstarKokkos M(sy.npn, sy.n - sy.npn);
+    if (g_device_tree) { M.opt.device_tree_everywhere = true; M.opt.device_tree_min_n = 0; }
     M.opt.G = o.G;
     M.opt.c = o.c;
     M.opt.PN_flags = o.pn;
@@ -260,6 +262,18 @@ int main(int argc, char** argv) {
             o.tol = 1e-10;
             o.team_max = 0;   // staged path (separate force / kick-drift launches)
             compare("core100_staged", s, o, 0.25, 1.3e-12, 1.3e-13, 1.3e-13);
+        }
+        if (want(argc, argv, "device_tree")) {
+            // the one-team Prim (device tree) must give the host Prim's tree: identical runs
+            Sys s = plummer(100, 0, 42);
+            Opt o;
+            o.tol = 1e-10;
+            const Run a = run_k(s, o, 0.25);
+            g_device_tree = true;
+            const Run b = run_k(s, o, 0.25);
+            g_device_tree = false;
+            check("device_tree", "|dx|/x host vs team Prim", rel_diff(a.x, b.x), 0.0);
+            check("device_tree", "step count diff", std::fabs((double)(a.steps - b.steps)), 0.0);
         }
         if (want(argc, argv, "pn_binary")) {
             // KETJU unit test binary_system_full_pn_spin (G = c = 1), shortened to 1e5

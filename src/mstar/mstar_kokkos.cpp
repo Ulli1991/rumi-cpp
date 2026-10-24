@@ -974,7 +974,8 @@ struct Engine {
             Kokkos::deep_copy(d.crad, hr);
             Kokkos::deep_copy(d.cbh, hb);
         }
-        build_tree(o.pos.data(), o.vel.data(), s);
+        if (use_device_tree()) build_tree_device(s);
+        else build_tree(o.pos.data(), o.vel.data(), s);
     }
     // slot s -> host state (time relative to the run start)
     void download_state(int s, double& t) {
@@ -993,9 +994,128 @@ struct Engine {
     }
     // MST rebuild from the positions of slot s (ketju_construct_MST after a step)
     void rebuild_tree(int s) {
+        if (use_device_tree()) { build_tree_device(s); return; }
         double t;
         download_state(s, t);
         build_tree(o.pos.data(), o.vel.data(), s);
+    }
+    bool use_device_tree() const {
+        return (o.opt.device_tree_everywhere || !std::is_same<Exec, HostExecSpace>::value) && o.n >= o.opt.device_tree_min_n;
+    }
+
+    // The same tree on the device (one team): dense Prim with float keys, root nearest the c.o.m., ties to the
+    // lowest index; relative coordinates of slot s set there. The path lists are built on the host from the parents.
+    V<float*> pk_key;
+    V<int*> pk_par;
+    V<char*> pk_in;
+    void build_tree_device(int s) {
+        const double t0 = wall();
+        const int N = o.n;
+        if ((int)pk_key.extent(0) < N) {
+            pk_key = V<float*>("mstar_pk_key", N);
+            pk_par = V<int*>("mstar_pk_par", N);
+            pk_in = V<char*>("mstar_pk_in", N);
+        }
+        const Dev dd = d;
+        const auto key = pk_key;
+        const auto par = pk_par;
+        const auto inm = pk_in;
+        Kokkos::parallel_for("mstar_prim", Kokkos::TeamPolicy<Exec>(1, Kokkos::AUTO), KOKKOS_LAMBDA(const Team& t) {
+            // centre of mass and the body nearest to it (lowest index among equal distances, as the host loop)
+            double M = 0, c0 = 0, c1 = 0, c2 = 0;
+            Kokkos::parallel_reduce(Kokkos::TeamThreadRange(t, N), [&](int i, double& m) { m += dd.mass(i); }, M);
+            Kokkos::parallel_reduce(Kokkos::TeamThreadRange(t, N), [&](int i, double& a) { a += dd.mass(i) * dd.pos(s, i, 0); }, c0);
+            Kokkos::parallel_reduce(Kokkos::TeamThreadRange(t, N), [&](int i, double& a) { a += dd.mass(i) * dd.pos(s, i, 1); }, c1);
+            Kokkos::parallel_reduce(Kokkos::TeamThreadRange(t, N), [&](int i, double& a) { a += dd.mass(i) * dd.pos(s, i, 2); }, c2);
+            const double cp[3] = {c0 / M, c1 / M, c2 / M};
+            double rmin = 0;
+            Kokkos::parallel_reduce(Kokkos::TeamThreadRange(t, N), [&](int i, double& mn) {
+                double r2 = 0;
+                for (int k = 0; k < 3; k++) { const double ds = dd.pos(s, i, k) - cp[k]; r2 += ds * ds; }
+                const double r = sqrt(r2);
+                if (r < mn) mn = r;
+            }, Kokkos::Min<double>(rmin));
+            int root = 0;
+            Kokkos::parallel_reduce(Kokkos::TeamThreadRange(t, N), [&](int i, int& mn) {
+                double r2 = 0;
+                for (int k = 0; k < 3; k++) { const double ds = dd.pos(s, i, k) - cp[k]; r2 += ds * ds; }
+                if (sqrt(r2) == rmin && i < mn) mn = i;
+            }, Kokkos::Min<int>(root));
+            Kokkos::parallel_for(Kokkos::TeamThreadRange(t, N), [&](int w) {
+                key(w) = Kokkos::Experimental::infinity<float>::value;
+                par(w) = -1;
+                inm(w) = (w == root);
+                dd.parent(w) = -1; dd.etp(w) = -1; dd.level(w) = 0;
+            });
+            t.team_barrier();
+            auto relax = [&](int v) {
+                Kokkos::parallel_for(Kokkos::TeamThreadRange(t, N), [&](int w) {
+                    if (inm(w)) return;
+                    double r2 = 0;
+                    for (int k = 0; k < 3; k++) { const double ds = dd.pos(s, v, k) - dd.pos(s, w, k); r2 += ds * ds; }
+                    const float wt = (float)sqrt(r2);
+                    if (wt < key(w)) { key(w) = wt; par(w) = v; }
+                });
+                t.team_barrier();
+            };
+            relax(root);
+            Kokkos::single(Kokkos::PerTeam(t), [&]() {
+                for (int k = 0; k < 3; k++) {
+                    dd.root_s(s, R_POS + k) = dd.pos(s, root, k);
+                    dd.root_s(s, R_VEL + k) = dd.vel(s, root, k);
+                }
+            });
+            for (int cnum = 0; cnum < N - 1; cnum++) {
+                // smallest key (float bits are ordered for keys >= 0), lowest index among equal keys
+                unsigned long long best = ~0ULL;
+                Kokkos::parallel_reduce(Kokkos::TeamThreadRange(t, N), [&](int w, unsigned long long& mn) {
+                    if (inm(w)) return;
+                    const unsigned int bits = Kokkos::bit_cast<unsigned int>(key(w));
+                    const unsigned long long q = ((unsigned long long)bits << 32) | (unsigned int)w;
+                    if (q < mn) mn = q;
+                }, Kokkos::Min<unsigned long long>(best));
+                const int v = (int)(best & 0xffffffffULL);
+                Kokkos::single(Kokkos::PerTeam(t), [&]() {
+                    const int p = par(v);
+                    inm(v) = 1;
+                    dd.parent(v) = p;
+                    dd.level(v) = dd.level(p) + 1;
+                    dd.etp(v) = cnum;
+                    dd.ehi(cnum) = v;
+                    dd.elo(cnum) = p;
+                    for (int k = 0; k < 3; k++) {
+                        dd.epos(s, cnum, k) = dd.pos(s, v, k) - dd.pos(s, p, k);
+                        dd.evel(s, cnum, k) = dd.vel(s, v, k) - dd.vel(s, p, k);
+                    }
+                });
+                t.team_barrier();
+                relax(v);
+            }
+        });
+        o.perf.launches++;
+        // path lists on the host from the tree
+        auto hp = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), d.parent);
+        auto hl = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), d.level);
+        auto hh = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), d.ehi);
+        h_off.assign(N + 1, 0);
+        for (int v = 0; v < N; v++) {
+            h_off[v + 1] = h_off[v] + hl(v);
+            if (hl(v) == 0) d.root = v;
+        }
+        h_pe.assign(std::max(h_off[N], 1), 0);
+        for (int cnum = 0; cnum < N - 1; cnum++) {
+            const int v = hh(cnum), p = hp(v);
+            for (int q = 0; q < hl(p); q++) h_pe[h_off[v] + q] = h_pe[h_off[p] + q];
+            h_pe[h_off[v] + hl(p)] = cnum;
+        }
+        {
+            Kokkos::View<int*, Kokkos::HostSpace> ho(h_off.data(), N + 1);
+            Kokkos::deep_copy(d.path_off, ho);
+            if ((int)d.path_edge.extent(0) < (int)h_pe.size()) d.path_edge = V<int*>("mstar_pe", h_pe.size() + N);
+            Kokkos::View<int*, Kokkos::HostSpace> hpe(h_pe.data(), h_pe.size());
+            Kokkos::deep_copy(Kokkos::subview(d.path_edge, std::make_pair((size_t)0, h_pe.size())), hpe);
+        }
+        o.perf.t_mst += wall() - t0;
     }
 
     // Forces (acc, u) of nslots consecutive slots from slot0: one team per (slot, i)
