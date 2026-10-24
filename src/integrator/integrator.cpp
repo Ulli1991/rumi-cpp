@@ -1468,7 +1468,8 @@ void advance_subsystems_in_range_impl(Particles& p, int start, int count,
         const double subsys_log = g_collisional.subsys_err_tol;
         auto log_subsys = [&](const Subsystem& sub, int nb, const char* kind, double d, int si) {
             if (subsys_log <= 0.0 || g_collisional.e_ref <= 0.0 || MPIComm::rank() != 0 ||
-                std::fabs(d) <= subsys_log * g_collisional.e_ref || !subsys_err_first(sub.particle_ids)) return;
+                std::fabs(d) <= subsys_log * g_collisional.e_ref) return;
+            if (std::strcmp(kind, "unbooked-irk") != 0 && !subsys_err_first(sub.particle_ids)) return;   // Gauss-IRK A/B: every call logged
             std::string msg;
             char buf[96];
             std::snprintf(buf, sizeof(buf), "SUBSYS_ERR step %d %s dE/E0 %.3e type %d n %d dt %.3e a %.4e e %.5f m",
