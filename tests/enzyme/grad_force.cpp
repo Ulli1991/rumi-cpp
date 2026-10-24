@@ -4,6 +4,7 @@
 // one constant for every particle and component; its value fixes the coefficient (GRAD_COEFF dt^2 times 2).
 //   clang++ -std=c++20 -O2 -fplugin=ClangEnzyme-18.so -I<kokkos-clang>/include -Isrc/core -Isrc/gravity ...
 #include "n2_kernels.h"
+#include <algorithm>
 #include <cstdio>
 #include <random>
 #include <vector>
@@ -41,6 +42,7 @@ int main() {
     std::mt19937_64 rng(42);
     std::uniform_real_distribution<double> U(-1.0, 1.0);
     const double G = 4.302194e-3, dt = 1e-3;
+    double worst = 0.0;
     for (int n : {2, 3, 8, 32}) {
         std::vector<double> x(3 * n), m(n), a0(3 * n), gp(3 * n, 0.0);
         for (auto& q : x) q = U(rng);
@@ -72,5 +74,9 @@ int main() {
         }
         std::printf("n=%3d: kernel correction / ((1/m_i) dPhi/dx_i) = %.15e .. %.15e   (in units of GRAD_COEFF dt^2: %.12f .. %.12f)\n",
                     n, rmin, rmax, rmin / (GRAD_COEFF * dt * dt), rmax / (GRAD_COEFF * dt * dt));
+        worst = std::max({worst, std::fabs(rmin / (GRAD_COEFF * dt * dt) - 1.0), std::fabs(rmax / (GRAD_COEFF * dt * dt) - 1.0)});
     }
+    const bool ok = worst < 1e-12;
+    std::printf("%s: max |ratio / (GRAD_COEFF dt^2) - 1| = %.1e\n", ok ? "PASS" : "FAIL", worst);
+    return !ok;
 }

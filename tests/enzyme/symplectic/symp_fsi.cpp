@@ -1,11 +1,12 @@
 // Target 4: FSI step (fsi_step, non-tree path) and one fixed-partition HHS level (hhs_fsi_recursive_impl: cross kicks
 // with the cross gradient), kernels mirrored from n2_kernels.h ForceK / GradK (pair formulas verbatim; Kahan
 // compensation of kick_velocities and of the n2 driver omitted: it does not change the map mathematically).
-// z = (x, p), p = m v.
+// z = (x, p), p = m v. Also: map jump where a level assignment flips; d(dE)/d(dt) (reverse vs forward, local order).
 // Build (from the repository root; logh_ctrl.cpp: python3.11 tests/enzyme/symplectic/make_ctrl.py <dir>):
 //   clang++ -std=c++20 -O2 -fplugin=ClangEnzyme-18.so -Isrc/collisional tests/enzyme/symplectic/symp_fsi.cpp -o symp_fsi
 //   (Enzyme)
 #include "jac.h"
+template <typename... T> double __enzyme_fwddiff_scalar(void*, T...);   // Enzyme matches the name prefix
 
 static int N = 5, NS = 3;           // slow set [0, NS), fast set [NS, N)
 static double m[8], G = 1.0, soft2 = 0.0, DT = 0.05;
@@ -78,8 +79,40 @@ static void fmap(const double* z, double* out) {
     if (mode == 0) fsi(x, v, 0, N, DT); else hhs(x, v, DT);
     for (int i = 0; i < 3 * N; i++) { out[i] = x[i]; out[3 * N + i] = v[i] * m[i / 3]; }
 }
+static double energy(const double* x, const double* v) {
+    double E = 0;
+    for (int i = 0; i < N; i++) {
+        E += 0.5 * m[i] * (v[3 * i] * v[3 * i] + v[3 * i + 1] * v[3 * i + 1] + v[3 * i + 2] * v[3 * i + 2]);
+        for (int j = i + 1; j < N; j++) {
+            const double dx = x[3 * j] - x[3 * i], dy = x[3 * j + 1] - x[3 * i + 1], dz = x[3 * j + 2] - x[3 * i + 2];
+            E -= G * m[i] * m[j] / std::sqrt(dx * dx + dy * dy + dz * dz + soft2);
+        }
+    }
+    return E;
+}
+// energy error after K steps of sizes dts[k] (mode 0 FSI, 1 HHS level) from the state Z0
+static double Z0[DMAX];
+static int KST = 1;
+__attribute__((noinline)) static double dE_steps(const double* dts) {
+    double x[24], v[24];
+    for (int i = 0; i < 3 * N; i++) { x[i] = Z0[i]; v[i] = Z0[3 * N + i] / m[i / 3]; }
+    const double E0 = energy(x, v);
+    for (int k = 0; k < KST; k++) { if (mode == 0) fsi(x, v, 0, N, dts[k]); else hhs(x, v, dts[k]); }
+    return energy(x, v) - E0;
+}
+template <typename... T> double __enzyme_autodiff(void*, T...);
+// kinetic and potential energy after the same steps (scale of the cancellation in d(dE)/d(dt))
+__attribute__((noinline)) static void TU_steps(const double* dts, double* tu) {
+    double x[24], v[24];
+    for (int i = 0; i < 3 * N; i++) { x[i] = Z0[i]; v[i] = Z0[3 * N + i] / m[i / 3]; }
+    for (int k = 0; k < KST; k++) { if (mode == 0) fsi(x, v, 0, N, dts[k]); else hhs(x, v, dts[k]); }
+    double z[24] = {};
+    tu[1] = energy(x, z);
+    tu[0] = energy(x, v) - tu[1];
+}
 static double M[DMAX][DMAX], Mb[DMAX][DMAX], Mfd[DMAX][DMAX];
 int main() {
+    int fails = 0;
     // 3 slow bodies + a fast binary
     const double m0[5] = {1.0, 0.7, 0.5, 0.3, 0.2};
     const double x0[15] = {0, 0, 0, 3, 0.5, -0.2, -2, 2.5, 0.4, 0.8, -3, 0.1, 0.8, -2.8, 0.15};
@@ -119,5 +152,51 @@ int main() {
                 }
                 std::printf("%d %5.0e %5.2f | %8.1e %8.1e %9.1e | %8.1e %8.1e | tr %8.1e dP %8.1e dL %8.1e\n", md, s2, dt, symp_defect(M, d), symp_defect(Mfd, d),
                             det(M, d) - 1, rv, prod_minus_I(Mb, M, d), tr, dP, dL);
+                fails += !(symp_defect(M, d) < 1e-14) + !(prod_minus_I(Mb, M, d) < 1e-12) + !(std::max(tr, std::max(dP, dL)) < 1e-12);
             }
+    // level change: the binary in the fast set (HHS level) or with everything in one FSI step; the map jumps by
+    // |Phi_HHS - Phi_FSI| where the level assignment flips (each piece symplectic, rows above)
+    std::printf("# level flip | dt | max |Phi_HHS(z) - Phi_FSI(z)| / max(1, |z|) | ratio to dt / 2\n");
+    double prev = 0, slope = 0;
+    for (double dt : {0.08, 0.04, 0.02, 0.01}) {
+        soft2 = 0; DT = dt;
+        double z[DMAX], za[DMAX], zb[DMAX];
+        for (int i = 0; i < 15; i++) { z[i] = x0[i]; z[15 + i] = v0[i] * m[i / 3]; }
+        mode = 1; fmap(z, za); mode = 0; fmap(z, zb);
+        double j = 0; for (int i = 0; i < 6 * N; i++) j = std::max(j, std::fabs(za[i] - zb[i]) / std::max(1.0, std::fabs(z[i])));
+        if (prev > 0) slope = std::log2(prev / j);
+        std::printf("  %5.3f  %9.3e  %s%.2f\n", dt, j, prev > 0 ? "order " : "", prev > 0 ? slope : 0.0);
+        prev = j;
+    }
+    fails += !(slope > 4.5 && slope < 5.5);   // both 4th order: the jump is a local error, O(dt^5)
+    // sensitivities (d(dE)/d(dt) = grad E . dPhi/d(dt) cancels along the flow: compared on the scale |dT| + |dU|)
+    // local order: one step, p = dt d(dE)/d(dt) / dE -> 5 (= d ln|dE| / d ln eta at fixed levels);
+    // K = 16 steps: d(dE)/d(dt_k) of every step by one reverse sweep vs forward mode along dt, share of the largest
+    std::printf("# sensitivity | mode K dt | dE | p (fwd) | rev-fwd / (|dT|+|dU|) | share of the largest step (k)\n");
+    for (int md : {0, 1}) {
+        mode = md; soft2 = 0;
+        for (int i = 0; i < 15; i++) { Z0[i] = x0[i]; Z0[15 + i] = v0[i] * m[i / 3]; }
+        double p1 = 0;
+        for (double dt : {0.004, 0.002, 0.001}) {
+            KST = 1; double d1[1] = {dt}, o1[1] = {dt};
+            const double dE = dE_steps(d1), f = __enzyme_fwddiff_scalar((void*)dE_steps, d1, o1);
+            p1 = f / dE;
+            std::printf("  %d  1 %5.3f | %10.3e | %6.3f\n", md, dt, dE, p1);
+        }
+        fails += !(p1 > 4.5 && p1 < 5.5);
+        KST = 16;
+        double dts[64], g[64] = {}, ones[64], tu[2], dtu[2] = {0, 0};
+        for (int k = 0; k < KST; k++) { dts[k] = 0.002; ones[k] = 0.002; }
+        const double dE = dE_steps(dts);
+        __enzyme_autodiff((void*)dE_steps, enzyme_dup, dts, g);
+        const double fwd = __enzyme_fwddiff_scalar((void*)dE_steps, dts, ones);
+        __enzyme_fwddiff((void*)TU_steps, enzyme_dup, dts, ones, enzyme_dupnoneed, tu, dtu);
+        double sum = 0, big = 0; int kb = 0;
+        for (int k = 0; k < KST; k++) { sum += dts[k] * g[k]; if (std::fabs(dts[k] * g[k]) > big) { big = std::fabs(dts[k] * g[k]); kb = k; } }
+        const double rel = std::fabs(sum - fwd) / (std::fabs(dtu[0]) + std::fabs(dtu[1]));
+        std::printf("  %d %d %5.3f | %10.3e | %6.3f | %8.1e | %.2f (%d)\n", md, KST, 0.002, dE, fwd / dE, rel, big / std::fabs(sum), kb);
+        fails += !(rel < 1e-12);
+    }
+    std::printf(fails ? "FAIL (%d)\n" : "PASS\n", fails);
+    return fails;
 }

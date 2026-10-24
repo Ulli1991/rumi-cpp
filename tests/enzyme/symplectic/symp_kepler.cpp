@@ -48,6 +48,7 @@ int main(int argc, char** argv) {
     std::vector<double> dts = {1e-3, 0.1, 0.37, 0.49999, 0.50001, 1.0, 10.3, 1000.3};
     if (fine) { es.clear(); for (int i = 0; i <= 60; i++) es.push_back(1.0 - std::pow(10.0, -i * 0.15)); }
     double worst = 0; double worst_at[3] = {};
+    int fails = 0;
     for (double e : es)
         for (double f0 : fs)
             for (double dtu : dts) {
@@ -94,6 +95,11 @@ int main(int argc, char** argv) {
                 std::printf("%-10.8g %5.2f %8.5g | %8.1e %8.1e %8.1e | %8.1e %8.1e %8.1e | %8.1e %8.1e | %8.1e %3d %s\n", e, f0, dtu, de, dfd, efd,
                             dE / std::max(1.0, sE * mm), dL / std::max(1.0, mm), req / std::max(1.0, mm), rv, rj / std::max(1.0, mm * mm), mm, it, br);
                 if (de > worst) { worst = de; worst_at[0] = e; worst_at[1] = f0; worst_at[2] = dtu; }
+                // it == 1: the Laguerre-Conway loop left at F == 0 on the initial guess, whose tangent Enzyme returns
+                // (the value is the root: the FD defect stays ~1e-11); otherwise symplectic to round-off
+                fails += !(de < (it == 1 ? 1e-7 : 1e-11)) + !(dE / std::max(1.0, sE * mm) < 1e-11) + !(dL / std::max(1.0, mm) < 1e-11);
             }
     std::printf("# worst defect %.2e at e=%.10g f0=%.2f dt/T=%g\n", worst, worst_at[0], worst_at[1], worst_at[2]);
+    std::printf(fails ? "FAIL (%d)\n" : "PASS\n", fails);
+    return fails;
 }

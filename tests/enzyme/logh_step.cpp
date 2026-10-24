@@ -1,6 +1,6 @@
 // One fixed-signature LogH + GBS step (logh_gbs_step, k_fixed stages, always accepted) differentiated with Enzyme:
 // d(energy error)/d(initial positions) of an eccentric binary against central differences of the same function.
-// Newtonian, and PN1-2.5 with the auxiliary velocities.
+// Newtonian, and PN1-2.5 with the auxiliary velocities. Also forward vs reverse mode, and d(dE)/d(dt) (local order).
 //   clang++ -std=c++20 -O2 -fplugin=ClangEnzyme-18.so -Isrc/collisional tests/enzyme/logh_step.cpp
 #include "../../src/collisional/logh.cpp"
 #include "../../src/collisional/logh_step.cpp"
@@ -9,6 +9,7 @@
 
 extern int enzyme_dup, enzyme_const;
 template <typename... T> double __enzyme_autodiff(void*, T...);
+template <typename... T> double __enzyme_fwddiff(void*, T...);
 
 static const int SEQ[] = {2, 4, 6, 8, 10, 12, 14, 16, 18, 20};
 static int g_pn = 0;
@@ -60,6 +61,21 @@ int main() {
         }
         std::printf("  worst relative difference %.1e\n", worst);
         if (!(worst < 1e-5)) fails++;
+        // forward mode along a direction vs the reverse gradient
+        const double dir[6] = {0.3, -0.7, 0.2, 0.5, 0.1, -0.4};
+        const double fwd = __enzyme_fwddiff((void*)energy_error, enzyme_dup, pos, dir, enzyme_const, vel, enzyme_const, mass,
+                                            enzyme_const, dt);
+        double rev = 0.0, sc = 0.0;
+        for (int i = 0; i < 6; i++) { rev += grad[i] * dir[i]; sc += std::fabs(grad[i] * dir[i]); }
+        std::printf("  forward %.12e  reverse %.12e  rel %.1e\n", fwd, rev, std::fabs(fwd - rev) / sc);
+        if (!(std::fabs(fwd - rev) <= 1e-12 * sc)) fails++;
+        // local order (Newtonian; with PN dE holds the radiated energy): p = dt d(dE)/d(dt) / dE, forward mode in dt
+        for (double h : {0.05, 0.025, 0.0125}) {
+            if (g_pn) break;
+            const double dE = energy_error(pos, vel, mass, h);
+            const double dd = __enzyme_fwddiff((void*)energy_error, enzyme_const, pos, enzyme_const, vel, enzyme_const, mass, h, 1.0);
+            std::printf("  dt = %.4f: dE = % .3e  p = dt d(dE)/d(dt) / dE = %.3f\n", h, dE, h * dd / dE);
+        }
     }
     std::printf(fails ? "FAIL\n" : "PASS\n");
     return fails;

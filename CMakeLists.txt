@@ -337,3 +337,52 @@ if(USE_HDF5 AND HDF5_FOUND)
     endif()
 endif()
 
+
+# Enzyme autodiff tests (tests/enzyme, docs/ENZYME.md): compiled with a clang matching the plugin (LLVM 18), not CXX
+option(RUMI_ENZYME_TESTS "Build and register the Enzyme autodiff tests (needs ENZYME_CLANG and ENZYME_PLUGIN)" OFF)
+if(RUMI_ENZYME_TESTS)
+    set(ENZYME_CLANG "clang++" CACHE FILEPATH "clang++ of the LLVM the Enzyme plugin was built against (18)")
+    set(ENZYME_PLUGIN "" CACHE FILEPATH "ClangEnzyme-18.so")
+    if(NOT EXISTS "${ENZYME_PLUGIN}")
+        message(FATAL_ERROR "RUMI_ENZYME_TESTS: set ENZYME_PLUGIN to ClangEnzyme-18.so (docs/ENZYME.md)")
+    endif()
+    find_program(ENZYME_CLANG_PATH NAMES ${ENZYME_CLANG} REQUIRED)
+    get_filename_component(ENZYME_CLANG_BIN "${ENZYME_CLANG_PATH}" DIRECTORY)
+    get_filename_component(ENZYME_CLANG_LIB "${ENZYME_CLANG_BIN}/../lib" ABSOLUTE)   # libomp at run time
+    file(GLOB ENZYME_TEST_HEADERS ${SRC_DIR}/core/*.h ${SRC_DIR}/gravity/*.h ${SRC_DIR}/collisional/*.h
+         ${CMAKE_CURRENT_SOURCE_DIR}/tests/enzyme/symplectic/*.h)
+    set(ENZYME_OUT ${CMAKE_BINARY_DIR}/enzyme)
+    file(MAKE_DIRECTORY ${ENZYME_OUT})
+    set(ENZYME_OUTPUTS "")
+    # name | source | extra sources, comma separated (the tests #include the code they differentiate where possible)
+    set(ENZYME_TESTS
+        "gradient_numerics|tests/enzyme/gradient_numerics.cpp|"
+        "grad_force|tests/enzyme/grad_force.cpp|"
+        "logh_step|tests/enzyme/logh_step.cpp|"
+        "spin_consistency|tests/enzyme/spin_consistency.cpp|"
+        "pn_rr_balance|tests/enzyme/pn_rr_balance.cpp|src/collisional/secular.cpp,src/collisional/kepler.cpp"
+        "symp_fsi|tests/enzyme/symplectic/symp_fsi.cpp|"
+        "symp_kepler|tests/enzyme/symplectic/symp_kepler.cpp|")
+    foreach(t ${ENZYME_TESTS})
+        string(REPLACE "|" ";" f "${t}")
+        list(GET f 0 name)
+        list(GET f 1 src)
+        list(GET f 2 extra_csv)
+        string(REPLACE "," ";" extra_rel "${extra_csv}")
+        set(extra "")
+        foreach(e ${extra_rel})
+            list(APPEND extra ${CMAKE_CURRENT_SOURCE_DIR}/${e})
+        endforeach()
+        add_custom_command(OUTPUT ${ENZYME_OUT}/${name}
+            COMMAND ${ENZYME_CLANG_PATH} -std=c++20 -O2 -fopenmp -fplugin=${ENZYME_PLUGIN} -Wno-everything
+                    "-I$<JOIN:$<TARGET_PROPERTY:Kokkos::kokkos,INTERFACE_INCLUDE_DIRECTORIES>,;-I>"
+                    -I${SRC_DIR}/core -I${SRC_DIR}/gravity -I${SRC_DIR}/collisional
+                    ${CMAKE_CURRENT_SOURCE_DIR}/${src} ${extra} -o ${ENZYME_OUT}/${name} -Wl,-rpath,${ENZYME_CLANG_LIB}
+            DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/${src} ${extra} ${ENZYME_TEST_HEADERS}
+            COMMENT "Enzyme test ${name}" COMMAND_EXPAND_LISTS VERBATIM)
+        list(APPEND ENZYME_OUTPUTS ${ENZYME_OUT}/${name})
+        add_test(NAME enzyme_${name} COMMAND ${ENZYME_OUT}/${name})
+    endforeach()
+    add_test(NAME enzyme_symp_kepler_parabolic COMMAND ${ENZYME_OUT}/symp_kepler f)
+    add_custom_target(enzyme-tests ALL DEPENDS ${ENZYME_OUTPUTS})
+endif()
