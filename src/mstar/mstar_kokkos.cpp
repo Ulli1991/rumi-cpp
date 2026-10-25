@@ -92,7 +92,7 @@ struct DevT {
     V<double***> spin, aspin, sder;                 // (slots, max(Npn, 1), 3)
     V<double***> accvd, pnv;                        // (slots, N, 3): velocity-dependent acceleration, velocities
     V<double***> aext;                              // (slots, N, 3): extra velocity-independent acceleration
-    V<double**> pert;                               // (n_pert, 7): perturbers m, x0, v (moving linearly in time)
+    V<double**> pert;                               // (n_pert, 10): perturbers m, x0, v, a (x0 + v t + a t^2 / 2)
     int n_pert = 0;
     ExtraForces ex;                                 // extra forces (RUMI++ port of KETJU's extra-force branch)
     bool vdep_on = false;                           // the auxiliary-velocity scheme is used (PN pairs or ex.vdep)
@@ -349,7 +349,7 @@ struct DevT {
             for (int q = 0; q < n_pert; q++) {
                 double d[3], d2 = ex.pm_eps2;
                 for (int k = 0; k < 3; k++) {
-                    d[k] = pos(s, i, k) - (pert(q, 1 + k) + pert(q, 4 + k) * tt);
+                    d[k] = pos(s, i, k) - (pert(q, 1 + k) + tt * (pert(q, 4 + k) + 0.5 * tt * pert(q, 7 + k)));
                     d2 += d[k] * d[k];
                 }
                 const double f = -G * pert(q, 0) / (d2 * sqrt(d2));
@@ -835,10 +835,10 @@ struct Engine {
         d.N = N; d.E = N - 1; d.Npn = Npn; d.Nd = o.opt.max_tree_distance; d.kmax = K;
         d.flags = o.opt.PN_flags; d.G = o.opt.G; d.c = o.opt.c;
         d.ex = o.opt.extra;
-        d.n_pert = (int)o.perturbers.size() / 7;
+        d.n_pert = (int)o.perturbers.size() / 10;
         if (d.n_pert > 0) {
-            if ((int)d.pert.extent(0) < d.n_pert) d.pert = V<double**>("mstar_pert", d.n_pert, 7);
-            Kokkos::View<const double**, Kokkos::LayoutRight, Kokkos::HostSpace> hp(o.perturbers.data(), d.n_pert, 7);
+            if ((int)d.pert.extent(0) < d.n_pert) d.pert = V<double**>("mstar_pert", d.n_pert, 10);
+            Kokkos::View<const double**, Kokkos::LayoutRight, Kokkos::HostSpace> hp(o.perturbers.data(), d.n_pert, 10);
             Kokkos::deep_copy(Kokkos::subview(d.pert, std::make_pair(0, d.n_pert), Kokkos::ALL), hp);
         }
         d.vdep_on = (d.flags != 0 && Npn >= 2) || d.ex.vdep;

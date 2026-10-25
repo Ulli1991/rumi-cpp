@@ -103,7 +103,7 @@ struct SubsystemBatch {
     std::vector<double> tide_A;
     std::vector<double> ext_dE;
     // ... and the perturbers of each MSTAR subsystem (bodies within NBODY_MSTAR_PERT_R x the group radius of its
-    // c.o.m.; 7 values each: m, x, v, physical), pert_off[s]..pert_off[s + 1]; the tidal tensor is the rest's
+    // c.o.m.; 10 values each: m, x, v, a, physical), pert_off[s]..pert_off[s + 1]; the tidal tensor is the rest's
     std::vector<double> pert;
     std::vector<int> pert_off;
     std::vector<double> t_reached; // physical time each subsystem's GBS integration reached (code units)

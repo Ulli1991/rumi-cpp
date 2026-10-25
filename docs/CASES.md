@@ -1288,7 +1288,7 @@ Status: **closed** (fixed, test, ensemble checked), **option** (fix kept as an o
 - **Open, separate:** weak_split_bh_binary (|dE/E| 1.93e-11 vs bound 1.23e-11) already fails at 5d91e1f^ and a381a27, with
   or without this fix; not a tree issue.
 
-## C29 MSTAR subsystems: groups above LOGH_MAX_BODIES on the GPU (optional GPLv3 module; NBODY_MSTAR, default off)
+## C30 MSTAR subsystems: groups above LOGH_MAX_BODIES on the GPU (optional GPLv3 module; NBODY_MSTAR, default off)
 
 C++ rewrite of the MSTAR regularised integrator (Rantala et al. 2020; public KETJU integrator, Mannerkoski et al.
 2023) with Kokkos support for GPUs, by Ulrich Steinwandel (src/mstar, `ENABLE_MSTAR`; docs/MSTAR.md).
@@ -1346,5 +1346,14 @@ C++ rewrite of the MSTAR regularised integrator (Rantala et al. 2020; public KET
   NBODY_MSTAR_PERT_R (3) x the group radius act inside MSTAR with their exact pull on straight lines (mean over the
   members left out; the host gives c.o.m. kicks), the rest as tidal tensor; the tidal-sampling cap is off for such
   groups. Cut-out: step 1 in < 300 s (HHS L10-L14, 300-body group), signed |dE/E| 2.5e-6 per step (books: PN 2.2e-6;
-  MSTAR's own unbooked error 1.3e-8): too large; open: the coupling error of the perturber split (straight-line
-  perturbers against impulsive back-reaction) and a group definition for cusps (perturber radius, core size).
+  MSTAR's own unbooked error 1.3e-8): too large. Predicted perturber motion x + v t + a t^2/2 (a relative to the
+  group's c.o.m., NBODY_MSTAR_PERT_ACC): 6.9e-7 per step (3.7x better), still 70x above MSTAR's own 1e-8.
+- **Literature (2026-10-25):** BIFROST (Rantala et al. 2023, sec. 3.2) deliberately keeps perturbers out of the
+  regularised integration: the subsystem is integrated in isolation and the perturbations act through the FSI kicks
+  (symplectic split), with subsystem time steps from a perturbation criterion eta_pert on the subsystem's own E and L
+  rates (sec. 3.5); FROST-CLUSTERS I keeps that and adds SDAR inside; perturbers inside the regularised step are the
+  AR-CHAIN / perturbed-chain approach (Mikkola & Aarseth; Mikkola & Merritt), where the perturber motion is predicted
+  and the back-reaction is impulsive, i.e. not a symplectic split - which is the coupling error measured here. Open:
+  either a symmetric treatment of the member-perturber interaction (back-reaction from the same time-averaged forces),
+  or the BIFROST route (no perturbers; an eta_pert-type step for large groups instead of the global FLYBY_CM_EPS budget,
+  to be A/B'd under the energy rule).

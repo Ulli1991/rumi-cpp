@@ -708,7 +708,7 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
                     // MSTAR core (NBODY_MSTAR_MAX): the max_group members nearest to the most massive one (an IMBH and
                     // the inner cusp) stay one subsystem, the others are field particles. A whole 0.01 pc cusp (238 of
                     // 300 stars around a 1000 Msun binary) as one group put its members at HHS level 13-29 through the
-                    // tidal-sampling step of its outer members (200k IMBH A/B, CASES.md C29)
+                    // tidal-sampling step of its outer members (200k IMBH A/B, CASES.md C30)
                     auto px = md.col(MemberData::X), py = md.col(MemberData::Y), pz = md.col(MemberData::Z);
                     auto pm = md.col(MemberData::M);
                     int c0 = part[0];
@@ -1188,7 +1188,7 @@ void SubsystemManager::fill_cm_velocity(const Particles& p, int lo, int hi, Kokk
     auto pax = raw(p.ax), pay = raw(p.ay), paz = raw(p.az);   // external only (the force kernel skips member pairs)
     const double tpert = g_collisional.tidal_step_pert;
     // NBODY_MSTAR_TIDE: MSTAR groups get c.o.m. kicks and their tide inside MSTAR, so the tidal-sampling cap does not
-    // apply to them (it would put a 300-body IMBH cusp at HHS level 13-29: 200k IMBH A/B, CASES.md C29)
+    // apply to them (it would put a 300-body IMBH cusp at HHS level 13-29: 200k IMBH A/B, CASES.md C30)
     const bool mstar_tide_groups = g_collisional.mstar && g_collisional.mstar_tide;
     small_for("cm_vel_members", n_sub, KOKKOS_LAMBDA(int k) {
         const int a = base + buf(k), e = base + buf(k + 1);

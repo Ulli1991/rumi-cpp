@@ -119,8 +119,8 @@ class MstarKokkos {
     // src/collisional/mstar_dispatch.h): coll_R[i] radius, coll_bh[i] black hole; empty coll_R: off. A hit stops
     // run() at that step (coll_i < coll_j set, time = the step's end). Not maintained across KETJU BH mergers (the
     // check is switched off after one).
-    // Perturbers (RUMI++, BIFROST-style perturbed subsystems): 7 values each, m, x0[3], v[3] (straight-line motion,
-    // t from the start of the call); their exact force is a velocity-independent extra force (ExtraForces::A etc. add)
+    // Perturbers (RUMI++, perturbed subsystems as in AR-CHAIN): 10 values each, m, x0[3], v[3], a[3] (predicted motion
+    // x0 + v t + a t^2 / 2, t from the start of the call); their exact pull is a velocity-independent extra force
     std::vector<double> perturbers;
     std::vector<double> coll_R;
     std::vector<char> coll_bh;

@@ -82,10 +82,10 @@ struct MstarGroup {
     // (the origin of pos), constant over the call; its work on the members is returned as ext_dE
     bool tide = false;
     double tide_A[9] = {};             // row-major, units of the call (1 / time^2)
-    // Perturbers (with tide): their exact pull, positions and velocities relative to the group's c.o.m. at the start,
-    // moving on straight lines; the mean over the members is left out (the host moves the c.o.m.)
+    // Perturbers (with tide): their exact pull, positions, velocities and accelerations relative to the group's c.o.m.
+    // at the start, moving on x + v t + a t^2 / 2; the mean over the members is left out (the host moves the c.o.m.)
     int n_pert = 0;
-    const double* pert = nullptr;      // [7 n_pert]: m, x[3], v[3]
+    const double* pert = nullptr;      // [10 n_pert]: m, x[3], v[3], a[3]
     // out
     bool ok = false;                   // integrated to dt
     int status = 0;                    // 0 reached dt, 1 collision (coll_*), 2 step limit

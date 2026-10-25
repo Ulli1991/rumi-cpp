@@ -497,16 +497,27 @@ void SubsystemBatch::pack(const SubsystemManager& mgr, const Particles& p,
                     Kokkos::View<int*, Kokkos::HostSpace> hpi(pidx.data(), pidx.size());
                     auto dpi = Kokkos::create_mirror_view_and_copy(Kokkos::DefaultExecutionSpace::memory_space(), hpi);
                     const int np = (int)pidx.size();
-                    Kokkos::View<double**, Kokkos::LayoutRight> buf("mstar_pert_buf", np, 7);
-                    auto pvx = p.vx, pvy = p.vy, pvz = p.vz;
+                    Kokkos::View<double**, Kokkos::LayoutRight> buf("mstar_pert_buf", np, 10);
+                    auto pvx = p.vx, pvy = p.vy, pvz = p.vz, pax = p.ax, pay = p.ay, paz = p.az;
+                    static const bool pacc = !std::getenv("NBODY_MSTAR_PERT_ACC") || std::atoi(std::getenv("NBODY_MSTAR_PERT_ACC")) != 0;
+                    const double af = pacc ? 1.0 : 0.0;
+                    // the group's c.o.m. acceleration (members' mass-weighted FSI accelerations): the perturbers' motion
+                    // relative to the freely falling group frame
+                    double gm = 0, ga0 = 0, ga1 = 0, ga2 = 0;
+                    Kokkos::parallel_reduce("mstar_pert_gacc", nm, KOKKOS_LAMBDA(int q, double& a) { a += pm(didx(q)); }, gm);
+                    Kokkos::parallel_reduce("mstar_pert_gacc", nm, KOKKOS_LAMBDA(int q, double& a) { a += pm(didx(q)) * pax(didx(q)); }, ga0);
+                    Kokkos::parallel_reduce("mstar_pert_gacc", nm, KOKKOS_LAMBDA(int q, double& a) { a += pm(didx(q)) * pay(didx(q)); }, ga1);
+                    Kokkos::parallel_reduce("mstar_pert_gacc", nm, KOKKOS_LAMBDA(int q, double& a) { a += pm(didx(q)) * paz(didx(q)); }, ga2);
+                    const double A0 = ga0 / gm, A1 = ga1 / gm, A2 = ga2 / gm;
                     Kokkos::parallel_for("mstar_pert_gather", np, KOKKOS_LAMBDA(int q) {
                         const int k = dpi(q);
                         buf(q, 0) = pm(k); buf(q, 1) = px(k); buf(q, 2) = py(k); buf(q, 3) = pz(k);
                         buf(q, 4) = pvx(k); buf(q, 5) = pvy(k); buf(q, 6) = pvz(k);
+                        buf(q, 7) = af * (pax(k) - A0); buf(q, 8) = af * (pay(k) - A1); buf(q, 9) = af * (paz(k) - A2);
                     });
                     auto hb = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), buf);
                     for (int q = 0; q < np; q++)
-                        for (int c = 0; c < 7; c++) pert.push_back(hb(q, c));
+                        for (int c = 0; c < 10; c++) pert.push_back(hb(q, c));
                     pert_off[s + 1] = pert_off[s] + np;
                 }
             }
@@ -775,10 +786,11 @@ static void mstar_integrate_one(SubsystemBatch& batch, int s, double G, double e
     std::vector<double> pert_n;
     if (tide && (size_t)s + 1 < batch.pert_off.size())
         for (int q = batch.pert_off[s]; q < batch.pert_off[s + 1]; q++) {
-            const double* b = &batch.pert[(size_t)q * 7];
+            const double* b = &batch.pert[(size_t)q * 10];
             pert_n.push_back(b[0] / M_total);
             for (int c = 0; c < 3; c++) pert_n.push_back((b[1 + c] - cm[c]) / R_scale);
             for (int c = 0; c < 3; c++) pert_n.push_back((b[4 + c] - cmv[c]) / V_scale);
+            for (int c = 0; c < 3; c++) pert_n.push_back(b[7 + c] * T_scale / V_scale);   // relative to the group's
         }
     const double dt_norm = dt / T_scale;
     static const long max_steps = std::getenv("NBODY_MSTAR_MAX_STEPS") ? std::atol(std::getenv("NBODY_MSTAR_MAX_STEPS"))
@@ -802,7 +814,7 @@ static void mstar_integrate_one(SubsystemBatch& batch, int s, double G, double e
         if (tide) {      // a = A x about the c.o.m.: normalised A' = A T_scale^2; perturbers normalised
             g.tide = true;
             for (int q = 0; q < 9; q++) g.tide_A[q] = batch.tide_A[(size_t)s * 9 + q] * T_scale * T_scale;
-            g.n_pert = (int)pert_n.size() / 7;
+            g.n_pert = (int)pert_n.size() / 10;
             g.pert = pert_n.data();
         }
         if (c_code > 0.0) {   // collisions as in the LogH path (coll_on: c_code > 0)
