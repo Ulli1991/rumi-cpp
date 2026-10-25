@@ -1275,19 +1275,6 @@ Status: **closed** (fixed, test, ensemble checked), **option** (fix kept as an o
   pass came from the first-order phase error (binary phase at the FSI kicks) partly cancelling the kick error. Bound
   re-measured: WEAK_SPLIT_DE 2.51e-11 (1.3x 1.93e-11).
 
-## C27 Host N^2 packed driver broke the bit-identity of the tree time-step search (fixed)
-
-- **Bug (since 5d91e1f):** `run_host_packed` (sources packed once per call) evaluates the pair time step with different
-  floating-point contraction than the tree search of dt_tree.h: 1-3 ulp in dt for 12 of 2000 particles, so the exact-pruning
-  check (`TREE_DT CHECK FAILED`) aborted 10 tests (tree_dt_binaries*, _triples, _mergers, _tidal*, tree_default_on).
-- **Bisection (treedt-1/-2):** passes at 5d91e1f^, fails at 5d91e1f and every later commit; 90dddec (dipole), c536fc0,
-  9655a15 are innocent. Restoring Kokkos::fmin/fmax (variant A) or a non-inlined pair_dt (C) does not help; the old tiled
-  driver (B) passes all tree_dt tests.
-- **Fix:** host backends use `run_tiled<TILE_SIZE, 1, 1>` again (the n2_fmin/n2_fmax inline compares stay). The packed
-  driver's speed gain is given up until its pair expression is made contraction-proof in both paths.
-- **Open, separate:** weak_split_bh_binary (|dE/E| 1.93e-11 vs bound 1.23e-11) already fails at 5d91e1f^ and a381a27, with
-  or without this fix; not a tree issue.
-
 ## C29 Stored cut-outs under the IAU G (1267691): same physics via G_OVERRIDE; fresh-IC bounds re-measured on Raven
 
 - **Cause of 8 Raven failures on main:** G_CODE 4.302194e-3 -> 4.300917e-3 turns every stored km/s cut-out in tests/data into
