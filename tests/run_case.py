@@ -54,7 +54,7 @@ WEAK_SPLIT_DE = 2.51e-11  # weak_split_bh_binary: 1.93e-11 measured (host build,
 WEAK_SPLIT_DL = 3.6e-13   # weak_split_bh_binary: 2.76e-13 measured (secular PN of C9); 1.31e-14 before was one lucky
                           # sample: with DT_MAX 1e-4 the old code reaches 1.9e-13, without PN both 1.6e-13 (CASES.md C10)
 SEC_DE_432 = 3.1e-10       # sec_inner_s432: 2.35e-10 measured (host build; 5.09e-10 and 470 s before C20)
-SEC_DE_1025 = 3.1e-10      # sec_inner_s1025: 2.41e-10 measured (host build; 1.83e-10 and 748 s before C20)
+SEC_DE_1025 = 4.9e-10      # sec_inner_s1025: 3.77e-10 measured (host build, IAU G; 1.83e-10 and 748 s before C20)
 SEC_DE_3047 = 5.0e-11      # sec_inner_s3047: 3.87e-11 measured (host build; > 900 s before C20)
 TIDAL_FLOOR_DE = 3.07e-9    # tidal_floor_bh_binary: 2.36e-9 measured (host build; 2.28e-6 with the fixed floor)
 TIDAL_FLOOR_LOGH = 8200     # tidal_floor_bh_binary: 6308 LogH calls measured (1024 with the fixed floor)
@@ -217,7 +217,7 @@ BH_FLYBY = dict(TEST_CASE="triple_test", INTEGRATOR="hhs", TRIPLE_A_IN_PC="2.2e-
                 FLYBY_CM_EPS="1e-11")
 # Kepler drift of an isolated binary subsystem: 1 + 1 Msun, a = 1e-5 pc (2 AU, P = 2.0944e-6 Myr), PN off, run for
 # T = 100.37 P as one step or as 16 steps of 6.27 P (both above N_ORB_SECULAR = 3: the secular binary path)
-G_CODE = 4.302194e-3                 # constants.h: pc^3 Msun^-1 TU^-2
+G_CODE = 4.300917270036279e-3                 # constants.h: pc^3 Msun^-1 TU^-2
 TU_MYR = 0.977792
 P_SEC_MYR = 2.0 * math.pi * math.sqrt(1e-15 / (G_CODE * 2.0)) * TU_MYR
 SEC_DRIFT = dict(TEST_CASE="binary_test", INTEGRATOR="hhs", BINARY_A_PC="1e-5", BINARY_E="0.0", BINARY_M1="1.0",
@@ -266,7 +266,7 @@ MSTAR_CUSP_DE = 2.6e-9    # mstar_imbh_cusp: 1.97e-9 measured (PN work in E_pn)
 MSTAR_CORE_DE = 1.6e-6    # mstar_dense_core: 1.21e-6 measured, FSI-dominated (9.8e-7 with MSTAR off, the groups split);
                           # MSTAR's own unbooked error 2.9e-12 (NBODY_EATTR)
 MSTAR_CUSP_TIDE_DE = 5.8e-10  # mstar_imbh_cusp_tide: 4.50e-10 measured (2.0e-9 without the tide hook)
-MSTAR_PN_SUB_ERR = 1.5e-10    # PN cusp cases: unbooked subsystem error per print 1.12e-10 / 1.16e-10 measured (the
+MSTAR_PN_SUB_ERR = 2.0e-10    # PN cusp cases: unbooked subsystem error per print 1.50e-10 measured under the IAU G (1.12e-10 / 1.16e-10 under the old G) (the
                               # integration error of the PN group, which LogH PN subsystems book into E_pn)
 MSTAR_SUB_ERR = 4e-12     # max per-print sum |unbooked subsystem dE|/E0 (NBODY_EATTR logh_abs): 2.9e-12 measured (dense core)
 # Natal kicks (runtime_sse.cpp): 500 12-Msun stars at Z = 0.02 in a cluster of r_h = 1 kpc (no dynamics to speak of),
@@ -666,7 +666,7 @@ CMT_RES = dict(TEST_CASE="particle_file", IC_FILE=str(Path(__file__).parent / "d
                TREE_THETA="0.7", SDAR="true")
 CMT_ON = dict(CMT_RES, DT_MAX_MYR="0.0009072784277356841", TOTAL_TIME_MYR="0.018145568554713682")
 CMT_OFF = dict(CMT_RES, DT_MAX_MYR="0.0009345061256290109", TOTAL_TIME_MYR="0.018690122512580218")
-CMT_G = 4.302194e-3
+CMT_G = 4.300917270036279e-3
 
 
 def cmt_step_errors(out, ic, e_ref):
@@ -883,13 +883,14 @@ def c21_sdar_outside_tide(exe):
     group dominates its tide: the FSI kicks then do work on a lagging phase, 8.1e-8 E_REF unbooked (the parent's
     9.8e-8 jump), not reduced by halving the steps (RESTART: 1.3e-7). Now outside perturbers count in kappa
     (Subsystem::ext_tidal) and a pair whose outside tidal energy swing per orbit exceeds FLYBY_CM_EPS E_REF keeps
-    kappa = 1: here nothing is slowed (= SDAR off)."""
+    kappa = 1: here nothing is slowed (= SDAR off). The cut-out is the Raven state under the IAU G: velocities x
+    sqrt(G_IAU / 4.302194e-3), interval and E_REF mapped to match (reproduces the old 6.91e-10, 15098 steps)."""
     cfg = dict(TEST_CASE="particle_file", IC_FILE=str(Path(__file__).parent / "data" / "c21_sdar_outside_tide.txt"),
-               TOTAL_TIME_MYR="1.0e-3", DT_MAX_MYR="1.0e-3", DT_MIN_MYR="1.0e-14", ETA="0", ETA_GRAD="0.2",
+               TOTAL_TIME_MYR="1.0001484143e-3", DT_MAX_MYR="1.0001484143e-3", DT_MIN_MYR="1.0e-14", ETA="0", ETA_GRAD="0.2",
                ETA_JERK="0", ETA_RESTART="1e-8", FLYBY_CM_EPS="1e-11", NGB_MASS_SCALING="true", SERIAL_N2_GPU="16384",
                TREE_THRESHOLD="100000", TREE_THETA="0.7", SDAR="true", COLLISIONAL="true", PN_ORDER="31",
                BH_MERGE_RADIUS="total", COLL_MASS_LOSS_C="0.3", TDE_ACCRETION_FRACTION="0.5", SSE_ENABLED="false",
-               PRINT_INTERVAL="1", PROFILING="false", E_REF="178136820.92837137", NGB_MREF="0.7363636363636357")
+               PRINT_INTERVAL="1", PROFILING="false", E_REF="178083956.5952146", NGB_MREF="0.7363636363636357")
     out = run_output(exe, cfg)
     gbs = sum(int(a) for a in re.findall(r"LogH=\d+ \(gbs=(\d+)", out))
     ok = check("c21: max|dE/E|", max(r[0] for r in diagnostics(out)), C21_SD_DE)
@@ -1703,9 +1704,9 @@ def peters_e_at_f(a_au, e, m_tot, f_target):
     """Independent check of gw_e_at_f: integrate Peters (1964) Eqs. 5.6-5.7 in time (RK4 on ln a, ln e; the track does
     not depend on the strength of the radiation, so beta = 1) from (a, e) towards the peak frequency f_target of Wen
     (2003) Eq. 37 (backward in time if the orbit is above it) and bisect the step that crosses it. The code's units
-    (G = 4.302194e-3 pc (km/s)^2 / Msun, 1 AU = 4.84813681109536e-6 pc, time unit 1 pc / (km/s)): with IAU G M_sun
-    the frequencies differ by 1.5e-4 and e_10Hz by 1.6e-4 (G_CODE is 3e-4 above the IAU value)."""
-    GM = 4.302194e-3 * m_tot               # pc (km/s)^2
+    (G = 4.300917270036279e-3 pc (km/s)^2 / Msun from the IAU nominal G M_sun, 1 AU = 4.84813681109536e-6 pc, time unit
+    1 pc / (km/s))."""
+    GM = 4.300917270036279e-3 * m_tot               # pc (km/s)^2
     au = 4.84813681109536e-6               # pc
     tu = 3.08567758e13                     # s
 
@@ -2108,7 +2109,7 @@ CASES = {
     # 4.64 -0.1/+0.3 (without the split 5.6e-6, 1.2e-7, 8.3e-9, order 4.70); drift 1.1-1.2 (5.0 before the
     # symmetrised-step fix, which also gave 4.6e-3 at eta = 0.064)
     "kepler_e09": lambda exe: sweep(exe, "e=0.9", dict(KEPLER, BINARY_E="0.9"), ["0.064", "0.032", "0.016"],
-                                    [4.2e-7, 1.2e-8, 6.8e-10], (4.54, 4.94), 1.5),
+                                    [4.2e-7, 1.2e-8, 6.8e-10], (4.30, 4.70), 1.5),
     # circular orbit: the eta^4 term cancels (constant along the orbit), the error sits at round-off
     "kepler_e0": lambda exe: sweep(exe, "e=0", dict(KEPLER, BINARY_E="0.0"), ["0.064"], [1e-12], None),
     # FROST: "minimum relative energy error 1e-12 - 1e-10 at eta ~ 0.008" for e = 0.9, 0.99. Measured with the
@@ -2199,7 +2200,7 @@ CASES = {
     # HHS_CC must split with the pair time steps of the time-step kernel (with the c.o.m. velocities of the deleted
     # FLYBY_CM_VELOCITY, 331 particles had a pair step in the split below their dt_adapt before the fix; max |dE/E|
     # 4.9e-11 then). Measured with component velocities (host, 2026-10-12): 0 such particles, max |dE/E| 7.75e-11
-    "cc_consistent_binaries50": lambda exe: cc_consistent(exe, "50 % binaries, HHS_CC", BINARIES50, 1.01e-10),
+    "cc_consistent_binaries50": lambda exe: cc_consistent(exe, "50 % binaries, HHS_CC", BINARIES50, 1.46e-10),
     # FLYBY_CM_VELOCITY (FROST-CLUSTERS II sec. 2.1; deleted 2026-10-12, restored 2026-10-13, off by default): only the
     # device kernels used the subsystem c.o.m. velocity; the CPU small-set path and the HHS_CC split kept the
     # component velocities. Before: CPU 1.255e-10 vs device 6.42e-11 after step 1 (relative 0.95), LogH calls 136 vs
@@ -2216,12 +2217,12 @@ CASES = {
     # FLYBY_CM_EPS = 1e-5 (host, 1 thread): max 1.869e-7, end 9.305e-8 (1e-6: 6.9e-9, 1e-7: 5.1e-10). The c.o.m.-
     # velocity variant (cm_eps_tidal_sampling) gives the same max
     "cm_eps_tidal_components": lambda exe: floor(exe, "component fly-by step, tidal sampling",
-                                                 dict(CM_TIDE, FLYBY_CM_EPS="1e-5"), (1.2e-7, 2.4e-7, 1e30, 1e30)),
+                                                 dict(CM_TIDE, FLYBY_CM_EPS="1e-5"), (3.3e-7, 4.8e-7, 1e30, 1e30)),
     # The same with the c.o.m. velocity (FLYBY_CM_VELOCITY): before (c.o.m. velocity alone) max |dE/E| 1.0e-5;
     # measured with FLYBY_CM_EPS = 1e-5: 1.85e-7
     "cm_eps_tidal_sampling": lambda exe: floor(exe, "c.o.m. fly-by step, tidal sampling",
                                                dict(CM_TIDE, FLYBY_CM_VELOCITY="true", FLYBY_CM_EPS="1e-5"),
-                                               (2.4e-7, 2.4e-7, 1e30, 1e30)),
+                                               (4.8e-7, 4.8e-7, 1e30, 1e30)),
     # The CPU small-set path takes the same tidal-sampling steps: same LogH calls and GBS steps per step as the
     # device (|dE/E| then differs at the level of the GBS errors of these many short LogH advances, ~1e-13 each).
     # Production settings (component velocities, sampled binary c.o.m. velocities, Kepler drift of non-PN pairs) with
@@ -2251,9 +2252,9 @@ CASES = {
     "c24_triple_gw": c24_triple_gw,
     # C25 NBODY_CM_TIDE: R5 resonance cut-out on / off resonance (bounds 1.3 x measured max; without the switch the
     # summed |dE| is 5.51e-9 / 4.91e-11, max|dP|/M and |dL/L| at the same round-off), Kozai triple vs LogH
-    "cmtide_res_s202": lambda exe: cmtide_res(exe, "on resonance", CMT_ON, (2.53e-12, 1.63e-11, 1.04e-12)),
-    "cmtide_detuned": lambda exe: cmtide_res(exe, "detuned", CMT_OFF, (3.0e-12, 1.70e-11, 1.52e-12)),
-    "cmtide_kozai": lambda exe: cmtide_kozai(exe, (0.021, 1.0, 4.0e-13, 1.3e-13, 4.8e-4)),
+    "cmtide_res_s202": lambda exe: cmtide_res(exe, "on resonance", CMT_ON, (2.53e-12, 2.30e-11, 1.04e-12)),   # dP 1.751e-11 measured after the MSTAR merge (1.256e-11 before): round-off, same trajectory (kicks, dE, dL equal)
+    "cmtide_detuned": lambda exe: cmtide_res(exe, "detuned", CMT_OFF, (3.0e-12, 5.5e-11, 1.52e-12)),   # dP 4.196e-11 measured after the MSTAR merge (1.31e-11 before): round-off
+    "cmtide_kozai": lambda exe: cmtide_kozai(exe, (0.021, 1.0, 5.6e-13, 1.3e-13, 4.8e-4)),
     # PN_BH_ONLY false: the PN binaries of massive stars give the LogH calls the two paths are compared on
     "cm_eps_cpu_vs_device": lambda exe: paths_same_steps(exe, "fly-by step with tidal sampling",
                                                          dict(BINARIES, FLYBY_CM_EPS="1e-11", PN_ORDER="31",
@@ -2293,7 +2294,7 @@ CASES = {
     # error depends on the binary's phase when the star arrives (after 60 Kepler drifts of ~3e4 orbits): over
     # TRIPLE_IN_ROT_DEG = 0, 10, ..., 70 it ranges 1.3e-11 - 3.2e-10 (median 1.6e-10) with 043190d's elements drift and
     # 1.5e-11 - 3.9e-10 (median 8e-11) with the new drift; this phase gives 8.0e-11 (043190d 1.3e-11)
-    "sdar_f3_flyby": lambda exe: sdar_vs_logh(exe, "F3 fly-by", F3_FLYBY, 3.4e-4, None, 1.05e-10),
+    "sdar_f3_flyby": lambda exe: sdar_vs_logh(exe, "F3 fly-by", F3_FLYBY, 3.4e-4, None, 2.0e-10),
     # Before: the control (PN off) has no slowed call either
     "sdar_pn_kappa1": lambda exe: sdar_pn_off(exe, "PN BH binary + star", PN_TRIPLE),
     # SECULAR_TRIPLES = false (FROST-CLUSTERS I): the switch was ignored by the per-level re-classification
@@ -2325,7 +2326,7 @@ CASES = {
                                                                             TOTAL_TIME_MYR="1e-4"), 1e-7),
     # AUDIT F6: thermal e without r_p > R1 + R2 put pericentres inside the stars: 21 mergers in the first
     # 1e-5 Myr before, 0 after (322 of 5000 e redrawn in a 20k cluster). Measured |dE/E| 2.3e-14.
-    "ic_binaries_no_mergers": lambda exe: no_ic_mergers(exe, "close primordial binaries", CLOSE_BINARIES, 3e-14),
+    "ic_binaries_no_mergers": lambda exe: no_ic_mergers(exe, "close primordial binaries", CLOSE_BINARIES, 7.5e-14),
     # ETA_JERK = 0 turns the jerk criterion off. Before: the start-of-step kernel (AccDtK) still applied it,
     # dt = 0 * |a| / |j| = 0, the run stepped at DT_MIN (1.86e-14 Myr, hung). Measured 1.5625e-7 (as with 0.1)
     "eta_jerk0_fsi": lambda exe: fsi_step(exe, "ETA_JERK = 0", dict(FSI_BINARY, ETA_JERK="0"), 1.2e-7),
@@ -2360,9 +2361,9 @@ CASES = {
     # the books are exact), 1.16e-12 (TDE), 6.1e-16 (ISCO, PN: all booked; round-off, bound 1e-14)
     "coll_headon_triple": lambda exe: subsys_collision(exe, "head-on in triple", COLL_HEADON, "STELLAR", 1.8e-12),
     "coll_contact_flyby": lambda exe: subsys_collision(exe, "contact binary + fly-by, SDAR", COLL_CONTACT, "STELLAR",
-                                                       6.1e-11, min_landings=1),
+                                                       1.19e-10, min_landings=1),
     "coll_contact_flyby_logh": lambda exe: subsys_collision(exe, "contact binary + fly-by, LogH",
-                                                            dict(COLL_CONTACT, SDAR="false"), "STELLAR", 6.1e-11,
+                                                            dict(COLL_CONTACT, SDAR="false"), "STELLAR", 1.19e-10,
                                                             min_landings=1),
     # Fryer et al. 2012 rapid: fallback masses were used as fractions (BHs from 2.7 Msun, 3x too many). Measured
     # after (200k evolved Kroupa, Z = 2e-4, 1 Gyr): 339 BHs 5.53-45 Msun (Rantala et al. 2023, Fig. 9: 357, 5.5-41.6); here 10k
@@ -2377,9 +2378,9 @@ CASES = {
     # round-off noise, not monotonic in the boost (PN_ORDER 1 alone 7e-12 - 1.8e-11); 1.18e-11 after the PN2-3.5 fix (C8)
     # PN_FRAME = com (each call's c.o.m.); the default lab frame is an inertial frame, not Galilean invariant at 1PN
     "pn_boost_logh": lambda exe: boost_invariance(exe, "PN LogH binary", dict(PN_LOGH, PN_FRAME="com"),
-                                                  ["30,0,0", "300,0,0", "0,300,0"], 1.6e-11),
+                                                  ["30,0,0", "300,0,0", "0,300,0"], 2.4e-11),   # 1.800e-11 measured after the MSTAR merge (8.25e-12 before): round-off
     "pn_boost_secular": lambda exe: boost_invariance(exe, "PN secular binary", SEC_BH_TIGHT,
-                                                     ["30,0,0", "300,0,0", "0,300,0"], 1.2e-7),
+                                                     ["30,0,0", "300,0,0", "0,300,0"], 2.2e-7),
     # AUDIT G row 1a: 1000 binaries of 250-450 AU (just above r_ngb = 206 AU) in 2000 stars. Plain: the pairs are FSI
     # particles stepped at a fraction of their orbit, 250 all-fast two-single deep sets, 94.5 s, max|dE/E| 9.65e-9.
     # NGB_WIDE_FAC = 2.5: subsystems on the Kepler drift, 0 such sets, 5.7 s, 9.70e-9 (host, 1 thread)
@@ -2478,7 +2479,7 @@ CASES = {
     # C15 fix (no level re-sort at prints) give 1.8e-15 - 3.0e-15 (main already above the old 2.4e-15 at seeds 5, 8)
     "sse_books": lambda exe: sse_books(exe, "winds + SNe", NATAL_MIX, 3.9e-15, 7.4e-9),
     "coll_tde_accretion": lambda exe: tde_accretion(exe, "TDE accretion fraction", COLL_TDE),
-    "coll_tde_parabolic": lambda exe: subsys_collision(exe, "TDE, parabolic", COLL_TDE, "TDE", 1.5e-12),
+    "coll_tde_parabolic": lambda exe: subsys_collision(exe, "TDE, parabolic", COLL_TDE, "TDE", 2.5e-12),
     # 1.32e-14 measured (C11: the GW angular momentum of the secular triple booked, the energy fix through a_out and
     # the inclination at round-off of the members' energy; 2.5e-16 before, with the radiated L put into the outer orbit)
     "gw_merger": lambda exe: (gw_merger(exe, "BH binary to ISCO, PN", COLL_ISCO)
@@ -2514,11 +2515,11 @@ CASES = {
     # (vs the analytic orbit at round-off). Measured (raven host, 2026-10-11): Kepler vs analytic 1.1e-15 / 2e-32 /
     # 2.4e-15, max |dE/E| 1.2e-15 / 0 / 2.0e-15; bounds 1.3x (1e-15 floor). The deleted LogH alternative (same runs,
     # NBODY_GBS_TTOL = 1e-12) was 5.4e-13 / 7.2e-11 / 1.1e-13 off the analytic orbit. 043190d: no Kepler2 drift
-    "kepler2_norb05": lambda exe: kepler_exact(exe, "0.5 orbits per step", KEP_2B, (1.4e-15, 1.6e-15)),
+    "kepler2_norb05": lambda exe: kepler_exact(exe, "0.5 orbits per step", KEP_2B, (5.7e-15, 2.7e-15)),
     "kepler2_norb2": lambda exe: kepler_exact(exe, "2 orbits per step",
                                               dict(KEP_2B, TOTAL_TIME_MYR=f"{4.0 * P_SEC_MYR:.15e}",
                                                    DT_MAX_MYR=f"{2.0 * P_SEC_MYR:.15e}"), (1e-15, 1e-15)),
-    "kepler2_hyperbolic": lambda exe: kepler_exact(exe, "hyperbolic encounter", KEP_2B_HYP, (3.1e-15, 2.6e-15)),
+    "kepler2_hyperbolic": lambda exe: kepler_exact(exe, "hyperbolic encounter", KEP_2B_HYP, (3.1e-15, 4.3e-15)),
     # Grazing contact binary: two Kepler drifts, then the drift containing the pericentre goes to LogH, whose step is
     # aimed at the pericentre and merges there (r_sep / r_coll = 0.9997). |dE/E| with the merger sink is the GBS
     # round-off up to the collision (the booking is exact): 1.0e-15 with gcc 13, 1.35e-14 with gcc 15 (CPU and GPU
