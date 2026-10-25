@@ -1359,3 +1359,7 @@ C++ rewrite of the MSTAR regularised integrator (Rantala et al. 2020; public KET
   to be A/B'd under the energy rule).
   Cut-out with NBODY_MSTAR_NO_TIDCAP=1 (impulsive kicks, no tidal-sampling cap for the group): interval 1 not done in
   900 s on 2 cores (50k GBS steps per print, 300-body group) - slower than the perturbed route; not pursued yet.
+- **200k + IMBH cusp on 4 A100 with perturbed groups (ab5, 8ac994b: straight-line perturbers):** 4 intervals in 12
+  min (off / plain MSTAR: none), ~180 s per interval, 31868 MSTAR calls (groups up to 302 bodies, 154k GBS steps);
+  |dE/E| 2.35e-6 after interval 3, 2.15e-6 after 4 (most of it in interval 1; later intervals change it by 5e-8 -
+  2e-7); MSTAR's own unbooked error 4e-9 - 2e-8 per interval. Not acceptable under the energy rule yet.
