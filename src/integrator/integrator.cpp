@@ -3688,9 +3688,11 @@ static int hhs_fsi_recursive_impl(
                                    g_collisional.r_ngb, g_collisional.r_ngb_max, pivot_dt);
             lean_fence("integrator.cpp:2421");
             g_subsys_phase.add(SubsystemPhaseTimes::DET_NGB, det_clock.lap());
+            g_subsystem_mgr.det_start = start; g_subsystem_mgr.det_count = count;
             g_subsystem_mgr.detect_from_pairs(p, G, pivot_dt,
                                                g_collisional.r_ngb, g_collisional.r_ngb_max,
                                                g_collisional.n_orb_secular);
+            g_subsystem_mgr.det_count = -1;
             g_subsys_phase.add(SubsystemPhaseTimes::DET_PAIRS, det_clock.lap());
             g_subsystem_mgr.update_particle_flags(p);
             g_subsystem_mgr.accumulate_diagnostics();
