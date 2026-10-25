@@ -1,0 +1,27 @@
+# MSTAR reference case, produced by running the KETJU integrator (ketju_generator/, GPLv3).
+# Origin: ketju-integrator unit-tests/mergers.cpp (merger_from_orbit)
+case merger_from_orbit
+kind merger
+# Only the merger and remnant_mass_range are checked (the remnant state depends on the GR fits).
+# Units: G and c as given; spin = spin angular momentum S (chi = c S / (G m^2)).
+# BH mergers between PN bodies at merger_distance_Rs * 2 G (m1 + m2) / c^2.
+G 1
+c 1
+pn all
+ketju_pn_flags 1855
+gbs_tol 1e-12
+t_end 1000000
+merger_distance_Rs 12
+# body id pn mass x y z vx vy vz sx sy sz
+body 1 1 1 40 0 0 0 0.050000000000000003 0 0 0 0
+body 2 1 1 -40 0 0 0 0 0 0 0 0
+# KETJU result
+ketju_steps 11
+ketju_relative_energy_error 4.987614e-01
+final_time 1000000
+final_n 1
+final_n_pn 1
+remnant_mass_range 1.8 2.0099999999999998
+final_body 1 1 1.903559381660241 -0.7368936873976385 25086.889667915904 0 -7.6591560655322201e-07 0.025086925502175967 0 0 0 2.4883199993884588
+# merger seq id_survivor id_absorbed m1 m2 m_remnant chi_remnant v_kick t_merger
+merger 0 1 2 1 1 1.903559381660241 0.68671000000000004 0 576.10746388833434

@@ -1065,6 +1065,11 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
         // PN path (state.use_aux_vel), otherwise the spins are carried unchanged
         state.has_spins = false;
         state.c_code = c_norm;
+        if (!g_collisional.pn_frame_com) {   // PN_FRAME = lab
+            state.v_frame[0] = cm_vx / V_scale;
+            state.v_frame[1] = cm_vy / V_scale;
+            state.v_frame[2] = cm_vz / V_scale;
+        }
         if (nb == 2 && n_live == 2 && batch.has_stored_spins[s] && state.use_aux_vel && (pn_order & PN_SPIN)) {
             // Spins are dimensionless chi vectors — no normalization needed
             state.has_spins = true;
@@ -1609,9 +1614,14 @@ void logh_integrate_batch_gpu(SubsystemBatch& batch, double G, double eta_gbs) {
         double Ef_norm = logh_total_energy(state, G_norm);
         double dE_rel;
         if (any_compact && pn_order > 0 && c_norm > 0.0 && (pn_order & 1) && colls.empty()) {
-            double E_pn_0 = pn1_energy(state_init_pos, state_init_vel, state.mass,
+            double v0_lab[LOGH_MAX_BODIES * 3], vf_lab[LOGH_MAX_BODIES * 3];   // 1PN energy in the lab frame
+            for (int i = 0; i < 3 * nb; i++) {
+                v0_lab[i] = state_init_vel[i] + state.v_frame[i % 3];
+                vf_lab[i] = state.vel[i] + state.v_frame[i % 3];
+            }
+            double E_pn_0 = pn1_energy(state_init_pos, v0_lab, state.mass,
                                         nb, G_norm, c_norm);
-            double E_pn_f = pn1_energy(state.pos, state.vel, state.mass,
+            double E_pn_f = pn1_energy(state.pos, vf_lab, state.mass,
                                         nb, G_norm, c_norm);
             double E0_total = E0_norm + E_pn_0;
             double Ef_total = Ef_norm + E_pn_f;

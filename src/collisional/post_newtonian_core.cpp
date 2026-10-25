@@ -6,68 +6,122 @@
 // spin dynamics. global_pn1_kick (Particles) is in post_newtonian.cpp.
 
 // ============================================================================
-// PN2.5, PN3.0 and PN3.5 of a pair: the centre-of-mass relative acceleration of Blanchet, Living Rev. Rel. 17, 2
-// (2014, v3 2024), eq. (dvdt): a = a_1 - a_2 = -(G M / r^2) [A n + B v], n = (x_1 - x_2)/r, v = v_1 - v_2,
-// r' = n.v, with A, B from eqs. (calAcoeff), (calBcoeff); 3PN in modified harmonic coordinates (eq. ABcoeffMH,
-// no ln(r/r'_0)). Body 1 gets (m_2/M) a and body 2 -(m_1/M) a (momentum exact). Returned as C_n, C_v with
-// a = C_n n + C_v v, summed over the orders in pn_order (bits 4, 8, 16). The inputs are symmetric in the two bodies
-// (r' = (-n).(-v)), so both single-body calls and the pair call get the same bits. Checked: circular-orbit energy
-// loss = GW flux to 1PN (32/5 nu^2 x^5 [1 - (1247/336 + 35/12 nu) x]), tests/pn_energy_test.cpp. (Up to 2026-10
-// these orders had the wrong sign at 2.5PN, wrong 3.5PN coefficients (+11 x the 2.5PN loss, as a gain) and
-// incomplete 3PN coefficients: CASES C8.)
+// PN2.5, PN3.0 and PN3.5 of body A from body B in a general frame: Blanchet, Living Rev. Rel. 17, 2 (2014, v3 2024),
+// eq. (acc3PN), body 1 = A, n_12 = n_AB = (x_A - x_B) / r, v_12 = v_A - v_B. 3PN in modified harmonic coordinates:
+// the ln(r/r'_0) terms dropped and the gauge vector of the footnote to eq. (contacttransf) applied, y_MH = y_SH -
+// delta y_A, delta y_A = (22/3) G^3 m_A^2 m_B n ln(r/r'_0) / (c^6 r^2), which adds
+//   (22/3) G^3 m_A^2 m_B [(8 r'^2 - v^2) / r^4 + G M / r^5] n - (44/3) G^3 m_A^2 m_B r' / r^4 v
+// (its ln terms cancel those of eq. acc3PN; the relative acceleration is eq. ABcoeffMH). 3.5PN: the three 1/r_12^6
+// of the printed G^4 terms are 1/r_12^5 (dimensions). The Newtonian centre of mass moves with these terms (Blanchet
+// sec. 6.3); before 2026-10 the c.o.m. relative acceleration was split by m_B / M, which off the PN c.o.m. frame
+// changed the inspiral (0.3 rad over 300 orbits against KETJU, q = 1/3, v/c = 0.085).
 // ============================================================================
-[[gnu::noinline]] static void pn_rel_highorder(double inv_r, double v2, double rd, double Gm, double nu,
-                                               double c_code, int pn_order, double& Cn, double& Cv) {
+namespace {
+struct InvC {   // 1/c^5, 1/c^6, 1/c^7 (as PnGeom: from 1/c^2 and c)
+    double c5, c6, c7;
+};
+InvC inv_c_powers(double c_code) {
     const double inv_c2 = 1.0 / (c_code * c_code);
-    const double u = Gm * inv_r;
-    const double pi2 = M_PI * M_PI;
-    double A = 0.0, B = 0.0;
+    return {inv_c2 * inv_c2 / c_code, inv_c2 * inv_c2 * inv_c2, inv_c2 * inv_c2 * inv_c2 / c_code};
+}
+}  // namespace
+
+[[gnu::noinline]] static void pn_body_highorder(const double n[3], const double v_A[3], const double v_B[3],
+                                                const double dv[3], double GmA, double GmB, double inv_r,
+                                                const InvC& ic, int pn_order, double a[3]) {
+    const double nvA = n[0]*v_A[0] + n[1]*v_A[1] + n[2]*v_A[2];
+    const double nvB = n[0]*v_B[0] + n[1]*v_B[1] + n[2]*v_B[2];
+    const double nv = n[0]*dv[0] + n[1]*dv[1] + n[2]*dv[2];
+    const double vA2 = v_A[0]*v_A[0] + v_A[1]*v_A[1] + v_A[2]*v_A[2];
+    const double vB2 = v_B[0]*v_B[0] + v_B[1]*v_B[1] + v_B[2]*v_B[2];
+    const double vAvB = v_A[0]*v_B[0] + v_A[1]*v_B[1] + v_A[2]*v_B[2];
+    const double v2 = dv[0]*dv[0] + dv[1]*dv[1] + dv[2]*dv[2];
+    const double r1 = inv_r, r2 = r1 * r1, r3 = r2 * r1, r4 = r2 * r2, r5 = r4 * r1;
+    const double A1B1 = GmA * GmB, A2B1 = GmA * A1B1, A1B2 = A1B1 * GmB;
+    double Cn = 0.0, Cv = 0.0;
     if (pn_order & 4) {
-        const double inv_c5 = inv_c2 * inv_c2 / c_code;
-        const double f = 8.0/5.0 * nu * u;
-        A += inv_c5 * f * rd * (-17.0/3.0 * u - 3.0 * v2);
-        B += inv_c5 * f * (3.0 * u + v2);
+        Cn += ic.c5 * nv * (208.0/15.0 * A1B2 * r4 - 24.0/5.0 * A2B1 * r4 + 12.0/5.0 * A1B1 * r3 * v2);
+        Cv += ic.c5 * (8.0/5.0 * A2B1 * r4 - 32.0/5.0 * A1B2 * r4 - 4.0/5.0 * A1B1 * r3 * v2);
     }
     if (pn_order & 8) {
-        const double inv_c6 = inv_c2 * inv_c2 * inv_c2;
-        const double nu2 = nu * nu, nu3 = nu2 * nu;
-        const double rd2 = rd * rd, rd3 = rd2 * rd, rd4 = rd2 * rd2, rd5 = rd4 * rd, rd6 = rd4 * rd2;
-        const double v4 = v2 * v2, v6 = v4 * v2;
-        const double A3 =
-              rd6 * (-35.0/16.0 * nu + 175.0/16.0 * nu2 - 175.0/16.0 * nu3)
-            + rd4 * v2 * (15.0/2.0 * nu - 135.0/4.0 * nu2 + 255.0/8.0 * nu3)
-            + rd2 * v4 * (-15.0/2.0 * nu + 237.0/8.0 * nu2 - 45.0/2.0 * nu3)
-            + v6 * (11.0/4.0 * nu - 49.0/4.0 * nu2 + 13.0 * nu3)
-            + u * (rd4 * (79.0 * nu - 69.0/2.0 * nu2 - 30.0 * nu3)
-                   + rd2 * v2 * (-121.0 * nu + 16.0 * nu2 + 20.0 * nu3)
-                   + v4 * (75.0/4.0 * nu + 8.0 * nu2 - 10.0 * nu3))
-            + u * u * (rd2 * (1.0 + 22717.0/168.0 * nu + 11.0/8.0 * nu2 - 7.0 * nu3 + 615.0/64.0 * pi2 * nu)
-                       + v2 * (-20827.0/840.0 * nu + nu3 - 123.0/64.0 * pi2 * nu))
-            + u * u * u * (-16.0 - 1399.0/12.0 * nu - 71.0/2.0 * nu2 + 41.0/16.0 * pi2 * nu);
-        const double B3 =
-              rd5 * (-45.0/8.0 * nu + 15.0 * nu2 + 15.0/4.0 * nu3)
-            + rd3 * v2 * (12.0 * nu - 111.0/4.0 * nu2 - 12.0 * nu3)
-            + rd * v4 * (-65.0/8.0 * nu + 19.0 * nu2 + 6.0 * nu3)
-            + u * (rd3 * (329.0/6.0 * nu + 59.0/2.0 * nu2 + 18.0 * nu3)
-                   + rd * v2 * (-15.0 * nu - 27.0 * nu2 - 10.0 * nu3))
-            + u * u * rd * (-4.0 - 5849.0/840.0 * nu + 25.0 * nu2 + 8.0 * nu3 - 123.0/32.0 * pi2 * nu);
-        A += inv_c6 * A3;
-        B += inv_c6 * B3;
+        const double pi2 = M_PI * M_PI;
+        const double nvA2 = nvA * nvA, nvB2 = nvB * nvB, nvA3 = nvA2 * nvA, nvB3 = nvB2 * nvB;
+        const double nvA4 = nvA2 * nvA2, nvB4 = nvB2 * nvB2, nvB5 = nvB4 * nvB, nvB6 = nvB4 * nvB2;
+        const double vB4 = vB2 * vB2, vB6 = vB4 * vB2, vA4 = vA2 * vA2, vAvB2 = vAvB * vAvB;
+        const double B1 = GmB, B2 = GmB * GmB, B3 = B2 * GmB, B4 = B2 * B2;
+        const double A2B2 = GmA * A1B2, A3B1 = GmA * A2B1, A1B3 = A1B2 * GmB;
+        const double n3 =
+              B1 * r2 * (35.0/16.0 * nvB6 - 15.0/8.0 * nvB4 * vA2 + 15.0/2.0 * nvB4 * vAvB + 3.0 * nvB2 * vAvB2
+                         - 15.0/2.0 * nvB4 * vB2 + 3.0/2.0 * nvB2 * vA2 * vB2 - 12.0 * nvB2 * vAvB * vB2
+                         - 2.0 * vAvB2 * vB2 + 15.0/2.0 * nvB2 * vB4 + 4.0 * vAvB * vB4 - 2.0 * vB6)
+            + A1B1 * r3 * (-171.0/8.0 * nvA4 + 171.0/2.0 * nvA3 * nvB - 723.0/4.0 * nvA2 * nvB2
+                           + 383.0/2.0 * nvA * nvB3 - 455.0/8.0 * nvB4 + 229.0/4.0 * nvA2 * vA2
+                           - 205.0/2.0 * nvA * nvB * vA2 + 191.0/4.0 * nvB2 * vA2 - 91.0/8.0 * vA4
+                           - 229.0/2.0 * nvA2 * vAvB + 244.0 * nvA * nvB * vAvB - 225.0/2.0 * nvB2 * vAvB
+                           + 91.0/2.0 * vA2 * vAvB - 177.0/4.0 * vAvB2 + 229.0/4.0 * nvA2 * vB2
+                           - 283.0/2.0 * nvA * nvB * vB2 + 259.0/4.0 * nvB2 * vB2 - 91.0/4.0 * vA2 * vB2
+                           + 43.0 * vAvB * vB2 - 81.0/8.0 * vB4)
+            + B2 * r3 * (-6.0 * nvA2 * nvB2 + 12.0 * nvA * nvB3 + 6.0 * nvB4 + 4.0 * nvA * nvB * vAvB
+                         + 12.0 * nvB2 * vAvB + 4.0 * vAvB2 - 4.0 * nvA * nvB * vB2 - 12.0 * nvB2 * vB2
+                         - 8.0 * vAvB * vB2 + 4.0 * vB4)
+            + B3 * r4 * (-nvA2 + 2.0 * nvA * nvB + 43.0/2.0 * nvB2 + 18.0 * vAvB - 9.0 * vB2)
+            + A1B2 * r4 * (415.0/8.0 * nvA2 - 375.0/4.0 * nvA * nvB + 1113.0/8.0 * nvB2 - 615.0/64.0 * nv * nv * pi2
+                           + 18.0 * vA2 + 123.0/64.0 * pi2 * v2 + 33.0 * vAvB - 33.0/2.0 * vB2)
+            + A2B1 * r4 * (-45887.0/168.0 * nvA2 + 24025.0/42.0 * nvA * nvB - 10469.0/42.0 * nvB2
+                           + 48197.0/840.0 * vA2 - 36227.0/420.0 * vAvB + 36227.0/840.0 * vB2)
+            + r5 * (16.0 * B4 + A2B2 * (175.0 - 41.0/16.0 * pi2) - 3187.0/1260.0 * A3B1
+                    + A1B3 * (110741.0/630.0 - 41.0/16.0 * pi2))
+            + 22.0/3.0 * A2B1 * ((8.0 * nv * nv - v2) * r4 + (GmA + GmB) * r5);   // modified harmonic
+        const double v3 =
+              B1 * r2 * (15.0/2.0 * nvA * nvB4 - 45.0/8.0 * nvB5 - 3.0/2.0 * nvB3 * vA2 + 6.0 * nvA * nvB2 * vAvB
+                         - 6.0 * nvB3 * vAvB - 2.0 * nvB * vAvB2 - 12.0 * nvA * nvB2 * vB2 + 12.0 * nvB3 * vB2
+                         + nvB * vA2 * vB2 - 4.0 * nvA * vAvB * vB2 + 8.0 * nvB * vAvB * vB2 + 4.0 * nvA * vB4
+                         - 7.0 * nvB * vB4)
+            + B2 * r3 * (-2.0 * nvA2 * nvB + 8.0 * nvA * nvB2 + 2.0 * nvB3 + 2.0 * nvA * vAvB + 4.0 * nvB * vAvB
+                         - 2.0 * nvA * vB2 - 4.0 * nvB * vB2)
+            + A1B1 * r3 * (-243.0/4.0 * nvA3 + 565.0/4.0 * nvA2 * nvB - 269.0/4.0 * nvA * nvB2 - 95.0/12.0 * nvB3
+                           + 207.0/8.0 * nvA * vA2 - 137.0/8.0 * nvB * vA2 - 36.0 * nvA * vAvB + 27.0/4.0 * nvB * vAvB
+                           + 81.0/8.0 * nvA * vB2 + 83.0/8.0 * nvB * vB2)
+            + B3 * r4 * (4.0 * nvA + 5.0 * nvB)
+            + A1B2 * r4 * (-307.0/8.0 * nvA + 479.0/8.0 * nvB + 123.0/32.0 * nv * pi2)
+            + A2B1 * r4 * (31397.0/420.0 * nvA - 36227.0/420.0 * nvB)
+            - 44.0/3.0 * A2B1 * nv * r4;   // modified harmonic
+        Cn += ic.c6 * n3;
+        Cv += ic.c6 * v3;
     }
     if (pn_order & 16) {
-        const double inv_c7 = inv_c2 * inv_c2 * inv_c2 / c_code;
-        const double rd2 = rd * rd, v4 = v2 * v2;
-        const double f = nu * u;
-        A += inv_c7 * f * rd * (u * u * (3956.0/35.0 + 184.0/5.0 * nu) + u * v2 * (692.0/35.0 - 724.0/15.0 * nu)
-                                + v4 * (366.0/35.0 + 12.0 * nu) + u * rd2 * (294.0/5.0 + 376.0/5.0 * nu)
-                                - v2 * rd2 * (114.0 + 12.0 * nu) + 112.0 * rd2 * rd2);
-        B += inv_c7 * f * (u * u * (-1060.0/21.0 - 104.0/5.0 * nu) + u * v2 * (164.0/21.0 + 148.0/5.0 * nu)
-                           + v4 * (-626.0/35.0 - 12.0/5.0 * nu) + u * rd2 * (-82.0/3.0 - 848.0/15.0 * nu)
-                           + v2 * rd2 * (678.0/5.0 + 12.0/5.0 * nu) - 120.0 * rd2 * rd2);
+        const double nvA2 = nvA * nvA, nvB2 = nvB * nvB, nvA3 = nvA2 * nvA, nvB3 = nvB2 * nvB;
+        const double nv2 = nv * nv, nv4 = nv2 * nv2, nv5 = nv4 * nv;
+        const double vA4 = vA2 * vA2, vB4 = vB2 * vB2, vAvB2 = vAvB * vAvB;
+        const double A2B2 = GmA * A1B2, A3B1 = GmA * A2B1, A1B3 = A1B2 * GmB;
+        const double n35 =
+              A3B1 * r5 * (3992.0/105.0 * nvA - 4328.0/105.0 * nvB)
+            + A2B2 * r5 * (-13576.0/105.0 * nvA + 2872.0/21.0 * nvB)
+            - 3172.0/21.0 * A1B3 * r5 * nv
+            + A2B1 * r4 * (48.0 * nvA3 - 696.0/5.0 * nvA2 * nvB + 744.0/5.0 * nvA * nvB2 - 288.0/5.0 * nvB3
+                           - 4888.0/105.0 * nvA * vA2 + 5056.0/105.0 * nvB * vA2 + 2056.0/21.0 * nvA * vAvB
+                           - 2224.0/21.0 * nvB * vAvB - 1028.0/21.0 * nvA * vB2 + 5812.0/105.0 * nvB * vB2)
+            + A1B2 * r4 * (-582.0/5.0 * nvA3 + 1746.0/5.0 * nvA2 * nvB - 1954.0/5.0 * nvA * nvB2 + 158.0 * nvB3
+                           + 3568.0/105.0 * nv * vA2 - 2864.0/35.0 * nvA * vAvB + 10048.0/105.0 * nvB * vAvB
+                           + 1432.0/35.0 * nvA * vB2 - 5752.0/105.0 * nvB * vB2)
+            + A1B1 * r3 * (-56.0 * nv5 + 60.0 * nvA3 * v2 - 180.0 * nvA2 * nvB * v2 + 174.0 * nvA * nvB2 * v2
+                           - 54.0 * nvB3 * v2 - 246.0/35.0 * nv * vA4 + 1068.0/35.0 * nvA * vA2 * vAvB
+                           - 984.0/35.0 * nvB * vA2 * vAvB - 1068.0/35.0 * nvA * vAvB2 + 180.0/7.0 * nvB * vAvB2
+                           - 534.0/35.0 * nvA * vA2 * vB2 + 90.0/7.0 * nvB * vA2 * vB2 + 984.0/35.0 * nvA * vAvB * vB2
+                           - 732.0/35.0 * nvB * vAvB * vB2 - 204.0/35.0 * nvA * vB4 + 24.0/7.0 * nvB * vB4);
+        const double v35 =
+              r5 * (-184.0/21.0 * A3B1 + 6224.0/105.0 * A2B2 + 6388.0/105.0 * A1B3)
+            + A2B1 * r4 * (52.0/15.0 * nvA2 - 56.0/15.0 * nvA * nvB - 44.0/15.0 * nvB2 - 132.0/35.0 * vA2
+                           + 152.0/35.0 * vAvB - 48.0/35.0 * vB2)
+            + A1B2 * r4 * (454.0/15.0 * nvA2 - 372.0/5.0 * nvA * nvB + 854.0/15.0 * nvB2 - 152.0/21.0 * vA2
+                           + 2864.0/105.0 * vAvB - 1768.0/105.0 * vB2)
+            + A1B1 * r3 * (60.0 * nv4 - 348.0/5.0 * nvA2 * v2 + 684.0/5.0 * nvA * nvB * v2 - 66.0 * nvB2 * v2
+                           + 334.0/35.0 * vA4 - 1336.0/35.0 * vA2 * vAvB + 1308.0/35.0 * vAvB2
+                           + 654.0/35.0 * vA2 * vB2 - 1252.0/35.0 * vAvB * vB2 + 292.0/35.0 * vB4);
+        Cn += ic.c7 * n35;
+        Cv += ic.c7 * v35;
     }
-    const double g = -Gm * inv_r * inv_r;
-    Cn = g * A;
-    Cv = g * B;
+    for (int k = 0; k < 3; k++) a[k] += Cn * n[k] + Cv * dv[k];
 }
 
 // ============================================================================
@@ -165,40 +219,24 @@ void eih_pn_acceleration(const double x_A[3], const double v_A[3], double m_A,
         }
     }
 
-    // PN2.5, PN3.0, PN3.5: Blanchet's two-body c.o.m. relative acceleration, body A's share m_B / M
-    if (pn_order & 28) {
-        double M = m_A + m_B;
-        double dv2 = dv[0]*dv[0] + dv[1]*dv[1] + dv[2]*dv[2];
-        double rd = (r_AB[0]*dv[0] + r_AB[1]*dv[1] + r_AB[2]*dv[2]) * inv_r;
-        double Cn, Cv;
-        pn_rel_highorder(inv_r, dv2, rd, G * M, m_A * m_B / (M * M), c_code, pn_order, Cn, Cv);
-        const double fA = m_B / M;
-        for (int k = 0; k < 3; k++) {
-            a_pn_A[k] += fA * (Cn * n[k] + Cv * dv[k]);
-        }
-    }
+    // PN2.5, PN3.0, PN3.5 (general frame)
+    if (pn_order & 28) pn_body_highorder(n, v_A, v_B, dv, Gm_A, Gm_B, inv_r, inv_c_powers(c_code), pn_order, a_pn_A);
 }
 
 // ============================================================================
 // eih_pn_acceleration of both bodies of a pair at once, bit-identical to the two calls (A = i, B = j) and
 // (A = j, B = i), with what both share computed once: 1/r (|x_j - x_i| = |x_i - x_j| exactly: IEEE subtraction
-// is sign-symmetric) and the coefficients A, B and prefactors of PN2.5 / 3.0 / 3.5 (functions of 1/r, |dv|^2,
-// r.dv, M and eta, all exactly symmetric in i, j). The per-body part (eih_body) repeats the operations of
+// is sign-symmetric) and 1/c^5..7. The per-body part (eih_body) repeats the operations of
 // eih_pn_acceleration in its own, not inlined function, so that no expression is shared between the two bodies
 // and every floating-point contraction (FMA, -march=native) comes out as there. Checked bitwise on 5e6 random
 // pairs over all 31 orders, host and nvcc_wrapper builds; NBODY_CHECK_EIH=1 checks every pair of a run.
 // ============================================================================
 
-namespace {
-struct EihPairCoeffs {   // the pair-symmetric total mass and PN2.5-3.5 coefficients (pn_rel_highorder)
-    double M, Cn, Cv;
-};
-}  // namespace
 
 // PN terms of body A from B (eih_pn_acceleration) with 1/r and the pair coefficients h given
 [[gnu::noinline]] static void eih_body(const double x_A[3], const double v_A[3], double m_A,
                                        const double x_B[3], const double v_B[3], double m_B,
-                                       double G, double inv_c2, double inv_r, const EihPairCoeffs& h,
+                                       double G, double inv_c2, double inv_r, const InvC& ic,
                                        int pn_order, double a_pn_A[3]) {
     a_pn_A[0] = a_pn_A[1] = a_pn_A[2] = 0.0;
 
@@ -264,12 +302,7 @@ struct EihPairCoeffs {   // the pair-symmetric total mass and PN2.5-3.5 coeffici
         }
     }
 
-    if (pn_order & 28) {
-        const double fA = m_B / h.M;
-        for (int k = 0; k < 3; k++) {
-            a_pn_A[k] += fA * (h.Cn * n[k] + h.Cv * dv[k]);
-        }
-    }
+    if (pn_order & 28) pn_body_highorder(n, v_A, v_B, dv, Gm_A, Gm_B, inv_r, ic, pn_order, a_pn_A);
 }
 
 void eih_pn_acceleration_pair(const double x_i[3], const double v_i[3], double m_i,
@@ -280,20 +313,12 @@ void eih_pn_acceleration_pair(const double x_i[3], const double v_i[3], double m
     double r2 = r_AB[0]*r_AB[0] + r_AB[1]*r_AB[1] + r_AB[2]*r_AB[2];
     double r_mag = std::sqrt(r2);
     double inv_r = 1.0 / r_mag;
-    double dv[3] = { v_i[0]-v_j[0], v_i[1]-v_j[1], v_i[2]-v_j[2] };
     double c2 = c_code * c_code;
     double inv_c2 = 1.0 / c2;
 
-    EihPairCoeffs h{};
-    h.M = m_i + m_j;
-    if (pn_order & 28) {
-        double dv2 = dv[0]*dv[0] + dv[1]*dv[1] + dv[2]*dv[2];
-        double rd = (r_AB[0]*dv[0] + r_AB[1]*dv[1] + r_AB[2]*dv[2]) * inv_r;
-        pn_rel_highorder(inv_r, dv2, rd, G * h.M, m_i * m_j / (h.M * h.M), c_code, pn_order, h.Cn, h.Cv);
-    }
-
-    eih_body(x_i, v_i, m_i, x_j, v_j, m_j, G, inv_c2, inv_r, h, pn_order, a_i);   // A = i, B = j
-    eih_body(x_j, v_j, m_j, x_i, v_i, m_i, G, inv_c2, inv_r, h, pn_order, a_j);   // A = j, B = i
+    const InvC ic = inv_c_powers(c_code);
+    eih_body(x_i, v_i, m_i, x_j, v_j, m_j, G, inv_c2, inv_r, ic, pn_order, a_i);   // A = i, B = j
+    eih_body(x_j, v_j, m_j, x_i, v_i, m_i, G, inv_c2, inv_r, ic, pn_order, a_j);   // A = j, B = i
 }
 
 // ============================================================================
@@ -370,50 +395,16 @@ void pn_geom_set_masses(const double* mass, int n, double G, double c_code, bool
     for (int A = 0; A < geom.n; A++) geom.Gm[A] = G * mass[A];
     geom.n_pairs = 0;
     if (pair_order == 0) return;
-    const double pi2 = M_PI * M_PI;
     for (int i = 0; i < geom.n; i++)
         for (int j = i + 1; j < geom.n; j++) {
             PnPairGeom& p = geom.pair[geom.n_pairs++];
             p.i = i;
             p.j = j;
-            p.M = mass[i] + mass[j];
-            p.Gm = G * p.M;
-            const double nu = mass[i] * mass[j] / (p.M * p.M);
-            p.nu = nu;
-            p.f25 = 8.0/5.0 * nu;
-            const double nu2 = nu * nu, nu3 = nu2 * nu;
-            p.P3A[0] = (-35.0/16.0 * nu + 175.0/16.0 * nu2 - 175.0/16.0 * nu3);
-            p.P3A[1] = (15.0/2.0 * nu - 135.0/4.0 * nu2 + 255.0/8.0 * nu3);
-            p.P3A[2] = (-15.0/2.0 * nu + 237.0/8.0 * nu2 - 45.0/2.0 * nu3);
-            p.P3A[3] = (11.0/4.0 * nu - 49.0/4.0 * nu2 + 13.0 * nu3);
-            p.P3A[4] = (79.0 * nu - 69.0/2.0 * nu2 - 30.0 * nu3);
-            p.P3A[5] = (-121.0 * nu + 16.0 * nu2 + 20.0 * nu3);
-            p.P3A[6] = (75.0/4.0 * nu + 8.0 * nu2 - 10.0 * nu3);
-            p.P3A[7] = (1.0 + 22717.0/168.0 * nu + 11.0/8.0 * nu2 - 7.0 * nu3 + 615.0/64.0 * pi2 * nu);
-            p.P3A[8] = (-20827.0/840.0 * nu + nu3 - 123.0/64.0 * pi2 * nu);
-            p.P3A[9] = (-16.0 - 1399.0/12.0 * nu - 71.0/2.0 * nu2 + 41.0/16.0 * pi2 * nu);
-            p.P3B[0] = (-45.0/8.0 * nu + 15.0 * nu2 + 15.0/4.0 * nu3);
-            p.P3B[1] = (12.0 * nu - 111.0/4.0 * nu2 - 12.0 * nu3);
-            p.P3B[2] = (-65.0/8.0 * nu + 19.0 * nu2 + 6.0 * nu3);
-            p.P3B[3] = (329.0/6.0 * nu + 59.0/2.0 * nu2 + 18.0 * nu3);
-            p.P3B[4] = (-15.0 * nu - 27.0 * nu2 - 10.0 * nu3);
-            p.P3B[5] = (-4.0 - 5849.0/840.0 * nu + 25.0 * nu2 + 8.0 * nu3 - 123.0/32.0 * pi2 * nu);
-            p.P35A[0] = (3956.0/35.0 + 184.0/5.0 * nu);
-            p.P35A[1] = (692.0/35.0 - 724.0/15.0 * nu);
-            p.P35A[2] = (366.0/35.0 + 12.0 * nu);
-            p.P35A[3] = (294.0/5.0 + 376.0/5.0 * nu);
-            p.P35A[4] = (114.0 + 12.0 * nu);
-            p.P35B[0] = (-1060.0/21.0 - 104.0/5.0 * nu);
-            p.P35B[1] = (164.0/21.0 + 148.0/5.0 * nu);
-            p.P35B[2] = (-626.0/35.0 - 12.0/5.0 * nu);
-            p.P35B[3] = (-82.0/3.0 - 848.0/15.0 * nu);
-            p.P35B[4] = (678.0/5.0 + 12.0/5.0 * nu);
             for (int s = 0; s < 2; s++) {
                 const int A = s ? j : i, B = s ? i : j;
                 PnBodyGeom& b = p.body[s];
                 b.Gm_A = G * mass[A];
                 b.Gm_B = G * mass[B];
-                b.fA = mass[B] / p.M;
             }
         }
 }
@@ -477,14 +468,6 @@ void pn_geom_set_positions(const double* pos_in, PnGeom& geom) {
             b.pf1 = b.Gm_B * inv_r2 * geom.inv_c2;
             b.pf2 = b.Gm_B * inv_r2 * geom.inv_c4;
         }
-        // as pn_rel_highorder
-        const double u = p.Gm * inv_r;
-        p.u = u;
-        p.uu = u * u;
-        p.uuu = u * u * u;
-        p.c25 = geom.inv_c5 * (p.f25 * u);
-        p.c35 = geom.inv_c7 * (p.nu * u);
-        p.g = -p.Gm * inv_r * inv_r;
     }
 }
 
@@ -515,59 +498,9 @@ void eih1_nbody_acceleration_geom(const PnGeom& geom, const double* vel, double*
     }
 }
 
-// pn_rel_highorder with the mass- and position-only factors of pair p
-[[gnu::noinline]] static void pn_rel_highorder_geom(const PnGeom& geom, const PnPairGeom& p, double v2, double rd,
-                                                    int pn_order, double& Cn, double& Cv) {
-    const double u = p.u;
-    double A = 0.0, B = 0.0;
-    if (pn_order & 4) {
-        A += p.c25 * rd * (-17.0/3.0 * u - 3.0 * v2);
-        B += p.c25 * (3.0 * u + v2);
-    }
-    if (pn_order & 8) {
-        const double* PA = p.P3A;
-        const double* PB = p.P3B;
-        const double rd2 = rd * rd, rd3 = rd2 * rd, rd4 = rd2 * rd2, rd5 = rd4 * rd, rd6 = rd4 * rd2;
-        const double v4 = v2 * v2, v6 = v4 * v2;
-        const double A3 =
-              rd6 * PA[0]
-            + rd4 * v2 * PA[1]
-            + rd2 * v4 * PA[2]
-            + v6 * PA[3]
-            + u * (rd4 * PA[4]
-                   + rd2 * v2 * PA[5]
-                   + v4 * PA[6])
-            + p.uu * (rd2 * PA[7]
-                      + v2 * PA[8])
-            + p.uuu * PA[9];
-        const double B3 =
-              rd5 * PB[0]
-            + rd3 * v2 * PB[1]
-            + rd * v4 * PB[2]
-            + u * (rd3 * PB[3]
-                   + rd * v2 * PB[4])
-            + p.uu * rd * PB[5];
-        A += geom.inv_c6 * A3;
-        B += geom.inv_c6 * B3;
-    }
-    if (pn_order & 16) {
-        const double* PA = p.P35A;
-        const double* PB = p.P35B;
-        const double rd2 = rd * rd, v4 = v2 * v2;
-        A += p.c35 * rd * (p.uu * PA[0] + u * v2 * PA[1]
-                           + v4 * PA[2] + u * rd2 * PA[3]
-                           - v2 * rd2 * PA[4] + 112.0 * rd2 * rd2);
-        B += p.c35 * (p.uu * PB[0] + u * v2 * PB[1]
-                      + v4 * PB[2] + u * rd2 * PB[3]
-                      + v2 * rd2 * PB[4] - 120.0 * rd2 * rd2);
-    }
-    Cn = p.g * A;
-    Cv = p.g * B;
-}
-
 // eih_body with the mass- and position-only factors of body A from B
 [[gnu::noinline]] static void eih_body_geom(const double v_A[3], const double v_B[3], const PnBodyGeom& b,
-                                            double inv_r, const EihPairCoeffs& h, int pn_order, double a_pn_A[3]) {
+                                            double inv_r, const InvC& ic, int pn_order, double a_pn_A[3]) {
     a_pn_A[0] = a_pn_A[1] = a_pn_A[2] = 0.0;
 
     const double* n = b.n;
@@ -629,12 +562,7 @@ void eih1_nbody_acceleration_geom(const PnGeom& geom, const double* vel, double*
         }
     }
 
-    if (pn_order & 28) {
-        const double fA = b.fA;
-        for (int k = 0; k < 3; k++) {
-            a_pn_A[k] += fA * (h.Cn * n[k] + h.Cv * dv[k]);
-        }
-    }
+    if (pn_order & 28) pn_body_highorder(n, v_A, v_B, dv, b.Gm_A, b.Gm_B, inv_r, ic, pn_order, a_pn_A);
 }
 
 void eih_pn_pairs_geom(const PnGeom& geom, const double* vel, int pn_order, double* a) {
@@ -643,17 +571,9 @@ void eih_pn_pairs_geom(const PnGeom& geom, const double* vel, int pn_order, doub
         const PnPairGeom& p = geom.pair[q];
         const double* v_i = &vel[3*p.i];
         const double* v_j = &vel[3*p.j];
-        const double* r_AB = p.rij;
-        double dv[3] = { v_i[0]-v_j[0], v_i[1]-v_j[1], v_i[2]-v_j[2] };
-        EihPairCoeffs h{};
-        h.M = p.M;
-        if (pn_order & 28) {
-            double dv2 = dv[0]*dv[0] + dv[1]*dv[1] + dv[2]*dv[2];
-            double rd = (r_AB[0]*dv[0] + r_AB[1]*dv[1] + r_AB[2]*dv[2]) * p.inv_r;
-            pn_rel_highorder_geom(geom, p, dv2, rd, pn_order, h.Cn, h.Cv);
-        }
-        eih_body_geom(v_i, v_j, p.body[0], p.inv_r, h, pn_order, &a[6*q]);       // A = i, B = j
-        eih_body_geom(v_j, v_i, p.body[1], p.inv_r, h, pn_order, &a[6*q + 3]);   // A = j, B = i
+        const InvC ic = {geom.inv_c5, geom.inv_c6, geom.inv_c7};
+        eih_body_geom(v_i, v_j, p.body[0], p.inv_r, ic, pn_order, &a[6*q]);       // A = i, B = j
+        eih_body_geom(v_j, v_i, p.body[1], p.inv_r, ic, pn_order, &a[6*q + 3]);   // A = j, B = i
     }
 }
 
@@ -807,6 +727,56 @@ void spin_pn_acceleration(const double x[3], const double v[3],
         a_rel[k] += q1 * (n[k] * S1S1 + 2.0 * S1[k] * nS1 - 5.0 * n[k] * nS1 * nS1);
         a_rel[k] += q2 * (n[k] * S2S2 + 2.0 * S2[k] * nS2 - 5.0 * n[k] * nS2 * nS2);
     }
+}
+
+// Spin terms of body A from body B in a general frame (Thorne & Hartle 1985, PRD 31, 1815, eqs. 4.11b-d and 4.17,
+// covariant spin condition, harmonic gauge; KETJU uses the same): n = (x_A - x_B) / r, v = v_A - v_B.
+//   a_SO = G / (c^2 m_A r^3) [6 n ((m_A S_B + m_B S_A).(n x v)) + 4 m_A S_B x v + 3 m_B S_A x v
+//                             + 3 (n.v) n x (2 m_A S_B + m_B S_A)]                                  (4.11c)
+//   a_SS = G / (c^2 m_A r^4) [(15 (n.S_A)(n.S_B) - 3 S_A.S_B) n - 3 (n.S_B) S_A - 3 (n.S_A) S_B]      (4.11d)
+//   a_Q  = G / (c^2 m_A r^4) sum over K = A (L = B), B (L = A) of (m_L / m_K) [(15/2 (n.S_K)^2 - 3/2 S_K^2) n
+//          - 3 (n.S_K) S_K]                                     (4.11b, Kerr quadrupole Q = -S^2 / m, their 1.7)
+//   Omega_A = G / (c^2 r^3) [3 (n.S_B) n - S_B] + G m_B / (c^2 r^2) (2 v_B - 3/2 v_A) x n
+//             + 3 G m_B / (c^2 m_A r^3) (n.S_A) n                                                    (4.17a-c)
+// In the c.o.m. frame a_A - a_B and Omega are Kidder's (spin_pn_acceleration, spin_precession); the geodetic term
+// depends on the frame, the a_A are not split by mass (the Newtonian c.o.m. moves).
+static void spin_body(const double x[3], const double vA[3], const double vB[3], double mA, double mB,
+                      const double SA[3], const double SB[3], double G, double c_code, double a[3], double Om[3]) {
+    const double r = std::sqrt(dot3(x, x));
+    const double n[3] = {x[0] / r, x[1] / r, x[2] / r};
+    const double v[3] = {vA[0] - vB[0], vA[1] - vB[1], vA[2] - vB[2]};
+    const double c2 = c_code * c_code, nv = dot3(n, v);
+    double nxv[3], SBxv[3], SAxv[3], nxSB[3], nxSA[3];
+    cross3(n, v, nxv);
+    cross3(SB, v, SBxv);
+    cross3(SA, v, SAxv);
+    cross3(n, SB, nxSB);
+    cross3(n, SA, nxSA);
+    const double nSA = dot3(n, SA), nSB = dot3(n, SB);
+    const double so = G / (c2 * mA * r * r * r);
+    const double proj = mA * dot3(SB, nxv) + mB * dot3(SA, nxv);
+    const double ss = G / (c2 * mA * r * r * r * r);
+    const double fQA = mB / mA, fQB = mA / mB;
+    for (int k = 0; k < 3; k++) {
+        a[k] = so * (6.0 * n[k] * proj + 4.0 * mA * SBxv[k] + 3.0 * mB * SAxv[k]
+                     + 3.0 * nv * (2.0 * mA * nxSB[k] + mB * nxSA[k]));
+        a[k] += ss * ((15.0 * nSA * nSB - 3.0 * dot3(SA, SB)) * n[k] - 3.0 * nSB * SA[k] - 3.0 * nSA * SB[k]);
+        a[k] += ss * (fQB * ((7.5 * nSB * nSB - 1.5 * dot3(SB, SB)) * n[k] - 3.0 * nSB * SB[k])
+                      + fQA * ((7.5 * nSA * nSA - 1.5 * dot3(SA, SA)) * n[k] - 3.0 * nSA * SA[k]));
+    }
+    double w[3], wxn[3];
+    for (int k = 0; k < 3; k++) w[k] = 2.0 * vB[k] - 1.5 * vA[k];
+    cross3(w, n, wxn);
+    const double pss = G / (c2 * r * r * r), pg = G * mB / (c2 * r * r), pq = 3.0 * G * mB / (c2 * mA * r * r * r) * nSA;
+    for (int k = 0; k < 3; k++) Om[k] = pss * (3.0 * nSB * n[k] - SB[k]) + pg * wxn[k] + pq * n[k];
+}
+
+void spin_pn_bodies(const double x[3], const double v1[3], const double v2[3], double m1, double m2,
+                    const double S1[3], const double S2[3], double G, double c_code, double a1[3], double a2[3],
+                    double Omega1[3], double Omega2[3]) {
+    const double xm[3] = {-x[0], -x[1], -x[2]};
+    spin_body(x, v1, v2, m1, m2, S1, S2, G, c_code, a1, Omega1);
+    spin_body(xm, v2, v1, m2, m1, S2, S1, G, c_code, a2, Omega2);
 }
 
 void binary_total_angular_momentum(const double x[3], const double v[3],

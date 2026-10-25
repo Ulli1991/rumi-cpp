@@ -60,7 +60,7 @@ exact), and MSTAR applies the tide continuously: the tidal tensor of all outside
 start of the call (`a = A x` about the c.o.m., `ExtraForces`; B follows its work). Its work on the members is an
 exchange with the outside bodies' potential that the global T + U contains: it is not booked, but separated from the
 integration error in the subsystem log (`ext_dE`). The host galaxy's tide stays impulsive (its time scale is ~100 Myr).
-Measured on an embedded group (`mstar_embedded_tide`): see `docs/CASES.md` C27. The tides need every particle on the
+Measured on an embedded group (`mstar_embedded_tide`): see `docs/CASES.md` C29. The tides need every particle on the
 device, so host subtrees are switched off (`HOST_SUBTREE_MAX = 0`).
 
 ## Extra forces (module API)
@@ -77,7 +77,7 @@ B blind to the velocity-independent part, which put a binary in a static field 1
 one force launch over the active rows and one kick+drift launch; small groups: every row inside one team, one launch
 per step), tree coordinates rebuilt by root-to-vertex path sums, deterministic reductions, one device-to-host copy per
 GBS step. Agreement with the C library: round-off (bitwise for two bodies); ctest `mstar_compare`. Scaling:
-`mstar-bench` (results in `docs/CASES.md` C27).
+`mstar-bench` (results in `docs/CASES.md` C29).
 
 ## Tests
 

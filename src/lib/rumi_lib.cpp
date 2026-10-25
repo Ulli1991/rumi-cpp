@@ -58,6 +58,7 @@ bool have_p = false;
 int nslots = 0;
 std::vector<long long> slot_id;
 std::vector<double> last_m, last_x, last_v;   // state by slot as last returned (merged bodies keep theirs)
+std::vector<double> last_chi;                 // spins (chi vectors) by slot as last returned
 std::vector<int> slot_kw;
 std::vector<double> slot_r;
 double eta = 0.2, dt_min = 0.0, soft2 = 0.0, t_lib = 0.0;
@@ -197,6 +198,7 @@ int set_particles(int n_in, const long long* id_in, const double* m_in, const do
     if (have_p) { if (distributed) DP.local.deallocate(); else P.deallocate(); have_p = false; }
     nslots = n; merged = 0;
     slot_id = id; last_m = m; last_x = x; last_v = v; slot_kw = kw; slot_r = rr;
+    last_chi.assign(3 * (size_t)n, 0.0);
     if (n == 0) { L.E_set += -E_old; T.rebuild += secs(t0); return 0; }
     // every rank builds the same set (bit-identical inputs); distributed mode distributes rank 0's copy as main.cpp
     Particles fresh;
@@ -286,6 +288,41 @@ int get_state(double* m, double* x, double* v) {
             for (int j = 0; j < 3; j++) { x[3*k+j] = last_x[3*k+j]; v[3*k+j] = last_v[3*k+j]; }
         }
     T.d2h += secs(t0);
+    return n;
+}
+
+void set_spins(const double* chi_in) {
+    if (!have_p) return;
+    if (!bcast_flag(chi_in != nullptr)) return;
+    const std::vector<double> chi = from_root(chi_in, 3 * (size_t)nslots);
+    int n = 0;
+    std::vector<int> s = present_slots(n);
+    Particles& p = W();
+    auto hs = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.spin_vec);
+    for (int i = 0; i < n; i++) {
+        const int k = s[i];
+        if (k < 0 || k >= nslots) continue;
+        for (int j = 0; j < 3; j++) hs(i, j) = chi[3*k+j];
+    }
+    Kokkos::deep_copy(p.spin_vec, hs);
+    last_chi = chi;
+}
+
+int get_spins(double* chi) {
+    int n = 0;
+    if (have_p) {
+        std::vector<int> s = present_slots(n);
+        Particles& p = W();
+        auto hm = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.mass);
+        auto hs = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), p.spin_vec);
+        last_chi.resize(3 * (size_t)nslots, 0.0);
+        for (int i = 0; i < n; i++) {
+            const int k = s[i];
+            if (k < 0 || k >= nslots || hm(i) <= 0.0) continue;
+            for (int j = 0; j < 3; j++) last_chi[3*k+j] = hs(i, j);
+        }
+    }
+    if (chi) for (size_t k = 0; k < last_chi.size(); k++) chi[k] = last_chi[k];
     return n;
 }
 
@@ -460,6 +497,7 @@ int save_state(const char* dir, const std::vector<char>& host_blob) {
     r.t = t_lib; r.step = (int)T.n_advance; r.integrator = "hhs"; r.test = "library";
     put_vec(r, "lib_slot_id", slot_id); put_vec(r, "lib_last_m", last_m); put_vec(r, "lib_last_x", last_x);
     put_vec(r, "lib_last_v", last_v); put_vec(r, "lib_slot_kw", slot_kw); put_vec(r, "lib_slot_r", slot_r);
+    put_vec(r, "lib_last_chi", last_chi);
     put_vec(r, "lib_host", host_blob);
     r.put("lib_ledger", L); r.put("lib_nslots", nslots); r.put("lib_merged", merged);
     r.put("lib_step_in_progress", g_step_in_progress); r.put("lib_merger_seen", merger_seen);
@@ -497,6 +535,8 @@ int load_state(const char* dir, std::vector<char>& host_blob) {
     t_lib = r.t; T.n_advance = r.step;
     get_vec(r, "lib_slot_id", slot_id); get_vec(r, "lib_last_m", last_m); get_vec(r, "lib_last_x", last_x);
     get_vec(r, "lib_last_v", last_v); get_vec(r, "lib_slot_kw", slot_kw); get_vec(r, "lib_slot_r", slot_r);
+    get_vec(r, "lib_last_chi", last_chi);
+    if (last_chi.size() != 3 * slot_id.size()) last_chi.assign(3 * slot_id.size(), 0.0);   // older restart
     std::vector<char> hb; get_vec(r, "lib_host", hb); host_blob = hb;
     r.get("lib_ledger", L); r.get("lib_nslots", nslots); r.get("lib_merged", merged);
     r.get("lib_step_in_progress", g_step_in_progress); r.get("lib_merger_seen", merger_seen);

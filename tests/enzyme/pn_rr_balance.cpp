@@ -37,13 +37,26 @@ static double g_nu = 0.2, g_c = 30.0;
     return E;
 }
 
-// production relative acceleration (c.o.m.: body 1 at m2/M x, body 2 at -m1/M x), G = 1, M = 1
+// production relative acceleration, G = 1, M = 1: the general-frame body accelerations at the c.o.m. positions of
+// Blanchet's eq. (CMrel), y_1,2 = [X_2, -X_1 + nu Delta P] x + nu Delta Q v with P_1PN and, with radiation reaction,
+// Q_2.5PN = (4/5) v^2 - (8/5) / r (eq. Qres; dQ/dt = 0 at Newtonian order), velocities their time derivatives. The
+// odd Q shift enters the 1PN terms at 3.5PN, part of the c.o.m. 3.5PN relative acceleration
 static void accel_prod(const double* x, const double* v, int order, double* a) {
-    const double m1 = 0.5 * (1 + std::sqrt(1 - 4 * g_nu)), m2 = 1 - m1;
-    double x1[3], x2[3], v1[3], v2[3], a1[3], a2[3];
-    for (int k = 0; k < 3; k++) { x1[k] = m2 * x[k]; x2[k] = -m1 * x[k]; v1[k] = m2 * v[k]; v2[k] = -m1 * v[k]; }
-    eih_pn_acceleration_pair(x1, v1, m1, x2, v2, m2, 1.0, g_c, a1, a2, order);
+    const double m1 = 0.5 * (1 + std::sqrt(1 - 4 * g_nu)), m2 = 1 - m1, D = m1 - m2;
     const double r = std::sqrt(x[0] * x[0] + x[1] * x[1] + x[2] * x[2]);
+    const double v2s = v[0] * v[0] + v[1] * v[1] + v[2] * v[2], rd = (x[0] * v[0] + x[1] * v[1] + x[2] * v[2]) / r;
+    const double c2 = g_c * g_c, c5 = c2 * c2 * g_c;
+    const double P = (0.5 * v2s - 0.5 / r) / c2, Pd = -0.5 * rd / (r * r) / c2;
+    const double Q = (order & 20) ? (0.8 * v2s - 1.6 / r) / c5 : 0.0;
+    double x1[3], x2[3], v1[3], v2[3], a1[3], a2[3];
+    for (int k = 0; k < 3; k++) {
+        const double aN = -x[k] / (r * r * r);
+        x1[k] = (m2 + g_nu * D * P) * x[k] + g_nu * D * Q * v[k];
+        x2[k] = (-m1 + g_nu * D * P) * x[k] + g_nu * D * Q * v[k];
+        v1[k] = (m2 + g_nu * D * P) * v[k] + g_nu * D * (Pd * x[k] + Q * aN);
+        v2[k] = (-m1 + g_nu * D * P) * v[k] + g_nu * D * (Pd * x[k] + Q * aN);
+    }
+    eih_pn_acceleration_pair(x1, v1, m1, x2, v2, m2, 1.0, g_c, a1, a2, order);
     for (int k = 0; k < 3; k++) a[k] = -x[k] / (r * r * r) + a1[k] - a2[k];
 }
 

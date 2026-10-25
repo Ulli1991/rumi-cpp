@@ -58,6 +58,7 @@ if(ENABLE_COLLISIONAL)
         ${SRC_DIR}/collisional/mergers.cpp
         ${SRC_DIR}/collisional/merger_tree.cpp
         ${SRC_DIR}/collisional/gw_output.cpp
+        ${SRC_DIR}/collisional/mst.cpp
         ${SRC_DIR}/collisional/checkpoint.cpp
         ${SRC_DIR}/collisional/runtime_sse.cpp
     )
@@ -482,4 +483,59 @@ if(RUMI_ENZYME_TESTS)
     endforeach()
     add_test(NAME enzyme_symp_kepler_parabolic COMMAND ${ENZYME_OUT}/symp_kepler f)
     add_custom_target(enzyme-tests ALL DEPENDS ${ENZYME_OUTPUTS})
+endif()
+
+# KETJU integrator unit-test cases (tests/mstar_reference/README.md): integration and mergers through the library path
+# (HHS + LogH/GBS), MST construction through build_mst; cases RUMI++ cannot express exit 77 (skipped)
+option(RUMI_KETJU_REFERENCE_TESTS "Build and register the KETJU reference cases (tests/mstar_reference; needs ENABLE_COLLISIONAL)" ON)
+if(RUMI_KETJU_REFERENCE_TESTS AND ENABLE_COLLISIONAL)
+    if(TARGET rumi)
+        set(_ketju_ref_lib rumi)
+    else()
+        get_target_property(_ref_exe_src nbody-kokkos SOURCES)
+        list(FILTER _ref_exe_src EXCLUDE REGEX "main\\.cpp$")
+        add_library(rumi-ketju-ref STATIC EXCLUDE_FROM_ALL ${_ref_exe_src} ${SRC_DIR}/lib/rumi_lib.cpp)
+        target_include_directories(rumi-ketju-ref PRIVATE ${CMAKE_BINARY_DIR}/generated ${SRC_DIR}/core ${SRC_DIR}/gravity
+                                   ${SRC_DIR}/integrator ${SRC_DIR}/ic_gen ${SRC_DIR}/io ${SRC_DIR}/collisional ${SRC_DIR}/lib)
+        target_compile_definitions(rumi-ketju-ref PRIVATE ENABLE_COLLISIONAL)
+        if(USE_MPI)
+            target_compile_definitions(rumi-ketju-ref PRIVATE USE_MPI)
+            target_link_libraries(rumi-ketju-ref PUBLIC MPI::MPI_CXX)
+        endif()
+        if(USE_HDF5 AND HDF5_FOUND)
+            target_include_directories(rumi-ketju-ref PRIVATE ${HDF5_INCLUDE_DIRS})
+            target_compile_definitions(rumi-ketju-ref PRIVATE USE_HDF5 ${HDF5_DEFINITIONS})
+            target_link_libraries(rumi-ketju-ref PUBLIC ${HDF5_C_LIBRARIES})
+        endif()
+        target_compile_options(rumi-ketju-ref PRIVATE -Wno-unknown-pragmas $<$<CONFIG:Release>:-O3 -march=native>)
+        target_link_libraries(rumi-ketju-ref PUBLIC Kokkos::kokkos)
+        add_dependencies(rumi-ketju-ref nbody_git_version)
+        set(_ketju_ref_lib rumi-ketju-ref)
+    endif()
+    add_executable(mstar-reference-test ${CMAKE_CURRENT_SOURCE_DIR}/tests/mstar_reference/mstar_reference_test.cpp
+                   ${CMAKE_CURRENT_SOURCE_DIR}/tests/mstar_reference/mstar_reference_adapter.cpp)
+    target_include_directories(mstar-reference-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests/mstar_reference
+                               ${SRC_DIR}/core ${SRC_DIR}/gravity ${SRC_DIR}/collisional ${SRC_DIR}/lib)
+    target_compile_definitions(mstar-reference-test PRIVATE ENABLE_COLLISIONAL)
+    target_compile_features(mstar-reference-test PRIVATE cxx_std_17)
+    target_link_libraries(mstar-reference-test ${_ketju_ref_lib})
+    if(TARGET rumi AND USE_HDF5 AND HDF5_FOUND)   # librumi.a leaves HDF5 to the host (rumi-lib.mk)
+        target_link_libraries(mstar-reference-test ${HDF5_C_LIBRARIES})
+    endif()
+    file(GLOB KETJU_REFERENCE_CASES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/tests/mstar_reference/data/*.txt)
+    foreach(f ${KETJU_REFERENCE_CASES})
+        get_filename_component(case ${f} NAME_WE)
+        file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/ketju_reference/${case})
+        add_test(NAME ketju_ref_${case} COMMAND mstar-reference-test ${f}
+                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/ketju_reference/${case})
+        set_tests_properties(ketju_ref_${case} PROPERTIES SKIP_RETURN_CODE 77 LABELS ketju_reference
+                             ENVIRONMENT "OMP_NUM_THREADS=1")
+    endforeach()
+    # KETJU's own call pattern, one call over the whole interval: the Peters shortcut must not merge a binary without
+    # radiation reaction (PN_ORDER without 2.5PN)
+    add_test(NAME ketju_ref_binary_no_pn_one_host_step COMMAND mstar-reference-test
+             ${CMAKE_CURRENT_SOURCE_DIR}/tests/mstar_reference/data/binary_no_pn.txt
+             WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/ketju_reference/binary_no_pn)
+    set_tests_properties(ketju_ref_binary_no_pn_one_host_step PROPERTIES SKIP_RETURN_CODE 77 LABELS ketju_reference
+                         ENVIRONMENT "OMP_NUM_THREADS=1;KETJU_REF_HOST_STEPS=1")
 endif()

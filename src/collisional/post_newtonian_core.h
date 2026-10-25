@@ -15,13 +15,13 @@ constexpr int PN_SPIN = 32;
 // relative-coordinate decomposition needed. (Poisson & Will 2014; Rantala et al. 2023)
 //
 // a_pn_A[3]: output PN acceleration on body A (added to Newtonian)
-// pn_order: bitmask (1=PN1, 2=PN2, 4=PN2.5)
+// pn_order: bitmask (1 PN1, 2 PN2, 4 PN2.5, 8 PN3, 16 PN3.5), all in the general frame (Blanchet 2014 eq. acc3PN)
 void eih_pn_acceleration(const double x_A[3], const double v_A[3], double m_A,
                          const double x_B[3], const double v_B[3], double m_B,
                          double G, double c_code, double a_pn_A[3], int pn_order);
 
 // Both bodies at once: a_i = eih_pn_acceleration(i from j), a_j = eih_pn_acceleration(j from i), bit-identical
-// to the two calls, with the geometry and the pair-symmetric PN2.5-3.5 coefficients computed once
+// to the two calls, with the geometry computed once
 void eih_pn_acceleration_pair(const double x_i[3], const double v_i[3], double m_i,
                               const double x_j[3], const double v_j[3], double m_j,
                               double G, double c_code, double a_i[3], double a_j[3], int pn_order);
@@ -66,22 +66,13 @@ struct PnBodyGeom {          // body A of a pair from body B (eih_pn_acceleratio
     double Gm_A, Gm_B;       // G m_A, G m_B
     double Gm_A_r, Gm_B_r;   // G m_A / r, G m_B / r (as G m * (1/r))
     double pf1, pf2;         // PN1, PN2 prefactors G m_B (1/r)^2 / c^2, / c^4
-    double fA;               // m_B / M: body A's share of the PN2.5-3.5 relative acceleration
 };
 
 struct PnPairGeom {          // pair i < j
     int i, j;
-    // masses
-    double M, Gm, nu;        // m_i + m_j, G M, m_i m_j / M^2
-    double f25;              // 8/5 nu
-    double P3A[10], P3B[6];  // nu polynomials of the PN3.0 coefficients A, B
-    double P35A[5], P35B[5]; // nu polynomials of the PN3.5 coefficients A, B
     // positions
     double rij[3];           // x_i - x_j
     double inv_r;
-    double u, uu, uuu;       // G M / r and its square, cube
-    double c25, c35;         // (1/c^5) (8/5) nu u, (1/c^7) nu u
-    double g;                // -G M / r^2
     PnBodyGeom body[2];      // [0]: i from j, [1]: j from i
 };
 
@@ -131,6 +122,13 @@ void spin_precession(const double x[3], const double v[3],
 void spin_pn_acceleration(const double x[3], const double v[3],
                           double m1, double m2, const double S1[3], const double S2[3],
                           double G, double c_code, double a_rel[3]);
+
+// Spin terms per body in a general frame (Thorne & Hartle 1985 eqs. 4.11b-d, 4.17): x = x1 - x2, v1, v2 the bodies'
+// velocities; accelerations a1, a2 and precession vectors (dS_i/dt = Omega_i x S_i). In the c.o.m. frame
+// a1 - a2 = spin_pn_acceleration and Omega_i = spin_precession
+void spin_pn_bodies(const double x[3], const double v1[3], const double v2[3], double m1, double m2,
+                    const double S1[3], const double S2[3], double G, double c_code, double a1[3], double a2[3],
+                    double Omega1[3], double Omega2[3]);
 
 // Conserved total angular momentum J = L_N (+ L_PN1 if pn1) + L_SO + S1 + S2 of a binary (Kidder eq. 2.9)
 void binary_total_angular_momentum(const double x[3], const double v[3],

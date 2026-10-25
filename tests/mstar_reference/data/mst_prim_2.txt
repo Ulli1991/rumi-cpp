@@ -1,0 +1,14 @@
+# MSTAR reference case, produced by running the KETJU integrator (ketju_generator/, GPLv3).
+# Origin: ketju-integrator unit-tests/mst_construction.cpp
+case mst_prim_2
+kind mst
+# Positions: std::mt19937(0x5eed) + uniform(-1, 1), drawn in gtest order (Prim 2..1000, then DnC 2..1000).
+# Edge weight = Euclidean distance (all masses 1). Edges as sorted id pairs (ids 1..N).
+mst_algorithm prim
+# body id pn mass x y z vx vy vz sx sy sz
+body 1 0 1 0.38965514781463062 0.069210272623178248 -0.7867140893908835 0 0 0 0 0 0
+body 2 0 1 0.44013135400220138 -0.24574381572958415 0.58558713617632918 0 0 0 0 0 0
+# KETJU result
+mst_length_exact 1.4088841609069511
+mst_length_ketju 1.4088841609069511
+mst_edge 1 2

@@ -18,7 +18,7 @@
 
 // Interface version: bumped on every change of this header's calls or their meaning (docs/LIBRARY.md). The library
 // embeds "RUMI_LIB_ID api=<version> commit=<git describe>" (build_id); hosts check both at build and run time.
-#define RUMI_LIB_API_VERSION 2
+#define RUMI_LIB_API_VERSION 3
 
 namespace rumi_lib {
 
@@ -59,6 +59,11 @@ int set_particles(int n, const long long* id, const double* m, const double* x, 
 int n_slots();                 // bodies of the last set_particles call (merged ones included)
 // The state by slot. Merged-away bodies: m = 0 and their last state. Returns the number still present.
 int get_state(double* m, double* x, double* v);
+// BH spins by slot, dimensionless chi = c S / (G m^2) as [3 n_slots] (zero after set_particles). Used by the PN spin
+// couplings (PN_ORDER bit 32) of 2-body subsystems and the merger remnants; not clamped (|chi| > 1 is integrated as
+// given). get_spins: merged-away bodies keep their last spin, a remnant has the fitted one; returns the number present.
+void set_spins(const double* chi);
+int get_spins(double* chi);
 // Velocity and position changes by slot (dv, dx as [3 n_slots]; nullptr: none); kicks book their work (Ledger)
 void kick(const double* dv);
 void shift(const double* dx);

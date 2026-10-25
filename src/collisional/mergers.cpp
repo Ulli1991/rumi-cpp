@@ -92,38 +92,45 @@ double collision_remnant_mass(MergerType type, int kw1, double m1, int kw2, doub
 }
 
 // ============================================================================
-// BH-BH merger remnant (Zlochower+ 2015 / Jimenez-Forteza+ 2017)
+// BH-BH merger remnant: quasi-circular fits, scaled with the orbital angular momentum at the merger
 // ============================================================================
+// j = h / h_qc, h = |dx x dv| of the relative orbit at the decision, h_qc = chi_orb G M / (c eta) the orbital
+// angular momentum per reduced mass that gives the quasi-circular remnant spin chi_orb (J conservation from the
+// plunge, Buonanno, Kidder & Lehner 2008, PRD 77, 026004). j >= 1 (any inspiral reaching 10 R_S; a direct plunge
+// needs h below ~2.7 G M / c): the quasi-circular fits. j -> 0: the head-on limit, E_rad / M = eta^2 (0.0110 -
+// 0.0088 eta) (Sperhake et al. 2011, PRD 84, 084038, Sec. IV, NR from rest), no orbital spin, no kick (head-on
+// kicks are below 5 km/s, ibid.; KETJU: none). In between E_rad and the kick go with j^2, the orbital spin with j.
 
 void bh_bh_remnant(double m1, double m2, const double chi1[3], const double chi2[3],
-                   const double L_orb[3], double& m_rem, double chi_rem[3],
+                   const double L_orb[3], const double dx[3], const double dv[3], double& m_rem, double chi_rem[3],
                    double v_kick[3], double G, double c_code) {
-    (void)G;
-    (void)c_code;
     double M = m1 + m2;
     double eta = m1 * m2 / (M * M);
-    double q = std::min(m1, m2) / std::max(m1, m2);
     double delta_m = std::fabs(m1 - m2) / M;
 
-    // Radiated energy fraction (Barausse, Morozova & Rezzolla 2012, ApJ 758, 63)
-    double E_rad_frac = 0.0547 * eta * (1.0 - 0.5 * delta_m * delta_m);
-    m_rem = M * (1.0 - E_rad_frac);
+    // Quasi-circular radiated energy (Barausse, Morozova & Rezzolla 2012, ApJ 758, 63, simplified)
+    const double E_qc = 0.0547 * eta * (1.0 - 0.5 * delta_m * delta_m);
+    const double E_ho = eta * eta * (0.0110 - 0.0088 * eta);
+    // Quasi-circular orbital spin (Barausse & Rezzolla 2009, non-spinning part)
+    const double chi_orb = eta * (3.464 - 3.162*eta - 2.484*eta*eta);
 
-    // Remnant spin (Barausse & Rezzolla 2009 simplified)
-    // chi_f ~ eta * (3.464 - 3.162*eta - 2.484*eta^2)
-    double chi_f_mag = eta * (3.464 - 3.162*eta - 2.484*eta*eta);
-    chi_f_mag = std::min(chi_f_mag, 0.998);  // Kerr limit
+    const double h[3] = {dx[1]*dv[2] - dx[2]*dv[1], dx[2]*dv[0] - dx[0]*dv[2], dx[0]*dv[1] - dx[1]*dv[0]};
+    const double h_mag = std::sqrt(h[0]*h[0] + h[1]*h[1] + h[2]*h[2]);
+    const double h_qc = chi_orb * G * M / (c_code * eta);
+    const double j = h_qc > 0.0 ? std::min(1.0, h_mag / h_qc) : 1.0;
+    const double w = j * j;
 
-    // Direction: along orbital angular momentum
-    double L_mag = std::sqrt(L_orb[0]*L_orb[0] + L_orb[1]*L_orb[1] + L_orb[2]*L_orb[2]);
-    if (L_mag > 1e-30) {
-        chi_rem[0] = chi_f_mag * L_orb[0] / L_mag;
-        chi_rem[1] = chi_f_mag * L_orb[1] / L_mag;
-        chi_rem[2] = chi_f_mag * L_orb[2] / L_mag;
-    } else {
-        chi_rem[0] = chi_rem[1] = 0.0;
-        chi_rem[2] = chi_f_mag;
-    }
+    m_rem = M * (1.0 - (E_ho + (E_qc - E_ho) * w));
+
+    // Remnant spin: orbital part j chi_orb along L plus the BH spins, (chi1 m1^2 + chi2 m2^2) / M^2 (Barausse &
+    // Rezzolla 2009); the BH spins are carried over unchanged in a head-on merger (KETJU)
+    double L_hat[3] = {0.0, 0.0, 0.0};
+    const double L_mag = std::sqrt(L_orb[0]*L_orb[0] + L_orb[1]*L_orb[1] + L_orb[2]*L_orb[2]);
+    if (L_mag > 0.0) for (int k = 0; k < 3; k++) L_hat[k] = L_orb[k] / L_mag;
+    for (int k = 0; k < 3; k++)
+        chi_rem[k] = j * chi_orb * L_hat[k] + (chi1[k] * m1 * m1 + chi2[k] * m2 * m2) / (M * M);
+    const double chi_mag = std::sqrt(chi_rem[0]*chi_rem[0] + chi_rem[1]*chi_rem[1] + chi_rem[2]*chi_rem[2]);
+    if (chi_mag > 0.998) for (int k = 0; k < 3; k++) chi_rem[k] *= 0.998 / chi_mag;   // Kerr limit
 
     // GW kick with spins (gw_recoil.h; Lousto et al. 2012). The phase angle and the in-plane orientation, unknown
     // from the orbit-averaged state, come from a hash of the masses, spins and L: deterministic on every MPI rank
@@ -137,6 +144,7 @@ void bh_bh_remnant(double m1, double m2, const double chi1[3], const double chi2
     hsh = (hsh ^ 0x9e3779b97f4a7c15ULL) * 1099511628211ULL;
     const double u2 = (double)(hsh >> 11) * 0x1.0p-53;
     gw_recoil_kick(m1, m2, chi1, chi2, L_orb, u1, u2, v_kick);
+    for (int k = 0; k < 3; k++) v_kick[k] *= w;
 }
 
 // ============================================================================
@@ -245,9 +253,11 @@ std::vector<MergerEvent> detect_mergers(const SubsystemManager& mgr,
             ev.m_remnant = collision_remnant_mass(ctype, stype1, m1, stype2, m2);
         }
 
-        // GW coalescence timescale: compact remnants only (WD/NS/BH, kw 10-14); stars merge on contact above
+        // GW coalescence timescale: compact remnants only (WD/NS/BH, kw 10-14), and only with radiation reaction
+        // (PN_ORDER 2.5PN bit); stars merge on contact above
         const bool compact_pair = stype1 >= 10 && stype1 <= 14 && stype2 >= 10 && stype2 <= 14;
-        if (ev.type == MergerType::NONE && sub.orb.a > 0 && compact_pair) {
+        const bool gw_on = (g_collisional.pn_order & 4) && c_code > 0.0;
+        if (ev.type == MergerType::NONE && sub.orb.a > 0 && compact_pair && gw_on) {
             double t_gw = gw_coalescence_time(sub.orb.a, sub.orb.e, m1, m2, G, c_code);
             // Triple: orbits to coalescence against LogH's per-call ceiling of 4e6 GBS steps at 64 per orbit
             // (logh_batch.cpp gbs_step_limit)
@@ -316,7 +326,8 @@ void execute_merger(const MergerEvent& event, Particles& p,
         double chi1[3] = {h_spin(idx1, 0), h_spin(idx1, 1), h_spin(idx1, 2)};
         double chi2[3] = {h_spin(idx2, 0), h_spin(idx2, 1), h_spin(idx2, 2)};
 
-        bh_bh_remnant(m1, m2, chi1, chi2, L_orb, m_rem, chi_rem, v_kick, G, c_code);
+        const double dxr[3] = {dx, dy, dz}, dvr[3] = {dvx, dvy, dvz};
+        bh_bh_remnant(m1, m2, chi1, chi2, L_orb, dxr, dvr, m_rem, chi_rem, v_kick, G, c_code);
     }
 
     // With integer positions the remnant sits on the grid; use that position in the books too
@@ -543,7 +554,9 @@ void finalize_subsystem_collision(const SubsystemCollision& c, Particles& p, Sub
     if (c.kw_keep == 14 && c.kw_gone == 14 && c_code > 0.0) {
         const double chi1[3] = {h_spin(ik, 0), h_spin(ik, 1), h_spin(ik, 2)};
         const double chi2[3] = {h_spin(ig, 0), h_spin(ig, 1), h_spin(ig, 2)};
-        bh_bh_remnant(c.m_keep, c.m_gone, chi1, chi2, L_orb, m_rem, chi_rem, kick, G, c_code);
+        double dxr[3], dvr[3];
+        for (int k = 0; k < 3; k++) { dxr[k] = c.d_gone[k] - c.d_keep[k]; dvr[k] = c.u_gone[k] - c.u_keep[k]; }
+        bh_bh_remnant(c.m_keep, c.m_gone, chi1, chi2, L_orb, dxr, dvr, m_rem, chi_rem, kick, G, c_code);
     }
     const double u[3] = {vr[0] + kick[0], vr[1] + kick[1], vr[2] + kick[2]};
     double E_before = 0.5 * M * (vr[0]*vr[0] + vr[1]*vr[1] + vr[2]*vr[2]);

@@ -90,6 +90,7 @@ int apply_run_settings(const Config& cfg, RunSettings& rs) {
         g_collisional.subsys_advance_limit = cfg.get_int("SUBSYS_ADVANCE_LIMIT");
         g_collisional.tidal_step_res  = cfg.get_double("TIDAL_STEP_RES");
         g_collisional.tidal_floor_adapt = cfg.get_bool("TIDAL_FLOOR_ADAPT");
+        g_collisional.tidal_step_pert = cfg.get_double("TIDAL_STEP_PERT");
         g_collisional.secular_triples = cfg.get_bool("SECULAR_TRIPLES");
         g_collisional.sdar            = cfg.get_bool("SDAR");
         if (const char* e = std::getenv("NBODY_SDAR")) g_collisional.sdar = std::atoi(e) != 0;
@@ -111,6 +112,7 @@ int apply_run_settings(const Config& cfg, RunSettings& rs) {
         g_collisional.m_pn            = cfg.get_double("M_PN");
         g_collisional.pn_bh_only      = cfg.get_bool("PN_BH_ONLY");
         g_collisional.pn_order        = cfg.get_int("PN_ORDER");
+        g_collisional.pn_frame_com    = cfg.get_str("PN_FRAME") == "com";
         g_collisional.r_escape_rh     = cfg.get_double("R_ESCAPE_RH");
         g_collisional.r_escape_rj     = cfg.get_double("R_ESCAPE_RJ");
         g_collisional.mstar_threshold = cfg.get_int("MSTAR_THRESHOLD");

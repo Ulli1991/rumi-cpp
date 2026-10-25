@@ -78,6 +78,8 @@ const std::vector<ParamSpec> kParams = {
     {"PN_ORDER", I, "7", "Physics", USER, "",
      "PN bitmask: 1 PN1, 2 PN2, 4 PN2.5, 8 PN3, 16 PN3.5, 32 BH spin couplings (63 all; 0 off)"},
     {"M_PN", D, "5.0", "Physics", EXPERT, "", "PN terms only for pairs with a member of at least this mass (Msun)"},
+    {"PN_FRAME", S, "lab", "Physics", EXPERT, "lab|com",
+     "Frame of the PN velocities in LogH: lab (the run's inertial frame, as MSTAR) or com (each call's c.o.m., Galilean invariant)"},
     {"PN_BH_ONLY", B, "true", "Physics", EXPERT, "",
      "PN terms only for black holes (stellar type 14) of at least M_PN (false: every body of at least M_PN, 3-5x slower young clusters)"},
     {"SOFTENING_PC", D, "1e-3", "Physics", EXPERT, "", "Plummer softening (pc); 0 with COLLISIONAL"},
@@ -155,6 +157,8 @@ const std::vector<ParamSpec> kParams = {
      "Tidal-sampling pair step: energy a slow particle's kicks put into a subsystem per step <= this x |E0| (0: off)"},
     {"TIDAL_STEP_RES", D, "1.0", "Subsystems", INTERNAL, "",
      "Floor of the FLYBY_CM_EPS step: this x P (1 - e)^(3/2) of a bound binary, this x the shortest pair pericentre passage 2 pi r_p / v_p of an unbound pair or larger subsystem (0: none)"},
+    {"TIDAL_STEP_PERT", D, "0", "Subsystems", EXPERIMENT, "",
+     "Bound 2-body subsystems: tidal-sampling step not below TIDAL_STEP_PERT x sqrt(r / |a_ext,2 - a_ext,1|), the members' external tidal time (0: off)"},
     {"TIDAL_FLOOR_ADAPT", B, "false", "Subsystems", INTERNAL, "",
      "Bound binaries whose local tidal estimate at the TIDAL_STEP_RES floor, mu |T| v_p floor (T: tidal acceleration "
      "of all perturbers), exceeds their share FLYBY_CM_EPS x |E0| take the floor x sqrt(share / estimate) (resolved "

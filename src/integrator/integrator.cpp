@@ -3745,7 +3745,7 @@ static int hhs_fsi_recursive_impl(
         {
             static int dump_calls = 0;
             static const int dump_max = std::getenv("NBODY_DUMP_DT") ? std::atoi(std::getenv("NBODY_DUMP_DT")) : 0;
-            if (dump_calls < dump_max && MPIComm::rank() == 0) {
+            if (dump_max > 0 && dump_calls < dump_max && MPIComm::rank() == 0) {
                 auto r = Kokkos::make_pair(start, start + count);
                 auto hp = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Kokkos::subview(p.particle_id, r));
                 auto hd = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Kokkos::subview(p.dt_adapt, r));
@@ -3757,7 +3757,7 @@ static int hhs_fsi_recursive_impl(
                     std::fclose(f);
                 }
             }
-            dump_calls++;
+            if (dump_calls < dump_max) dump_calls++;   // no int overflow on a stalled step
         }
         // STALL_FACTOR: the first set at the deepest depth of the step (named if the step stalls)
         if (g_stall.deeper(depth) && count <= StallRecorder::MAX_DEEP && MPIComm::rank() == 0 &&

@@ -468,37 +468,35 @@ static void spin_from_chi(const LogHState& state, const double chi[3], int b, do
     for (int k = 0; k < 3; k++) S[k] = chi[k] * f;
 }
 
-// Spin-dependent PN accelerations (spin-orbit, spin-spin, Kerr quadrupole; Rantala et al. 2023, sec. 3.7) of a 2-body
-// subsystem, evaluated at velocities eval_vel and dimensionless spins chi1, chi2; added to pn_out
+// Spin-dependent PN accelerations (spin-orbit, spin-spin, Kerr quadrupole; Thorne & Hartle 1985 per body, spin_pn_bodies)
+// of a 2-body subsystem at velocities eval_vel (lab frame: v_frame added by the caller) and dimensionless spins chi1,
+// chi2; added to pn_out
 static void add_spin_accel(const LogHState& state, const double* eval_vel, const double chi1[3],
                            const double chi2[3], double G, double* pn_out) {
-    double x[3], v[3], S1[3], S2[3], a[3];
-    for (int k = 0; k < 3; k++) {
-        x[k] = state.pos[k] - state.pos[3 + k];
-        v[k] = eval_vel[k] - eval_vel[3 + k];
-    }
+    double x[3], S1[3], S2[3], a1[3], a2[3], O1[3], O2[3];
+    for (int k = 0; k < 3; k++) x[k] = state.pos[k] - state.pos[3 + k];
     spin_from_chi(state, chi1, 0, G, S1);
     spin_from_chi(state, chi2, 1, G, S2);
-    spin_pn_acceleration(x, v, state.mass[0], state.mass[1], S1, S2, G, state.c_code, a);
-    const double M = state.mass[0] + state.mass[1];
+    spin_pn_bodies(x, &eval_vel[0], &eval_vel[3], state.mass[0], state.mass[1], S1, S2, G, state.c_code, a1, a2, O1, O2);
     for (int k = 0; k < 3; k++) {
-        pn_out[k] += state.mass[1] / M * a[k];
-        pn_out[3 + k] -= state.mass[0] / M * a[k];
+        pn_out[k] += a1[k];
+        pn_out[3 + k] += a2[k];
     }
 }
 
-// Rotate the spins rot1, rot2 by the precession vectors evaluated at (x, eval_vel, chi1, chi2) over the
+// Rotate the spins rot1, rot2 by the precession vectors evaluated at (x, eval_vel + v_frame, chi1, chi2) over the
 // physical time dt: exact (norm-preserving, time-symmetric) solution of dS/dt = Omega × S with Omega frozen
 static void rotate_spins(const LogHState& state, const double* eval_vel, const double chi1[3],
                          const double chi2[3], double G, double dt, double rot1[3], double rot2[3]) {
-    double x[3], v[3], S1[3], S2[3], O1[3], O2[3];
+    double x[3], v1[3], v2[3], S1[3], S2[3], a1[3], a2[3], O1[3], O2[3];
     for (int k = 0; k < 3; k++) {
         x[k] = state.pos[k] - state.pos[3 + k];
-        v[k] = eval_vel[k] - eval_vel[3 + k];
+        v1[k] = eval_vel[k] + state.v_frame[k];
+        v2[k] = eval_vel[3 + k] + state.v_frame[k];
     }
     spin_from_chi(state, chi1, 0, G, S1);
     spin_from_chi(state, chi2, 1, G, S2);
-    spin_precession(x, v, state.mass[0], state.mass[1], S1, S2, G, state.c_code, O1, O2);
+    spin_pn_bodies(x, v1, v2, state.mass[0], state.mass[1], S1, S2, G, state.c_code, a1, a2, O1, O2);
     rotate_about(rot1, O1, dt);
     rotate_about(rot2, O2, dt);
 }
@@ -522,6 +520,13 @@ static void compute_pn_all_pairs(const LogHState& state, const PnGeom& geom, con
                                   double* pn_out, const double* chi1 = nullptr, const double* chi2 = nullptr) {
     int n = state.n_bodies;
     std::memset(pn_out, 0, n * 3 * sizeof(double));
+    // Lab-frame velocities: the EIH and 2PN terms are not Galilean invariant (KETJU evaluates them in the lab frame)
+    double lab_vel[LOGH_MAX_BODIES * 3];
+    if (state.v_frame[0] != 0.0 || state.v_frame[1] != 0.0 || state.v_frame[2] != 0.0) {
+        for (int i = 0; i < n; i++)
+            for (int k = 0; k < 3; k++) lab_vel[i*3+k] = eval_vel[i*3+k] + state.v_frame[k];
+        eval_vel = lab_vel;
+    }
     // NBODY_CHECK_EIH=1 (tests): every evaluation must equal the direct functions (eih1_nbody_acceleration, and
     // eih_pn_acceleration of each body of a pair) bit for bit
     static const bool check_eih = std::getenv("NBODY_CHECK_EIH") != nullptr;

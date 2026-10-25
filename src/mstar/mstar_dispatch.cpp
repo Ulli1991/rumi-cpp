@@ -93,7 +93,7 @@ int mstar_crossover_n() {
         if (const char* e = std::getenv("NBODY_MSTAR_CROSSOVER")) return std::atoi(e);
         // host-only Kokkos builds: the host engine for every group
         if (std::is_same<rumi_mstar::ExecSpace, Kokkos::DefaultHostExecutionSpace>::value) return 1 << 30;
-        return 32;   // A100 (mstar-bench, docs/CASES.md C27): 0.41 ms per GBS step at N = 32, serial KETJU 0.53 ms
+        return 32;   // A100 (mstar-bench, docs/CASES.md C29): 0.41 ms per GBS step at N = 32, serial KETJU 0.53 ms
     }();
     return n;
 }
