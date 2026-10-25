@@ -351,6 +351,7 @@ const std::vector<DebugEnvSpec> kDebugEnv = {
     {"NBODY_MSTAR_LOG", "=1: one line per MSTAR call (group size, PN bodies, interval, GBS steps, wall time, device, outcome)"},
     {"NBODY_MSTAR_MAX_STEPS", "=n: GBS steps (accepted + failed) after which an MSTAR subsystem call gives up (not converged: retried with subdivided steps as LogH; default 2000000)"},
     {"NBODY_MSTAR_TIDE", "=1 (with NBODY_MSTAR=1): members of MSTAR groups get the FSI kicks of the outside bodies as c.o.m. kicks (mass-weighted mean, momentum exact) and MSTAR applies their tide continuously, the tidal tensor at the group's c.o.m. at the start of each call (docs/MSTAR.md; default off, experimental)"},
+    {"NBODY_MSTAR_NO_TIDCAP", "=1 (experiment): no tidal-sampling (FLYBY_CM_EPS) cap on the steps of MSTAR groups, the other step criteria alone (BIFROST-like)"},
     {"NBODY_MSTAR_PERT_ACC", "=0 (NBODY_MSTAR_TIDE): perturbers inside MSTAR on straight lines instead of the predicted x + v t + a t^2 / 2 (a: FSI acceleration relative to the group's c.o.m.; default on)"},
     {"NBODY_MSTAR_PERT_R", "=f (NBODY_MSTAR_TIDE): bodies within f x the group radius of an MSTAR group's c.o.m. act inside MSTAR with their exact pull on straight lines (perturbers), the others through the tidal tensor (default 3)"},
     {"NBODY_MSTAR_TEAM_N", "=n: MSTAR groups up to n bodies run every GBS row inside one device team, one launch per step (default 96; ENABLE_MSTAR builds)"},

@@ -1189,7 +1189,9 @@ void SubsystemManager::fill_cm_velocity(const Particles& p, int lo, int hi, Kokk
     const double tpert = g_collisional.tidal_step_pert;
     // NBODY_MSTAR_TIDE: MSTAR groups get c.o.m. kicks and their tide inside MSTAR, so the tidal-sampling cap does not
     // apply to them (it would put a 300-body IMBH cusp at HHS level 13-29: 200k IMBH A/B, CASES.md C30)
-    const bool mstar_tide_groups = g_collisional.mstar && g_collisional.mstar_tide;
+    // NBODY_MSTAR_NO_TIDCAP=1 (experiment): no tidal-sampling cap for MSTAR groups (BIFROST: the eta_pert step alone)
+    static const bool mstar_no_tidcap = std::getenv("NBODY_MSTAR_NO_TIDCAP") && std::atoi(std::getenv("NBODY_MSTAR_NO_TIDCAP")) != 0;
+    const bool mstar_tide_groups = g_collisional.mstar && (g_collisional.mstar_tide || mstar_no_tidcap);
     small_for("cm_vel_members", n_sub, KOKKOS_LAMBDA(int k) {
         const int a = base + buf(k), e = base + buf(k + 1);
         double M = 0, px = 0, py = 0, pz = 0, cx = 0, cy = 0, cz = 0;

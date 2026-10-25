@@ -1357,3 +1357,5 @@ C++ rewrite of the MSTAR regularised integrator (Rantala et al. 2020; public KET
   either a symmetric treatment of the member-perturber interaction (back-reaction from the same time-averaged forces),
   or the BIFROST route (no perturbers; an eta_pert-type step for large groups instead of the global FLYBY_CM_EPS budget,
   to be A/B'd under the energy rule).
+  Cut-out with NBODY_MSTAR_NO_TIDCAP=1 (impulsive kicks, no tidal-sampling cap for the group): interval 1 not done in
+  900 s on 2 cores (50k GBS steps per print, 300-body group) - slower than the perturbed route; not pursued yet.
