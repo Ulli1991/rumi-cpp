@@ -1274,4 +1274,12 @@ C++ rewrite of the MSTAR regularised integrator (Rantala et al. 2020; public KET
 - **Cluster runs** (host build, NBODY_MSTAR=1): 16-body group 3.3e-10 |dE/E| (FSI-dominated), 1 collision inside a
   group with N conserved, IMBH binary + 40-star cusp (42-body PN group) 2.0e-9 with E_pn booked, dense core (100 stars
   in r_h = 2e-3 pc, 73-body group) 1.2e-6 (9.8e-7 with MSTAR off: FSI-dominated; MSTAR's own unbooked error 2.9e-12).
-- **200k gpudev A/B:** pending (docs: see the agent report).
+- **A100 module results (gate 2):** all module tests pass on the A100 with round-off-level bounds; bench
+  N = 1024 / 2048 / 4096: 3.2 / 8.7 / 28 ms per GBS step (device MST: no gain, open).
+- **200k gpudev A/B (status 2026-10-25, open):** production 200k (r_h 3.1 pc, no IMBH): no group above 8 forms, the
+  arms are bitwise identical (449 steps in 12 min, |dE/E| 7.5e-10 both). 200k + IMBH binary (500 + 500 Msun,
+  a = 1e-4 pc) + 300-star cusp: neither arm finished interval 1 in 12 min; off: a 26-body group left to the FSI, HHS
+  down to d32; on: no MSTAR call reported before the time limit (no per-call log yet), and a scaled-down host
+  cut-out (2000 stars + the same IMBH cusp) also stalled silently. Next: per-call MSTAR log (n, dt, GBS steps, wall,
+  status), find whether the group reaches MSTAR (subsystem detection around the IMBH, r_ngb, group membership per
+  HHS level) and where the time goes; then the A/B again.
