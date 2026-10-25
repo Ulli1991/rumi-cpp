@@ -447,13 +447,17 @@ void SubsystemBatch::pack(const SubsystemManager& mgr, const Particles& p,
     // NBODY_MSTAR_TIDE: tidal tensor of every body outside an MSTAR subsystem at its c.o.m. (one device reduction per
     // subsystem over all particles; positions replicated on every rank)
     tide_A.assign((size_t)n_sub * 9, 0.0);
+    pert.clear();
+    pert_off.assign(n_sub + 1, 0);
     if (g_collisional.mstar && g_collisional.mstar_tide) {
+        static const double pert_fac = std::getenv("NBODY_MSTAR_PERT_R") ? std::atof(std::getenv("NBODY_MSTAR_PERT_R")) : 3.0;
         static Kokkos::View<char*> mask;
         static bool hook = (Kokkos::push_finalize_hook([] { mask = Kokkos::View<char*>(); }), true);
         (void)hook;
         if ((int)mask.extent(0) < p.N) mask = Kokkos::View<char*>("mstar_tide_mask", p.N);
         auto px = p.x, py = p.y, pz = p.z, pm = p.mass;
         for (int s = 0; s < n_sub; s++) {
+            pert_off[s + 1] = pert_off[s];
             if (!g_collisional.mstar_group(n_bodies[s], LOGH_MAX_BODIES)) continue;
             double M = 0, X[3] = {0, 0, 0};
             std::vector<int> idx(n_bodies[s]);
@@ -470,6 +474,42 @@ void SubsystemBatch::pack(const SubsystemManager& mgr, const Particles& p,
             const int nm = (int)idx.size();
             auto mk = mask;
             Kokkos::parallel_for("mstar_tide_mark", nm, KOKKOS_LAMBDA(int q) { mk(didx(q)) = 1; });
+            // perturbers: bodies within pert_fac x the group radius (marked 2, then gathered in index order)
+            double rg2 = 0;
+            for (int b = 0; b < n_bodies[s]; b++) {
+                const int k = offset[s] + b;
+                double r2 = 0;
+                for (int c = 0; c < 3; c++) r2 += (flat_pos[k * 3 + c] - X[c]) * (flat_pos[k * 3 + c] - X[c]);
+                rg2 = std::max(rg2, r2);
+            }
+            const double rp2 = pert_fac * pert_fac * rg2;
+            {
+                const double Xa = X[0], Xb = X[1], Xc = X[2];
+                Kokkos::parallel_for("mstar_pert_mark", p.N, KOKKOS_LAMBDA(int k) {
+                    if (mk(k) || !(pm(k) > 0.0)) return;
+                    const double d0 = px(k) - Xa, d1 = py(k) - Xb, d2 = pz(k) - Xc;
+                    if (d0 * d0 + d1 * d1 + d2 * d2 < rp2) mk(k) = 2;
+                });
+                auto hm = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), mk);
+                std::vector<int> pidx;
+                for (int k = 0; k < p.N; k++) if (hm(k) == 2) pidx.push_back(k);
+                if (!pidx.empty()) {
+                    Kokkos::View<int*, Kokkos::HostSpace> hpi(pidx.data(), pidx.size());
+                    auto dpi = Kokkos::create_mirror_view_and_copy(Kokkos::DefaultExecutionSpace::memory_space(), hpi);
+                    const int np = (int)pidx.size();
+                    Kokkos::View<double**, Kokkos::LayoutRight> buf("mstar_pert_buf", np, 7);
+                    auto pvx = p.vx, pvy = p.vy, pvz = p.vz;
+                    Kokkos::parallel_for("mstar_pert_gather", np, KOKKOS_LAMBDA(int q) {
+                        const int k = dpi(q);
+                        buf(q, 0) = pm(k); buf(q, 1) = px(k); buf(q, 2) = py(k); buf(q, 3) = pz(k);
+                        buf(q, 4) = pvx(k); buf(q, 5) = pvy(k); buf(q, 6) = pvz(k);
+                    });
+                    auto hb = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), buf);
+                    for (int q = 0; q < np; q++)
+                        for (int c = 0; c < 7; c++) pert.push_back(hb(q, c));
+                    pert_off[s + 1] = pert_off[s] + np;
+                }
+            }
             Tide9 T;
             const double X0 = X[0], X1 = X[1], X2 = X[2];
             Kokkos::parallel_reduce("mstar_tide", p.N, KOKKOS_LAMBDA(int k, Tide9& t) {
@@ -481,7 +521,7 @@ void SubsystemBatch::pack(const SubsystemManager& mgr, const Particles& p,
                 for (int i = 0; i < 3; i++)
                     for (int j = 0; j < 3; j++) t.a[3 * i + j] += gm * (3.0 * d[i] * d[j] * ir2 - (i == j ? 1.0 : 0.0));
             }, Kokkos::Sum<Tide9>(T));
-            Kokkos::parallel_for("mstar_tide_unmark", nm, KOKKOS_LAMBDA(int q) { mk(didx(q)) = 0; });
+            Kokkos::parallel_for("mstar_tide_unmark", p.N, KOKKOS_LAMBDA(int k) { mk(k) = 0; });
             for (int q = 0; q < 9; q++) tide_A[(size_t)s * 9 + q] = T.a[q];
         }
     }
@@ -731,6 +771,15 @@ static void mstar_integrate_one(SubsystemBatch& batch, int s, double G, double e
     const double E0 = energy();
     double E_ref = E0, pn_dE = 0.0, ext_dE = 0.0, t = 0.0;
     const bool tide = g_collisional.mstar_tide && (size_t)s * 9 + 8 < batch.tide_A.size();
+    // perturbers in normalised units relative to the c.o.m. at the start (pos, vel) and in its frame
+    std::vector<double> pert_n;
+    if (tide && (size_t)s + 1 < batch.pert_off.size())
+        for (int q = batch.pert_off[s]; q < batch.pert_off[s + 1]; q++) {
+            const double* b = &batch.pert[(size_t)q * 7];
+            pert_n.push_back(b[0] / M_total);
+            for (int c = 0; c < 3; c++) pert_n.push_back((b[1 + c] - cm[c]) / R_scale);
+            for (int c = 0; c < 3; c++) pert_n.push_back((b[4 + c] - cmv[c]) / V_scale);
+        }
     const double dt_norm = dt / T_scale;
     static const long max_steps = std::getenv("NBODY_MSTAR_MAX_STEPS") ? std::atol(std::getenv("NBODY_MSTAR_MAX_STEPS"))
                                                                         : 2000000;
@@ -750,9 +799,11 @@ static void mstar_integrate_one(SubsystemBatch& batch, int s, double G, double e
         g.tol = eta_gbs;
         g.max_steps = max_steps;
         g.device = -1;   // device from mstar_crossover_n() bodies (NBODY_MSTAR_CROSSOVER), host engine below
-        if (tide) {      // a = A x about the c.o.m.: normalised A' = A T_scale^2
+        if (tide) {      // a = A x about the c.o.m.: normalised A' = A T_scale^2; perturbers normalised
             g.tide = true;
             for (int q = 0; q < 9; q++) g.tide_A[q] = batch.tide_A[(size_t)s * 9 + q] * T_scale * T_scale;
+            g.n_pert = (int)pert_n.size() / 7;
+            g.pert = pert_n.data();
         }
         if (c_code > 0.0) {   // collisions as in the LogH path (coll_on: c_code > 0)
             g.coll_R = R.data();
@@ -761,6 +812,12 @@ static void mstar_integrate_one(SubsystemBatch& batch, int s, double G, double e
             g.coll_bh_max_single = g_collisional.bh_merge_max_single;
         }
         mstar_integrate(g);
+        // NBODY_MSTAR_LOG=1: one line per MSTAR call (size, PN bodies, interval, steps, wall time, outcome)
+        static const bool mlog = std::getenv("NBODY_MSTAR_LOG") && std::atoi(std::getenv("NBODY_MSTAR_LOG")) != 0;
+        if (mlog)
+            std::printf("      MSTAR call: n=%d n_pn=%d dt=%.3e Myr steps=%ld fail=%ld wall=%.3f s dev=%d status=%d t=%.3e/%.3e\n",
+                        g.n, g.n_pn, g.dt * T_scale * TIME_UNIT_MYR, g.steps, g.failed_steps, g.wall, g.used_device,
+                        g.status, g.t_reached, g.dt);
         used_dev = used_dev || g.used_device;
         steps += g.steps + g.failed_steps;
         t += g.t_reached;

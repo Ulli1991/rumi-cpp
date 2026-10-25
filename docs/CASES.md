@@ -1335,6 +1335,16 @@ C++ rewrite of the MSTAR regularised integrator (Rantala et al. 2020; public KET
   arms are bitwise identical (449 steps in 12 min, |dE/E| 7.5e-10 both). 200k + IMBH binary (500 + 500 Msun,
   a = 1e-4 pc) + 300-star cusp: neither arm finished interval 1 in 12 min; off: a 26-body group left to the FSI, HHS
   down to d32; on: no MSTAR call reported before the time limit (no per-call log yet), and a scaled-down host
-  cut-out (2000 stars + the same IMBH cusp) also stalled silently. Next: per-call MSTAR log (n, dt, GBS steps, wall,
-  status), find whether the group reaches MSTAR (subsystem detection around the IMBH, r_ngb, group membership per
-  HHS level) and where the time goes; then the A/B again.
+  cut-out (2000 stars + the same IMBH cusp) also stalled silently.
+- **IMBH cusp analysis (2026-10-25, host cut-out, NBODY_MSTAR_LOG):** the group does reach MSTAR: 238 of the 300 cusp
+  stars + the binary form one MSTAR group (mass-scaled r_ngb links the whole 0.01 pc cusp), ~20 ms per call on the
+  host. The stall is its HHS level: NBODY_DT_ATTR shows the tidal-sampling step (FLYBY_CM_EPS) of the 293 members
+  at L13 at the start, then L29 (1.9e-12 Myr calls). Tighter bound for groups > 8 (sum m |r - R| |v - V| instead of
+  2 max|r| sum m|v|): still L29. A 40-body core (NBODY_MSTAR_MAX=40, the rest field): worse (3e-14 Myr), the cut
+  cusp perturbs it at close range. NBODY_MSTAR_TIDE with the linear tide only: step 1 done but |dE/E| 4e-5 (linear tide
+  invalid for perturbers at the group's own size). Now NBODY_MSTAR_TIDE takes BIFROST-style perturbers: bodies within
+  NBODY_MSTAR_PERT_R (3) x the group radius act inside MSTAR with their exact pull on straight lines (mean over the
+  members left out; the host gives c.o.m. kicks), the rest as tidal tensor; the tidal-sampling cap is off for such
+  groups. Cut-out: step 1 in < 300 s (HHS L10-L14, 300-body group), signed |dE/E| 2.5e-6 per step (books: PN 2.2e-6;
+  MSTAR's own unbooked error 1.3e-8): too large; open: the coupling error of the perturber split (straight-line
+  perturbers against impulsive back-reaction) and a group definition for cusps (perturber radius, core size).

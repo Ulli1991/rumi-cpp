@@ -704,6 +704,27 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
             for (const auto& [pid, k] : in_group) parts[bound_uf.find(k)].push_back(pid);
             for (auto& [r, part] : parts) {
                 if (part.size() < 2) continue;   // a single star: field particle
+                if (g_collisional.mstar && (int)part.size() > max_group) {
+                    // MSTAR core (NBODY_MSTAR_MAX): the max_group members nearest to the most massive one (an IMBH and
+                    // the inner cusp) stay one subsystem, the others are field particles. A whole 0.01 pc cusp (238 of
+                    // 300 stars around a 1000 Msun binary) as one group put its members at HHS level 13-29 through the
+                    // tidal-sampling step of its outer members (200k IMBH A/B, CASES.md C29)
+                    auto px = md.col(MemberData::X), py = md.col(MemberData::Y), pz = md.col(MemberData::Z);
+                    auto pm = md.col(MemberData::M);
+                    int c0 = part[0];
+                    for (int pid : part) if (pm(pid_to_idx[pid]) > pm(pid_to_idx[c0])) c0 = pid;
+                    const int i0 = pid_to_idx[c0];
+                    std::vector<std::pair<double, int>> dist;
+                    dist.reserve(part.size());
+                    for (int pid : part) {
+                        const int i = pid_to_idx[pid];
+                        const double dx = px(i) - px(i0), dy = py(i) - py(i0), dz = pz(i) - pz(i0);
+                        dist.push_back({dx * dx + dy * dy + dz * dz, pid});
+                    }
+                    std::sort(dist.begin(), dist.end());
+                    part.clear();
+                    for (int q = 0; q < max_group; q++) part.push_back(dist[q].second);
+                }
                 std::sort(part.begin(), part.end());
                 split.push_back({next_key--, part});   // still > max_group: left to the FSI below
             }
@@ -1166,6 +1187,9 @@ void SubsystemManager::fill_cm_velocity(const Particles& p, int lo, int hi, Kokk
     auto fscale = raw(scale_v);
     auto pax = raw(p.ax), pay = raw(p.ay), paz = raw(p.az);   // external only (the force kernel skips member pairs)
     const double tpert = g_collisional.tidal_step_pert;
+    // NBODY_MSTAR_TIDE: MSTAR groups get c.o.m. kicks and their tide inside MSTAR, so the tidal-sampling cap does not
+    // apply to them (it would put a 300-body IMBH cusp at HHS level 13-29: 200k IMBH A/B, CASES.md C29)
+    const bool mstar_tide_groups = g_collisional.mstar && g_collisional.mstar_tide;
     small_for("cm_vel_members", n_sub, KOKKOS_LAMBDA(int k) {
         const int a = base + buf(k), e = base + buf(k + 1);
         double M = 0, px = 0, py = 0, pz = 0, cx = 0, cy = 0, cz = 0;
@@ -1179,17 +1203,19 @@ void SubsystemManager::fill_cm_velocity(const Particles& p, int lo, int hi, Kokk
         if (tol > 0.0) {
             double ext = 0.0, muv = 0.0;
             if (e - a > LOGH_MAX_BODIES) {
-                // MSTAR group (more members than the tree arrays below hold): the bound max_i 2 |dr_i| sum_i m_i
-                // |dv_i| about the c.o.m. (looser than the tree bound, see below), fastest pair time scale as there
+                // MSTAR group (more members than the tree arrays below hold): the energy a tide T puts in per unit
+                // time, sum_i m_i (v_i - V) . T (r_i - R), is at most |T| sum_i m_i |r_i - R| |v_i - V| (each member
+                // about the c.o.m.); the former bound max_i 2 |dr_i| sum_i m_i |dv_i| took the extent from the
+                // outermost member and the speed from the tight BH binary (200k + IMBH cusp, 238-body group: HHS
+                // steps down to 1e-12 Myr). Fastest pair time scale as below
                 const double ccx = cx / M, ccy = cy / M, ccz = cz / M;
                 const double vcx = px / M, vcy = py / M, vcz = pz / M;
-                double rmax = 0.0, smv = 0.0, tmin = 1e300;
+                double smrv = 0.0, tmin = 1e300;
                 for (int q = a; q < e; q++) {
                     const int i = buf(q);
                     const double dx = px_(i) - ccx, dy = py_(i) - ccy, dz = pz_(i) - ccz;
                     const double ux = vx(i) - vcx, uy = vy(i) - vcy, uz = vz(i) - vcz;
-                    rmax = Kokkos::fmax(rmax, Kokkos::sqrt(dx * dx + dy * dy + dz * dz));
-                    smv += pm(i) * Kokkos::sqrt(ux * ux + uy * uy + uz * uz);
+                    smrv += pm(i) * Kokkos::sqrt(dx * dx + dy * dy + dz * dz) * Kokkos::sqrt(ux * ux + uy * uy + uz * uz);
                     for (int s2 = q + 1; s2 < e; s2++) {
                         const int j = buf(s2);
                         tmin = Kokkos::fmin(tmin, pericentre_passage_time(px_(j) - px_(i), py_(j) - py_(i),
@@ -1199,7 +1225,7 @@ void SubsystemManager::fill_cm_velocity(const Particles& p, int lo, int hi, Kokk
                     }
                 }
                 ext = 1.0;
-                muv = 2.0 * rmax * smv;
+                muv = mstar_tide_groups ? 0.0 : smrv;
                 kfl = tmin < 1e300 ? res * tmin : 0.0;
             } else if (e - a == 2) {
                 const int i = buf(a), j = buf(a + 1);

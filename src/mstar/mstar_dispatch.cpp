@@ -54,6 +54,8 @@ bool port_path(MstarGroup& g, bool on_host) {
     if (g.tide) {
         M->opt.extra.vindep = true;
         M->opt.extra.track_work = true;
+        M->opt.extra.remove_mean = true;
+        if (g.pert && g.n_pert > 0) M->perturbers.assign(g.pert, g.pert + 7 * g.n_pert);
         for (int q = 0; q < 9; q++) M->opt.extra.A[q] = g.tide_A[q];
     }
     const double t0 = M->time;

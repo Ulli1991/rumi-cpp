@@ -102,6 +102,10 @@ struct SubsystemBatch {
     // code units 1 / time^2; filled by pack) and the work of that tide on the members' T + U in the call (physical)
     std::vector<double> tide_A;
     std::vector<double> ext_dE;
+    // ... and the perturbers of each MSTAR subsystem (bodies within NBODY_MSTAR_PERT_R x the group radius of its
+    // c.o.m.; 7 values each: m, x, v, physical), pert_off[s]..pert_off[s + 1]; the tidal tensor is the rest's
+    std::vector<double> pert;
+    std::vector<int> pert_off;
     std::vector<double> t_reached; // physical time each subsystem's GBS integration reached (code units)
     int stat_collisions = 0;       // collisions decided inside the integrations
     int stat_peri_landings = 0;    // candidate pericentres a step was forced onto

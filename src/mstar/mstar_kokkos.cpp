@@ -92,6 +92,8 @@ struct DevT {
     V<double***> spin, aspin, sder;                 // (slots, max(Npn, 1), 3)
     V<double***> accvd, pnv;                        // (slots, N, 3): velocity-dependent acceleration, velocities
     V<double***> aext;                              // (slots, N, 3): extra velocity-independent acceleration
+    V<double**> pert;                               // (n_pert, 7): perturbers m, x0, v (moving linearly in time)
+    int n_pert = 0;
     ExtraForces ex;                                 // extra forces (RUMI++ port of KETJU's extra-force branch)
     bool vdep_on = false;                           // the auxiliary-velocity scheme is used (PN pairs or ex.vdep)
     V<double*> crad;                                // collision radius per body
@@ -342,7 +344,31 @@ struct DevT {
             const double f = -G * ex.pm_m[q] / (d2 * sqrt(d2));
             for (int k = 0; k < 3; k++) e[k] += f * d[k];
         }
+        if (n_pert > 0) {   // perturbers on straight lines x_k(t) = x_k0 + v_k t (t from the start of the call)
+            const double tt = scal(s, S_TIME);
+            for (int q = 0; q < n_pert; q++) {
+                double d[3], d2 = ex.pm_eps2;
+                for (int k = 0; k < 3; k++) {
+                    d[k] = pos(s, i, k) - (pert(q, 1 + k) + pert(q, 4 + k) * tt);
+                    d2 += d[k] * d[k];
+                }
+                const double f = -G * pert(q, 0) / (d2 * sqrt(d2));
+                for (int k = 0; k < 3; k++) e[k] += f * d[k];
+            }
+        }
         for (int k = 0; k < 3; k++) { a[k] += e[k]; aext(s, i, k) = e[k]; }
+    }
+    // mass-weighted mean of the extra velocity-independent acceleration (ExtraForces::remove_mean: the group's c.o.m.
+    // is moved outside, by the host's c.o.m. kicks; only the root kick sees the mean, edges take differences)
+    KOKKOS_INLINE_FUNCTION void team_ext_mean(const Team& t, int s, double* am) const {
+        am[0] = am[1] = am[2] = 0;
+        if (!(ex.vindep && ex.remove_mean)) return;
+        double M = 0, a0 = 0, a1 = 0, a2 = 0;
+        Kokkos::parallel_reduce(Kokkos::TeamThreadRange(t, N), [&](int i, double& m) { m += mass(i); }, M);
+        Kokkos::parallel_reduce(Kokkos::TeamThreadRange(t, N), [&](int i, double& a) { a += mass(i) * aext(s, i, 0); }, a0);
+        Kokkos::parallel_reduce(Kokkos::TeamThreadRange(t, N), [&](int i, double& a) { a += mass(i) * aext(s, i, 1); }, a1);
+        Kokkos::parallel_reduce(Kokkos::TeamThreadRange(t, N), [&](int i, double& a) { a += mass(i) * aext(s, i, 2); }, a2);
+        am[0] = a0 / M; am[1] = a1 / M; am[2] = a2 / M;
     }
     // velocity-dependent accelerations (PN, extra) with velocities and spins physical or auxiliary (aux)
     KOKKOS_INLINE_FUNCTION void team_pn_acc(const Team& t, int s, bool aux) const {
@@ -375,7 +401,7 @@ struct DevT {
         return accvd(s, hi, k) - accvd(s, lo, k);
     }
     // integration.c auxiliary_kick (into eaux) / physical_kick (into evel)
-    KOKKOS_INLINE_FUNCTION void team_pn_subkick(const Team& t, int s, double dt, bool physical) const {
+    KOKKOS_INLINE_FUNCTION void team_pn_subkick(const Team& t, int s, double dt, bool physical, const double* am) const {
         team_pn_acc(t, s, physical);
         if (physical) {
             Kokkos::single(Kokkos::PerTeam(t), [&]() {
@@ -395,7 +421,7 @@ struct DevT {
         });
         Kokkos::single(Kokkos::PerTeam(t), [&]() {
             for (int k = 0; k < 3; k++) {
-                const double a = acc(s, root, k) + accvd(s, root, k);
+                const double a = (acc(s, root, k) - am[k]) + accvd(s, root, k);
                 if (physical) root_s(s, R_VEL + k) += dt * a; else root_s(s, R_AUX + k) += dt * a;
             }
         });
@@ -409,17 +435,19 @@ struct DevT {
     // integration.c kick (forces of slot s already computed)
     KOKKOS_INLINE_FUNCTION void team_kick(const Team& t, int s, double ds) const {
         const double dt = ds / scal(s, S_U);
+        double am[3];
+        team_ext_mean(t, s, am);
         if (vdep_on) {
-            team_pn_subkick(t, s, dt / 2, false);
-            team_pn_subkick(t, s, dt, true);
-            team_pn_subkick(t, s, dt / 2, false);
+            team_pn_subkick(t, s, dt / 2, false, am);
+            team_pn_subkick(t, s, dt, true, am);
+            team_pn_subkick(t, s, dt / 2, false, am);
         } else {
             Kokkos::parallel_for(Kokkos::TeamThreadRange(t, E), [&](int e) {
                 const int hi = ehi(e), lo = elo(e);
                 for (int k = 0; k < 3; k++) evel(s, e, k) += dt * (acc(s, hi, k) - acc(s, lo, k));
             });
             Kokkos::single(Kokkos::PerTeam(t), [&]() {
-                for (int k = 0; k < 3; k++) root_s(s, R_VEL + k) += dt * acc(s, root, k);
+                for (int k = 0; k < 3; k++) root_s(s, R_VEL + k) += dt * (acc(s, root, k) - am[k]);
             });
             t.team_barrier();
         }
@@ -432,7 +460,7 @@ struct DevT {
                 double x[3];
                 vertex_vel(s, v, R_VEL, x);
                 for (int k = 0; k < 3; k++) {
-                    sum += mass(v) * 0.5 * (vel(s, v, k) + x[k]) * aext(s, v, k);
+                    sum += mass(v) * 0.5 * (vel(s, v, k) + x[k]) * (aext(s, v, k) - am[k]);
                     vel(s, v, k) = x[k];
                 }
             }, w);
@@ -807,7 +835,14 @@ struct Engine {
         d.N = N; d.E = N - 1; d.Npn = Npn; d.Nd = o.opt.max_tree_distance; d.kmax = K;
         d.flags = o.opt.PN_flags; d.G = o.opt.G; d.c = o.opt.c;
         d.ex = o.opt.extra;
+        d.n_pert = (int)o.perturbers.size() / 7;
+        if (d.n_pert > 0) {
+            if ((int)d.pert.extent(0) < d.n_pert) d.pert = V<double**>("mstar_pert", d.n_pert, 7);
+            Kokkos::View<const double**, Kokkos::LayoutRight, Kokkos::HostSpace> hp(o.perturbers.data(), d.n_pert, 7);
+            Kokkos::deep_copy(Kokkos::subview(d.pert, std::make_pair(0, d.n_pert), Kokkos::ALL), hp);
+        }
         d.vdep_on = (d.flags != 0 && Npn >= 2) || d.ex.vdep;
+        if (d.n_pert > 0) d.ex.vindep = true;
         work_on = d.vdep_on || (d.ex.vindep && d.ex.track_work);
         d.nvars = 1 + 3 + 3 + 6 * (N - 1) + 3 * Npn;
         if (N == cap_N && Npn == cap_pn && K == cap_k) return;
@@ -1373,6 +1408,7 @@ MstarKokkos::MstarKokkos(int num_pn, int num_other) { reset(num_pn, num_other); 
 void MstarKokkos::reset(int num_pn, int num_other) {
     perf = Perf();
     mergers.clear();
+    perturbers.clear();
     time = 0;
     n = num_pn + num_other;
     n_pn = num_pn;

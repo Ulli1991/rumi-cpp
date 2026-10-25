@@ -56,6 +56,7 @@ struct ExtraForces {
     double pm_x[MAX_PM][3] = {};
     double pm_eps2 = 0;
     bool track_work = true;      // B follows their work (RUMI++ fix; false: KETJU's branch, B unchanged)
+    bool remove_mean = false;    // the mass-weighted mean is left out (the c.o.m. is moved outside: perturbed groups)
     bool vdep = false;
     double D[9] = {};            // row-major 3x3
 };
@@ -118,6 +119,9 @@ class MstarKokkos {
     // src/collisional/mstar_dispatch.h): coll_R[i] radius, coll_bh[i] black hole; empty coll_R: off. A hit stops
     // run() at that step (coll_i < coll_j set, time = the step's end). Not maintained across KETJU BH mergers (the
     // check is switched off after one).
+    // Perturbers (RUMI++, BIFROST-style perturbed subsystems): 7 values each, m, x0[3], v[3] (straight-line motion,
+    // t from the start of the call); their exact force is a velocity-independent extra force (ExtraForces::A etc. add)
+    std::vector<double> perturbers;
     std::vector<double> coll_R;
     std::vector<char> coll_bh;
     double coll_c = 0;
