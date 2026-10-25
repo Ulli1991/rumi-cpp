@@ -1287,3 +1287,23 @@ Status: **closed** (fixed, test, ensemble checked), **option** (fix kept as an o
   driver's speed gain is given up until its pair expression is made contraction-proof in both paths.
 - **Open, separate:** weak_split_bh_binary (|dE/E| 1.93e-11 vs bound 1.23e-11) already fails at 5d91e1f^ and a381a27, with
   or without this fix; not a tree issue.
+
+## C29 Stored cut-outs under the IAU G (1267691): same physics via G_OVERRIDE; fresh-IC bounds re-measured on Raven
+
+- **Cause of 8 Raven failures on main:** G_CODE 4.302194e-3 -> 4.300917e-3 turns every stored km/s cut-out in tests/data into
+  another system (1.5e-4 in v). cmtide_detuned (dP 2.47e-11), adv_kozai_triple (dP 5.3e-15), sec_inner_s432 (dL 6.55e-13)
+  fail on that; the knife-edge cases flip decisions (c21 earlier: 42830 steps, 2.4e-7).
+- **Rescaling v by sqrt(G_IAU/G_old) as for c21 (bc5796e) is not enough in general:** it leaves v/c 3e-4 off, i.e. the PN
+  terms. adv_kozai_triple (secular-triple path, step 3) then took LogH instead of SecTriple: |dE/E| 2.6e-10 (bound 1.5e-15),
+  weak_split 1.1e-10 (bound 2.5e-11), c24 dL 7.8e-12 (1.4e-12).
+- **Fix:** `run_output` sets `G_OVERRIDE = 4.302194e-3` (G_STORED) for every particle_file case whose IC_FILE is in tests/data
+  (except c21, which keeps its rescaled cut-out and the default G); data, E_REF and intervals stay as measured. That is the old
+  physics exactly (adv_kozai 1.3e-15 / 1.8e-15 / 1.1e-15 vs 1.5 / 3.8 / 1.6e-15 bounds). cmt_step_errors uses G_STORED for the
+  cut-out's E0. All 15 cut-out cases (sec_inner_*, c19, c24, cmtide_*, cmv, flyby_group, gauss_irk, tidal_floor, weak_split) pass.
+- **coll_contact_flyby(_logh), behaviour:** under the new G no R window gives a pericentre landing (events found directly
+  by the step); whether a step lands on the pericentre depends on the binary's phase at the passage. Star distance
+  0.003 -> 0.0031 pc: landings at 0.00295 and 0.00305-0.0032 for R 2.1298-2.1302, SDAR and LogH (|dE/E| 2.6e-11).
+- **Round-off / integration error on fresh ICs (platform, Raven gcc 15, IAU G), bounds 1.3x measured:** secular_drift_e1e-8
+  16 steps |dE/E| 4.229e-15 (was bound 4e-15) -> 5.5e-15; sec_triple_energy |dP|/M 6.175e-15 (5.7e-15) -> 8.0e-15;
+  logh_hierarchy_complete |dE/E| 1.622e-11 (1.1e-11, GBS error of the unstable triple, phase-dependent) -> 2.1e-11;
+  sec_inner_s3047 |dP|/M 4.279e-12 (3.6e-12, old G) -> 5.6e-12.

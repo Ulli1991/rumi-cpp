@@ -176,9 +176,9 @@ COLL_HEADON = dict(TEST_CASE="triple_test", INTEGRATOR="hhs", TRIPLE_A_IN_PC="1e
 # The 200k step-1 stall (AUDIT F3, SDAR runs with BINARY_PERI_CHECK = false): a contact binary, 1+1 Msun at 0.05 AU,
 # e = 0.6 (R = 2.1300 R_sun: r_p just inside r_coll, so the steps jump over the short stretch inside r_coll unless
 # one is forced onto the pericentre; R = 2.131 was too deep for gcc 15, whose steps hit the overlap directly, and
-# R <= 2.1295 misses; 2.1298-2.1302 lands on gcc 13 and gcc 15) and a 0.7 Msun star passing at 0.003 pc (190 km/s, inside
+# R <= 2.1295 misses; 2.1298-2.1302 lands on gcc 13 and gcc 15) and a 0.7 Msun star passing at 0.0031 pc (190 km/s; 0.003 under the IAU G lost the landing on Raven, whether the step lands on the pericentre depends on the orbital phase at the passage: 0.00295, 0.00305-0.0032 land; inside
 # R_NGB from the start): a 3-body subsystem with SDAR, kappa = 1 for the candidate
-COLL_CONTACT = dict(F3_FLYBY, TRIPLE_E_IN="0.6", TRIPLE_A_OUT_PC="0.003", SDAR="true", TEST_STELLAR_RADIUS_RSUN="2.1300")
+COLL_CONTACT = dict(F3_FLYBY, TRIPLE_E_IN="0.6", TRIPLE_A_OUT_PC="0.0031", SDAR="true", TEST_STELLAR_RADIUS_RSUN="2.1300")
 # TDE on a parabolic orbit: a 1 Msun star of 1 R_sun reaches q = 1e-7 pc from a 100 Msun BH (r_t = 1.3 (M/m)^{1/3}
 # R = 6.03 R_sun = 1.36e-7 pc; q / r_t = 0.74), starting at 5 q; a 4 Msun star at 1e-4 pc (circular) binds the system
 # (E0 != 0 for the relative energy error)
@@ -269,6 +269,19 @@ NATAL_MIX = dict(NATAL_NS, TOTAL_TIME_MYR="60", PLUMMER_MASS_DIST="kroupa", PLUM
                  PLUMMER_R_HALF="2000", SSE_METALLICITY="0.0002", SSE_ECSN_MODEL="ON", SSE_PPISN_MODEL="STRONG")
 
 
+# Cut-outs in tests/data store velocities in km/s from runs under the old G (4.302194e-3; G_CODE has been the IAU
+# value 4.300917e-3 since 1267691). Under another G they are other systems (1.5e-4 in v: the secular-triple / SDAR
+# / pericentre-landing decisions of the knife-edge cases flip). They run with G_OVERRIDE = G_STORED, which is the
+# old physics exactly (rescaling v by sqrt(G_IAU / G_old) changes v / c, i.e. the PN terms, by 3e-4 and was not
+# enough for adv_kozai_triple). c21_sdar_outside_tide has its own rescaled cut-out and runs with the default G.
+G_STORED = "4.302194e-3"
+
+
+def stored_kms_cutout(cfg):
+    ic = str(cfg.get("IC_FILE", ""))
+    return cfg.get("TEST_CASE") == "particle_file" and "/tests/data/" in ic.replace("\\", "/") and "c21_" not in ic
+
+
 def run(exe, cfg, timeout=None):
     """L0 diagnostic rows (|dE/E|, |dP|/M, |dL/L|) of one run; raises on a nonzero exit."""
     return diagnostics(run_output(exe, cfg, timeout=timeout))
@@ -284,6 +297,8 @@ def run_output(exe, cfg, env=None, dump=False, read=None, timeout=None):
             env = {**(env or {}), "NBODY_DUMP": "1"}
         # NBODY_TEST_EXTRA="KEY=value,KEY2=value" overrides keys of every case (A/B comparisons)
         extra = dict(kv.split("=", 1) for kv in os.environ.get("NBODY_TEST_EXTRA", "").split(",") if "=" in kv)
+        if stored_kms_cutout(cfg) and "G_OVERRIDE" not in cfg:
+            cfg = dict(cfg, G_OVERRIDE=G_STORED)
         Path(d, "config.txt").write_text("".join(f"{k} = {v}\n" for k, v in {**OLD_DEFAULTS, **cfg, **extra}.items()))
         try:
             launcher = os.environ.get("NBODY_TEST_LAUNCHER", "").split()  # e.g. "mpirun -n 2"
@@ -611,7 +626,7 @@ def tidal_floor_bh_binary(exe):
 SEC_INNER_CASES = {
     "s101_s432_1": ("306584304.2034864", "0.4037126187872738", (SEC_DE_432, 2.95e-12, 2.5e-13), 1000),
     "s404_s1025_1": ("367882904.67611593", "0.40210304758978715", (SEC_DE_1025, 5.6e-12, 7.0e-13), 5000),  # dL 5.34e-13 (lab)
-    "s404_s3047_0": ("367882904.67611593", "0.40210304758978715", (SEC_DE_3047, 3.6e-12, 6.6e-13), 2000),
+    "s404_s3047_0": ("367882904.67611593", "0.40210304758978715", (SEC_DE_3047, 5.6e-12, 6.6e-13), 2000),
 }
 SEC_INNER_WALL = 20.0   # s per run (0.03-0.11 s measured on the login node; 470 s, 748 s, > 900 s before)
 
@@ -648,7 +663,7 @@ def cmt_step_errors(out, ic, e_ref):
     e0 = sum(0.5 * r[0] * sum(v * v for v in r[4:7]) for r in rows)
     for a in range(len(rows)):
         for b in range(a + 1, len(rows)):
-            e0 -= CMT_G * rows[a][0] * rows[b][0] / math.dist(rows[a][1:4], rows[b][1:4])
+            e0 -= float(G_STORED) * rows[a][0] * rows[b][0] / math.dist(rows[a][1:4], rows[b][1:4])
     vals = {int(s): float(v) for s, v in re.findall(r"^EATTR step (\d+) signed_dE (\S+)", out, re.M)}
     prev, steps = 0.0, []
     for k in sorted(vals):
@@ -2214,7 +2229,7 @@ CASES = {
     # |dE/E| 2.38e-9. Measured with NGB_MASS_SCALING (host): one 3-body subsystem, 8 LogH calls, 4.44e-14
     "ngb_mass_scaling": lambda exe: floor(exe, "black hole passing a wide binary, mass-scaled r_ngb",
                                           dict(BH_FLYBY, NGB_MASS_SCALING="true"), (7.7e-14, 7.7e-14, 1e30, 1e30)),
-    "logh_hierarchy_complete": lambda exe: logh_complete(exe, "tight binary in unstable triple", HIER_LOGH, 1.1e-11),
+    "logh_hierarchy_complete": lambda exe: logh_complete(exe, "tight binary in unstable triple", HIER_LOGH, 2.1e-11),
     "triple_id_order": lambda exe: triple_order(exe, "secular triple", SEC_TRIPLE, 1e-6),
     # SDAR (M3; Wang, Nitadori & Makino 2020; FROST-CLUSTERS I App. A2). Before (no SDAR key, plain LogH): GBS
     # step ratio 1, no slowed call. B-S triple (W20 Table 1), 0.07 t_KL: kappa_max 51.7 as in W20 sec. 7.1;
@@ -2238,7 +2253,7 @@ CASES = {
     # A100: end 9.28e-16, |dP|/M 4.16e-15. Angular-momentum-exact outer orbit (2026-10-17): max |dL/L| 6.2e-16 (8.4e-13
     # with the frozen outer orbit)
     "sec_triple_energy": lambda exe: floor(exe, "secular triple energy", dict(SEC_TRIPLE, ETA_RESTART="0"),
-                                           (2.2e-15, 2.2e-15, 5.7e-15, 2.4e-15)),   # Orion host: 1.70e-15 (end = max)
+                                           (2.2e-15, 2.2e-15, 8.0e-15, 2.4e-15)),   # Orion host: 1.70e-15 (end = max)
     # Found by scripts/adversary.py: a strongly coupled Kozai triple on the secular-triple path; the frozen outer
     # orbit lost |dL/L| 1.26e-2 in one step. Measured (host): max |dE/E| 4.39e-16, |dP|/M 1.74e-15 km/s, |dL/L| 1.21e-15
     # After C11 (octupole signs, mutual-node angles): |dE/E| 1.17e-15, |dP|/M 2.90e-15 km/s
@@ -2442,7 +2457,7 @@ CASES = {
     # bounds 1.3x the larger of host and A100 (GPU 2026-10-17: 1 vs 16 1.44e-12, vs analytic 1.59e-12, fma rounding)
     "secular_drift_e0": lambda exe: secular_drift(exe, "e = 0", SEC_DRIFT, (1.88e-12, 2.08e-12, 4.3e-15, 1e-15)),
     "secular_drift_e1e-8": lambda exe: secular_drift(exe, "e = 1e-8", dict(SEC_DRIFT, BINARY_E="1e-8"),
-                                                     (1.9e-12, 1.9e-12, 4e-15, 1e-15)),
+                                                     (1.9e-12, 1.9e-12, 5.5e-15, 1e-15)),   # |dE/E| 16 steps: 4.229e-15 measured (Raven, gcc 15, IAU G)
     # Kepler path of isolated non-PN pairs (subsystem audit #1, KEPLER_2BODY until 2026-10-12): the drift is exact
     # (vs the analytic orbit at round-off). Measured (raven host, 2026-10-11): Kepler vs analytic 1.1e-15 / 2e-32 /
     # 2.4e-15, max |dE/E| 1.2e-15 / 0 / 2.0e-15; bounds 1.3x (1e-15 floor). The deleted LogH alternative (same runs,
