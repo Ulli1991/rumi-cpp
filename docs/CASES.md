@@ -1374,3 +1374,32 @@ C++ rewrite of the MSTAR regularised integrator (Rantala et al. 2020; public KET
 - **Open (2026-10-25, after the MSTAR merge):** cmtide_res_s202 / cmtide_detuned max|dP|/M rose 1.256e-11 -> 1.751e-11 and
   1.7e-11 -> 4.196e-11 with identical c.o.m. kick counts, sum|dE| and max|dL/L|; the MSTAR branch tip b9263d5 alone gives
   the same values, so it is a round-off change from a commit on that branch (not identified). Bounds re-measured (dee534c).
+
+## C31 IMBH cusp as one MSTAR group: tidal join instead of the tidal-sampling cap (MSTAR_TIDAL_JOIN, default on)
+
+- **System:** 500 + 500 Msun BH binary (a = 1e-4 pc, e = 0.5, P = 3 yr) with a 300-star cusp inside 0.01 pc, in 200k
+  (C30 A/B) and in a 2000-star cut-out (`mstar_imbh_cusp300`, two 1e-4 Myr intervals, no restarts, production accuracy).
+- **Before:** the group's step was capped by the tidal-sampling step (FLYBY_CM_EPS), whose floor for groups above 8 is
+  TIDAL_STEP_RES x the shortest pericentre passage of any member pair: HHS level ~29, interval 1 never finished (cut-out:
+  no result in 1800 s on one core). Without the cap (NBODY_MSTAR_NO_TIDCAP) the run is fast but |dE/E| 5.7e-6 per two
+  intervals (first tries 4e-7 - 4e-6 per interval; with ETA_RESTART the restarts drove the steps to 1e-8 Myr).
+- **Attribution (cut-out, no cap, restarts off):** the error does not follow the steps (member steps x 0.25: 5.7e-6,
+  field x 0.25: 3.7e-6, BH x 0.25: 1.2e-4), NBODY_ELEDGER puts it in the HHS calls with the group at pivots 3-6e-6 Myr
+  (~ the binary period), and it vanishes when the whole cusp is in the group (R_NGB 2e-3: 1.2e-11, 4 MSTAR calls per
+  interval). Cause: cusp stars outside the group are kicked by the BHs at steps comparable to the binary period, so each
+  kick samples the binary's quadrupole at one phase, error ~ G m mu a^2 / d^3 per kick. MSTAR off: 1.0e-5 (250 s).
+- **Literature:** BIFROST (Rantala et al. 2023, sec. 3.2-3.4) and FROST-CLUSTERS I keep perturbers out of the regularised
+  step (H-splitting: internal Hamiltonian in the subsystem, everything external as FSI kicks) and size subsystem steps by
+  ff / fb / gradient and eta_pert on the subsystem's E and L rates; no tidal-sampling cap. The strongly coupled neighbours
+  are members (neighbour criteria), not perturbers.
+- **Fix (`MSTAR_TIDAL_JOIN`, default true, only with NBODY_MSTAR=1):** in detect_from_pairs, for every group above 8
+  members, each member's most bound member partner with period below the level's step is a fast pair (mu, a, c.o.m.);
+  a body of the level with G m sum mu a^2 / d^3 > FLYBY_CM_EPS x |E0| (the same per-kick budget as the cap) joins the
+  group (an extra neighbour edge; it brings its own subsystem along). MSTAR groups then have no tidal-sampling cap.
+  Bodies below the budget stay outside and act by the kicks, as in BIFROST.
+- **Cut-out:** |dE/E| 1.04e-11 in 54.7 s on one core (8 MSTAR calls, group of 302, 22 joined at the first detection);
+  with ETA_RESTART (4 intervals) 8.8e-12, no restart; MSTAR's own unbooked error ~1e-12 per call. MSTAR ctests and
+  ketju unit tests unchanged (41/41). Bounds: 1.4e-11, 72 s (test fails on the old code: no result in 1800 s).
+- **Fixed on the way:** MemberData columns kept the row offset by value, so rebuilding the gathered rows with the joined
+  bodies (lower slot) mapped them wrongly ("slot was not gathered" aborts in two runs).
+- **Open:** 200k gpudev A/B (MSTAR off / on, IMBH and plain production case; mcoup-2026-10-25).

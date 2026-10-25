@@ -101,9 +101,9 @@ struct MemberData {
     std::vector<double> f[NF];
 
     struct Col {
-        std::vector<double>* v; const std::vector<int>* loc; int lo;
+        std::vector<double>* v; const std::vector<int>* loc; const int* lo;   // lo by pointer: md may be rebuilt
         double& operator()(int i) const {
-            const int k = i - lo;
+            const int k = i - *lo;
             const int r = (k >= 0 && k < (int)loc->size()) ? (*loc)[k] : -1;
             if (r < 0) {   // a slot outside the gathered members: map and gather disagree
                 std::fprintf(stderr, "MemberData: slot %d was not gathered\n", i);
@@ -112,7 +112,7 @@ struct MemberData {
             return (*v)[r];
         }
     };
-    Col col(int k) { return Col{&f[k], &loc, lo}; }
+    Col col(int k) { return Col{&f[k], &loc, &lo}; }
 
     // Rows in first-appearance order of the valid slots
     template <class Slots>

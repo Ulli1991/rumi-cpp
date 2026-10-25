@@ -277,8 +277,8 @@ MSTAR_CUSP300 = dict(TEST_CASE="plummer", INTEGRATOR="hhs", TOTAL_TIME_MYR="2e-4
                      IMBH_SPIN="0", IMBH_CUSP_N="300", IMBH_CUSP_R_PC="0.01", ETA_GRAD="0.2", ETA_JERK="0", ETA="0",
                      FLYBY_CM_EPS="1e-11", NGB_MASS_SCALING="true", SDAR="true", ETA_RESTART="0", PRINT_INTERVAL="1",
                      PROFILING="false")
-MSTAR_CUSP300_DE = 1.0e-10   # mstar_imbh_cusp300: placeholder, set from the measurement
-MSTAR_CUSP300_WALL = 120.0   # s on one core: placeholder
+MSTAR_CUSP300_DE = 1.4e-11   # mstar_imbh_cusp300: 1.04e-11 measured (host gcc 15; MSTAR off 1.0e-5, no join 5.7e-6)
+MSTAR_CUSP300_WALL = 72.0    # s on one core: 54.7 measured (without the join: no result in 1800 s)
 MSTAR_SUB_ERR = 4e-12     # max per-print sum |unbooked subsystem dE|/E0 (NBODY_EATTR logh_abs): 2.9e-12 measured (dense core)
 # Natal kicks (runtime_sse.cpp): 500 12-Msun stars at Z = 0.02 in a cluster of r_h = 1 kpc (no dynamics to speak of),
 # 1 Myr steps through their core collapse at 19-21 Myr: 500 NSs (Fryer 2012 rapid, f_fb ~ 0.025)
