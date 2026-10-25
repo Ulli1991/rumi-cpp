@@ -3287,7 +3287,8 @@ void dt_attr_report(Particles& p, int start, int count, double G, double soft2) 
         auto hjff = cp(jff), hjfb = cp(jfb);
         auto hx = cp(Kokkos::subview(p.x, r)), hy = cp(Kokkos::subview(p.y, r)), hz = cp(Kokkos::subview(p.z, r));
         auto hvx = cp(Kokkos::subview(p.vx, r)), hvy = cp(Kokkos::subview(p.vy, r)), hvz = cp(Kokkos::subview(p.vz, r));
-        auto hm = cp(Kokkos::subview(p.mass, r)), hpid = cp(Kokkos::subview(p.particle_id, r));
+        auto hm = cp(Kokkos::subview(p.mass, r));
+        auto hpid = cp(Kokkos::subview(p.particle_id, r));
         std::map<int, int> nmem, kmin;
         for (int k = 0; k < count; k++) {
             if (hs(k) < 0) continue;
