@@ -683,6 +683,7 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
             for (const auto& mem : big)
                 for (int q : mem) { auto it = loc.find(q); if (it != loc.end()) taken[it->second] = 1; }
             std::vector<PairInfo> add;
+            std::vector<int> join_slots;
             for (const auto& mem : big) {
                 std::vector<int> sl;
                 for (int q : mem) { auto it = loc.find(q); if (it != loc.end()) sl.push_back(it->second); }
@@ -740,10 +741,15 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
                     pr.pid_lo = std::min((int)hpid(j), near); pr.pid_hi = std::max((int)hpid(j), near);
                     pr.a = 0.0; pr.e = 0.0; pr.E_orb = 0.0; pr.bound = false;
                     add.push_back(pr);
+                    join_slots.push_back(s0 + j);
                     last_level_mstar_joined++;
                 }
             }
             if (!add.empty()) {
+                // the joined bodies' rows (the columns of md keep pointing at its members: rebuilt in place)
+                std::vector<int> slots = pair_slots;
+                slots.insert(slots.end(), join_slots.begin(), join_slots.end());
+                md = MemberData(slots, p);
                 pairs.insert(pairs.end(), add.begin(), add.end());
                 std::sort(pairs.begin(), pairs.end(), [](const PairInfo& a, const PairInfo& b) {
                     return a.pid_lo != b.pid_lo ? a.pid_lo < b.pid_lo : a.pid_hi < b.pid_hi;
