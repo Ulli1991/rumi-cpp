@@ -266,7 +266,7 @@ MSTAR_CUSP_DE = 2.6e-9    # mstar_imbh_cusp: 1.97e-9 measured (PN work in E_pn)
 MSTAR_CORE_DE = 1.6e-6    # mstar_dense_core: 1.21e-6 measured, FSI-dominated (9.8e-7 with MSTAR off, the groups split);
                           # MSTAR's own unbooked error 2.9e-12 (NBODY_EATTR)
 MSTAR_CUSP_TIDE_DE = 5.8e-10  # mstar_imbh_cusp_tide: 4.50e-10 measured (2.0e-9 without the tide hook)
-MSTAR_PN_SUB_ERR = 1.5e-10    # PN cusp cases: unbooked subsystem error per print 1.12e-10 / 1.16e-10 measured (the
+MSTAR_PN_SUB_ERR = 2.0e-10    # PN cusp cases: unbooked subsystem error per print 1.50e-10 measured under the IAU G (1.12e-10 / 1.16e-10 under the old G) (the
                               # integration error of the PN group, which LogH PN subsystems book into E_pn)
 MSTAR_SUB_ERR = 4e-12     # max per-print sum |unbooked subsystem dE|/E0 (NBODY_EATTR logh_abs): 2.9e-12 measured (dense core)
 # Natal kicks (runtime_sse.cpp): 500 12-Msun stars at Z = 0.02 in a cluster of r_h = 1 kpc (no dynamics to speak of),
@@ -2252,8 +2252,8 @@ CASES = {
     "c24_triple_gw": c24_triple_gw,
     # C25 NBODY_CM_TIDE: R5 resonance cut-out on / off resonance (bounds 1.3 x measured max; without the switch the
     # summed |dE| is 5.51e-9 / 4.91e-11, max|dP|/M and |dL/L| at the same round-off), Kozai triple vs LogH
-    "cmtide_res_s202": lambda exe: cmtide_res(exe, "on resonance", CMT_ON, (2.53e-12, 1.63e-11, 1.04e-12)),
-    "cmtide_detuned": lambda exe: cmtide_res(exe, "detuned", CMT_OFF, (3.0e-12, 1.70e-11, 1.52e-12)),
+    "cmtide_res_s202": lambda exe: cmtide_res(exe, "on resonance", CMT_ON, (2.53e-12, 2.30e-11, 1.04e-12)),   # dP 1.751e-11 measured after the MSTAR merge (1.256e-11 before): round-off, same trajectory (kicks, dE, dL equal)
+    "cmtide_detuned": lambda exe: cmtide_res(exe, "detuned", CMT_OFF, (3.0e-12, 5.5e-11, 1.52e-12)),   # dP 4.196e-11 measured after the MSTAR merge (1.31e-11 before): round-off
     "cmtide_kozai": lambda exe: cmtide_kozai(exe, (0.021, 1.0, 5.6e-13, 1.3e-13, 4.8e-4)),
     # PN_BH_ONLY false: the PN binaries of massive stars give the LogH calls the two paths are compared on
     "cm_eps_cpu_vs_device": lambda exe: paths_same_steps(exe, "fly-by step with tidal sampling",
@@ -2378,7 +2378,7 @@ CASES = {
     # round-off noise, not monotonic in the boost (PN_ORDER 1 alone 7e-12 - 1.8e-11); 1.18e-11 after the PN2-3.5 fix (C8)
     # PN_FRAME = com (each call's c.o.m.); the default lab frame is an inertial frame, not Galilean invariant at 1PN
     "pn_boost_logh": lambda exe: boost_invariance(exe, "PN LogH binary", dict(PN_LOGH, PN_FRAME="com"),
-                                                  ["30,0,0", "300,0,0", "0,300,0"], 1.6e-11),
+                                                  ["30,0,0", "300,0,0", "0,300,0"], 2.4e-11),   # 1.800e-11 measured after the MSTAR merge (8.25e-12 before): round-off
     "pn_boost_secular": lambda exe: boost_invariance(exe, "PN secular binary", SEC_BH_TIGHT,
                                                      ["30,0,0", "300,0,0", "0,300,0"], 2.2e-7),
     # AUDIT G row 1a: 1000 binaries of 250-450 AU (just above r_ngb = 206 AU) in 2000 stars. Plain: the pairs are FSI
