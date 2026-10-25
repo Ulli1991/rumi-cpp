@@ -2,7 +2,9 @@
 
 The physics cases of the KETJU integrator's unit tests (Rantala+20 MSTAR, ketju-integrator `unit-tests/`), with
 reference results produced by running KETJU, run through RUMI++: integration and mergers through the library path
-(`src/lib/rumi_lib.h`: HHS with LogH+GBS subsystems), MST construction through `build_mst` (`mstar.h`).
+(`src/lib/rumi_lib.h`: HHS with LogH+GBS subsystems), MST construction through `build_mst` (`src/collisional/mst.h`).
+The MSTAR module (`src/mstar`, `ENABLE_MSTAR`) checks its own parity with KETJU directly against the KETJU library
+(`mstar_compare`, round-off; docs/MSTAR.md); these stored outputs cover RUMI++'s LogH path.
 
 ## Layout and licences
 

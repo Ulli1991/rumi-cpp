@@ -6,6 +6,8 @@ option(USE_MPI "Enable MPI for multi-node support" OFF)
 option(USE_GPU_AWARE_MPI "Enable GPU-aware MPI (CUDA-aware/ROCm-aware)" OFF)
 option(ENABLE_COLLISIONAL "Compile collisional (unsoftened) support" OFF)
 # HDF5 restart files and LUNA-compatible snapshots (src/io/restart.*, src/io/snapshot.*): on when HDF5 is found
+# Optional GPLv3 MSTAR module (src/mstar: KETJU integrator + Kokkos port); binaries built with it are GPLv3
+option(ENABLE_MSTAR "Build the MSTAR module (src/mstar, GPLv3; needs ENABLE_COLLISIONAL)" OFF)
 option(USE_HDF5 "HDF5 restart files and snapshots (needs the HDF5 C library, e.g. module hdf5-serial)" ON)
 
 # Find Kokkos (set Kokkos_ROOT or CMAKE_PREFIX_PATH)
@@ -17,6 +19,7 @@ if(USE_MPI)
 endif()
 
 set(SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src)
+enable_testing()
 
 add_executable(nbody-kokkos
     ${SRC_DIR}/main.cpp
@@ -55,7 +58,7 @@ if(ENABLE_COLLISIONAL)
         ${SRC_DIR}/collisional/mergers.cpp
         ${SRC_DIR}/collisional/merger_tree.cpp
         ${SRC_DIR}/collisional/gw_output.cpp
-        ${SRC_DIR}/collisional/mstar.cpp
+        ${SRC_DIR}/collisional/mst.cpp
         ${SRC_DIR}/collisional/checkpoint.cpp
         ${SRC_DIR}/collisional/runtime_sse.cpp
     )
@@ -94,6 +97,18 @@ if(ENABLE_COLLISIONAL)
     message(STATUS "Collisional (unsoftened direct N-body) support enabled")
 endif()
 target_link_libraries(nbody-kokkos Kokkos::kokkos)
+# MSTAR: the core calls src/collisional/mstar_dispatch.h (BSD); the GPLv3 module implements it, else the BSD stub
+if(ENABLE_MSTAR)
+    if(NOT ENABLE_COLLISIONAL)
+        message(FATAL_ERROR "ENABLE_MSTAR needs ENABLE_COLLISIONAL=ON")
+    endif()
+    include(${SRC_DIR}/mstar/CMakeLists.txt)
+    target_link_libraries(nbody-kokkos rumi-mstar)
+    target_compile_definitions(nbody-kokkos PRIVATE ENABLE_MSTAR)
+    message(STATUS "MSTAR module enabled (src/mstar, GPLv3): this build is distributed under the GPLv3")
+elseif(ENABLE_COLLISIONAL)
+    target_sources(nbody-kokkos PRIVATE ${SRC_DIR}/collisional/mstar_dispatch_stub.cpp)
+endif()
 
 # Kokkos force kernel benchmark, counterpart of tools/hip_bench (tests/n2_bench.cpp)
 add_executable(n2-bench ${CMAKE_CURRENT_SOURCE_DIR}/tests/n2_bench.cpp)
@@ -272,6 +287,12 @@ if(BUILD_RUMI_LIBRARY)
         endif()
     endforeach()
     add_library(rumi STATIC ${_rumi_lib_src} ${SRC_DIR}/lib/rumi_lib.cpp)
+    set(_rumi_mstar_libs "")
+    if(ENABLE_MSTAR)
+        target_link_libraries(rumi PUBLIC rumi-mstar)
+        target_compile_definitions(rumi PRIVATE ENABLE_MSTAR)
+        set(_rumi_mstar_libs "$<TARGET_FILE:rumi-mstar> ")
+    endif()
     target_include_directories(rumi PRIVATE ${CMAKE_BINARY_DIR}/generated ${SRC_DIR}/core ${SRC_DIR}/gravity
                                ${SRC_DIR}/integrator ${SRC_DIR}/ic_gen ${SRC_DIR}/io ${SRC_DIR}/collisional ${SRC_DIR}/lib)
     target_compile_definitions(rumi PRIVATE ENABLE_COLLISIONAL)
@@ -317,14 +338,13 @@ RUMI_LIB_DEVICES = ${Kokkos_DEVICES}
 RUMI_LIB_INCL = -I${CMAKE_INSTALL_PREFIX}/include
 RUMI_LIB_MPI = ${USE_MPI}
 RUMI_LIB_HDF5 = ${HDF5_FOUND}
-RUMI_LIB_LIBS = ${CMAKE_INSTALL_PREFIX}/lib/librumi.a $<TARGET_FILE:Kokkos::kokkoscontainers> $<TARGET_FILE:Kokkos::kokkoscore> -ldl${_rumi_backend}
+RUMI_LIB_LIBS = ${CMAKE_INSTALL_PREFIX}/lib/librumi.a ${_rumi_mstar_libs}$<TARGET_FILE:Kokkos::kokkoscontainers> $<TARGET_FILE:Kokkos::kokkoscore> -ldl${_rumi_backend}
 ")
     install(FILES ${CMAKE_BINARY_DIR}/rumi-lib.mk DESTINATION .)
     add_dependencies(rumi nbody_git_version)
 endif()
 
-# Tests: `ctest --test-dir <build>` runs each case through tests/run_case.py
-enable_testing()
+# Tests: `ctest --test-dir <build>` runs each case through tests/run_case.py (enable_testing() is at the top)
 add_test(NAME gw_recoil_unit COMMAND recoil-test)
 add_test(NAME sse_vms_unit COMMAND sse-test)
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
@@ -370,6 +390,15 @@ if(ENABLE_COLLISIONAL)
     add_test(NAME gauss_irk COMMAND gauss-irk-test)
 endif()
 add_test(NAME grad_force_consistency COMMAND grad-force-test)
+# MSTAR subsystems in the cluster code (NBODY_MSTAR=1; the cases skip without the module)
+if(ENABLE_MSTAR)
+    foreach(case mstar_big_group mstar_coll_group mstar_imbh_cusp mstar_imbh_cusp_tide mstar_dense_core)
+        add_test(NAME ${case} COMMAND Python3::Interpreter ${CMAKE_SOURCE_DIR}/tests/run_case.py
+                 $<TARGET_FILE:nbody-kokkos> ${case})
+        set_tests_properties(${case} PROPERTIES SKIP_RETURN_CODE 77 ENVIRONMENT
+            "OMP_NUM_THREADS=1;OMP_PROC_BIND=false;NBODY_CHECK_PIDMAP=1;NBODY_CHECK_SUBSYS=1;NBODY_CHECK_STELLAR_CACHE=1")
+    endforeach()
+endif()
 if(USE_MPI)
     foreach(case spin_mpi2 mergers_mpi2 mpi_1v2 rankcount_binaries rankcount_mergers rankcount_triples rankcount_natal_kicks)
         add_test(NAME ${case} COMMAND Python3::Interpreter ${CMAKE_SOURCE_DIR}/tests/run_case.py

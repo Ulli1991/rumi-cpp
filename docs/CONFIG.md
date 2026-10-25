@@ -1,10 +1,10 @@
 # Config reference
 
-All 160 keys of the config file (`config.txt`, or `--config <file>`), generated from the parameter table in `src/core/params.cpp` by `scripts/gen_config_md.py`. Every key has one default, in that table; an unknown key in a config file is an error. Each run writes the effective value of every key, and whether it came from the file or the default, to `run_params.txt`.
+All 164 keys of the config file (`config.txt`, or `--config <file>`), generated from the parameter table in `src/core/params.cpp` by `scripts/gen_config_md.py`. Every key has one default, in that table; an unknown key in a config file is an error. Each run writes the effective value of every key, and whether it came from the file or the default, to `run_params.txt`.
 
 Levels:
 
-- **user**: the choices of a run; these 52 keys are in `config.txt`.
+- **user**: the choices of a run; these 56 keys are in `config.txt`.
 - **expert**: accuracy and output knobs; the default is the production value.
 - **test**: parameters of the few-body test problems.
 - **internal**: performance tuning thresholds; results do not depend on them (or only through the reduction order).
@@ -58,6 +58,10 @@ Levels:
 | `IMBH_A_PC` | double | `1e-4` | user |  | Semi-major axis (pc) |
 | `IMBH_E` | double | `0.5` | user |  | Eccentricity |
 | `IMBH_SPIN` | double | `0.0` | user |  | Dimensionless spin of both BHs (along z) |
+| `IMBH_CUSP_N` | int | `0` | user |  | Extra stars bound to the IMBH binary in a power-law cusp (ADD_IMBH; 0: none) |
+| `IMBH_CUSP_GAMMA` | double | `1.75` | user |  | Cusp density slope rho ~ r^-gamma (7/4: Bahcall & Wolf 1976) |
+| `IMBH_CUSP_R_PC` | double | `0.01` | user |  | Outer radius of the cusp (pc) |
+| `IMBH_CUSP_M` | double | `1.0` | user |  | Mass of each cusp star (Msun; main sequence, R = M^0.8 R_sun) |
 
 ## Physics
 
@@ -144,7 +148,7 @@ Levels:
 | `NGB_MREF` | double | `0.0` | test |  | <m> of NGB_MASS_SCALING (Msun) instead of the cluster's (0) |
 | `E_REF` | double | `0.0` | test |  | \|E0\| of FLYBY_CM_EPS (Msun (km/s)^2) instead of the run's (0): a cut-out of a cluster as in the cluster |
 | `NGB_WIDE_FAC` | double | `0` | **experiment** |  | Bound pairs with a < NGB_WIDE_FAC x R_NGB are neighbours (wide binaries; 0: off) |
-| `MSTAR_THRESHOLD` | int | `8` | **experiment** |  | Subsystems of at least this many bodies for MSTAR (not wired: printed only, every subsystem uses LogH) |
+| `MSTAR_THRESHOLD` | int | `9` | **experiment** |  | With NBODY_MSTAR=1 (ENABLE_MSTAR builds, docs/MSTAR.md): subsystems of at least this many bodies are integrated by MSTAR instead of LogH (those above LOGH_MAX_BODIES = 8 always) |
 | `SUBSYS_ADVANCE_LIMIT` | int | `0` | expert |  | A subsystem advanced more often than this in one top-level step stops the run with its state (0: off; hosts that must not stall) |
 
 ## Output
@@ -286,6 +290,16 @@ Levels:
 | `NBODY_CM_TIDE_GAMMA` | =g: tidal strength 2 (a(1+e))^3 sum m_k/d_k^3 / M below which NBODY_CM_TIDE takes a binary (default 1e-3; leaves it above 4 g) |
 | `NBODY_CM_TIDE_NRES` | =n: kicks per orbit that resolve a binary for NBODY_CM_TIDE (default 16: c.o.m. mode above spacing P/16, stays down to P/32) |
 | `NBODY_GAUSS_IRK` | =1: compact Newtonian subsystems (2-4 bodies, no PN member, no collision candidate, no e >= 0.99 pair or hard encounter, no stable MA hierarchy, no SDAR slow-down) by the symplectic 8-stage Gauss-Legendre IRK instead of LogH+GBS, LogH+GBS if it does not converge (CASES.md C22; default off, A/B). At exit: `Gauss-IRK stats` line; step summary `irk=` / `irk_fb=`; SUBSYS_ERR kind `unbooked-irk` |
+| `NBODY_MSTAR` | =1: subsystems of MSTAR_THRESHOLD..NBODY_MSTAR_MAX bodies by MSTAR (optional GPLv3 module, ENABLE_MSTAR builds; docs/MSTAR.md); groups above LOGH_MAX_BODIES then become subsystems instead of staying with the FSI (default off) |
+| `NBODY_MSTAR_MAX` | =n: largest group integrated as one MSTAR subsystem (default 1024); larger groups are split along their bound pairs as without MSTAR |
+| `NBODY_MSTAR_CROSSOVER` | =n: MSTAR groups of at least n bodies run on the device, smaller ones on the host execution space (default 32 on GPU builds; ENABLE_MSTAR builds) |
+| `NBODY_MSTAR_LOG` | =1: one line per MSTAR call (group size, PN bodies, interval, GBS steps, wall time, device, outcome) |
+| `NBODY_MSTAR_MAX_STEPS` | =n: GBS steps (accepted + failed) after which an MSTAR subsystem call gives up (not converged: retried with subdivided steps as LogH; default 2000000) |
+| `NBODY_MSTAR_TIDE` | =1 (with NBODY_MSTAR=1): members of MSTAR groups get the FSI kicks of the outside bodies as c.o.m. kicks (mass-weighted mean, momentum exact) and MSTAR applies their tide continuously, the tidal tensor at the group's c.o.m. at the start of each call (docs/MSTAR.md; default off, experimental) |
+| `NBODY_MSTAR_NO_TIDCAP` | =1 (experiment): no tidal-sampling (FLYBY_CM_EPS) cap on the steps of MSTAR groups, the other step criteria alone (BIFROST-like) |
+| `NBODY_MSTAR_PERT_ACC` | =0 (NBODY_MSTAR_TIDE): perturbers inside MSTAR on straight lines instead of the predicted x + v t + a t^2 / 2 (a: FSI acceleration relative to the group's c.o.m.; default on) |
+| `NBODY_MSTAR_PERT_R` | =f (NBODY_MSTAR_TIDE): bodies within f x the group radius of an MSTAR group's c.o.m. act inside MSTAR with their exact pull on straight lines (perturbers), the others through the tidal tensor (default 3) |
+| `NBODY_MSTAR_TEAM_N` | =n: MSTAR groups up to n bodies run every GBS row inside one device team, one launch per step (default 96; ENABLE_MSTAR builds) |
 | `NBODY_SLOW0_STATS` | Statistics of small all-fast HHS sets, printed at the end |
 | `NBODY_SMALL_FOR` | Largest loop run on the host where it can access device memory (default 256; 0: off) |
 | `NBODY_SMALL_N2` | Largest pair count run on the host where it can access device memory (default 4096) |

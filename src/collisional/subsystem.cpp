@@ -681,15 +681,17 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
     // A group larger than LogH's storage is usually a chain linked partly by unbound fly-bys (dense
     // cores). Split it along its bound pairs only: its binaries and triples still become subsystems
     // instead of the whole group being integrated orbit by orbit by the FSI.
+    // With MSTAR (NBODY_MSTAR=1) groups up to NBODY_MSTAR_MAX bodies stay whole (one MSTAR subsystem).
+    const int max_group = g_collisional.subsys_max_bodies(LOGH_MAX_BODIES);
     {
         std::vector<Component> split;   // creation order
         std::vector<Component> kept_c;
         int next_key = -1;
         bool any_oversize = false;
-        for (const auto& comp : components) any_oversize |= (int)comp.members.size() > LOGH_MAX_BODIES;
+        for (const auto& comp : components) any_oversize |= (int)comp.members.size() > max_group;
         for (auto& comp : components) {
             if (!any_oversize) break;
-            if ((int)comp.members.size() <= LOGH_MAX_BODIES) { kept_c.push_back(std::move(comp)); continue; }
+            if ((int)comp.members.size() <= max_group) { kept_c.push_back(std::move(comp)); continue; }
             std::unordered_map<int, int> in_group;
             for (int pid : comp.members) in_group.emplace(pid, (int)in_group.size());
             UnionFind bound_uf((int)in_group.size());
@@ -702,8 +704,29 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
             for (const auto& [pid, k] : in_group) parts[bound_uf.find(k)].push_back(pid);
             for (auto& [r, part] : parts) {
                 if (part.size() < 2) continue;   // a single star: field particle
+                if (g_collisional.mstar && (int)part.size() > max_group) {
+                    // MSTAR core (NBODY_MSTAR_MAX): the max_group members nearest to the most massive one (an IMBH and
+                    // the inner cusp) stay one subsystem, the others are field particles. A whole 0.01 pc cusp (238 of
+                    // 300 stars around a 1000 Msun binary) as one group put its members at HHS level 13-29 through the
+                    // tidal-sampling step of its outer members (200k IMBH A/B, CASES.md C30)
+                    auto px = md.col(MemberData::X), py = md.col(MemberData::Y), pz = md.col(MemberData::Z);
+                    auto pm = md.col(MemberData::M);
+                    int c0 = part[0];
+                    for (int pid : part) if (pm(pid_to_idx[pid]) > pm(pid_to_idx[c0])) c0 = pid;
+                    const int i0 = pid_to_idx[c0];
+                    std::vector<std::pair<double, int>> dist;
+                    dist.reserve(part.size());
+                    for (int pid : part) {
+                        const int i = pid_to_idx[pid];
+                        const double dx = px(i) - px(i0), dy = py(i) - py(i0), dz = pz(i) - pz(i0);
+                        dist.push_back({dx * dx + dy * dy + dz * dz, pid});
+                    }
+                    std::sort(dist.begin(), dist.end());
+                    part.clear();
+                    for (int q = 0; q < max_group; q++) part.push_back(dist[q].second);
+                }
                 std::sort(part.begin(), part.end());
-                split.push_back({next_key--, part});   // still > LOGH_MAX_BODIES: left to the FSI below
+                split.push_back({next_key--, part});   // still > max_group: left to the FSI below
             }
         }
         if (any_oversize) {
@@ -763,13 +786,14 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
     for (auto& comp : components) {
         const int root = comp.key;
         const auto& members = comp.members;
-        // LogH has fixed storage for LOGH_MAX_BODIES; MSTAR, which Rantala et al. (2023) use for larger groups, is
-        // not wired in. Larger groups stay field particles, integrated by the FSI directly.
-        if ((int)members.size() > LOGH_MAX_BODIES) {
+        // LogH has fixed storage for LOGH_MAX_BODIES; larger groups are MSTAR subsystems when MSTAR is on
+        // (NBODY_MSTAR=1, up to NBODY_MSTAR_MAX), else they stay field particles, integrated by the FSI directly.
+        if ((int)members.size() > max_group) {
             static bool warned = false;
             if (!warned) {
-                std::printf("WARNING: %d-body group exceeds LOGH_MAX_BODIES=%d, left to the FSI "
-                            "(reported once)\n", (int)members.size(), LOGH_MAX_BODIES);
+                std::printf("WARNING: %d-body group exceeds LOGH_MAX_BODIES=%d (subsystem limit %d; NBODY_MSTAR=1 "
+                            "raises it), left to the FSI (reported once)\n", (int)members.size(), LOGH_MAX_BODIES,
+                            max_group);
                 warned = true;
             }
             continue;
@@ -1163,6 +1187,11 @@ void SubsystemManager::fill_cm_velocity(const Particles& p, int lo, int hi, Kokk
     auto fscale = raw(scale_v);
     auto pax = raw(p.ax), pay = raw(p.ay), paz = raw(p.az);   // external only (the force kernel skips member pairs)
     const double tpert = g_collisional.tidal_step_pert;
+    // NBODY_MSTAR_TIDE: MSTAR groups get c.o.m. kicks and their tide inside MSTAR, so the tidal-sampling cap does not
+    // apply to them (it would put a 300-body IMBH cusp at HHS level 13-29: 200k IMBH A/B, CASES.md C30)
+    // NBODY_MSTAR_NO_TIDCAP=1 (experiment): no tidal-sampling cap for MSTAR groups (BIFROST: the eta_pert step alone)
+    static const bool mstar_no_tidcap = std::getenv("NBODY_MSTAR_NO_TIDCAP") && std::atoi(std::getenv("NBODY_MSTAR_NO_TIDCAP")) != 0;
+    const bool mstar_tide_groups = g_collisional.mstar && (g_collisional.mstar_tide || mstar_no_tidcap);
     small_for("cm_vel_members", n_sub, KOKKOS_LAMBDA(int k) {
         const int a = base + buf(k), e = base + buf(k + 1);
         double M = 0, px = 0, py = 0, pz = 0, cx = 0, cy = 0, cz = 0;
@@ -1175,7 +1204,32 @@ void SubsystemManager::fill_cm_velocity(const Particles& p, int lo, int hi, Kokk
         double kt = 1e30, kfl = 0.0;
         if (tol > 0.0) {
             double ext = 0.0, muv = 0.0;
-            if (e - a == 2) {
+            if (e - a > LOGH_MAX_BODIES) {
+                // MSTAR group (more members than the tree arrays below hold): the energy a tide T puts in per unit
+                // time, sum_i m_i (v_i - V) . T (r_i - R), is at most |T| sum_i m_i |r_i - R| |v_i - V| (each member
+                // about the c.o.m.); the former bound max_i 2 |dr_i| sum_i m_i |dv_i| took the extent from the
+                // outermost member and the speed from the tight BH binary (200k + IMBH cusp, 238-body group: HHS
+                // steps down to 1e-12 Myr). Fastest pair time scale as below
+                const double ccx = cx / M, ccy = cy / M, ccz = cz / M;
+                const double vcx = px / M, vcy = py / M, vcz = pz / M;
+                double smrv = 0.0, tmin = 1e300;
+                for (int q = a; q < e; q++) {
+                    const int i = buf(q);
+                    const double dx = px_(i) - ccx, dy = py_(i) - ccy, dz = pz_(i) - ccz;
+                    const double ux = vx(i) - vcx, uy = vy(i) - vcy, uz = vz(i) - vcz;
+                    smrv += pm(i) * Kokkos::sqrt(dx * dx + dy * dy + dz * dz) * Kokkos::sqrt(ux * ux + uy * uy + uz * uz);
+                    for (int s2 = q + 1; s2 < e; s2++) {
+                        const int j = buf(s2);
+                        tmin = Kokkos::fmin(tmin, pericentre_passage_time(px_(j) - px_(i), py_(j) - py_(i),
+                                                                          pz_(j) - pz_(i), vx(j) - vx(i),
+                                                                          vy(j) - vy(i), vz(j) - vz(i),
+                                                                          G * (pm(i) + pm(j))));
+                    }
+                }
+                ext = 1.0;
+                muv = mstar_tide_groups ? 0.0 : smrv;
+                kfl = tmin < 1e300 ? res * tmin : 0.0;
+            } else if (e - a == 2) {
                 const int i = buf(a), j = buf(a + 1);
                 const double rx = px_(j) - px_(i), ry = py_(j) - py_(i), rz = pz_(j) - pz_(i);
                 const double ux = vx(j) - vx(i), uy = vy(j) - vy(i), uz = vz(j) - vz(i);
@@ -1620,6 +1674,8 @@ void SubsystemManager::reset_step_diagnostics() {
     step_sdar_kappa_max = 0.0;
     step_sec_inner = 0;
     step_irk = step_irk_fb = 0;
+    step_mstar = step_mstar_dev = step_mstar_nmax = 0;
+    step_mstar_gbs = 0;
     step_secular_evolved = 0;
     step_secular_substeps = 0;
     step_kepler2 = 0;
@@ -1687,6 +1743,8 @@ void SubsystemManager::print_step_summary() const {
             std::printf(", secinner=%d", step_sec_inner);
         if (step_irk > 0 || step_irk_fb > 0)
             std::printf(", irk=%d irk_fb=%d", step_irk, step_irk_fb);
+        if (step_mstar > 0)
+            std::printf(", mstar=%d (dev %d, gbs %ld, nmax %d)", step_mstar, step_mstar_dev, step_mstar_gbs, step_mstar_nmax);
         std::printf(")");
     }
     std::printf("  Secular=%d", step_secular_evolved);

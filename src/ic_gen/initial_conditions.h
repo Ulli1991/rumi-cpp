@@ -8,6 +8,11 @@ void init_outer_planets(Particles& p);
 
 // r_half_pc <= 0: r_h from scic_mass_size_r_half(M) of the generated masses. r_break_au > 0: SCIC artificial-binary
 // avoidance (Rantala et al. 2023, App. A) on singles and binary centres of mass.
+// IMBH cusp (IMBH_CUSP_N > 0, with ADD_IMBH): n extra stars of mass m bound to the IMBH binary in a power-law cusp
+// rho ~ r^-gamma (gamma = 7/4: Bahcall & Wolf 1976) out to r_pc, isotropic, f(E) ~ |E|^(gamma - 3/2) in the potential of
+// the binary's mass (Peebles 1972); inner edge 3 a(1 + e) of the binary. Set before init_plummer (main.cpp).
+struct ImbhCuspParams { int n = 0; double gamma = 1.75, r_pc = 0.01, m = 1.0; };
+void set_imbh_cusp(const ImbhCuspParams& c);
 void init_plummer(Particles& p, int N, double M_total_msun, double r_half_pc, int seed,
                   const std::string& mass_distribution = "equal",
                   double age_gyr = 1.0, double metallicity = 0.02,

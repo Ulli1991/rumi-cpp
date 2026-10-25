@@ -1280,11 +1280,23 @@ void advance_subsystems_in_range_impl(Particles& p, int start, int count,
         // SDAR: book the physical energy change of the slow-down (sum of kappa jumps, Wang+2020 Eq. 24) of the
         // accepted integrations; failed ones are booked from the accepted retry below. sd_J[si]: booked jump
         std::vector<double> sd_J(n_sub, 0.0);
+        // MSTAR subsystems (docs/MSTAR.md): pn_J[si] the Newtonian T + U change by the PN forces (the module's PN work
+        // ledger; accepted call or the sum over the accepted retry)
+        std::vector<double> pn_J(n_sub, 0.0), ext_J(n_sub, 0.0);   // ext_J: work of the outside tide (NBODY_MSTAR_TIDE)
+        std::vector<char> mst_J(n_sub, 0);
         {   // also the jumps of secular inner binaries (CASES.md C20), which do not need SDAR
             std::vector<char> is_failed(n_sub, 0);
             for (int si : failed) is_failed[si] = 1;
             for (int si = 0; si < n_sub; si++)
                 if (!is_failed[si]) sd_J[si] = g_logh_batch.sd_jump[si];
+            for (int si = 0; si < n_sub; si++) {
+                mst_J[si] = si < (int)g_logh_batch.mstar_used.size() && g_logh_batch.mstar_used[si];
+                if (!is_failed[si] && mst_J[si]) { pn_J[si] = g_logh_batch.pn_dE[si]; ext_J[si] = g_logh_batch.ext_dE[si]; }
+            }
+            g_subsystem_mgr.step_mstar += g_logh_batch.stat_mstar;
+            g_subsystem_mgr.step_mstar_dev += g_logh_batch.stat_mstar_dev;
+            g_subsystem_mgr.step_mstar_gbs += g_logh_batch.stat_mstar_gbs;
+            g_subsystem_mgr.step_mstar_nmax = std::max(g_subsystem_mgr.step_mstar_nmax, g_logh_batch.stat_mstar_nmax);
             g_subsystem_mgr.step_sdar_calls += g_logh_batch.stat_sd_calls;
             g_subsystem_mgr.step_sdar_kappa_max = std::max(g_subsystem_mgr.step_sdar_kappa_max,
                                                            g_logh_batch.stat_sd_kappa_max);
@@ -1391,6 +1403,7 @@ void advance_subsystems_in_range_impl(Particles& p, int start, int count,
                 double worst_dE = 0;
                 const bool last_try = (subdiv == MAX_SUBDIV);
                 std::vector<double> t_sum(failed.size(), 0.0), j_sum(failed.size(), 0.0), c_sum(failed.size(), 0.0);
+                std::vector<double> p_sum(failed.size(), 0.0), x_sum(failed.size(), 0.0);   // MSTAR PN / tide work
                 std::vector<std::vector<SubsystemCollision>> c_list(failed.size());
 
                 for (int step = 0; step < n_steps; step++) {
@@ -1409,6 +1422,8 @@ void advance_subsystems_in_range_impl(Particles& p, int start, int count,
                         t_sum[r] += retry_batch.t_reached[r];
                         j_sum[r] += retry_batch.sd_jump[r];
                         c_sum[r] += retry_batch.coll_dE[r];
+                        if (r < retry_batch.pn_dE.size()) p_sum[r] += retry_batch.pn_dE[r];
+                        if (r < retry_batch.ext_dE.size()) x_sum[r] += retry_batch.ext_dE[r];
                         for (const auto& c : retry_batch.collisions[r]) c_list[r].push_back(c);
                         if (!retry_batch.collisions[r].empty()) mass_dirty[failed[r]] = 1;
                     }
@@ -1416,6 +1431,9 @@ void advance_subsystems_in_range_impl(Particles& p, int start, int count,
                     g_subsystem_mgr.step_irk += retry_batch.stat_irk;
                     g_subsystem_mgr.step_irk_fb += retry_batch.stat_irk_fb;
                     g_subsystem_mgr.step_peri_misses += retry_batch.stat_peri_misses;
+                    g_subsystem_mgr.step_mstar += retry_batch.stat_mstar;
+                    g_subsystem_mgr.step_mstar_dev += retry_batch.stat_mstar_dev;
+                    g_subsystem_mgr.step_mstar_gbs += retry_batch.stat_mstar_gbs;
 
                     // No point continuing if a sub-step failed, except on the last try: there the result stands,
                     // and stopping early would leave the members short of dt (frozen for the rest of the step)
@@ -1426,6 +1444,8 @@ void advance_subsystems_in_range_impl(Particles& p, int start, int count,
                         adv_check.set_time(logh_idx[failed[r]], t_sum[r]);
                         sd_J[failed[r]] = j_sum[r];
                         coll_J[failed[r]] = c_sum[r];
+                        pn_J[failed[r]] = p_sum[r];
+                        ext_J[failed[r]] = x_sum[r];
                         sub_colls[failed[r]] = c_list[r];
                     }
 
@@ -1502,7 +1522,7 @@ void advance_subsystems_in_range_impl(Particles& p, int start, int count,
             for (int si = 0; si < n_sub; si++) {
                 const auto& sub = saved_subs[si];
                 int nb = sub.n_bodies;
-                int idx[LOGH_MAX_BODIES];
+                std::vector<int> idx(nb);   // MSTAR subsystems have more than LOGH_MAX_BODIES members
                 bool pn_active = false, ok = true;
                 for (int b = 0; b < nb; b++) {
                     idx[b] = g_subsystem_mgr.safe_pid_to_idx(sub.particle_ids[b]);
@@ -1536,14 +1556,23 @@ void advance_subsystems_in_range_impl(Particles& p, int start, int count,
                 }
                 // Collisions in the call: their energy change coll_J goes to E_merge (finalize_subsystem_collision),
                 // their P and L to the P / L books just made here (PN), so the collision books leave them out
-                if (pn_active) {
+                if (pn_active && mst_J[si]) {
+                    // MSTAR: only the PN work goes to E_pn; the rest is integration error, left unbooked and logged
+                    g_energy_books.E_pn -= pn_J[si];
+                    for (auto& c : sub_colls[si]) c.pl_booked = true;
+                    const double d = E_post - E_pre - coll_J[si] - pn_J[si] - ext_J[si];
+                    log_subsys(sub, nb, "unbooked-mstar", d, si);
+                    g_eattr.logh += d; g_eattr.logh_abs += std::fabs(d); g_eattr.n_logh++;
+                } else if (pn_active) {
                     g_energy_books.E_pn += E_pre - E_post + coll_J[si] + sd_J[si];   // slow-down jumps: E_sd
                     for (auto& c : sub_colls[si]) c.pl_booked = true;
                 } else {
-                    const double d = E_post - E_pre - sd_J[si] - coll_J[si];   // unbooked part
+                    // unbooked part (MSTAR with NBODY_MSTAR_TIDE: minus the tide's work, an exchange with the outside
+                    // bodies' potential that the global T + U contains)
+                    const double d = E_post - E_pre - sd_J[si] - coll_J[si] - ext_J[si];
                     // Gauss-IRK integrations (CASES.md C21) logged as unbooked-irk (a retried one: as its retry left it)
                     const bool irk = !any_retry && si < (int)g_logh_batch.irk_used.size() && g_logh_batch.irk_used[si];
-                    log_subsys(sub, nb, irk ? "unbooked-irk" : "unbooked", d, si);
+                    log_subsys(sub, nb, irk ? "unbooked-irk" : mst_J[si] ? "unbooked-mstar" : "unbooked", d, si);
                     g_eattr.logh += d; g_eattr.logh_abs += std::fabs(d); g_eattr.n_logh++;
                     if (std::fabs(d) > std::fabs(g_eattr.worst)) {
                         g_eattr.worst = d; g_eattr.worst_n = nb; g_eattr.worst_type = (int)sub.type;
@@ -2031,6 +2060,51 @@ void hhs_fsi_step_dynamic(Particles& p, int start, int count, double pivot_dt,
 // This achieves O(N) communication per step regardless of HHS depth.
 // =============================================================================
 
+#ifdef ENABLE_COLLISIONAL
+// NBODY_MSTAR_TIDE (docs/MSTAR.md): the members of an MSTAR subsystem with every member in [start, start + count)
+// get the mass-weighted mean of their (outside) accelerations instead of their own: v_i += (a_mean - a_i) dt after
+// the kick (momentum exact); the tidal remainder acts inside MSTAR, continuously
+static void mstar_com_kicks(Particles& p, int start, int count, double dt) {
+    std::vector<int> off{0}, idx;
+    for (const auto& sub : g_subsystem_mgr.active) {
+        if (!g_collisional.mstar_group(sub.n_bodies, LOGH_MAX_BODIES)) continue;
+        bool in = true;
+        const size_t o = idx.size();
+        for (int pid : sub.particle_ids) {
+            const int i = g_subsystem_mgr.safe_pid_to_idx(pid);
+            if (i < start || i >= start + count) { in = false; break; }
+            idx.push_back(i);
+        }
+        if (!in) { idx.resize(o); continue; }
+        off.push_back((int)idx.size());
+    }
+    const int ng = (int)off.size() - 1;
+    if (ng <= 0) return;
+    Kokkos::View<int*, Kokkos::HostSpace> hi(idx.data(), idx.size()), ho(off.data(), off.size());
+    auto di = Kokkos::create_mirror_view_and_copy(Kokkos::DefaultExecutionSpace::memory_space(), hi);
+    auto dof = Kokkos::create_mirror_view_and_copy(Kokkos::DefaultExecutionSpace::memory_space(), ho);
+    RawView pvx{p.vx.data()}, pvy{p.vy.data()}, pvz{p.vz.data()};
+    RawView pax{p.ax.data()}, pay{p.ay.data()}, paz{p.az.data()};
+    RawView cvx{p.cvx.data()}, cvy{p.cvy.data()}, cvz{p.cvz.data()};
+    RawView pm{p.mass.data()};
+    Kokkos::parallel_for("mstar_com_kicks", ng, KOKKOS_LAMBDA(int g) {
+        double M = 0, a[3] = {0, 0, 0};
+        for (int q = dof(g); q < dof(g + 1); q++) {
+            const int i = di(q);
+            M += pm(i); a[0] += pm(i) * pax(i); a[1] += pm(i) * pay(i); a[2] += pm(i) * paz(i);
+        }
+        if (!(M > 0)) return;
+        for (int c = 0; c < 3; c++) a[c] /= M;
+        for (int q = dof(g); q < dof(g + 1); q++) {
+            const int i = di(q);
+            kahan_add(pvx(i), cvx(i), (a[0] - pax(i)) * dt);
+            kahan_add(pvy(i), cvy(i), (a[1] - pay(i)) * dt);
+            kahan_add(pvz(i), cvz(i), (a[2] - paz(i)) * dt);
+        }
+    });
+}
+#endif
+
 // Kick velocities using pre-computed accelerations
 void kick_velocities(Particles& p, int start, int count, double dt) {
     RawView pvx{p.vx.data()}, pvy{p.vy.data()}, pvz{p.vz.data()};
@@ -2050,6 +2124,7 @@ void kick_velocities(Particles& p, int start, int count, double dt) {
     });
 #ifdef ENABLE_COLLISIONAL
     if (cmt) cm_tide::post(p, dt);
+    if (g_collisional.mstar_tide) mstar_com_kicks(p, start, count, dt);
 #endif
 }
 
@@ -3263,8 +3338,8 @@ std::vector<double> member_energies(const Particles& p, int start, int count, do
     };
     get(p.x, hx); get(p.y, hy); get(p.z, hz); get(p.vx, hvx); get(p.vy, hvy); get(p.vz, hvz); get(p.mass, hm);
     for (size_t s = 0; s < subs.size(); s++) {
-        int idx[LOGH_MAX_BODIES];
-        const int nb = std::min((int)subs[s].particle_ids.size(), LOGH_MAX_BODIES);
+        const int nb = (int)subs[s].particle_ids.size();   // MSTAR subsystems: more than LOGH_MAX_BODIES
+        std::vector<int> idx(nb);
         bool in = nb >= 2;
         for (int b = 0; b < nb && in; b++) {
             const int pid = subs[s].particle_ids[b];

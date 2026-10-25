@@ -217,6 +217,9 @@ struct SubsystemManager {
     double step_sdar_kappa_max = 0.0;  // SDAR: largest slow-down factor of the step
     int step_sec_inner = 0;            // secular inner binaries collapsed in PN subsystems (CASES.md C20)
     int step_irk = 0, step_irk_fb = 0;  // Gauss-IRK integrations / fallbacks to LogH+GBS (CASES.md C21)
+    int step_mstar = 0, step_mstar_dev = 0;   // MSTAR integrations / of them on the device (docs/MSTAR.md)
+    long step_mstar_gbs = 0;                  // their GBS steps (accepted + failed)
+    int step_mstar_nmax = 0;                  // largest MSTAR group of the step
     int step_secular_evolved = 0;      // secular binaries evolved
     long long step_secular_substeps = 0;  // internal steps of the secular binary integrator
     int step_kepler2 = 0;              // ... of them on the Kepler drift only as non-PN pairs (unbound, or < N_ORB_SECULAR orbits)

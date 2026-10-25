@@ -22,7 +22,7 @@ import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-G = 4.300917270036279e-3   # pc (km/s)^2 / Msun (G_CODE)
+G = 4.302194e-3   # pc (km/s)^2 / Msun (G_CODE)
 
 
 def eref_scale(case):

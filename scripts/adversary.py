@@ -34,7 +34,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-G = 4.300917270036279e-3          # pc (km/s)^2 / Msun
+G = 4.302194e-3          # pc (km/s)^2 / Msun
 AU = 4.84813681e-6       # pc
 PC_KMS_MYR = 1.0227122   # pc/Myr per km/s
 

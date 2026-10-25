@@ -32,6 +32,10 @@ IMBH_M2 = 500.0
 IMBH_A_PC = 1e-4                        # Semi-major axis (pc)
 IMBH_E = 0.5                            # Eccentricity
 IMBH_SPIN = 0.0                         # Dimensionless spin of both BHs
+IMBH_CUSP_N = 0                         # Extra stars in a power-law cusp around the IMBH binary (0: none)
+IMBH_CUSP_GAMMA = 1.75                  # Cusp slope rho ~ r^-gamma (>= 1.5; 7/4 Bahcall-Wolf)
+IMBH_CUSP_R_PC = 0.01                   # Cusp outer radius (pc)
+IMBH_CUSP_M = 1.0                       # Cusp star mass (Msun)
 
 # ---- Physics ----
 COLLISIONAL = true                      # Unsoftened N-body with subsystems, PN and mergers

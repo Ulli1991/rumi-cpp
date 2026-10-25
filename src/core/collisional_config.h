@@ -89,8 +89,16 @@ struct CollisionalConfig {
     double r_escape_rh = 100.0;        // escape radius in half-mass radii
     double r_escape_rj = 2.0;          // R_ESCAPE_RJ: with TIDAL_FIELD, escape radius in Jacobi radii (NBODY6: 2); 0 = R_ESCAPE_RH
 
-    // MSTAR
-    int mstar_threshold = 8;           // bodies threshold for MSTAR vs LogH
+    // MSTAR (optional GPLv3 module src/mstar, ENABLE_MSTAR builds; switched on at run time by NBODY_MSTAR=1)
+    int mstar_threshold = 9;           // MSTAR_THRESHOLD: groups of at least this many bodies go to MSTAR (above
+                                       // LOGH_MAX_BODIES = 8 always, when MSTAR is on)
+    bool mstar = false;                // NBODY_MSTAR=1 and the module is built in
+    int mstar_max = 1024;              // NBODY_MSTAR_MAX: largest group integrated as one subsystem
+    bool mstar_tide = false;           // NBODY_MSTAR_TIDE=1: c.o.m. kicks + continuous tide inside MSTAR groups
+    // Group size limit of subsystem formation (logh_max: LOGH_MAX_BODIES)
+    int subsys_max_bodies(int logh_max) const { return mstar ? (mstar_max > logh_max ? mstar_max : logh_max) : logh_max; }
+    // A subsystem of n bodies is integrated by MSTAR
+    bool mstar_group(int n, int logh_max) const { return mstar && (n > logh_max || n >= mstar_threshold); }
 
     // Stellar evolution
     bool sse_enabled = true;           // runtime stellar evolution

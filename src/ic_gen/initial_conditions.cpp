@@ -303,6 +303,9 @@ void print_ic_check(const std::vector<int>& partner,
 
 }  // namespace
 
+static ImbhCuspParams g_imbh_cusp;
+void set_imbh_cusp(const ImbhCuspParams& c) { g_imbh_cusp = c; }
+
 // =========================================================================
 // Plummer sphere generator
 // =========================================================================
@@ -790,6 +793,50 @@ void init_plummer(Particles& p, int N, double M_total_msun, double r_half_pc, in
         std::printf("  ADD_IMBH: injected %.0f+%.0f M_sun BH binary at center\n", imbh_m1, imbh_m2);
         std::printf("    a=%.4e pc (%.2f AU), e=%.4f, P=%.4f yr, spin=%.2f\n",
                     imbh_a_pc, imbh_a_pc / AU_TO_PC, imbh_e, period_yr, imbh_spin);
+
+        // IMBH cusp (set_imbh_cusp): power-law density rho ~ r^-gamma inside r_pc around the binary, isotropic
+        // velocities with f(E) ~ |E|^(gamma - 3/2) in the Kepler potential of M_imbh (Peebles 1972; gamma = 7/4
+        // Bahcall & Wolf 1976): v = q v_esc, P(q) ~ q^2 (1 - q^2)^(gamma - 3/2)
+        const ImbhCuspParams& cu = g_imbh_cusp;
+        if (cu.n > 0) {
+            const double r_in = 3.0 * imbh_a_pc * (1.0 + imbh_e), r_out = cu.r_pc;
+            const double p3 = 3.0 - cu.gamma;
+            std::uniform_real_distribution<double> U(0.0, 1.0);
+            const int n0 = N;
+            N += cu.n;
+            hx.resize(N); hy.resize(N); hz.resize(N); hvx.resize(N); hvy.resize(N); hvz.resize(N);
+            hmass.resize(N); h_kw.resize(N); h_mzams.resize(N); h_sage.resize(N); h_srad.resize(N); h_lum.resize(N);
+            h_mcore.resize(N);
+            const double qexp = std::max(cu.gamma - 1.5, 0.0);   // gamma >= 3/2 (below, f(E) diverges at E = 0)
+            const double xm = 1.0 / (1.0 + qexp), fmax = xm * std::pow(1.0 - xm, qexp);
+            for (int i = n0; i < N; i++) {
+                // M(<r) ~ r^(3 - gamma) between r_in and r_out
+                const double u = U(rng);
+                const double r = std::pow(std::pow(r_in, p3) + u * (std::pow(r_out, p3) - std::pow(r_in, p3)), 1.0 / p3);
+                const double ct = 2.0 * U(rng) - 1.0, ph = 2.0 * M_PI * U(rng), st = std::sqrt(1.0 - ct * ct);
+                double q;
+                for (;;) {   // P(q) ~ q^2 (1 - q^2)^qexp on [0, 1), maximum fmax at q^2 = 1 / (1 + qexp)
+                    q = U(rng);
+                    const double f = q * q * std::pow(1.0 - q * q, qexp);
+                    if (U(rng) * fmax <= f) break;
+                }
+                const double v = q * std::sqrt(2.0 * mu / r);
+                const double cv = 2.0 * U(rng) - 1.0, pv = 2.0 * M_PI * U(rng), sv = std::sqrt(1.0 - cv * cv);
+                hx[i] = r * st * std::cos(ph); hy[i] = r * st * std::sin(ph); hz[i] = r * ct;
+                hvx[i] = v * sv * std::cos(pv); hvy[i] = v * sv * std::sin(pv); hvz[i] = v * cv;
+                hmass[i] = cu.m;
+                h_kw[i] = 1; h_mzams[i] = cu.m; h_sage[i] = 0.0; h_srad[i] = std::pow(cu.m, 0.8);   // ZAMS R ~ M^0.8
+                h_lum[i] = std::pow(cu.m, 3.5); h_mcore[i] = 0.0;
+            }
+            // the cusp's net momentum goes into the IMBH binary's c.o.m. velocity (total momentum unchanged)
+            double pcx = 0, pcy = 0, pcz = 0;
+            for (int i = n0; i < N; i++) { pcx += hmass[i] * hvx[i]; pcy += hmass[i] * hvy[i]; pcz += hmass[i] * hvz[i]; }
+            for (int i : {i0, i1}) { hvx[i] -= pcx / M_imbh; hvy[i] -= pcy / M_imbh; hvz[i] -= pcz / M_imbh; }
+            M_total += cu.n * cu.m;
+            M_total_msun = M_total;
+            std::printf("  IMBH cusp: %d stars of %.3g M_sun, rho ~ r^-%.3g from %.3e to %.3e pc\n", cu.n, cu.m,
+                        cu.gamma, r_in, r_out);
+        }
     }
 #endif
 

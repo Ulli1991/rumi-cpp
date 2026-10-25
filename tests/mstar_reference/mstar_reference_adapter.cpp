@@ -1,10 +1,10 @@
 // RUMI++ side of the KETJU reference harness.
 // integration/merger: the library path (src/lib/rumi_lib.h: HHS with LogH+GBS subsystems), the case scaled from
-// KETJU's units to RUMI++'s (mass unit M_UNIT Msun, length G M_UNIT / c^2, velocity c); mst: build_mst (mstar.h).
+// KETJU's units to RUMI++'s (mass unit M_UNIT Msun, length G M_UNIT / c^2, velocity c); mst: build_mst (mst.h).
 #include "mstar_reference_adapter.h"
 
 #include "constants.h"
-#include "mstar.h"
+#include "mst.h"
 #include "rumi_lib.h"
 
 #include <cmath>
