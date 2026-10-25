@@ -1402,4 +1402,8 @@ C++ rewrite of the MSTAR regularised integrator (Rantala et al. 2020; public KET
   ketju unit tests unchanged (41/41). Bounds: 1.4e-11, 72 s (test fails on the old code: no result in 1800 s).
 - **Fixed on the way:** MemberData columns kept the row offset by value, so rebuilding the gathered rows with the joined
   bodies (lower slot) mapped them wrongly ("slot was not gathered" aborts in two runs).
-- **Open:** 200k gpudev A/B (MSTAR off / on, IMBH and plain production case; mcoup-2026-10-25).
+- **After the fix (0baa913, cut-out, 8 threads):** seeds 101 / 202: 8.8e-12 / 1.21e-11 in 10 / 12 s (MSTAR off, seed 202:
+  1.85e-5 in 32 s; seed 101: 2.3e-5). Original cut-out intervals (2 x 1e-3 Myr, production restarts): 2.0e-9 in 66 s
+  (64 + 76 MSTAR calls, group of 302, no restart; C30 with the cap: interval 1 not done in 900 s). MSTAR + ketju ctests
+  41/41 (mstar_imbh_cusp300 54.6 s).
+- **Open:** 200k gpudev A/B (MSTAR off / on, IMBH and plain production case; mcoup-2026-10-25, build-cuda2).
