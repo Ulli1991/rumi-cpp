@@ -9,10 +9,13 @@ subsystem, on the GPU from `NBODY_MSTAR_CROSSOVER` bodies and on the host execut
 
 ## Licence
 
-The module (`src/mstar`) is **GPLv3** (it contains the KETJU library). It is compiled only with `-DENABLE_MSTAR=ON`
-(default `OFF`); **a binary built with it is distributed under the GPLv3.** The BSD-3 core builds and runs without it
-and reaches it only through `src/collisional/mstar_dispatch.h` (BSD). Cite the two papers above when you use it
-(`src/mstar/README.md`, `CITATION.cff`).
+The library (separate repository https://github.com/Ulli1991/ketju-integrator, branch `main`, C++/Kokkos, namespace
+`mstar`, target `mstar::mstar`; it is derived from the KETJU library) is **GPLv3** and is included as the submodule
+`extern/mstar` (`submodule update --init extern/mstar` after cloning). It is built only with `-DENABLE_MSTAR=ON`
+(default `OFF`, the submodule is then not needed); **a binary built with it is distributed under the GPLv3.** The
+BSD-3 core builds and runs without it and reaches it only through `src/collisional/mstar_dispatch.h` (BSD); the glue
+`src/collisional/mstar_glue.cpp` (compiled only with `ENABLE_MSTAR`) converts a group to an `mstar::System`. Cite the
+two papers above when you use it (`extern/mstar/README.md`, `CITATION.cff`).
 
 ## Use
 
@@ -71,16 +74,17 @@ PN); evaluated on the device, off by default. B follows the work of all of them 
 B blind to the velocity-independent part, which put a binary in a static field 1e-2 off after a few orbits), and
 `pn_dB` / `ext_work` return the works.
 
-## Device implementation (module)
+## Device implementation (library)
 
-`src/mstar/mstar_kokkos.cpp`: all GBS rows of a step run concurrently on the device in lockstep (per substep stage
+`extern/mstar/src/engine.cpp`: all GBS rows of a step run concurrently on the device in lockstep (per substep stage
 one force launch over the active rows and one kick+drift launch; small groups: every row inside one team, one launch
 per step), tree coordinates rebuilt by root-to-vertex path sums, deterministic reductions, one device-to-host copy per
-GBS step. Agreement with the C library: round-off (bitwise for two bodies); ctest `mstar_compare`. Scaling:
-`mstar-bench` (results in `docs/CASES.md` C30).
+GBS step. Agreement with the C library: round-off (bitwise for two bodies); ctest `mstar_compare_c`. Scaling:
+`mstar-bench` (extern/mstar/examples; results in `docs/CASES.md` C30).
 
 ## Tests
 
-`ketju_unit`, `mstar_compare`, `mstar_vs_logh` (module); `mstar_big_group`, `mstar_coll_group`, `mstar_imbh_cusp`,
+`mstar_unit_tests`, `mstar_compare_c`, `mstar_extra_force`, `mstar_embedded_tide`, `mstar_driver` (the library's
+own tests, registered from `extern/mstar`), `mstar_vs_logh` (`tests/mstar_vs_logh.cpp`); `mstar_big_group`, `mstar_coll_group`, `mstar_imbh_cusp`,
 `mstar_dense_core` (cluster code with `NBODY_MSTAR=1`). IMBH + cusp initial conditions: `ADD_IMBH` with `IMBH_CUSP_N`,
 `IMBH_CUSP_GAMMA`, `IMBH_CUSP_R_PC`, `IMBH_CUSP_M`.

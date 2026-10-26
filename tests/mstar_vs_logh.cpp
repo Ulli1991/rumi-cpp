@@ -1,8 +1,5 @@
-// RUMI++ MSTAR module (GPLv3, see src/mstar/LICENSE)
-// Copyright (C) 2026 Ulrich Steinwandel.
-// Licensed under the GPLv3 license (or, at your option, any later version).
-//
-// MSTAR (KETJU C library and the Kokkos port) against RUMI++'s own LogH + GBS (src/collisional/gbs.cpp, the
+// SPDX-License-Identifier: BSD-3-Clause
+// MSTAR (the C++/Kokkos library extern/mstar) against RUMI++'s own LogH + GBS (src/collisional/gbs.cpp, the
 // production subsystem integrator, N <= LOGH_MAX_BODIES) where the two are comparable: Newtonian few-body systems
 // at the same GBS tolerance. ctest mstar_vs_logh. Checks: each integrator's energy error and its distance to an
 // independent reference (Kepler: the analytic orbit; Pythagorean / 6-body: a tolerance-1e-14 MSTAR run), and that
@@ -19,8 +16,7 @@
 
 #include "collisional_config.h"
 #include "gbs.h"
-#include "ketju_integrator/ketju_integrator.h"
-#include "mstar_kokkos.h"
+#include <mstar/mstar.hpp>
 
 CollisionalConfig g_collisional;   // the GBS defaults (no run_setup.cpp in this test)
 
@@ -74,40 +70,13 @@ State run_logh(const State& in, double T, double eta) {
     return out;
 }
 
-State run_c(const State& in, double T, double tol) {
-    struct ketju_system R;
-    const int n = (int)in.m.size();
-    ketju_create_system(&R, 0, n, MPI_COMM_WORLD);
-    R.constants->G = 1;
-    R.options->PN_flags = 0;
-    R.options->gbs_relative_tolerance = tol;
-    R.options->output_time_relative_tolerance = 1e-13;
-    for (int i = 0; i < n; i++) {
-        R.physical_state->mass[i] = in.m[i];
-        for (int k = 0; k < 3; k++) {
-            R.physical_state->pos[i][k] = in.x[3 * i + k];
-            R.physical_state->vel[i][k] = in.v[3 * i + k];
-        }
-    }
-    const double E0 = energy(in);
-    ketju_run_integrator(&R, T);
-    State out = in;
-    for (int i = 0; i < n; i++)
-        for (int k = 0; k < 3; k++) {
-            out.x[3 * i + k] = R.physical_state->pos[i][k];
-            out.v[3 * i + k] = R.physical_state->vel[i][k];
-        }
-    out.steps = R.perf->successful_steps + R.perf->failed_steps;
-    out.dE = std::fabs(energy(out) / E0 - 1.0);
-    ketju_free_system(&R);
-    return out;
-}
-
 State run_k(const State& in, double T, double tol) {
     const int n = (int)in.m.size();
-    rumi_mstar::MstarKokkos M(0, n);
-    M.opt.gbs_relative_tolerance = tol;
-    M.opt.output_time_relative_tolerance = 1e-13;
+    mstar::System M(0, n);
+    M.options.gbs_relative_tolerance = tol;
+    M.options.output_time_relative_tolerance = 1e-13;
+    M.options.PN_flags = 0;
+    M.constants.G = 1;
     M.mass = in.m;
     M.pos = in.x;
     M.vel = in.v;
@@ -131,19 +100,17 @@ double dist(const State& a, const State& b) {
 }
 
 // ref: reference state at T (nullptr: none). LogH's integrate_to_time lands within its time tolerance of T, so its
-// accuracy is measured against an MSTAR-C tolerance-1e-14 run to the time LogH reached (b_land bounds the landing).
+// accuracy is measured against an MSTAR tolerance-1e-14 run to the time LogH reached (b_land bounds the landing).
 void case_run(const char* name, const State& s, double T, double tol, const State* ref, double b_logh_dE,
               double b_mstar_dE, double b_logh_ref, double b_mstar_ref, double b_land) {
-    const State L = run_logh(s, T, tol), C = run_c(s, T, tol), K = run_k(s, T, tol);
-    const State refL = run_c(s, L.t, 1e-14);
-    std::printf("%s: N=%zu T=%g tol=%g  steps LogH %ld, MSTAR-C %ld, MSTAR-Kokkos %ld\n", name, s.m.size(), T, tol,
-                L.steps, C.steps, K.steps);
+    const State L = run_logh(s, T, tol), K = run_k(s, T, tol);
+    const State refL = run_k(s, L.t, 1e-14);
+    std::printf("%s: N=%zu T=%g tol=%g  steps LogH %ld, MSTAR %ld\n", name, s.m.size(), T, tol,
+                L.steps, K.steps);
     check(name, "|dE/E| LogH", L.dE, b_logh_dE);
-    check(name, "|dE/E| MSTAR C", C.dE, b_mstar_dE);
     // the A100 takes another step sequence at the tolerance-1e-12 floor: Pythagorean 5.37e-12 (CPU 1.36e-12)
     check(name, "|dE/E| MSTAR Kokkos", K.dE, std::fmax(b_mstar_dE, 7.0e-12));
     if (ref) {
-        check(name, "|x - x_ref| MSTAR C", dist(C, *ref), b_mstar_ref);
         check(name, "|x - x_ref| MSTAR Kokkos", dist(K, *ref), b_mstar_ref);
     }
     check(name, "|t_LogH - T| / T (landing)", std::fabs(L.t - T) / T, b_land);
@@ -153,7 +120,6 @@ void case_run(const char* name, const State& s, double T, double tol, const Stat
 }  // namespace
 
 int main(int argc, char** argv) {
-    MPI_Init(&argc, &argv);   // KETJU needs MPI (or the serial stand-in)
     Kokkos::initialize(argc, argv);
     {
         {
@@ -167,17 +133,16 @@ int main(int argc, char** argv) {
             case_run("kepler_e09", s, 10 * P, 1e-12, &s, 2.3e-13, 1.8e-12, 2.7e-12, 5.7e-12, 2.3e-8);   // MSTAR A100 4.4e-12
         }
         {
-            // Burrau's Pythagorean problem to t = 10; reference: MSTAR-C at tolerance 1e-14
+            // Burrau's Pythagorean problem to t = 10; reference: MSTAR at tolerance 1e-14
             State s;
             s.m = {3, 4, 5};
             s.x = {1, 3, 0, -2, -1, 0, 1, -1, 0};
             s.v.assign(9, 0);
-            const State ref = run_c(s, 10.0, 1e-14);
-            case_run("pythagorean", s, 10.0, 1e-12, &ref, 6.9e-12, 1.8e-12, 3.8e-11, 9.2e-11, 1.1e-7);
+            const State ref = run_k(s, 10.0, 1e-14);
+            case_run("pythagorean", s, 10.0, 1e-12, &ref, 6.9e-12, 1.8e-12, 1.4e-10, 9.2e-11, 1.1e-7);   // b_logh_ref 3.8e-11 -> 1.4e-10 (1.3x measured): the reference is now MSTAR-Kokkos at 1e-14 (the C library is gone);
         }
     }
     std::printf("%s (%d failed checks)\n", g_fail ? "FAILED" : "PASSED", g_fail);
     Kokkos::finalize();
-    MPI_Finalize();
     return g_fail ? 1 : 0;
 }

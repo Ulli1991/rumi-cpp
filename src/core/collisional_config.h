@@ -89,7 +89,7 @@ struct CollisionalConfig {
     double r_escape_rh = 100.0;        // escape radius in half-mass radii
     double r_escape_rj = 2.0;          // R_ESCAPE_RJ: with TIDAL_FIELD, escape radius in Jacobi radii (NBODY6: 2); 0 = R_ESCAPE_RH
 
-    // MSTAR (optional GPLv3 module src/mstar, ENABLE_MSTAR builds; switched on at run time by NBODY_MSTAR=1)
+    // MSTAR (optional GPLv3 library extern/mstar, ENABLE_MSTAR builds; switched on at run time by NBODY_MSTAR=1)
     int mstar_threshold = 9;           // MSTAR_THRESHOLD: groups of at least this many bodies go to MSTAR (above
                                        // LOGH_MAX_BODIES = 8 always, when MSTAR is on)
     bool mstar = false;                // NBODY_MSTAR=1 and the module is built in

@@ -1298,7 +1298,7 @@ Status: **closed** (fixed, test, ensemble checked), **option** (fix kept as an o
 ## C30 MSTAR subsystems: groups above LOGH_MAX_BODIES on the GPU (optional GPLv3 module; NBODY_MSTAR, default off)
 
 C++ rewrite of the MSTAR regularised integrator (Rantala et al. 2020; public KETJU integrator, Mannerkoski et al.
-2023) with Kokkos support for GPUs, by Ulrich Steinwandel (src/mstar, `ENABLE_MSTAR`; docs/MSTAR.md).
+2023) with Kokkos support for GPUs, by Ulrich Steinwandel (extern/mstar submodule, `ENABLE_MSTAR`; docs/MSTAR.md).
 
 - **System:** subsystems of more than 8 bodies (IMBH with its cusp, dense cores, runaway-collision regions). Before:
   LogH holds 8; larger groups were split along their bound pairs or left to the FSI ("exceeds LOGH_MAX_BODIES"), i.e.

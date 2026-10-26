@@ -1,0 +1,3 @@
+[submodule "extern/mstar"]
+	path = extern/mstar
+	url = https://github.com/Ulli1991/ketju-integrator.git

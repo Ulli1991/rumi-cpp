@@ -680,7 +680,7 @@ void SubsystemBatch::unpack(SubsystemManager& mgr, Particles& p, const HostSourc
 
 // ============================================================================
 // MSTAR subsystems (g_collisional.mstar_group; docs/MSTAR.md): one group through the MSTAR dispatch interface
-// (mstar_dispatch.h; the GPLv3 module src/mstar implements it). Same normalisation as LogH (c.o.m. frame, fixed
+// (mstar_dispatch.h; the GPLv3 library extern/mstar implements it via mstar_glue.cpp). Same normalisation as LogH (c.o.m. frame, fixed
 // scales, G = M = 1). Collisions are decided inside the call (the module checks every accepted step: separation or
 // osculating pericentre inside collision_distance's rule); the pair merges here as in the LogH path (c.o.m., momentum
 // exact, the change of T + U booked as dE_int) and the call continues for the rest of dt. Energy: the module's PN

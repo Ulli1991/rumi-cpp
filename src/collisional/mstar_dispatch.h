@@ -3,9 +3,9 @@
 //
 // MSTAR (minimum-spanning-tree algorithmic regularisation; Rantala et al. 2020, MNRAS 492, 4131; Mannerkoski et al.
 // 2023, MNRAS 524, 4062) integrates subsystems larger than LogH's LOGH_MAX_BODIES. Its implementation (a C++/Kokkos
-// rewrite of the KETJU integrator) lives in the separate, GPLv3-licensed module src/mstar, compiled only with
+// rewrite of the KETJU integrator) lives in the separate, GPLv3-licensed library extern/mstar (submodule), compiled only with
 // the CMake option ENABLE_MSTAR=ON (binaries built so are GPLv3). The core never includes module code: it calls the
-// functions below, which the module implements (src/mstar/mstar_dispatch.cpp) or, without the module, the BSD stub
+// functions below, which the library glue implements (mstar_glue.cpp) or, without the module, the BSD stub
 // mstar_dispatch_stub.cpp does (mstar_available() = false; every call fails, the caller keeps its LogH/FSI path).
 
 #pragma once
