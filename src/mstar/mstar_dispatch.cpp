@@ -95,7 +95,9 @@ int mstar_crossover_n() {
         if (const char* e = std::getenv("NBODY_MSTAR_CROSSOVER")) return std::atoi(e);
         // host-only Kokkos builds: the host engine for every group
         if (std::is_same<rumi_mstar::ExecSpace, Kokkos::DefaultHostExecutionSpace>::value) return 1 << 30;
-        return 32;   // A100 (mstar-bench, docs/CASES.md C30): 0.41 ms per GBS step at N = 32, serial KETJU 0.53 ms
+        // A100 vs the best full Raven node (Kokkos-OpenMP 1-72 threads, cpujobs/mbench-omp, 2026-10-26): CPU faster at
+        // N = 32 (0.23 vs 0.41 ms per GBS step), A100 faster from N = 64 (0.42 vs 0.66 ms): crossover ~48
+        return 48;
     }();
     return n;
 }
