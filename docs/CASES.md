@@ -1411,3 +1411,21 @@ C++ rewrite of the MSTAR regularised integrator (Rantala et al. 2020; public KET
   bitwise identical (449 steps, |dE/E| 2.61e-10, 1.58 s/step: no group above 8 bodies forms). IMBH + cusp: MSTAR off
   never finishes interval 1; MSTAR on (with MSTAR_TIDAL_JOIN) 59 intervals, |dE/E| 3.1e-9, median 11.2 s/step.
   Runs in /raven/ptmp/uli/cpp-nbody-runs/mcoup-2026-10-25/{prod,imbh}_{off,on}.
+
+- **C30 addendum, CPU vs GPU MSTAR (2026-10-26, Plummer groups, ms per GBS step):** one A100 vs the best of a full
+  72-core Raven node with Kokkos-OpenMP (1-72 threads, cpujobs/mbench-omp) and with KETJU C + MPI (1-72 ranks, 144 on
+  2 nodes, cpujobs/kmpi-1/2):
+
+  | N | A100 | Kokkos-OpenMP node | KETJU MPI node (2 nodes) |
+  |---|---|---|---|
+  | 16 | 0.40 | 0.095 | 0.26 |
+  | 32 | 0.41 | 0.23 | 0.39 |
+  | 64 | ~0.42 | 0.66 | 0.75 |
+  | 128 | 0.48 | 1.16 | 1.33 |
+  | 512 | 1.53 | 7.8 | 11.9 |
+  | 1024 | 3.37 | 30.1 | 39.0 (22.1) |
+  | 4096 | 29.6 | 308 | 425 (232) |
+
+  Crossover ~48 bodies (default NBODY_MSTAR_CROSSOVER = 48); above it one A100 beats a full node of either CPU
+  version (10-14x from 1000 bodies, 8x vs two MPI nodes at 4096). Below it the host engine wins (GPU launch latency
+  floor ~0.4 ms per GBS step); KETJU MPI has a large communication floor at small N (0.93 ms at N = 16 on one rank).
