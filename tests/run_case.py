@@ -268,6 +268,17 @@ MSTAR_CORE_DE = 1.6e-6    # mstar_dense_core: 1.21e-6 measured, FSI-dominated (9
 MSTAR_CUSP_TIDE_DE = 5.8e-10  # mstar_imbh_cusp_tide: 4.50e-10 measured (2.0e-9 without the tide hook)
 MSTAR_PN_SUB_ERR = 2.0e-10    # PN cusp cases: unbooked subsystem error per print 1.50e-10 measured under the IAU G (1.12e-10 / 1.16e-10 under the old G) (the
                               # integration error of the PN group, which LogH PN subsystems book into E_pn)
+# IMBH binary (500 + 500 Msun, a = 1e-4 pc, e = 0.5) + 300-star cusp inside 0.01 pc in a 2000-star cluster (the 200k
+# A/B case scaled down, C30/C31), production accuracy settings, two 1e-4 Myr intervals without restarts
+MSTAR_CUSP300 = dict(TEST_CASE="plummer", INTEGRATOR="hhs", TOTAL_TIME_MYR="2e-4", DT_MAX_MYR="1e-4", DT_MIN_MYR="1e-14",
+                     SOFTENING_PC="0", COLLISIONAL="true", PN_ORDER="31", SSE_ENABLED="false", PLUMMER_N="2000",
+                     PLUMMER_M_TOTAL="800", PLUMMER_R_HALF="3.1", PLUMMER_MASS_DIST="kroupa", PLUMMER_SEED="404",
+                     BINARY_FRAC="0", ADD_IMBH="true", IMBH_M1="500", IMBH_M2="500", IMBH_A_PC="1e-4", IMBH_E="0.5",
+                     IMBH_SPIN="0", IMBH_CUSP_N="300", IMBH_CUSP_R_PC="0.01", ETA_GRAD="0.2", ETA_JERK="0", ETA="0",
+                     FLYBY_CM_EPS="1e-11", NGB_MASS_SCALING="true", SDAR="true", ETA_RESTART="0", PRINT_INTERVAL="1",
+                     PROFILING="false")
+MSTAR_CUSP300_DE = 1.4e-11   # mstar_imbh_cusp300: 1.04e-11 measured (host gcc 15; MSTAR off 1.0e-5, no join 5.7e-6)
+MSTAR_CUSP300_WALL = 72.0    # s on one core: 54.7 measured (without the join: no result in 1800 s)
 MSTAR_SUB_ERR = 4e-12     # max per-print sum |unbooked subsystem dE|/E0 (NBODY_EATTR logh_abs): 2.9e-12 measured (dense core)
 # Natal kicks (runtime_sse.cpp): 500 12-Msun stars at Z = 0.02 in a cluster of r_h = 1 kpc (no dynamics to speak of),
 # 1 Myr steps through their core collapse at 19-21 Myr: 500 NSs (Fryer 2012 rapid, f_fb ~ 0.025)
@@ -1160,6 +1171,28 @@ def mstar_groups(exe, label, cfg, bound, min_nmax, min_colls=0, pn=False, tide=F
               f"(abs {eattr[-1][2]}), E_pn/E0 {eattr[-1][3]}")
     if pn:   # the PN work of the MSTAR group is booked (and only it: the unbooked part is the integration error)
         ok &= check(f"{label} |E_pn/E0| booked", abs(float(eattr[-1][3])) if eattr else 0.0, 1e-15, lower=True)
+    return ok & check(f"{label} max|dE/E|", max(r[0] for r in rows), bound)
+
+
+def mstar_cusp300(exe, label, cfg, bound, wall_bound):
+    """IMBH binary + 300-star cusp (C31): the cusp is one MSTAR group with the bodies that would sample its fast
+    pairs (MSTAR_TIDAL_JOIN), two intervals finish within the wall-time bound and |dE/E| stays at the bound, far
+    below the MSTAR-off level of the same case (FSI with LogH pieces: 1.0e-5) and the uncapped group with the cusp
+    split between group and field (5.7e-6). Without the join the tidal-sampling cap holds the group at HHS level
+    ~29 and the run does not finish. Skipped without the module."""
+    env = {"NBODY_MSTAR": "1", "NBODY_EATTR": "1"}
+    t0 = time.time()
+    out = run_output(exe, cfg, env=env, timeout=int(2 * wall_bound))
+    wall = time.time() - t0
+    if "NBODY_MSTAR=1 ignored" in out:
+        print("SKIP: no MSTAR module in this build")
+        return "skip"
+    rows = diagnostics(out)
+    calls = [(int(a), int(d)) for a, b, c, d in re.findall(r"mstar=(\d+) \(dev (\d+), gbs (\d+), nmax (\d+)\)", out)]
+    ok = check(f"{label} MSTAR integrations", sum(c[0] for c in calls), 1, lower=True)
+    ok &= check(f"{label} largest MSTAR group", max([c[1] for c in calls] or [0]), 290, lower=True)
+    ok &= check(f"{label} step-limit hits and give-ups", out.count("step limit") + out.count("GAVE UP"), 0)
+    ok &= check(f"{label} wall time [s]", wall, wall_bound)
     return ok & check(f"{label} max|dE/E|", max(r[0] for r in rows), bound)
 
 
@@ -2535,6 +2568,8 @@ CASES = {
     "mstar_coll_group": lambda exe: mstar_groups(exe, "16 stars of 1000 R_sun, MSTAR collisions",
                                                  dict(BIG_GROUP, TEST_STELLAR_RADIUS_RSUN="1000"), MSTAR_COLL_DE, 9,
                                                  min_colls=1),
+    "mstar_imbh_cusp300": lambda exe: mstar_cusp300(exe, "IMBH binary + 300-star cusp, MSTAR", MSTAR_CUSP300,
+                                                    MSTAR_CUSP300_DE, MSTAR_CUSP300_WALL),
     "mstar_imbh_cusp": lambda exe: mstar_groups(exe, "IMBH binary + 40-star cusp, all PN, MSTAR", MSTAR_CUSP,
                                                 MSTAR_CUSP_DE, 20, pn=True, sub_bound=MSTAR_PN_SUB_ERR),
     "mstar_imbh_cusp_tide": lambda exe: mstar_groups(exe, "IMBH cusp, all PN, MSTAR + outside tide", MSTAR_CUSP,

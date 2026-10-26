@@ -179,6 +179,8 @@ const std::vector<ParamSpec> kParams = {
      "Bound pairs with a < NGB_WIDE_FAC x R_NGB are neighbours (wide binaries; 0: off)"},
     {"MSTAR_THRESHOLD", I, "9", "Subsystems", EXPERIMENT, "",
      "With NBODY_MSTAR=1 (ENABLE_MSTAR builds, docs/MSTAR.md): subsystems of at least this many bodies are integrated by MSTAR instead of LogH (those above LOGH_MAX_BODIES = 8 always)"},
+    {"MSTAR_TIDAL_JOIN", B, "true", "Subsystems", EXPERIMENT, "",
+     "With NBODY_MSTAR=1: a body whose kicks would sample the fast internal pairs of an MSTAR group (period below the level's step) with more than FLYBY_CM_EPS x |E0| per kick, G m sum mu a^2 / d^3, joins the group; MSTAR groups then have no tidal-sampling cap (BIFROST H-splitting, docs/CASES.md C31; false: the C30 cap)"},
 
     // ---- Output ----
     {"PRINT_INTERVAL", I, "1000", "Output", USER, "", "Diagnostics every this many steps"},

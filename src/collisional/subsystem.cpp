@@ -101,9 +101,9 @@ struct MemberData {
     std::vector<double> f[NF];
 
     struct Col {
-        std::vector<double>* v; const std::vector<int>* loc; int lo;
+        std::vector<double>* v; const std::vector<int>* loc; const int* lo;   // lo by pointer: md may be rebuilt
         double& operator()(int i) const {
-            const int k = i - lo;
+            const int k = i - *lo;
             const int r = (k >= 0 && k < (int)loc->size()) ? (*loc)[k] : -1;
             if (r < 0) {   // a slot outside the gathered members: map and gather disagree
                 std::fprintf(stderr, "MemberData: slot %d was not gathered\n", i);
@@ -112,7 +112,7 @@ struct MemberData {
             return (*v)[r];
         }
     };
-    Col col(int k) { return Col{&f[k], &loc, lo}; }
+    Col col(int k) { return Col{&f[k], &loc, &lo}; }
 
     // Rows in first-appearance order of the valid slots
     template <class Slots>
@@ -621,6 +621,143 @@ void SubsystemManager::detect_from_pairs(Particles& p, double G, double dt_step,
             pairs.swap(kept);
         }
         clear_lids();
+    }
+
+    // MSTAR_TIDAL_JOIN (C31): bodies that sample an MSTAR group's fast internal motion join the group. In the
+    // H-splitting of BIFROST (Rantala et al. 2023, sec. 3.2) the outside bodies act on the members by the FSI kicks; a
+    // kick samples the potential of the group's fast internal pairs (period below this level's step) at one phase, so
+    // an outside body at d from such a pair (reduced mass mu, semi-major axis a) gets an error of the order of the
+    // pair's quadrupole energy G m mu a^2 / d^3 per kick. The tidal-sampling cap (FLYBY_CM_EPS) bounded that by
+    // shortening the whole group's step, down to the pericentre passage of its closest pair: a 300-body IMBH cusp sat
+    // at HHS level 29 (C30). Instead, a body above the same budget, FLYBY_CM_EPS x |E0| per kick, becomes a member
+    // (BIFROST's subsystems contain their strongly coupled neighbours: no perturbers in the regularised step), and
+    // MSTAR groups keep only the ordinary step criteria (ff, fb, gradient, eta_pert; fill_cm_velocity drops the cap).
+    // IMBH-cusp cut-out without the cap: 5.7e-6 per 1e-4 Myr with the cusp split between group and field, 1.2e-11
+    // with the whole cusp in the group (R_NGB 2e-3); the error did not follow the steps (x 0.25: 5.7e-6, 3.7e-6)
+    last_level_mstar_joined = 0;
+    if (g_collisional.mstar && g_collisional.mstar_tidal_join && g_collisional.flyby_cm_eps > 0.0 &&
+        g_collisional.e_ref > 0.0 && !pairs.empty() && dt_step > 0.0) {
+        // preliminary components of the pair graph (pid -> compact id)
+        std::unordered_map<int, int> cid;
+        std::vector<int> cpid;
+        for (const auto& pr : pairs)
+            for (int q : {pr.pid_lo, pr.pid_hi})
+                if (cid.emplace(q, (int)cpid.size()).second) cpid.push_back(q);
+        UnionFind puf((int)cpid.size());
+        for (const auto& pr : pairs) puf.unite(cid[pr.pid_lo], cid[pr.pid_hi]);
+        std::unordered_map<int, std::vector<int>> comp;
+        for (int k = 0; k < (int)cpid.size(); k++) comp[puf.find(k)].push_back(cpid[k]);
+        std::vector<std::vector<int>> big;
+        for (auto& [r, mem] : comp)
+            if ((int)mem.size() > LOGH_MAX_BODIES && (int)mem.size() <= g_collisional.mstar_max) {
+                std::sort(mem.begin(), mem.end());
+                big.push_back(mem);
+            }
+        std::sort(big.begin(), big.end());   // deterministic order
+        const int s0 = std::max(det_start, 0), c0 = det_count < 0 ? p.N - s0 : std::min(det_count, p.N - s0);
+        if (!big.empty() && c0 > 0) {
+            // host copies of the level's range (a host subtree holds device-typed views over host memory)
+            auto cp = [&](auto v) {
+                using T = typename decltype(v)::non_const_value_type;
+                std::vector<T> out(c0);
+                if (host_exec()) std::copy(v.data() + s0, v.data() + s0 + c0, out.begin());
+                else {
+                    auto h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
+                                                                 Kokkos::subview(v, Kokkos::make_pair(s0, s0 + c0)));
+                    std::copy(h.data(), h.data() + c0, out.begin());
+                }
+                return out;
+            };
+            const auto vx_ = cp(p.x), vy_ = cp(p.y), vz_ = cp(p.z), vvx = cp(p.vx), vvy = cp(p.vy), vvz = cp(p.vz);
+            const auto vm = cp(p.mass);
+            const auto vpid = cp(p.particle_id);
+            auto hx = [&](int k) { return vx_[k]; }; auto hy = [&](int k) { return vy_[k]; };
+            auto hz = [&](int k) { return vz_[k]; }; auto hvx = [&](int k) { return vvx[k]; };
+            auto hvy = [&](int k) { return vvy[k]; }; auto hvz = [&](int k) { return vvz[k]; };
+            auto hm = [&](int k) { return vm[k]; }; auto hpid = [&](int k) { return (int)vpid[k]; };
+            const double tol = g_collisional.flyby_cm_eps * g_collisional.e_ref;
+            std::unordered_map<int, int> loc;   // pid -> slot in the range copy
+            loc.reserve(2 * (size_t)c0);
+            for (int k = 0; k < c0; k++) loc.emplace(hpid(k), k);
+            std::vector<char> taken(c0, 0);
+            for (const auto& mem : big)
+                for (int q : mem) { auto it = loc.find(q); if (it != loc.end()) taken[it->second] = 1; }
+            std::vector<PairInfo> add;
+            std::vector<int> join_slots;
+            for (const auto& mem : big) {
+                std::vector<int> sl;
+                for (int q : mem) { auto it = loc.find(q); if (it != loc.end()) sl.push_back(it->second); }
+                if ((int)sl.size() != (int)mem.size()) continue;   // members outside this level's range
+                // fast internal pairs: each member with its most bound member partner, period below the level's step
+                struct FastPair { double cx, cy, cz, q, a; int pid; };
+                std::vector<FastPair> fp;
+                std::set<std::pair<int, int>> seen;
+                double M = 0, gx = 0, gy = 0, gz = 0;
+                for (int i : sl) { M += hm(i); gx += hm(i) * hx(i); gy += hm(i) * hy(i); gz += hm(i) * hz(i); }
+                gx /= M; gy /= M; gz /= M;
+                double Rg = 0.0, Q = 0.0;
+                for (int i : sl) {
+                    Rg = std::max(Rg, std::sqrt((hx(i) - gx) * (hx(i) - gx) + (hy(i) - gy) * (hy(i) - gy) +
+                                                (hz(i) - gz) * (hz(i) - gz)));
+                    int best = -1;
+                    double ebest = 0.0;
+                    for (int k : sl) {
+                        if (k == i) continue;
+                        const double dx = hx(k) - hx(i), dy = hy(k) - hy(i), dz = hz(k) - hz(i);
+                        const double ux = hvx(k) - hvx(i), uy = hvy(k) - hvy(i), uz = hvz(k) - hvz(i);
+                        const double r = std::sqrt(dx * dx + dy * dy + dz * dz);
+                        if (r <= 0.0) continue;
+                        const double en = 0.5 * (ux * ux + uy * uy + uz * uz) - G * (hm(i) + hm(k)) / r;
+                        if (en < ebest) { ebest = en; best = k; }
+                    }
+                    if (best < 0) continue;
+                    const auto key = std::make_pair(std::min(i, best), std::max(i, best));
+                    if (!seen.insert(key).second) continue;
+                    const double mt = hm(i) + hm(best), a = -G * mt / (2.0 * ebest);
+                    const double P = 2.0 * M_PI * std::sqrt(a * a * a / (G * mt));
+                    if (!(P < dt_step)) continue;
+                    const double q = hm(i) * hm(best) / mt * a * a;
+                    fp.push_back({(hm(i) * hx(i) + hm(best) * hx(best)) / mt, (hm(i) * hy(i) + hm(best) * hy(best)) / mt,
+                                  (hm(i) * hz(i) + hm(best) * hz(best)) / mt, q, a, (int)hpid(hm(i) >= hm(best) ? i : best)});
+                    Q += q;
+                }
+                if (fp.empty()) continue;
+                for (int j = 0; j < c0; j++) {
+                    if (taken[j]) continue;
+                    const double dgx = hx(j) - gx, dgy = hy(j) - gy, dgz = hz(j) - gz;
+                    const double dg = std::sqrt(dgx * dgx + dgy * dgy + dgz * dgz) - Rg;
+                    if (dg > 0.0 && G * hm(j) * Q / (dg * dg * dg) <= tol) continue;   // bound over all fast pairs
+                    double est = 0.0, dmin = 1e300;
+                    int near = -1;
+                    for (const auto& f : fp) {
+                        const double dx = hx(j) - f.cx, dy = hy(j) - f.cy, dz = hz(j) - f.cz;
+                        const double d = std::max(std::sqrt(dx * dx + dy * dy + dz * dz), f.a);
+                        est += G * hm(j) * f.q / (d * d * d);
+                        if (d < dmin) { dmin = d; near = f.pid; }
+                    }
+                    if (est <= tol) continue;
+                    taken[j] = 1;
+                    PairInfo pr;
+                    pr.pid_lo = std::min((int)hpid(j), near); pr.pid_hi = std::max((int)hpid(j), near);
+                    pr.a = 0.0; pr.e = 0.0; pr.E_orb = 0.0; pr.bound = false;
+                    add.push_back(pr);
+                    join_slots.push_back(s0 + j);
+                    last_level_mstar_joined++;
+                }
+            }
+            if (!add.empty()) {
+                // the joined bodies' rows (the columns of md keep pointing at its members: rebuilt in place)
+                std::vector<int> slots = pair_slots;
+                slots.insert(slots.end(), join_slots.begin(), join_slots.end());
+                md = MemberData(slots, p);
+                pairs.insert(pairs.end(), add.begin(), add.end());
+                std::sort(pairs.begin(), pairs.end(), [](const PairInfo& a, const PairInfo& b) {
+                    return a.pid_lo != b.pid_lo ? a.pid_lo < b.pid_lo : a.pid_hi < b.pid_hi;
+                });
+                pairs.erase(std::unique(pairs.begin(), pairs.end(), [](const PairInfo& a, const PairInfo& b) {
+                    return a.pid_lo == b.pid_lo && a.pid_hi == b.pid_hi; }), pairs.end());
+            }
+        }
     }
 
     // Union-find to identify connected components
@@ -1191,7 +1328,9 @@ void SubsystemManager::fill_cm_velocity(const Particles& p, int lo, int hi, Kokk
     // apply to them (it would put a 300-body IMBH cusp at HHS level 13-29: 200k IMBH A/B, CASES.md C30)
     // NBODY_MSTAR_NO_TIDCAP=1 (experiment): no tidal-sampling cap for MSTAR groups (BIFROST: the eta_pert step alone)
     static const bool mstar_no_tidcap = std::getenv("NBODY_MSTAR_NO_TIDCAP") && std::atoi(std::getenv("NBODY_MSTAR_NO_TIDCAP")) != 0;
-    const bool mstar_tide_groups = g_collisional.mstar && (g_collisional.mstar_tide || mstar_no_tidcap);
+    // MSTAR_TIDAL_JOIN (C31, default): the bodies above the budget are members (detect_from_pairs), so no cap either
+    const bool mstar_tide_groups = g_collisional.mstar && (g_collisional.mstar_tide || mstar_no_tidcap ||
+                                                           g_collisional.mstar_tidal_join);
     small_for("cm_vel_members", n_sub, KOKKOS_LAMBDA(int k) {
         const int a = base + buf(k), e = base + buf(k + 1);
         double M = 0, px = 0, py = 0, pz = 0, cx = 0, cy = 0, cz = 0;
@@ -1657,6 +1796,7 @@ void SubsystemManager::reset_step_diagnostics() {
     step_flyby_cm_dropped = 0;
     step_flyby_curved = 0;
     step_ngb_mass_kept = 0;
+    step_mstar_joined = 0;
     step_weak_split = 0;
     step_sec_triple_unfixed = 0;
     step_n_secular = 0;
@@ -1695,6 +1835,7 @@ void SubsystemManager::accumulate_diagnostics() {
     step_flyby_cm_dropped += last_level_flyby_cm_dropped;
     step_flyby_curved += last_level_flyby_curved;
     step_ngb_mass_kept += last_level_ngb_mass_kept;
+    step_mstar_joined += last_level_mstar_joined;
     step_weak_split += last_level_weak_split;
     step_total_subsystems += (int)active.size();
     for (const auto& sub : active) {
@@ -1723,6 +1864,7 @@ void SubsystemManager::print_step_summary() const {
     if (step_flyby_cm_dropped > 0) std::printf("  flyby_cm_dropped=%d", step_flyby_cm_dropped);
     if (step_flyby_curved > 0) std::printf("  flyby_curved=%d", step_flyby_curved);
     if (step_ngb_mass_kept > 0) std::printf("  ngb_mass_kept=%d", step_ngb_mass_kept);
+    if (step_mstar_joined > 0) std::printf("  mstar_joined=%d", step_mstar_joined);
     if (step_weak_split > 0) std::printf("  weak_split=%d", step_weak_split);
     if (step_sec_triple_unfixed > 0) std::printf("  sec_triple_unfixed=%d", step_sec_triple_unfixed);
     std::printf("\n");

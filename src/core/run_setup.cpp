@@ -116,6 +116,7 @@ int apply_run_settings(const Config& cfg, RunSettings& rs) {
         g_collisional.r_escape_rh     = cfg.get_double("R_ESCAPE_RH");
         g_collisional.r_escape_rj     = cfg.get_double("R_ESCAPE_RJ");
         g_collisional.mstar_threshold = cfg.get_int("MSTAR_THRESHOLD");
+        g_collisional.mstar_tidal_join = cfg.get_bool("MSTAR_TIDAL_JOIN");
         {   // MSTAR: runtime switch NBODY_MSTAR (default off); needs a build with ENABLE_MSTAR (GPLv3 module)
             const char* e = std::getenv("NBODY_MSTAR");
             const bool want = e && std::atoi(e) != 0;

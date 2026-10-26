@@ -88,6 +88,8 @@ struct SubsystemManager {
     std::vector<int> pid_scratch_;                    // pid -> local id inside detect_from_pairs (-1 between calls)
 
     int ngb_count_host = -1;   // neighbour count of the last neighbor_search_subset, consumed by detect_from_pairs
+    // Particle range of the level detect_from_pairs works on (MSTAR_TIDAL_JOIN candidates; count < 0: all)
+    int det_start = 0, det_count = -1;
     const SubsystemManager* shared_map_ = nullptr;   // local managers read the global map
     const std::vector<int>& pid_to_idx() const { return shared_map_ ? shared_map_->pid_to_idx_ : pid_to_idx_; }
     int pid_to_idx_max() const { return shared_map_ ? shared_map_->pid_to_idx_max_ : pid_to_idx_max_; }
@@ -190,6 +192,7 @@ struct SubsystemManager {
     int last_level_flyby_cm_dropped = 0;
     int last_level_flyby_curved = 0;   // distant fly-by pairs whose straight-line extrapolation fails
     int last_level_weak_split = 0;         // weakly perturbed binaries split off fly-by / unstable triples (WEAK_SPLIT_GAMMA)
+    int last_level_mstar_joined = 0;       // bodies joined to MSTAR groups by MSTAR_TIDAL_JOIN
     int last_level_ngb_mass_kept = 0;      // pairs kept as strong perturbers by NGB_MASS_SCALING  // distant fly-by pairs of a binary member that fail the c.o.m. test (FLYBY_NGB_CM)
 
     // Step-level diagnostics: accumulated across HHS recursion levels
@@ -200,6 +203,7 @@ struct SubsystemManager {
     int step_flyby_cm_dropped = 0;
     int step_flyby_curved = 0;
     int step_ngb_mass_kept = 0;
+    int step_mstar_joined = 0;
     int step_weak_split = 0;
     int step_sec_triple_unfixed = 0;      // secular triples whose energy difference no radial velocity could take
     int step_n_secular = 0;

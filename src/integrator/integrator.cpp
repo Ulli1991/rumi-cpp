@@ -3226,6 +3226,7 @@ void dt_attr_report(Particles& p, int start, int count, double G, double soft2) 
     PairVelocities pv = pair_velocities(p, start, e);
     const double eff = g_collisional.eta_ff, efb = g_collisional.eta_fb;
     Kokkos::View<double*> mff("dta_ff", count), mfb("dta_fb", count), mtd("dta_td", count);
+    Kokkos::View<int*> jff("dta_jff", count), jfb("dta_jfb", count);   // partner of the ff / fb minimum
     auto x = p.x, y = p.y, z = p.z, m = p.mass;
     auto sid = p.subsystem_id;
     RawView vx{pv.x}, vy{pv.y}, vz{pv.z};
@@ -3234,6 +3235,7 @@ void dt_attr_report(Particles& p, int start, int count, double G, double soft2) 
     Kokkos::parallel_for("dt_attr_pairs", count, KOKKOS_LAMBDA(int ii) {
         const int i = start + ii;
         double bff = 1e300, bfb = 1e300, btd = 1e300;
+        int aff = -1, afb = -1;
         const int si = sid(i);
         for (int j = start; j < e; j++) {
             if (j == i || (si >= 0 && sid(j) == si)) continue;
@@ -3243,13 +3245,13 @@ void dt_attr_report(Particles& p, int start, int count, double G, double soft2) 
             const double ir = 1.0 / Kokkos::sqrt(r2);
             double tff, tfb;
             symmetrized_timestep(r2, ir, dx, dy, dz, dvx, dvy, dvz, G, m(i) + m(j), eff, efb, tff, tfb);
-            bff = Kokkos::fmin(bff, eff * tff);
-            bfb = Kokkos::fmin(bfb, efb * tfb);
+            if (eff * tff < bff) { bff = eff * tff; aff = j; }
+            if (efb * tfb < bfb) { bfb = efb * tfb; afb = j; }
             if (has_k)
                 btd = Kokkos::fmin(btd, Kokkos::fmax(Kokkos::fmin(kk(i) / m(j), kk(j) / m(i)) * r2 * Kokkos::sqrt(r2),
                                                      Kokkos::fmax(kf(i), kf(j))));
         }
-        mff(ii) = bff; mfb(ii) = bfb; mtd(ii) = btd;
+        mff(ii) = bff; mfb(ii) = bfb; mtd(ii) = btd; jff(ii) = aff; jfb(ii) = afb;
     });
     auto cp = [&](auto v) { return Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), v); };
     auto r = Kokkos::make_pair(start, e);
@@ -3278,6 +3280,41 @@ void dt_attr_report(Particles& p, int start, int count, double G, double soft2) 
         }
         cnt[lvl][cr][cl]++;
     }
+    // Subsystems above LOGH_MAX_BODIES (MSTAR groups): the member with the shortest step, the criterion, and the
+    // partner of its ff / fb minimum (pid, its subsystem, separation, relative speed, masses)
+#ifdef ENABLE_COLLISIONAL
+    {
+        auto hjff = cp(jff), hjfb = cp(jfb);
+        auto hx = cp(Kokkos::subview(p.x, r)), hy = cp(Kokkos::subview(p.y, r)), hz = cp(Kokkos::subview(p.z, r));
+        auto hvx = cp(Kokkos::subview(p.vx, r)), hvy = cp(Kokkos::subview(p.vy, r)), hvz = cp(Kokkos::subview(p.vz, r));
+        auto hm = cp(Kokkos::subview(p.mass, r));
+        auto hpid = cp(Kokkos::subview(p.particle_id, r));
+        std::map<int, int> nmem, kmin;
+        for (int k = 0; k < count; k++) {
+            if (hs(k) < 0) continue;
+            nmem[hs(k)]++;
+            auto it = kmin.find(hs(k));
+            if (it == kmin.end() || hp(k) < hp(it->second)) kmin[hs(k)] = k;
+        }
+        for (const auto& [s_id, k] : kmin) {
+            if (nmem[s_id] <= LOGH_MAX_BODIES) continue;
+            const bool usefb = hfb(k) < hff(k);
+            const int j = (usefb ? hjfb(k) : hjff(k)) - start;
+            double rr = 0, vv = 0;
+            if (j >= 0 && j < count) {
+                const double dx = hx(j) - hx(k), dy = hy(j) - hy(k), dz = hz(j) - hz(k);
+                const double ux = hvx(j) - hvx(k), uy = hvy(j) - hvy(k), uz = hvz(j) - hvz(k);
+                rr = std::sqrt(dx * dx + dy * dy + dz * dz); vv = std::sqrt(ux * ux + uy * uy + uz * uz);
+            }
+            std::printf("DTGRP step %d sid %d n %d dt_final %.3e dt_pre %.3e dt_kern %.3e ff %.3e fb %.3e tid %.3e "
+                        "member pid %d m %.3g partner pid %d sid %d m %.3g r %.3e pc v %.3e km/s\n",
+                        g_step_in_progress, s_id, nmem[s_id], hf(k) * TIME_UNIT_MYR, hp(k) * TIME_UNIT_MYR,
+                        hk(k) * TIME_UNIT_MYR, hff(k) * TIME_UNIT_MYR, hfb(k) * TIME_UNIT_MYR, htd(k) * TIME_UNIT_MYR,
+                        hpid(k), hm(k), j >= 0 && j < count ? hpid(j) : -1, j >= 0 && j < count ? hs(j) : -9,
+                        j >= 0 && j < count ? hm(j) : 0.0, rr, vv);
+        }
+    }
+#endif
     static const char* cn[NCR] = {"ff", "fb", "tid", "grad", "subadj", "other"};
     for (int l = 0; l < NL; l++) {
         long long n = 0;
@@ -3651,9 +3688,11 @@ static int hhs_fsi_recursive_impl(
                                    g_collisional.r_ngb, g_collisional.r_ngb_max, pivot_dt);
             lean_fence("integrator.cpp:2421");
             g_subsys_phase.add(SubsystemPhaseTimes::DET_NGB, det_clock.lap());
+            g_subsystem_mgr.det_start = start; g_subsystem_mgr.det_count = count;
             g_subsystem_mgr.detect_from_pairs(p, G, pivot_dt,
                                                g_collisional.r_ngb, g_collisional.r_ngb_max,
                                                g_collisional.n_orb_secular);
+            g_subsystem_mgr.det_count = -1;
             g_subsys_phase.add(SubsystemPhaseTimes::DET_PAIRS, det_clock.lap());
             g_subsystem_mgr.update_particle_flags(p);
             g_subsystem_mgr.accumulate_diagnostics();
