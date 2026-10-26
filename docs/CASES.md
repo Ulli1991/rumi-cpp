@@ -1407,3 +1407,7 @@ C++ rewrite of the MSTAR regularised integrator (Rantala et al. 2020; public KET
   (64 + 76 MSTAR calls, group of 302, no restart; C30 with the cap: interval 1 not done in 900 s). MSTAR + ketju ctests
   41/41 (mstar_imbh_cusp300 54.6 s).
 - **Open:** 200k gpudev A/B (MSTAR off / on, IMBH and plain production case; mcoup-2026-10-25, build-cuda2).
+- **200k gpudev A/B (2026-10-26, build-cuda2 0baa913, 12 min per arm, 4 A100):** production (no IMBH) MSTAR off/on
+  bitwise identical (449 steps, |dE/E| 2.61e-10, 1.58 s/step: no group above 8 bodies forms). IMBH + cusp: MSTAR off
+  never finishes interval 1; MSTAR on (with MSTAR_TIDAL_JOIN) 59 intervals, |dE/E| 3.1e-9, median 11.2 s/step.
+  Runs in /raven/ptmp/uli/cpp-nbody-runs/mcoup-2026-10-25/{prod,imbh}_{off,on}.
