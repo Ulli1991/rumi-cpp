@@ -1,6 +1,6 @@
 # Config reference
 
-All 164 keys of the config file (`config.txt`, or `--config <file>`), generated from the parameter table in `src/core/params.cpp` by `scripts/gen_config_md.py`. Every key has one default, in that table; an unknown key in a config file is an error. Each run writes the effective value of every key, and whether it came from the file or the default, to `run_params.txt`.
+All 165 keys of the config file (`config.txt`, or `--config <file>`), generated from the parameter table in `src/core/params.cpp` by `scripts/gen_config_md.py`. Every key has one default, in that table; an unknown key in a config file is an error. Each run writes the effective value of every key, and whether it came from the file or the default, to `run_params.txt`.
 
 Levels:
 
@@ -149,6 +149,7 @@ Levels:
 | `E_REF` | double | `0.0` | test |  | \|E0\| of FLYBY_CM_EPS (Msun (km/s)^2) instead of the run's (0): a cut-out of a cluster as in the cluster |
 | `NGB_WIDE_FAC` | double | `0` | **experiment** |  | Bound pairs with a < NGB_WIDE_FAC x R_NGB are neighbours (wide binaries; 0: off) |
 | `MSTAR_THRESHOLD` | int | `9` | **experiment** |  | With NBODY_MSTAR=1 (ENABLE_MSTAR builds, docs/MSTAR.md): subsystems of at least this many bodies are integrated by MSTAR instead of LogH (those above LOGH_MAX_BODIES = 8 always) |
+| `MSTAR_TIDAL_JOIN` | bool | `true` | **experiment** |  | With NBODY_MSTAR=1: a body whose kicks would sample the fast internal pairs of an MSTAR group (period below the level's step) with more than FLYBY_CM_EPS x \|E0\| per kick, G m sum mu a^2 / d^3, joins the group; MSTAR groups then have no tidal-sampling cap (BIFROST H-splitting, docs/CASES.md C31; false: the C30 cap) |
 | `SUBSYS_ADVANCE_LIMIT` | int | `0` | expert |  | A subsystem advanced more often than this in one top-level step stops the run with its state (0: off; hosts that must not stall) |
 
 ## Output
