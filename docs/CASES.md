@@ -562,9 +562,9 @@ Status: **closed** (fixed, test, ensemble checked), **option** (fix kept as an o
   s404 (84 steps; main in 2 gpudev segments): 6.6e-11 -> 1.26e-10, 1.4e-13 -> 1.1e-13, 1.8e-12 -> 1.9e-12,
   4.15 / 7.30 / 187 -> 4.11 / 4.55 / 20.
   s202 (86 steps): 4.53e-9 -> 4.55e-9, 2.3e-13 -> 2.3e-13, 2.6e-12 -> 2.1e-12, 3.99 / 4.31 / 12 -> 3.95 / 4.22 / 8.
-  s101 (91 steps): C20 1.51e-9, 1.5e-13, 1.7e-11, 4.61 / 5.22 / 18. Main is still queued on gpu (job 31366161, main_s101):
-  its first step is the 1096 s stall and cannot fit in gpudev.
-  Energy: equal on s202, 1.9x on s404 (noise level, user decision 2026-10-21: acceptable for the speed-up).
+  s101 (91 steps): 5.06e-10 -> 1.51e-9, 1.3e-13 -> 1.5e-13, 1.6e-11 -> 1.7e-11, 4.28 / 15.78 / 677 -> 4.61 / 5.22 / 18.
+  Energy: equal on s202, 1.9x on s404 and 3.0x on s101 (noise level judged acceptable for the speed-up by the user, 2026-10-21);
+  P and L equal on all three. Mean s/step 1.0-3.0x faster, max step 9-38x shorter.
 - **Open:** a 3-body IC with the star moved to 5e-4 pc from a 60x shrunk BH binary (a = 1.3e-9 pc, v ~ 5000 km/s)
   gives NaN at the first LogH call (dt = nan) in main as well. Not followed up: the 200k runs never reached it, and
   the IC is artificial (`/raven/ptmp/uli/cpp-nbody-runs/secinner-ab-2026-10-19/nan_ic.txt`).
